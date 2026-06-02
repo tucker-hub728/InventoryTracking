@@ -99,10 +99,27 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3:::${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}'
                   - !Sub 'arn:aws:s3:::${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}/*'
+              # Elastic Beanstalk's default per-region storage bucket
+              # (elasticbeanstalk-<region>-<account>). UpdateEnvironment ensures
+              # it exists — s3:CreateBucket is a no-op when it already does, but
+              # the API call still requires the permission.
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}/*'
               # Create a new application version and roll the environment to it.
               - Effect: Allow
                 Action:
                   - elasticbeanstalk:CreateApplicationVersion
+                  - elasticbeanstalk:CreateStorageLocation
                   - elasticbeanstalk:UpdateEnvironment
                   - elasticbeanstalk:DescribeEnvironments
                   - elasticbeanstalk:DescribeEvents
