@@ -47,6 +47,14 @@ Resources:
     Properties:
       RoleName: !Sub '${ProjectName}-${EnvName}-gha-deploy'
       MaxSessionDuration: 3600
+      # An EB environment is backed by an internal CloudFormation stack
+      # (awseb-e-*-stack) and EC2/ASG/S3 resources; UpdateEnvironment needs to
+      # read/modify all of them. This AWS-managed policy grants exactly that —
+      # the supported way to avoid enumerating dozens of sub-permissions.
+      # ECR push and the CUSTOM artifacts bucket are NOT covered by it, so they
+      # remain as the inline policies below.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
