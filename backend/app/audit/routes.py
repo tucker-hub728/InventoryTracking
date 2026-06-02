@@ -23,7 +23,6 @@ from app.core.exceptions import NotFoundError
 from app.models.audit import AuditEvent
 from app.security.permissions import RequirePermission
 
-
 audit_router = APIRouter(prefix="/audit", tags=["audit"])
 
 

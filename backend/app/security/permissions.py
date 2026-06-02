@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from app.core.exceptions import AuthorizationError
 
-
 # Resource → set of allowed actions, per role. Mirrors the v1 doc §3.
 PERM_MATRIX: dict[str, dict[str, frozenset[str]]] = {
     "super_admin": {"*": frozenset({"*"})},
@@ -59,7 +58,7 @@ class RequirePermission:
         self.resource = resource
         self.action = action
 
-    async def __call__(self, db_user: "CurrentDbUserDep") -> None:  # type: ignore[name-defined]
+    async def __call__(self, db_user: CurrentDbUserDep) -> None:  # type: ignore[name-defined]
         # ``CurrentDbUserDep`` already authenticated + resolved the local
         # row. We just check the role's bucket against the requested
         # ``(resource, action)``. Role changes take effect immediately —

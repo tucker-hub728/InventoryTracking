@@ -22,10 +22,9 @@ from __future__ import annotations
 
 import json
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 import uuid
-
 
 BASE = "http://localhost:8000/v1"
 EMAIL = "admin@cellready.local"
@@ -48,7 +47,7 @@ def _req(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:  # noqa: S310
+        with urllib.request.urlopen(req) as resp:
             raw = resp.read()
             return resp.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
@@ -166,7 +165,7 @@ def main() -> int:
     rows2 = _audit_rows_for("meta.vendors", vid)
     delete_rows = [r for r in rows2 if r["action"] == "deleted"]
     assert delete_rows and delete_rows[-1]["severity"] == "warning", delete_rows
-    print(f"==> soft-deleted vendor + audit (severity=warning)")
+    print("==> soft-deleted vendor + audit (severity=warning)")
 
     # Idempotent: second DELETE → 200, no new audit row
     s, b = _req("DELETE", f"/vendors/{vid}", token=token)
@@ -217,13 +216,13 @@ def main() -> int:
     # DELETE rejected because stock > 0
     s, b = _req("DELETE", f"/items/{iid}", token=token)
     assert s == 422 and b.get("code") == "item_has_stock", b
-    print(f"==> delete-with-stock blocked: 422 item_has_stock")
+    print("==> delete-with-stock blocked: 422 item_has_stock")
 
     rows = _audit_rows_for("app.items", iid)
     assert any(r["action"] == "updated" for r in rows), rows
     last_update = [r for r in rows if r["action"] == "updated"][-1]
     assert "description" in last_update["diff"], last_update["diff"]
-    print(f"==> item audit row recorded description change")
+    print("==> item audit row recorded description change")
 
     # Revert to keep the dataset tidy across re-runs.
     s, _ = _req(
@@ -235,7 +234,7 @@ def main() -> int:
     assert s == 200
 
     # ── LOTS ──────────────────────────────────────────────────────────
-    s, lots = _req(f"GET", f"/items/{iid}/lots", token=token)
+    s, lots = _req("GET", f"/items/{iid}/lots", token=token)
     assert s == 200 and lots, lots
     # Find a lot whose status we can flip.
     lot = lots[0]
@@ -276,7 +275,7 @@ def main() -> int:
             "-c", "UPDATE audit.audit_events SET severity = 'danger' WHERE 1=2;",
         ],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     # The UPDATE matches no rows so the trigger doesn't fire — but a
     # non-zero match would. Try one that matches.
@@ -296,7 +295,7 @@ def main() -> int:
             ),
         ],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     combined = (out2.stdout + out2.stderr).lower()
     assert "audit.audit_events is append-only" in combined, combined

@@ -21,7 +21,6 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_valida
 
 from app.models.inventory import ITEM_NUMBER_PREFIXES
 
-
 # Item-number prefix is the *one* validation that's the same in the API,
 # the ORM, and the DB. Centralise the regex so they can't drift.
 _PREFIX_RE = re.compile(
@@ -59,7 +58,7 @@ class VendorRead(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_orm_row(cls, vendor: object) -> "VendorRead":
+    def from_orm_row(cls, vendor: object) -> VendorRead:
         return cls.model_validate(vendor, from_attributes=True)
 
 
@@ -525,7 +524,7 @@ class ReceiptRequest(BaseModel):
     evidence_id: str  # UUID from /v1/auth/reauth (action=movement.receipt)
 
     @model_validator(mode="after")
-    def _check_lot_xor(self) -> "ReceiptRequest":
+    def _check_lot_xor(self) -> ReceiptRequest:
         if (self.lot_id is None) == (self.new_lot is None):
             raise ValueError(
                 "exactly one of 'lot_id' or 'new_lot' must be provided"

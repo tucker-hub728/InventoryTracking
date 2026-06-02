@@ -12,17 +12,12 @@ Run from the project root:
 
 from __future__ import annotations
 
+import json
 import struct
 import sys
-import tempfile
-import zlib
-from pathlib import Path
-
-import urllib.request
 import urllib.parse
-import json
-import io
-
+import urllib.request
+import zlib
 
 BASE = "http://localhost:8000/v1"
 EMAIL = "admin@cellready.local"
@@ -79,7 +74,7 @@ def _request(
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:  # noqa: S310 — local URL
+        with urllib.request.urlopen(req) as resp:
             raw = resp.read()
             if expect_bytes:
                 return resp.status, raw

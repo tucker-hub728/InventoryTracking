@@ -14,7 +14,8 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import provisioning, repository as users_repo
+from app.auth import provisioning
+from app.auth import repository as users_repo
 from app.auth.cognito_client import get_user as cognito_get_user
 from app.auth.dependencies import CurrentUser, CurrentUserDep
 from app.core.exceptions import NotFoundError

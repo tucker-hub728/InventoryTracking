@@ -21,7 +21,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from app.api.deps import CurrentDbUserDep, DBSession
-from app.auth import cognito_client, provisioning, reauth, repository as users_repo
+from app.auth import cognito_client, provisioning, reauth
+from app.auth import repository as users_repo
 from app.auth.dependencies import CurrentUserDep
 from app.auth.schemas import (
     LoginRequest,

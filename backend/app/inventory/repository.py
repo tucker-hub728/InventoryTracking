@@ -7,10 +7,9 @@ query shape stays consistent and tests can fake one place.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, date
 from decimal import Decimal
 from typing import Literal
-
-from datetime import date
 
 from sqlalchemy import Integer, Select, asc, cast, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +23,6 @@ from app.models.inventory import (
     UnitOfMeasure,
     Vendor,
 )
-
 
 # Whitelist for the ``status`` query filter. Aligned with the
 # ``status_code`` values produced by ``app.v_item_stock``.
@@ -318,9 +316,9 @@ async def soft_delete_item(
     after deletion. Lots and movements that reference the item keep
     resolving through the FK.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    item.deleted_at = datetime.now(timezone.utc)
+    item.deleted_at = datetime.now(UTC)
     item.updated_by_user_id = deleted_by_user_id
     await session.flush()
     return item
@@ -573,9 +571,9 @@ async def soft_delete_lot(
     soft-deleted rows so the same lot number can be re-issued for
     the same item after deletion.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    lot.deleted_at = datetime.now(timezone.utc)
+    lot.deleted_at = datetime.now(UTC)
     lot.updated_by_user_id = deleted_by_user_id
     await session.flush()
     return lot
@@ -1109,13 +1107,7 @@ async def create_reversal_movement(
         to_loc = None
         qty_delta = -qty
         qty_abs = qty
-    elif original.movement_type == "dispense":
-        counter_type = "receipt"
-        from_loc = None
-        to_loc = original.from_location_id
-        qty_delta = qty
-        qty_abs = qty
-    elif original.movement_type == "discard":
+    elif original.movement_type == "dispense" or original.movement_type == "discard":
         counter_type = "receipt"
         from_loc = None
         to_loc = original.from_location_id

@@ -9,7 +9,7 @@ fake one place, and (c) future schema changes (e.g. promoting the
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,7 +70,7 @@ async def touch_last_active(session: AsyncSession, user_id: uuid.UUID) -> None:
     stmt = (
         update(User)
         .where(User.id == user_id)
-        .values(last_active_at=datetime.now(tz=timezone.utc))
+        .values(last_active_at=datetime.now(tz=UTC))
         .execution_options(synchronize_session=False)
     )
     await session.execute(stmt)

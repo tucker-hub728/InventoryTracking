@@ -65,7 +65,7 @@ class Role(Base):
         server_default=func.now(),
     )
 
-    users: Mapped[list["User"]] = relationship(
+    users: Mapped[list[User]] = relationship(
         back_populates="role_rel",
         viewonly=True,  # writes go through users.role, not the relationship
     )

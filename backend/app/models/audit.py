@@ -33,7 +33,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
-
 # Single source of truth for the actor + severity enums. Mirror the DB
 # CHECK + the Pydantic literal types.
 AUDIT_ACTOR_KINDS: tuple[str, ...] = ("user", "system", "integration")

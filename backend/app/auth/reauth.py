@@ -28,7 +28,7 @@ route handler does input validation + step 3d (returning the response).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import func, select
@@ -77,7 +77,7 @@ async def _count_recent_failures(
     db: AsyncSession, *, user_id: uuid.UUID
 ) -> int:
     """Number of failed reauth events for the user inside the sliding window."""
-    since = datetime.now(timezone.utc) - RATE_LIMIT_WINDOW
+    since = datetime.now(UTC) - RATE_LIMIT_WINDOW
     stmt = (
         select(func.count())
         .select_from(ReauthEvent)
@@ -103,7 +103,7 @@ async def _record_event(
     signature_image_s3_key: str | None = None,
 ) -> ReauthEvent:
     """Insert an immutable audit row. Caller commits."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evt = ReauthEvent(
         user_id=user_id,
         action=action,
@@ -333,7 +333,7 @@ async def consume_reauth_evidence(
             f"Evidence was issued for action '{evt.action}', not '{expected_action}'",
             code="reauth_evidence_action_mismatch",
         )
-    if evt.expires_at < datetime.now(timezone.utc):
+    if evt.expires_at < datetime.now(UTC):
         raise ReauthEvidenceInvalid(
             "Re-authentication evidence has expired; re-enter your password",
             code="reauth_evidence_expired",

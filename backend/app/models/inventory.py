@@ -22,7 +22,6 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
-    String,
     Text,
     func,
     text,
@@ -32,7 +31,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.identity import User
-
 
 # Single source of truth for accepted item-number prefixes. The DB
 # CHECK enforces the same set; keep these aligned if either is changed.

@@ -50,7 +50,7 @@ class S3StorageError(DomainError):
 
 
 @lru_cache(maxsize=1)
-def get_s3_client() -> "S3Client":
+def get_s3_client() -> S3Client:
     """Process-wide S3 client.
 
     Path-style addressing is forced so MinIO works; AWS S3 still accepts

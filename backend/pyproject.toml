@@ -100,11 +100,29 @@ ignore = [
     "S101",        # assert used — fine in tests
     "PLR0913",     # too many args — FastAPI deps make this common
     "PLR2004",     # magic values — common in HTTP status assertions
+    # Typographic punctuation (em/en dashes, ×, −) is intentional house style
+    # throughout comments and docstrings — not a real confusable risk.
+    "RUF001", "RUF002", "RUF003",
+    # SQLAlchemy declarative models carry mutable class attrs (__table_args__,
+    # constraint/index tuples) that don't fit the ClassVar pattern.
+    "RUF012",
+    # Style/complexity opinions we don't enforce here:
+    "SIM102",      # nested ifs are sometimes clearer than a combined condition
+    "SIM103",      # explicit if/return reads fine
+    "PLR0912",     # branch count — some route handlers legitimately branch
+    "PLR0915",     # statement count — long linear flows (routes, smoke scripts)
+    "PLR1714",     # `== a or == b` reads fine without a set
+    "PLW2901",     # deliberate loop-variable reuse (e.g. patch-apply loops)
+    "N818",        # existing exception class names are kept stable
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "PLR2004"]
+# Smoke scripts: long linear main(), `Decimal as _D` alias, throwaway locals.
+"tests/**" = ["S", "PLR2004", "N814", "E741", "F841"]
 "alembic/**" = ["E", "F", "I"]
+# Forward-ref dependency type resolved at runtime by FastAPI (see the
+# `# type: ignore[name-defined]` on the same line).
+"app/security/permissions.py" = ["F821"]
 # JWT claim names like `token_use`, `token_type`, and the literal `"local"`
 # dummy credentials for cognito-local trip bandit's hardcoded-password checks
 # (S105/S106/S107). They're not real secrets; silence them just in app/auth/.

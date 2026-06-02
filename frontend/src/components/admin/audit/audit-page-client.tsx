@@ -209,6 +209,22 @@ export function AuditPageClient() {
     [events, page],
   );
 
+  // Declared before any early return so the hook call order stays stable
+  // (react-hooks/rules-of-hooks). Used by the table rows below.
+  const handleSelect = React.useCallback(
+    (e: ApiAuditEvent) => {
+      if (isMovementRow(e)) {
+        const m = movementIndex.get(e.id);
+        if (m) {
+          setSelectedMovement(m);
+          return;
+        }
+      }
+      setSelectedAuditId(e.id);
+    },
+    [movementIndex],
+  );
+
   if (!canView) {
     return (
       <>
@@ -226,20 +242,6 @@ export function AuditPageClient() {
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const startIdx = page * PAGE_SIZE;
   const endIdx = Math.min(startIdx + pageRows.length, total);
-
-  const handleSelect = React.useCallback(
-    (e: ApiAuditEvent) => {
-      if (isMovementRow(e)) {
-        const m = movementIndex.get(e.id);
-        if (m) {
-          setSelectedMovement(m);
-          return;
-        }
-      }
-      setSelectedAuditId(e.id);
-    },
-    [movementIndex],
-  );
 
   return (
     <>

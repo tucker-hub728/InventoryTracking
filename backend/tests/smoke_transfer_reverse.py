@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import json
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 from decimal import Decimal as _D
-
 
 BASE = "http://localhost:8000/v1"
 EMAIL = "admin@cellready.local"
@@ -46,7 +45,7 @@ def _req(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:  # noqa: S310
+        with urllib.request.urlopen(req) as resp:
             raw = resp.read()
             return resp.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
@@ -236,7 +235,7 @@ def main() -> int:
     assert isinstance(b, list) and len(b) == 2, b
     counter_types = {row["movement_type"] for row in b}
     assert counter_types == {"transfer_in", "transfer_out"}, b
-    print(f"==> reverse transfer: 201 (2 counter rows)")
+    print("==> reverse transfer: 201 (2 counter rows)")
 
     sbl3 = _stock_by_lot(token, item["id"])
     src_back = _qty(sbl3, lot_id, from_loc)

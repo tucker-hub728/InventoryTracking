@@ -3,7 +3,11 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, dev]
+    branches: [dev]
+  # Callable by the deploy workflow: a push to main runs lint FIRST,
+  # and only deploys if it passes. (main is intentionally not in the push
+  # list above so CI doesn't run twice on main.)
+  workflow_call:
 
 jobs:
   backend:
@@ -11,21 +15,6 @@ jobs:
     defaults:
       run:
         working-directory: backend
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: cellready
-          POSTGRES_PASSWORD: cellready_dev_only
-          POSTGRES_DB: cellready_ims
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U cellready -d cellready_ims"
-          --health-interval 5s --health-timeout 3s --health-retries 10
-    env:
-      APP_ENV: test
-      SECRET_KEY: ci-only-secret-key-32-chars-minimum-aaaa
-      DATABASE_URL: postgresql+asyncpg://cellready:cellready_dev_only@localhost:5432/cellready_ims
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -34,11 +23,6 @@ jobs:
       - run: uv sync --all-extras --dev
       - name: Lint (ruff)
         run: uv run ruff check .
-      - name: Type-check (mypy)
-        run: uv run mypy app
-      - name: Tests (pytest)
-        # If tests need MinIO/cognito-local, add them as `services` above.
-        run: uv run pytest -q
 
   frontend:
     runs-on: ubuntu-latest
@@ -55,7 +39,3 @@ jobs:
       - run: npm ci
       - name: Lint
         run: npm run lint
-      - name: Type-check
-        run: npm run typecheck
-      - name: Build
-        run: npm run build

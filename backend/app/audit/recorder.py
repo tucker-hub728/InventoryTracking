@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
 
-
 # Allowed actions. ``deleted`` covers both hard and soft (deactivated)
 # deletes — the ``after_state`` will carry the soft-delete marker.
 AuditAction = Literal["created", "updated", "deleted", "restored"]

@@ -18,9 +18,8 @@ from __future__ import annotations
 
 import json
 import sys
-import urllib.request
 import urllib.error
-
+import urllib.request
 
 BASE = "http://localhost:8000/v1"
 EMAIL = "admin@cellready.local"
@@ -43,7 +42,7 @@ def _req(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:  # noqa: S310 — local URL
+        with urllib.request.urlopen(req) as resp:
             raw = resp.read()
             return resp.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:

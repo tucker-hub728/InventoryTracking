@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.audit import AuditEvent
 from app.models.identity import User
 
-
 # Shape returned by the listing query — flat dicts so the route can
 # build the Pydantic model without dragging a half-hydrated ORM
 # instance across an async boundary (the same gotcha that bit the

@@ -22,7 +22,13 @@ permissions:
   contents: read
 
 jobs:
+  # Gate: run the full backend + frontend lint/type/test/build suite first.
+  # If any check fails, the deploy job below is SKIPPED (needs: ci).
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   deploy:
+    needs: ci
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}

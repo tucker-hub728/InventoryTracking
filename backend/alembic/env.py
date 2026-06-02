@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # ``Base.metadata``.
 from app.core.config import get_settings
 from app.db.base import Base
-from app import models as _models  # noqa: F401 — needed for metadata side-effect
+from app import models as _models
 
 # Alembic config object provides access to .ini values
 config = context.config

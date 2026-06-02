@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentDbUserDep, DBSession
+from app.audit import record_entity_change
+from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
@@ -48,8 +50,6 @@ from app.inventory.schemas import (
     VendorRead,
     VendorUpdate,
 )
-from app.audit import record_entity_change
-from app.auth.reauth import consume_reauth_evidence
 from app.models.inventory import (
     Item,
     Location,
@@ -59,7 +59,6 @@ from app.models.inventory import (
     Vendor,
 )
 from app.security.permissions import RequirePermission
-
 
 items_router = APIRouter(prefix="/items", tags=["items"])
 vendors_router = APIRouter(prefix="/vendors", tags=["vendors"])
@@ -324,7 +323,7 @@ async def update_vendor(
         msg = (str(exc.orig).lower() if exc.orig else str(exc).lower())
         if "uq_vendors_name" in msg:
             raise ConflictError(
-                f"Vendor name conflict",
+                "Vendor name conflict",
                 code="vendor_name_conflict",
             ) from exc
         raise

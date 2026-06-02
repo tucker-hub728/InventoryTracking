@@ -16,9 +16,12 @@ Returns ``{ key, content_type, size }``. The caller then passes
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Path, UploadFile, status
 from fastapi.responses import Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentDbUserDep
 from app.core.exceptions import NotFoundError, ValidationError
@@ -30,11 +33,6 @@ from app.storage import (
     fetch_signature_bytes,
     put_signature_image,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Annotated
-from fastapi import Path
-
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
