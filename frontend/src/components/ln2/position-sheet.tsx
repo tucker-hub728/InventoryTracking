@@ -25,16 +25,23 @@ import {
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { toast } from '@/components/ui/sonner';
 import { usePermission } from '@/hooks/use-permission';
-import type { LN2Map, PositionInfo, PositionStatus } from './ln2-data';
+import type { Position, PositionStatus } from './ln2-data';
 import { POSITION_TONE } from './ln2-data';
 import { cn } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
 
+export interface PositionSelection {
+  locationId: string;
+  locationName: string;
+  rackKey: string;
+  rackName: string;
+  position: Position;
+}
+
 interface Props {
-  posKey: string | null;
-  map: LN2Map;
+  selection: PositionSelection | null;
   onClose: () => void;
-  onUpdate?: (key: string, patch: Partial<PositionInfo>) => void;
+  onUpdate: (patch: Partial<Position>) => void;
 }
 
 const STATUS_TONE: Record<PositionStatus, BadgeTone> = {
@@ -53,59 +60,56 @@ const STATUS_DESCRIPTION: Record<PositionStatus, string> = {
 
 const STATUS_OPTIONS: PositionStatus[] = ['Empty', 'Reserved', 'Occupied', 'Quarantine'];
 
-/** "LN2-A-01-02" → "Position 02" */
-function positionTitle(posKey: string): string {
-  const parts = posKey.split('-');
-  return `Position ${parts[parts.length - 1] ?? '—'}`;
-}
-
-export function PositionSheet({ posKey, map, onClose, onUpdate }: Props) {
+export function PositionSheet({ selection, onClose, onUpdate }: Props) {
   const canEdit = usePermission('inventory', 'edit');
   const [pendingStatus, setPendingStatus] = React.useState<PositionStatus | null>(null);
   const [confirmEmpty, setConfirmEmpty] = React.useState(false);
   const [confirmMove, setConfirmMove] = React.useState(false);
 
-  const open = Boolean(posKey);
-  const info = posKey ? map[posKey] : undefined;
+  const open = Boolean(selection);
+  const info = selection?.position;
 
-  // Reset working status when sheet opens/changes target.
+  // Reset working status when the sheet opens / changes target.
   React.useEffect(() => {
     setPendingStatus(info?.status ?? null);
-  }, [posKey, info?.status]);
+  }, [selection?.position.id, info?.status]);
 
   const status = pendingStatus ?? info?.status ?? 'Empty';
   const dirty = info ? status !== info.status : false;
 
   const save = (): void => {
-    if (!posKey || !info || !dirty || !canEdit) return;
-    const next: Partial<PositionInfo> = { status };
-    // If we just emptied a position, also clear the item/lot.
+    if (!info || !dirty || !canEdit) return;
+    const next: Partial<Position> = { status };
     if (status === 'Empty') {
       next.item = null;
       next.lot = null;
     }
-    onUpdate?.(posKey, next);
-    toast.success('Position updated', { description: `${posKey} → ${status}` });
+    onUpdate(next);
+    toast.success('Position updated', {
+      description: `${selection?.position.id} → ${status}`,
+    });
   };
 
   const emptyPosition = async (): Promise<void> => {
-    if (!posKey || !canEdit) return;
+    if (!canEdit) return;
     await new Promise((r) => setTimeout(r, 200));
-    onUpdate?.(posKey, { status: 'Empty', item: null, lot: null });
-    toast.success('Position emptied', { description: posKey });
+    onUpdate({ status: 'Empty', item: null, lot: null });
+    toast.success('Position emptied', { description: selection?.position.id });
     onClose();
   };
 
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
       <SheetContent>
-        {posKey && info && (
+        {selection && info && (
           <>
             <SheetHeader>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <SheetDescription className="text-text-3">{posKey}</SheetDescription>
-                  <SheetTitle>{positionTitle(posKey)}</SheetTitle>
+                  <SheetDescription className="text-text-3">
+                    {selection.locationName} · {selection.rackName}
+                  </SheetDescription>
+                  <SheetTitle>Position {String(info.index).padStart(2, '0')}</SheetTitle>
                 </div>
                 {canEdit && info.status !== 'Empty' && (
                   <Button
@@ -148,9 +152,7 @@ export function PositionSheet({ posKey, map, onClose, onUpdate }: Props) {
                   <div className="space-y-3 rounded-md border border-border bg-surface p-4 text-sm">
                     <div>
                       <div className="font-medium">{info.item.desc}</div>
-                      <div className="mt-0.5 font-mono text-xs text-accent">
-                        {info.item.id}
-                      </div>
+                      <div className="mt-0.5 font-mono text-xs text-accent">{info.item.id}</div>
                     </div>
                     <dl className="grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs">
                       <KV k="Vendor" v={info.item.vendor} />
@@ -226,8 +228,8 @@ export function PositionSheet({ posKey, map, onClose, onUpdate }: Props) {
                   'rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2',
                 )}
               >
-                <strong className="text-text">Tip:</strong> Use &ldquo;Move to…&rdquo; to
-                relocate this item to another tank position without changing inventory totals.
+                <strong className="text-text">Tip:</strong> Use &ldquo;Move to…&rdquo; to relocate
+                this item to another position without changing inventory totals.
               </p>
 
               {/* Audit footnote */}
@@ -248,8 +250,8 @@ export function PositionSheet({ posKey, map, onClose, onUpdate }: Props) {
         title="Empty this position?"
         description={
           info?.item
-            ? `${info.item.desc} will be unassigned from ${posKey}. Inventory totals are not affected.`
-            : `${posKey} will be cleared and made available for assignment.`
+            ? `${info.item.desc} will be unassigned from position ${info.index}. Inventory totals are not affected.`
+            : `Position ${info?.index ?? ''} will be cleared and made available for assignment.`
         }
         confirmLabel="Empty position"
         variant="danger"
@@ -260,7 +262,7 @@ export function PositionSheet({ posKey, map, onClose, onUpdate }: Props) {
         open={confirmMove}
         onOpenChange={setConfirmMove}
         title="Move this item?"
-        description="Choose a destination position from the tank map. (Demo: relocation is queued — no real move is performed.)"
+        description="Choose a destination position from the map. (Demo: relocation is queued — no real move is performed.)"
         confirmLabel="Queue move"
         onConfirm={async () => {
           await new Promise((r) => setTimeout(r, 200));

@@ -1,7 +1,15 @@
 'use client';
 
 import * as React from 'react';
-import { Download, Plus, Search, Snowflake } from 'lucide-react';
+import {
+  Boxes,
+  FlaskConical,
+  Plus,
+  Refrigerator,
+  Search,
+  Snowflake,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Button } from '@/components/ui/button';
@@ -11,118 +19,134 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { usePermission } from '@/hooks/use-permission';
-import { toast } from '@/components/ui/sonner';
-import {
-  LN2_TANKS,
-  LN2_RACKS_PER_TANK,
-  POSITION_TONE,
-  buildLN2Map,
-  type LN2Map,
-  type LN2Tank,
-  type PositionInfo,
-} from './ln2-data';
+import type { LocationKind } from '@/lib/api/locations';
+import { useLN2Store } from '@/stores/ln2.store';
+import { POSITION_TONE, computeStats } from './ln2-data';
 import { RackTile } from './rack-tile';
-import { PositionSheet } from './position-sheet';
+import { PositionSheet, type PositionSelection } from './position-sheet';
+import { LocationAddDialog } from './location-add-dialog';
+
+/** Icon per location kind — keeps the switcher readable at a glance. */
+const KIND_ICON: Record<LocationKind, LucideIcon> = {
+  LN2: Snowflake,
+  minus_80: Snowflake,
+  minus_20: Snowflake,
+  fridge: Refrigerator,
+  cold_room: Refrigerator,
+  room_temp: FlaskConical,
+  incubator: FlaskConical,
+  other: Boxes,
+};
 
 export function TankMapClient() {
-  const base = React.useMemo(buildLN2Map, []);
-  // Local overrides for demo edits. Each entry replaces the deterministic
-  // value for that key; a real app would push these to /positions/{id}.
-  const [overrides, setOverrides] = React.useState<Record<string, PositionInfo>>({});
-  const map: LN2Map = React.useMemo(
-    () => (Object.keys(overrides).length ? { ...base, ...overrides } : base),
-    [base, overrides],
+  const locations = useLN2Store((s) => s.locations);
+  const updatePosition = useLN2Store((s) => s.updatePosition);
+
+  const [activeId, setActiveId] = React.useState<string>(locations[0]?.id ?? '');
+  const [selected, setSelected] = React.useState<{ rackKey: string; positionId: string } | null>(
+    null,
   );
-  const [tank, setTank] = React.useState<LN2Tank>('A');
-  const [openPos, setOpenPos] = React.useState<string | null>(null);
+  const [addOpen, setAddOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
   const debounced = useDebouncedValue(query, 150);
   const canEdit = usePermission('inventory', 'edit');
 
-  const updatePosition = React.useCallback(
-    (key: string, patch: Partial<PositionInfo>) => {
-      setOverrides((prev) => {
-        const current = prev[key] ?? base[key];
-        if (!current) return prev;
-        return { ...prev, [key]: { ...current, ...patch } };
-      });
-    },
-    [base],
+  // Keep the active tab valid as locations are added/removed.
+  const activeLoc = locations.find((l) => l.id === activeId) ?? locations[0];
+  React.useEffect(() => {
+    if (activeLoc && activeLoc.id !== activeId) setActiveId(activeLoc.id);
+  }, [activeLoc, activeId]);
+
+  const stats = React.useMemo(
+    () => (activeLoc ? computeStats(activeLoc) : null),
+    [activeLoc],
   );
 
-  const tankStats = React.useMemo(() => {
-    const stats: Record<LN2Tank, { total: number; occupied: number; reserved: number; quarantine: number; empty: number }> = {
-      A: { total: 0, occupied: 0, reserved: 0, quarantine: 0, empty: 0 },
-      B: { total: 0, occupied: 0, reserved: 0, quarantine: 0, empty: 0 },
-      C: { total: 0, occupied: 0, reserved: 0, quarantine: 0, empty: 0 },
-    };
-    for (const k of Object.keys(map)) {
-      const tankId = k.split('-')[1] as LN2Tank;
-      const info = map[k]!;
-      stats[tankId].total += 1;
-      if (info.status === 'Occupied') stats[tankId].occupied += 1;
-      else if (info.status === 'Reserved') stats[tankId].reserved += 1;
-      else if (info.status === 'Quarantine') stats[tankId].quarantine += 1;
-      else stats[tankId].empty += 1;
-    }
-    return stats;
-  }, [map]);
-
+  // Positions matching the search query (highlighted in the grid).
   const matched = React.useMemo(() => {
     const result = new Set<string>();
     const q = debounced.trim().toLowerCase();
-    if (!q) return result;
-    for (const k of Object.keys(map)) {
-      const info = map[k]!;
-      if (k.toLowerCase().includes(q)) result.add(k);
-      else if (
-        info.item &&
-        `${info.item.id} ${info.item.desc} ${info.lot ?? ''}`.toLowerCase().includes(q)
-      )
-        result.add(k);
+    if (!q || !activeLoc) return result;
+    for (const rack of activeLoc.racks) {
+      for (const pos of rack.positions) {
+        if (
+          pos.id.toLowerCase().includes(q) ||
+          rack.name.toLowerCase().includes(q) ||
+          (pos.item &&
+            `${pos.item.id} ${pos.item.desc} ${pos.lot ?? ''}`.toLowerCase().includes(q))
+        ) {
+          result.add(pos.id);
+        }
+      }
     }
     return result;
-  }, [map, debounced]);
+  }, [activeLoc, debounced]);
 
-  const stats = tankStats[tank];
+  // Resolve the current selection into a full object for the sheet.
+  const selection: PositionSelection | null = React.useMemo(() => {
+    if (!selected || !activeLoc) return null;
+    const rack = activeLoc.racks.find((r) => r.id === selected.rackKey);
+    const position = rack?.positions.find((p) => p.id === selected.positionId);
+    if (!rack || !position) return null;
+    return {
+      locationId: activeLoc.id,
+      locationName: activeLoc.name,
+      rackKey: rack.id,
+      rackName: rack.name,
+      position,
+    };
+  }, [selected, activeLoc]);
+
+  if (!activeLoc || !stats) {
+    return (
+      <>
+        <PageHeader title="Storage" subtitle="No locations yet" />
+        <div className="px-6 py-5 sm:px-8">
+          <Button variant="primary" onClick={() => setAddOpen(true)}>
+            <Plus size={14} /> Add location
+          </Button>
+        </div>
+        <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={setActiveId} />
+      </>
+    );
+  }
 
   return (
     <>
       <PageHeader
-        title="LN2 Tanks"
-        subtitle={`Cryogenic position management · ${Object.keys(map).length} positions across ${LN2_TANKS.length} tanks`}
+        title="Storage"
+        subtitle={`Position management · ${locations.length} location${locations.length === 1 ? '' : 's'}`}
         actions={
-          <>
-            <Button onClick={() => toast.info('Export queued')}>
-              <Download size={14} /> Export map
+          canEdit && (
+            <Button variant="primary" onClick={() => setAddOpen(true)}>
+              <Plus size={14} /> Add location
             </Button>
-            {canEdit && (
-              <Button variant="primary">
-                <Plus size={14} /> Assign position
-              </Button>
-            )}
-          </>
+          )
         }
       />
 
       <div className="px-6 py-5 sm:px-8">
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          <Tabs value={tank} onValueChange={(v) => setTank(v as LN2Tank)}>
-            <TabsList className="border-b-0">
-              {LN2_TANKS.map((t) => (
-                <TabsTrigger key={t} value={t} className="gap-2">
-                  <Snowflake size={12} aria-hidden />
-                  Tank {t}
-                  <span className="font-mono text-[10px] text-text-3">
-                    {tankStats[t].occupied}/{tankStats[t].total}
-                  </span>
-                </TabsTrigger>
-              ))}
+          <Tabs value={activeLoc.id} onValueChange={setActiveId}>
+            <TabsList className="flex-wrap border-b-0">
+              {locations.map((loc) => {
+                const Icon = KIND_ICON[loc.kind];
+                const s = computeStats(loc);
+                return (
+                  <TabsTrigger key={loc.id} value={loc.id} className="gap-2">
+                    <Icon size={12} aria-hidden />
+                    {loc.name}
+                    <span className="font-mono text-[10px] text-text-3">
+                      {s.occupied}/{s.total}
+                    </span>
+                  </TabsTrigger>
+                );
+              })}
             </TabsList>
           </Tabs>
           <Input
             icon={Search}
-            placeholder="Search position, item, or lot…"
+            placeholder="Search position, item, lot, or rack…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             wrapperClassName="w-[280px]"
@@ -130,10 +154,15 @@ export function TankMapClient() {
           />
           {matched.size > 0 && (
             <div className="text-xs text-text-2">
-              <span className="font-medium text-accent">{matched.size}</span>{' '}
-              match{matched.size === 1 ? '' : 'es'}
+              <span className="font-medium text-accent">{matched.size}</span> match
+              {matched.size === 1 ? '' : 'es'}
             </div>
           )}
+        </div>
+
+        <div className="mb-4 flex items-baseline gap-2">
+          <h2 className="text-sm font-semibold tracking-tight">{activeLoc.name}</h2>
+          <span className="text-xs text-text-3">{activeLoc.detail}</span>
         </div>
 
         <ul className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -155,14 +184,12 @@ export function TankMapClient() {
 
         <Card className="p-4 sm:p-5">
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {Array.from({ length: LN2_RACKS_PER_TANK }).map((_, i) => (
+            {activeLoc.racks.map((rack) => (
               <RackTile
-                key={i + 1}
-                tank={tank}
-                rackNum={i + 1}
-                map={map}
+                key={rack.id}
+                rack={rack}
                 highlight={matched}
-                onSelect={setOpenPos}
+                onSelectPosition={(rackKey, positionId) => setSelected({ rackKey, positionId })}
               />
             ))}
           </div>
@@ -170,11 +197,16 @@ export function TankMapClient() {
       </div>
 
       <PositionSheet
-        posKey={openPos}
-        map={map}
-        onClose={() => setOpenPos(null)}
-        onUpdate={updatePosition}
+        selection={selection}
+        onClose={() => setSelected(null)}
+        onUpdate={(patch) => {
+          if (selection) {
+            updatePosition(selection.locationId, selection.rackKey, selection.position.id, patch);
+          }
+        }}
       />
+
+      <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={setActiveId} />
     </>
   );
 }

@@ -3,75 +3,52 @@
 import * as React from 'react';
 
 import { cn } from '@/lib/utils';
-import {
-  LN2_GRID_SIZE,
-  LN2_POSITIONS_PER_RACK,
-  POSITION_TONE,
-  positionKey,
-  type LN2Map,
-  type LN2Tank,
-} from './ln2-data';
+import { GRID_COLUMNS, POSITION_TONE, rackOccupied, type Rack } from './ln2-data';
 
 interface RackTileProps {
-  tank: LN2Tank;
-  rackNum: number;
-  map: LN2Map;
+  rack: Rack;
   highlight: Set<string>;
-  onSelect: (key: string) => void;
+  onSelectPosition: (rackKey: string, positionId: string) => void;
 }
 
 export const RackTile = React.memo(function RackTile({
-  tank,
-  rackNum,
-  map,
+  rack,
   highlight,
-  onSelect,
+  onSelectPosition,
 }: RackTileProps) {
-  const occupied = React.useMemo(
-    () =>
-      Array.from({ length: LN2_POSITIONS_PER_RACK }).filter((_, i) => {
-        const k = positionKey(tank, rackNum, i + 1);
-        return map[k]?.status === 'Occupied';
-      }).length,
-    [tank, rackNum, map],
-  );
+  const occupied = rackOccupied(rack);
 
   return (
     <div className="rounded-md border border-border bg-bg-elev p-3 shadow-elev-sm">
       <div className="mb-2 flex items-baseline justify-between">
-        <div className="text-xs font-semibold tracking-tight">Rack {String(rackNum).padStart(2, '0')}</div>
+        <div className="text-xs font-semibold tracking-tight">{rack.name}</div>
         <div className="font-mono text-[11px] text-text-3">
-          {occupied}/{LN2_POSITIONS_PER_RACK}
+          {occupied}/{rack.positions.length}
         </div>
       </div>
       <div
         role="grid"
-        aria-label={`Tank ${tank} rack ${rackNum} positions`}
+        aria-label={`${rack.name} positions`}
         className="grid gap-1"
-        style={{ gridTemplateColumns: `repeat(${LN2_GRID_SIZE}, minmax(0,1fr))` }}
+        style={{ gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0,1fr))` }}
       >
-        {Array.from({ length: LN2_POSITIONS_PER_RACK }).map((_, i) => {
-          const pos = i + 1;
-          const key = positionKey(tank, rackNum, pos);
-          const info = map[key];
-          if (!info) return null;
-          const tone = POSITION_TONE[info.status];
-          const highlighted = highlight.has(key);
+        {rack.positions.map((pos) => {
+          const tone = POSITION_TONE[pos.status];
+          const highlighted = highlight.has(pos.id);
           return (
             <button
-              key={key}
+              key={pos.id}
               type="button"
-              onClick={() => onSelect(key)}
-              aria-label={`Position ${key} (${info.status})`}
-              title={info.item ? `${info.item.id} · ${info.item.desc}` : info.status}
+              onClick={() => onSelectPosition(rack.id, pos.id)}
+              aria-label={`Position ${pos.index} (${pos.status})`}
+              title={pos.item ? `${pos.item.id} · ${pos.item.desc}` : pos.status}
               className={cn(
                 'aspect-square rounded-sm text-[10px] font-medium leading-none transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
                 tone.cell,
-                highlighted &&
-                  'ring-2 ring-offset-2 ring-offset-bg-elev ring-accent scale-105',
+                highlighted && 'ring-2 ring-offset-2 ring-offset-bg-elev ring-accent scale-105',
               )}
             >
-              {pos}
+              {pos.index}
             </button>
           );
         })}
