@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CellReady IMS — Elastic Beanstalk (Docker-Compose platform, SingleInstance)
+  + CloudFront for free HTTPS, IAM instance/service roles, security groups,
+  and the :5432 ingress from the EB instance SG to the RDS SG. The env is
+  created with the EB sample app; the first real deploy is done by GitHub
+  Actions (CI owns app versions, this stack owns infrastructure).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cellready
+  EnvName:
+    Type: String
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  EBSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnet(s) for the single EB instance.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: >-
+      x86_64 by default so CI builds (native amd64) match the instance with
+      no cross-arch build step. To use Graviton (t4g.small, ~20% cheaper),
+      switch this AND build linux/arm64 images in CI (see infra/README.md).
+  SolutionStackName:
+    Type: String
+    Description: >-
+      Latest "64bit Amazon Linux 2023 ... running Docker" stack. Find it with:
+      aws elasticbeanstalk list-available-solution-stacks
+      --query "SolutionStacks[?contains(@,'running Docker')]"
+  CNAMEPrefix:
+    Type: String
+    Description: >-
+      Globally-unique EB CNAME prefix. The env URL becomes
+      <prefix>.<region>.elasticbeanstalk.com — also used as the CloudFront origin.
+  CloudFrontPrefixListId:
+    Type: String
+    Description: >-
+      AWS-managed CloudFront origin-facing prefix list id for this region. Find with:
+      aws ec2 describe-managed-prefix-lists
+      --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+      --query 'PrefixLists[0].PrefixListId'
+  SSMParamPrefix:
+    Type: String
+    Default: /cellready/dev/
+    Description: SSM path the prebuild hook reads secrets from (trailing slash).
+
+Resources:
+  # ── IAM: EC2 instance role (least privilege) ────────────────────────────
+  EBInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: app-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read secrets written by scripts/bootstrap_ssm.sh.
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SSMParamPrefix}*'
+              # Decrypt SecureString params (default aws/ssm key).
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+              # e-signature object storage (boto3 uses the instance role; no static keys).
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-SignaturesBucketArn'
+                  - !Sub
+                    - '${Arn}/*'
+                    - Arn:
+                        Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-SignaturesBucketArn'
+              # Cognito admin operations scoped to this pool.
+              - Effect: Allow
+                Action: cognito-idp:*
+                Resource:
+                  Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-UserPoolArn'
+
+  EBInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref EBInstanceRole ]
+
+  # ── IAM: EB service role (enhanced health + managed updates) ─────────────
+  EBServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: elasticbeanstalk.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+
+  # ── Networking: EB instance SG (only CloudFront may reach :80) ───────────
+  EBInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${EnvName} EB instance - :80 from CloudFront only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: HTTP from CloudFront edge only
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${EnvName}-eb'
+
+  # Open RDS :5432 to the EB instances. Lives here (not in 02) so 02 has no
+  # dependency on this stack — breaks the SG circular reference.
+  DBIngressFromEB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-DBSecurityGroupId'
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref EBInstanceSecurityGroup
+      Description: PostgreSQL from EB instances
+
+  # ── CloudFront (free TLS in front of the single instance) ───────────────
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${ProjectName}-${EnvName} frontend'
+        HttpVersion: http2
+        Origins:
+          - Id: eb-origin
+            DomainName: !Sub '${CNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginSSLProtocols: [ TLSv1.2 ]
+        DefaultCacheBehavior:
+          TargetOriginId: eb-origin
+          ViewerProtocolPolicy: redirect-to-https
+          # Dynamic app: don't cache, forward everything (cookies/headers/qs).
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # Managed-CachingDisabled
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # Managed-AllViewer
+          AllowedMethods: [ GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE ]
+          CachedMethods: [ GET, HEAD ]
+          Compress: true
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true  # free *.cloudfront.net HTTPS
+
+  # ── Elastic Beanstalk ───────────────────────────────────────────────────
+  Application:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Sub '${ProjectName}-${EnvName}'
+
+  Environment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      EnvironmentName: !Sub '${ProjectName}-${EnvName}'
+      CNAMEPrefix: !Ref CNAMEPrefix
+      SolutionStackName: !Ref SolutionStackName
+      Tier: { Name: WebServer, Type: Standard }
+      # No VersionLabel → EB launches its sample app; CI deploys the real one.
+      OptionSettings:
+        # Single instance, no load balancer.
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: EnvironmentType, Value: SingleInstance }
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: ServiceRole, Value: !GetAtt EBServiceRole.Arn }
+        # Instance config.
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: IamInstanceProfile, Value: !Ref EBInstanceProfile }
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: SecurityGroups, Value: !Ref EBInstanceSecurityGroup }
+        - { Namespace: 'aws:ec2:instances', OptionName: InstanceTypes, Value: !Ref InstanceType }
+        # Networking (default VPC, public subnet, public IP for the instance).
+        - { Namespace: 'aws:ec2:vpc', OptionName: VPCId, Value: !Ref VpcId }
+        - { Namespace: 'aws:ec2:vpc', OptionName: Subnets, Value: !Join [',', !Ref EBSubnetIds] }
+        - { Namespace: 'aws:ec2:vpc', OptionName: AssociatePublicIpAddress, Value: 'true' }
+        # Health + logs.
+        - { Namespace: 'aws:elasticbeanstalk:healthreporting:system', OptionName: SystemType, Value: enhanced }
+        - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: StreamLogs, Value: 'true' }
+        - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: DeleteOnTerminate, Value: 'true' }
+        - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: RetentionInDays, Value: '7' }
+        # ── Application env (NON-SECRET only; secrets come from SSM hook) ──
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: APP_ENV, Value: production }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: APP_DEBUG, Value: 'false' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: AWS_REGION, Value: !Ref 'AWS::Region' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_LEVEL, Value: INFO }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_FORMAT, Value: json }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: SSM_PARAM_PREFIX, Value: !Ref SSMParamPrefix }
+        # S3 — leave endpoint/keys unset so boto3 uses the instance role + real S3.
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: S3_SIGNATURES_BUCKET
+          Value:
+            Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-SignaturesBucket'
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: S3_REGION, Value: !Ref 'AWS::Region' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: S3_FORCE_PATH_STYLE, Value: 'false' }
+        # Cognito — pool/client ids; issuer + JWKS are derived by the backend.
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: COGNITO_USER_POOL_ID
+          Value:
+            Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-UserPoolId'
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: COGNITO_CLIENT_ID
+          Value:
+            Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-UserPoolClientId'
+        # Frontend BFF → backend over the compose network.
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: BACKEND_INTERNAL_URL, Value: 'http://backend:8000/v1' }
+        # Backend CORS — the public origin is the CloudFront domain.
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: CORS_ALLOW_ORIGINS
+          Value: !Sub 'https://${Distribution.DomainName}'
+        # JWT/session TTLs (kept in lockstep with the Cognito client).
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_ACCESS_TOKEN_TTL_MINUTES, Value: '60' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_ID_TOKEN_TTL_MINUTES, Value: '60' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_REFRESH_TOKEN_TTL_DAYS, Value: '30' }
+
+Outputs:
+  EnvironmentName:
+    Value: !Ref Environment
+  EnvironmentURL:
+    Description: Origin URL CloudFront points at (HTTP, locked to CloudFront).
+    Value: !Sub 'http://${CNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
+  AppURL:
+    Description: The public HTTPS URL users hit.
+    Value: !Sub 'https://${Distribution.DomainName}'
+  CloudFrontDistributionId:
+    Value: !Ref Distribution

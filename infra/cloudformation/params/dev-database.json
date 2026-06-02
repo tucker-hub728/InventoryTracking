@@ -1,0 +1,12 @@
+[
+  { "ParameterKey": "ProjectName", "ParameterValue": "cellready" },
+  { "ParameterKey": "EnvName", "ParameterValue": "dev" },
+  { "ParameterKey": "VpcId", "ParameterValue": "REPLACE_WITH_DEFAULT_VPC_ID" },
+  { "ParameterKey": "DbSubnetIds", "ParameterValue": "REPLACE_SUBNET_A,REPLACE_SUBNET_B" },
+  { "ParameterKey": "DBInstanceClass", "ParameterValue": "db.t4g.micro" },
+  { "ParameterKey": "DBAllocatedStorage", "ParameterValue": "20" },
+  { "ParameterKey": "EngineVersion", "ParameterValue": "16.4" },
+  { "ParameterKey": "MultiAZ", "ParameterValue": "false" },
+  { "ParameterKey": "DBName", "ParameterValue": "cellready_ims" },
+  { "ParameterKey": "DBUsername", "ParameterValue": "cellready" }
+]

@@ -1,0 +1,47 @@
+# ───── OS / IDE ─────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ───── Env files ─────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ───── Frontend (Next.js / Node) ─────
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.vercel/
+*.tsbuildinfo
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+frontend/*.log
+
+# ───── Backend (Python / FastAPI) ─────
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.venv/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/htmlcov/
+backend/*.egg-info/
+backend/dist/
+backend/build/
+
+# ───── Docker ─────
+.docker-data/
+
+# ───── Cognito-local persistence ─────
+.cognito/
+
+# ───── Misc ─────
+*.log
+/temp
+.claude/

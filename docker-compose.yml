@@ -1,0 +1,205 @@
+# CellReady IMS — local development orchestration.
+#
+# Three services:
+#   postgres : data store, persisted in a named volume.
+#   backend  : FastAPI, source bind-mounted, hot reload via uvicorn --reload.
+#   frontend : Next.js dev server, source bind-mounted.
+#
+# All env defaults live in the root .env (copy from .env.example).
+#
+# Common workflows:
+#   docker compose up --build              # full stack
+#   docker compose up postgres backend     # backend dev only
+#   docker compose logs -f backend         # tail one service
+#   docker compose down                    # stop, keep db volume
+#   docker compose down -v                 # stop and wipe db
+
+name: ${COMPOSE_PROJECT_NAME:-cellready-ims}
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: cellready-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cellready}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cellready_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-cellready_ims}
+      # Reasonable dev defaults; tune for prod.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Run any *.sql files in this dir on first init (extensions, roles).
+      - ./backend/db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cellready} -d ${POSTGRES_DB:-cellready_ims}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - ims
+
+  # ── MinIO (S3-compatible object store) ────────────────────────────────────
+  # Stand-in for AWS S3 in dev. Speaks the same wire protocol so the same
+  # boto3 client works against both — only ``S3_ENDPOINT_URL`` differs
+  # between environments. Persists to a named volume so the signatures
+  # bucket survives ``docker compose down``.
+  minio:
+    # Quay mirror — Docker Hub kept EOFing on this image during local pulls.
+    image: quay.io/minio/minio:latest
+    container_name: cellready-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cellready}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cellready_dev_only}
+      # Default region — boto3 sends region in every signature; mismatch
+      # against the bucket location causes a 301. Match this to AWS_REGION.
+      MINIO_REGION_NAME: ${AWS_REGION:-us-east-1}
+    ports:
+      # 9000 = S3 API, 9001 = web console (handy for poking at uploads).
+      - "${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    networks:
+      - ims
+
+  # ── Cognito-local ─────────────────────────────────────────────────────────
+  # Drop-in stand-in for AWS Cognito User Pools while developing. State is
+  # persisted in ./.cognito so pool/client/user definitions survive restarts.
+  cognito:
+    image: jagregory/cognito-local:3.21.1
+    container_name: cellready-cognito
+    restart: unless-stopped
+    ports:
+      - "${COGNITO_HOST_PORT:-9229}:9229"
+    volumes:
+      - ./.cognito:/app/.cognito
+    # No healthcheck: cognito-local doesn't expose a dedicated probe and
+    # answers 404 on /, which is awkward to grade. Backend startup is
+    # gated on `service_started` (not `service_healthy`) for this reason.
+    networks:
+      - ims
+
+  # ── Backend (FastAPI) ─────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      target: dev
+    container_name: cellready-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cognito:
+        condition: service_started
+      minio:
+        condition: service_started
+    environment:
+      APP_ENV: development
+      APP_DEBUG: "true"
+      HOST: 0.0.0.0
+      PORT: 8000
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required (see .env.example)}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cellready}:${POSTGRES_PASSWORD:-cellready_dev_only}@postgres:5432/${POSTGRES_DB:-cellready_ims}
+      CORS_ALLOW_ORIGINS: http://localhost:${FRONTEND_HOST_PORT:-3000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-console}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@cellready.local}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-ChangeMe!Now123}
+      # Cognito — empty values are fine; auth endpoints will surface a clear
+      # error until you've run scripts/seed_cognito.sh and populated .env.
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
+      COGNITO_ENDPOINT_URL: ${COGNITO_ENDPOINT_URL:-http://cognito:9229}
+      COGNITO_JWKS_URL: ${COGNITO_JWKS_URL:-}
+      COGNITO_ISSUER: ${COGNITO_ISSUER:-}
+      # JWT / session TTLs (mirrored on the Cognito user pool client).
+      JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES:-60}
+      JWT_ID_TOKEN_TTL_MINUTES: ${JWT_ID_TOKEN_TTL_MINUTES:-60}
+      JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS:-30}
+      # ── S3 / MinIO ─────────────────────────────────────────────────────
+      # In prod the backend hits real S3 — leave ``S3_ENDPOINT_URL``
+      # unset and rely on IAM role creds + region. In dev we point at
+      # the MinIO container with its root credentials.
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_REGION: ${S3_REGION:-${AWS_REGION:-us-east-1}}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-cellready}}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-cellready_dev_only}}
+      S3_SIGNATURES_BUCKET: ${S3_SIGNATURES_BUCKET:-cellready-signatures}
+      # Force path-style addressing — required for MinIO (and harmless
+      # against AWS S3 in regions that still support it).
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+    ports:
+      - "${BACKEND_HOST_PORT:-8000}:8000"
+    volumes:
+      # Source bind-mount enables hot reload.
+      - ./backend:/app
+      # Anonymous volume preserves the venv created inside the image so it
+      # doesn't get shadowed by the host bind-mount.
+      - /app/.venv
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/v1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ims
+
+  # ── Frontend (Next.js) ────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    container_name: cellready-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      # Public, inlined into the client bundle (used only as a fallback /
+      # docs hint — the BFF routes proxy through the server-side URL below).
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/v1}
+      # Server-side URL the Next.js route handlers use to reach the backend
+      # over the docker network. NOT exposed to the browser.
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000/v1}
+      # JWT TTLs — used to size httpOnly cookie max-ages. Must match the
+      # values applied to the Cognito user pool client.
+      JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES:-60}
+      JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS:-30}
+      # Polling makes the watcher work over Windows bind mounts.
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
+    volumes:
+      - ./frontend:/app
+      # Same anonymous-volume trick as backend, but for node_modules.
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - ims
+
+# ── Networks ───────────────────────────────────────────────────────────────
+networks:
+  ims:
+    driver: bridge
+
+# ── Volumes ────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    name: cellready-postgres-data
+  minio_data:
+    name: cellready-minio-data

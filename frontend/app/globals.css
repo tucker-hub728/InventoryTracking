@@ -1,0 +1,233 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Theme tokens — light/dark + density.
+ * The data-theme attribute is set on <html> by the ui store (see src/stores/ui.store.ts).
+ * data-density on <body> controls table/control padding.
+ */
+
+@layer base {
+  :root,
+  [data-theme='light'] {
+    color-scheme: light;
+    --bg: #ffffff;
+    --bg-elev: #ffffff;
+    --surface: #fafafa;
+    --surface-2: #f5f5f4;
+    --text: #0a0a0a;
+    --text-2: #525252;
+    --text-3: #a3a3a3;
+    --border: #e7e5e4;
+    --border-strong: #d6d3d1;
+    --accent: #2547d0;
+    --accent-soft: #eef1fb;
+    --accent-fg: #ffffff;
+    --success: #15803d;
+    --success-soft: #ecfdf5;
+    --warning: #b45309;
+    --warning-soft: #fef3c7;
+    --danger: #b91c1c;
+    --danger-soft: #fef2f2;
+
+    --shadow-sm: 0 1px 2px rgba(10, 10, 10, 0.06);
+    --shadow-md: 0 8px 24px rgba(10, 10, 10, 0.08);
+    --shadow-lg: 0 12px 32px rgba(10, 10, 10, 0.1);
+    --scrollbar-thumb: #e7e5e4;
+    --scrollbar-thumb-hover: #d6d3d1;
+    --scrollbar-track: var(--bg);
+    --selection: #d9e0f7;
+    --ink: #0a0a0a;
+
+    --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  [data-theme='dark'] {
+    color-scheme: dark;
+    --bg: #0e0e10;
+    --bg-elev: #1a1a1d;
+    --surface: #161618;
+    --surface-2: #232328;
+    --text: #f4f4f5;
+    --text-2: #a1a1aa;
+    --text-3: #71717a;
+    --border: #2a2a2f;
+    --border-strong: #3a3a40;
+    --accent: #6b8aff;
+    --accent-soft: #1c2440;
+    --accent-fg: #ffffff;
+    --success: #34d399;
+    --success-soft: #112c20;
+    --warning: #fbbf24;
+    --warning-soft: #2f2410;
+    --danger: #f87171;
+    --danger-soft: #2a1414;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+    --scrollbar-thumb: #2a2a2f;
+    --scrollbar-thumb-hover: #3a3a40;
+    --scrollbar-track: var(--bg);
+    --selection: #2c3a78;
+    --ink: #f4f4f5;
+  }
+
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    @apply bg-bg text-text;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  input,
+  select,
+  textarea {
+    font-family: inherit;
+    font-size: inherit;
+    /*
+     * Explicit full-strength foreground so typed text always has the
+     * highest contrast, even when an ancestor (e.g. our Input shell
+     * wrapper that uses ``text-text-2`` for the leading icon) sets a
+     * muted colour. ``color: inherit`` previously meant typed text
+     * picked up the wrapper's muted shade in a few places.
+     */
+    color: var(--text);
+  }
+
+  /*
+   * Native ``<input type="date">`` calendar icon. ``color-scheme`` on the
+   * theme root lets Chrome/Safari pick the right tint, but Firefox + some
+   * Chromium builds still render a near-black SVG that disappears against
+   * our dark surface. Explicit ``invert`` flips it to white in dark mode;
+   * we leave it alone in light mode. Same trick for ``time`` / ``datetime-local``
+   * so future inputs inherit the fix.
+   */
+  [data-theme='dark'] input[type='date']::-webkit-calendar-picker-indicator,
+  [data-theme='dark'] input[type='time']::-webkit-calendar-picker-indicator,
+  [data-theme='dark'] input[type='datetime-local']::-webkit-calendar-picker-indicator,
+  [data-theme='dark'] input[type='month']::-webkit-calendar-picker-indicator,
+  [data-theme='dark'] input[type='week']::-webkit-calendar-picker-indicator {
+    filter: invert(1) brightness(1.2);
+    opacity: 0.85;
+    cursor: pointer;
+  }
+  input[type='date']::-webkit-calendar-picker-indicator,
+  input[type='time']::-webkit-calendar-picker-indicator,
+  input[type='datetime-local']::-webkit-calendar-picker-indicator {
+    opacity: 0.7;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+  }
+  input[type='date']::-webkit-calendar-picker-indicator:hover,
+  input[type='time']::-webkit-calendar-picker-indicator:hover,
+  input[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+  }
+
+  /*
+   * Browser autofill (Chrome / Edge / Brave) paints inputs it recognises
+   * as fillable in a fixed yellow / pale-blue, ignoring the input's own
+   * background — and the colour persists through hover / focus / active.
+   * There is no spec-supported way to *disable* it; the canonical
+   * workaround is an inset box-shadow large enough to repaint the entire
+   * background, plus an explicit ``-webkit-text-fill-color`` so the typed
+   * text stays readable (especially in dark mode, where autofill would
+   * otherwise leave near-white text on a near-white box). The ``9999s``
+   * transition delay is the classic trick that prevents the shadow from
+   * fading back to the autofill colour after a few seconds.
+   */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active,
+  textarea:-webkit-autofill,
+  textarea:-webkit-autofill:hover,
+  textarea:-webkit-autofill:focus,
+  select:-webkit-autofill,
+  select:-webkit-autofill:hover,
+  select:-webkit-autofill:focus {
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-elev) inset !important;
+    box-shadow: 0 0 0 1000px var(--bg-elev) inset !important;
+    -webkit-text-fill-color: var(--text) !important;
+    caret-color: var(--text);
+    transition: background-color 9999s ease-out 0s;
+  }
+
+  /*
+   * Drag-to-select highlight. Background alone isn't enough — most
+   * browsers default the selected-text foreground to white, which is
+   * unreadable on our light selection tint. Fix the foreground too,
+   * and mirror the rule under ``::-moz-selection`` for Firefox.
+   */
+  ::selection {
+    background: var(--selection);
+    color: var(--text);
+  }
+  ::-moz-selection {
+    background: var(--selection);
+    color: var(--text);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 999px;
+    border: 2px solid var(--scrollbar-track);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+  }
+
+  /* Density variants */
+  [data-density='compact'] td,
+  [data-density='compact'] th {
+    padding: 8px 12px !important;
+  }
+  [data-density='regular'] td {
+    padding: 12px 14px;
+  }
+  [data-density='regular'] th {
+    padding: 10px 14px;
+  }
+}
+
+@layer utilities {
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+  .text-text-2 {
+    color: var(--text-2);
+  }
+  .text-text-3 {
+    color: var(--text-3);
+  }
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}

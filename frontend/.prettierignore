@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+build
+dist
+public/*.jsx
+public/data.js
+public/inventory-data.json
+package-lock.json

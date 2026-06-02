@@ -1,0 +1,104 @@
+name: Deploy (dev)
+
+# Builds backend + frontend images, pushes to ECR, bundles the prod compose +
+# .platform hooks, and rolls the Elastic Beanstalk environment to the new
+# version. Auth via GitHub OIDC — no long-lived AWS keys.
+#
+# Required repo VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#   AWS_REGION, AWS_ACCOUNT_ID, DEPLOY_ROLE_ARN, PROJECT, EB_APP, EB_ENV, ARTIFACTS_BUCKET
+# (PROJECT defaults to "cellready"; EB_APP/EB_ENV are "cellready-dev".)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # for OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      PROJECT: ${{ vars.PROJECT || 'cellready' }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push images
+        run: |
+          set -euo pipefail
+          REG="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com"
+          BACKEND_IMAGE="${REG}/${PROJECT}/backend:${IMAGE_TAG}"
+          FRONTEND_IMAGE="${REG}/${PROJECT}/frontend:${IMAGE_TAG}"
+          echo "BACKEND_IMAGE=${BACKEND_IMAGE}"  >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=${FRONTEND_IMAGE}" >> "$GITHUB_ENV"
+
+          docker build --target prod -t "${BACKEND_IMAGE}"  ./backend
+          docker build --target prod -t "${FRONTEND_IMAGE}" ./frontend
+          docker push "${BACKEND_IMAGE}"
+          docker push "${FRONTEND_IMAGE}"
+
+      - name: Build EB source bundle
+        run: |
+          set -euo pipefail
+          cd deploy
+          # Substitute ONLY the image placeholders; leave runtime ${VAR}s intact.
+          sed -e "s|\${BACKEND_IMAGE}|${BACKEND_IMAGE}|g" \
+              -e "s|\${FRONTEND_IMAGE}|${FRONTEND_IMAGE}|g" \
+              docker-compose.yml > docker-compose.rendered.yml
+          mv docker-compose.rendered.yml docker-compose.yml
+          # Ensure the prebuild hook keeps its executable bit inside the zip.
+          chmod +x .platform/hooks/prebuild/*.sh
+          zip -r -y ../bundle.zip docker-compose.yml .platform
+          cd ..
+
+      - name: Upload bundle & create application version
+        run: |
+          set -euo pipefail
+          KEY="bundle/${IMAGE_TAG}.zip"
+          aws s3 cp bundle.zip "s3://${{ vars.ARTIFACTS_BUCKET }}/${KEY}"
+          aws elasticbeanstalk create-application-version \
+            --application-name "${{ vars.EB_APP }}" \
+            --version-label "${IMAGE_TAG}" \
+            --source-bundle "S3Bucket=${{ vars.ARTIFACTS_BUCKET }},S3Key=${KEY}" \
+            --auto-create-application
+
+      - name: Deploy & wait for green
+        run: |
+          set -euo pipefail
+          aws elasticbeanstalk update-environment \
+            --environment-name "${{ vars.EB_ENV }}" \
+            --version-label "${IMAGE_TAG}"
+
+          echo "Waiting for environment to return to Ready/Green..."
+          for i in $(seq 1 60); do
+            read -r status health < <(aws elasticbeanstalk describe-environments \
+              --environment-names "${{ vars.EB_ENV }}" \
+              --query 'Environments[0].[Status,Health]' --output text)
+            echo "  [$i] Status=${status} Health=${health}"
+            if [[ "${status}" == "Ready" && "${health}" == "Green" ]]; then
+              echo "Deploy succeeded."; exit 0
+            fi
+            if [[ "${status}" == "Ready" && "${health}" == "Red" ]]; then
+              echo "Environment is Ready but Red — deploy failed."; exit 1
+            fi
+            sleep 15
+          done
+          echo "Timed out waiting for green."; exit 1

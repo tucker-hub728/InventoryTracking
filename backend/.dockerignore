@@ -1,0 +1,42 @@
+# Keep the build context small and reproducible.
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI / docs not needed inside the image
+.github/
+README.md
+docs/
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml

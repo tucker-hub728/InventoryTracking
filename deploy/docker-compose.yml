@@ -1,0 +1,86 @@
+# CellReady IMS — PRODUCTION compose, run by Elastic Beanstalk (Docker-Compose
+# platform) on a single instance. This is the root of the EB source bundle.
+#
+# How env values arrive (compose interpolates ${VAR} from both sources;
+# the shell environment wins over the .env file):
+#   * NON-SECRET config  → EB environment properties (set in 03-beanstalk.yaml),
+#                          present in the shell environment.
+#   * SECRETS            → written to ./.env by the prebuild hook
+#                          (.platform/hooks/prebuild/01_fetch_ssm_secrets.sh)
+#                          from SSM SecureString parameters.
+#   * Image refs         → ${BACKEND_IMAGE}/${FRONTEND_IMAGE} are substituted by
+#                          CI (envsubst) before the bundle is zipped.
+#
+# Intentionally UNSET in prod (so the AWS SDK hits real services via the
+# instance role): COGNITO_ENDPOINT_URL, S3_ENDPOINT_URL, S3_ACCESS_KEY_ID,
+# S3_SECRET_ACCESS_KEY.
+
+name: cellready-ims
+
+services:
+  # One-shot: apply DB migrations, then exit. Backend waits for success.
+  migrate:
+    image: ${BACKEND_IMAGE}
+    restart: "no"
+    command: ["sh", "-c", "alembic upgrade head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      APP_ENV: ${APP_ENV}
+
+  backend:
+    image: ${BACKEND_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV}
+      APP_DEBUG: ${APP_DEBUG}
+      HOST: 0.0.0.0
+      PORT: 8000
+      AWS_REGION: ${AWS_REGION}
+      LOG_LEVEL: ${LOG_LEVEL}
+      LOG_FORMAT: ${LOG_FORMAT}
+      # Secrets (from SSM via .env)
+      SECRET_KEY: ${SECRET_KEY}
+      DATABASE_URL: ${DATABASE_URL}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD}
+      # CORS — the public CloudFront origin
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS}
+      # Cognito (real). Endpoint/JWKS/issuer left unset → derived for real AWS.
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
+      # JWT TTLs (kept in lockstep with the Cognito client)
+      JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES}
+      JWT_ID_TOKEN_TTL_MINUTES: ${JWT_ID_TOKEN_TTL_MINUTES}
+      JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS}
+      # S3 — real bucket via instance role (endpoint + keys deliberately unset)
+      S3_REGION: ${S3_REGION}
+      S3_SIGNATURES_BUCKET: ${S3_SIGNATURES_BUCKET}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/v1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Server-side BFF → backend over the compose network.
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL}
+      # Cookie max-ages (must match Cognito client TTLs).
+      JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES}
+      JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS}
+    ports:
+      # EB serves the instance on :80 → CloudFront origin. Backend has no
+      # published port (reachable only on the compose network).
+      - "80:3000"

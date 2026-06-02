@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CellReady IMS — managed PostgreSQL (RDS). Decoupled from the Elastic
+  Beanstalk environment so data survives env rebuilds. The master password
+  is generated and stored in Secrets Manager (ManageMasterUserPassword) —
+  no plaintext password lives in this template or in CloudFormation.
+  The :5432 ingress rule is added by the beanstalk stack (03), which knows
+  the EB instance security group — this stack only creates an empty DB SG.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cellready
+  EnvName:
+    Type: String
+    Default: dev
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Default VPC id (aws ec2 describe-vpcs --filters Name=isDefault,Values=true).
+  DbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      At least two subnets in different AZs (default VPC subnets are fine).
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    Description: Cheapest Graviton burstable for dev. Bump for prod.
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+  EngineVersion:
+    Type: String
+    Default: '16.4'
+    Description: >-
+      Verify with: aws rds describe-db-engine-versions --engine postgres
+      --query 'DBEngineVersions[].EngineVersion'. Adjust if 16.4 is retired.
+  MultiAZ:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Single-AZ for dev; set true for prod.
+  DBName:
+    Type: String
+    Default: cellready_ims
+  DBUsername:
+    Type: String
+    Default: cellready
+
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub '${ProjectName}-${EnvName} db subnets'
+      SubnetIds: !Ref DbSubnetIds
+
+  # Empty on purpose — the EB stack (03) adds the :5432 ingress from the
+  # EB instance SG. Default egress (allow-all) is added by CloudFormation.
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${EnvName} RDS - ingress added by EB stack'
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${EnvName}-rds'
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-${EnvName}'
+      Engine: postgres
+      EngineVersion: !Ref EngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      # Generates the password and stores it in Secrets Manager.
+      ManageMasterUserPassword: true
+      MultiAZ: !Ref MultiAZ
+      PubliclyAccessible: false
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 7
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false  # dev; enable for prod
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvName
+
+Outputs:
+  DBEndpointAddress:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-DBEndpoint' }
+  DBEndpointPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-DBPort' }
+  DBName:
+    Value: !Ref DBName
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-DBName' }
+  DBUsername:
+    Value: !Ref DBUsername
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-DBUsername' }
+  DBSecretArn:
+    Description: Secrets Manager ARN holding the generated master password.
+    Value: !GetAtt DBInstance.MasterUserSecret.SecretArn
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-DBSecretArn' }
+  DBSecurityGroupId:
+    Value: !GetAtt DBSecurityGroup.GroupId
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-DBSecurityGroupId' }

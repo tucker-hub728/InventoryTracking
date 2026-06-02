@@ -1,0 +1,166 @@
+[project]
+name = "cellready-ims-backend"
+version = "0.1.0"
+description = "CellReady IMS — FastAPI backend"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "CellReady" }]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime dependencies
+# Pinned to compatible minor versions; bump deliberately, not opportunistically.
+# ─────────────────────────────────────────────────────────────────────────────
+dependencies = [
+    # Web framework + ASGI server
+    "fastapi[standard]>=0.115.0,<0.120.0",
+    "uvicorn[standard]>=0.32.0,<0.34.0",
+    "gunicorn>=23.0.0,<24.0.0",
+
+    # Configuration
+    "pydantic>=2.9.0,<3.0.0",
+    "pydantic-settings>=2.6.0,<3.0.0",
+
+    # Database (async)
+    "sqlalchemy[asyncio]>=2.0.36,<2.1.0",
+    "asyncpg>=0.30.0,<0.31.0",
+    "alembic>=1.14.0,<2.0.0",
+
+    # Security / auth — JWT verification + AWS Cognito (boto3 only imported in app/auth/)
+    "argon2-cffi>=23.1.0,<24.0.0",
+    "pyjwt[crypto]>=2.10.0,<3.0.0",
+    "boto3>=1.35.0,<2.0.0",
+    "botocore>=1.35.0,<2.0.0",
+
+    # Observability
+    "structlog>=24.4.0,<25.0.0",
+    "python-json-logger>=2.0.7,<3.0.0",
+
+    # HTTP client (for internal calls + tests)
+    "httpx>=0.28.0,<0.29.0",
+
+    # Misc
+    "python-multipart>=0.0.20,<0.1.0",  # form parsing (file uploads later)
+    "orjson>=3.10.0,<4.0.0",            # faster JSON serialiser
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dev dependencies (uv: `uv sync` installs these by default)
+# ─────────────────────────────────────────────────────────────────────────────
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+    "pytest-asyncio>=0.24.0,<0.25.0",
+    "pytest-cov>=6.0.0,<7.0.0",
+    "ruff>=0.8.0,<0.9.0",
+    "mypy>=1.13.0,<2.0.0",
+    "types-passlib",
+    "pre-commit>=4.0.0,<5.0.0",
+    # Type stubs for boto3 — keeps mypy happy on the AWS surface.
+    "boto3-stubs[cognito-idp]>=1.35.0,<2.0.0",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build (we don't actually publish a wheel; this lets uv treat us as a package)
+# ─────────────────────────────────────────────────────────────────────────────
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ruff — single tool for lint + format (replaces black + isort + flake8)
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "B",           # flake8-bugbear
+    "C4",          # comprehensions
+    "UP",          # pyupgrade
+    "N",           # pep8-naming
+    "S",           # bandit (security)
+    "A",           # builtins shadowing
+    "RUF",         # ruff-specific
+    "ASYNC",       # async best practices
+    "SIM",         # simplifications
+    "TID",         # tidy imports
+    "PL",          # pylint subset
+]
+ignore = [
+    "E501",        # line length — handled by formatter
+    "S101",        # assert used — fine in tests
+    "PLR0913",     # too many args — FastAPI deps make this common
+    "PLR2004",     # magic values — common in HTTP status assertions
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR2004"]
+"alembic/**" = ["E", "F", "I"]
+# JWT claim names like `token_use`, `token_type`, and the literal `"local"`
+# dummy credentials for cognito-local trip bandit's hardcoded-password checks
+# (S105/S106/S107). They're not real secrets; silence them just in app/auth/.
+"app/auth/**" = ["S105", "S106", "S107"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mypy — strict where it pays off
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pytest
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+]
+asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:passlib.*",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Coverage
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = ["app/main.py", "alembic/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

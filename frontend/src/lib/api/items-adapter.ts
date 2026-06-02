@@ -1,0 +1,75 @@
+/**
+ * API → UI shape conversion for inventory items.
+ *
+ * The wire shape (``ApiItem``) carries Postgres NUMERIC as strings,
+ * snake_case keys, and the API status codes (``available`` / ``low_stock``
+ * / ``out_of_stock``). The UI's ``InventoryItem`` was designed around the
+ * Excel-converted seed: numbers as numbers, camelCase keys, full-word
+ * status labels (``Available`` / ``Low stock`` / ``Out of stock``).
+ *
+ * This adapter is the *only* place those translations happen. Components
+ * never see ``ApiItem``; the store transforms on fetch and only stores
+ * ``InventoryItem`` instances.
+ *
+ * Fields that haven't shipped yet on the backend (``location``, ``lot``,
+ * ``expires``, ``months``, ``onOrder``, ``mustOrder``) get safe placeholder
+ * values until lots / batches / ledger / forecast modules land.
+ */
+
+import { CATEGORY_OPTIONS } from '@/config/inventory';
+import type { InventoryItem, InventoryStatus } from '@/types/inventory';
+
+import type { ApiItem, ApiItemStatus } from './items';
+
+// ``CM`` / ``NM`` / ``CR`` / ``AY`` → human label for the Category column.
+const CATEGORY_LABEL_BY_PREFIX: Record<string, string> = Object.fromEntries(
+  CATEGORY_OPTIONS.map((c) => [c.code, c.label]),
+);
+
+const STATUS_LABEL_BY_CODE: Record<ApiItemStatus, InventoryStatus> = {
+  available: 'Available',
+  low_stock: 'Low stock',
+  out_of_stock: 'Out of stock',
+};
+
+/** Convert a numeric-string from the API to a plain number. */
+function num(s: string | null | undefined, fallback = 0): number {
+  if (s == null || s === '') return fallback;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
+  return {
+    // The UI keys items by ``item_number`` (e.g. ``CM-0001``) — that's
+    // what URLs, sorts, and table rows use. We surface the backend UUID
+    // separately for endpoints that demand it (e.g. ``/items/{uuid}/ledger``).
+    id: api.item_number,
+    uuid: api.id,
+    desc: api.description,
+    vendor: api.vendor_name ?? '',
+    category: CATEGORY_LABEL_BY_PREFIX[api.item_prefix] ?? api.item_prefix,
+    lead: api.avg_lead_days ?? 0,
+    invValue: num(api.inv_value_amount),
+    poValue: num(api.po_value_amount),
+    qty: num(api.qty_on_hand),
+    months: null, // forecast module
+    poNote: api.po_note ?? '',
+    poDue: api.po_due_text ?? '',
+    onOrder: num(api.qty_on_order),
+    mustOrder: api.must_order_flag ? 1 : 0,
+    // Batch dimensions land with the movements module.
+    location: '',
+    lot: '',
+    expires: '',
+    threshold: num(api.reorder_threshold),
+    status: STATUS_LABEL_BY_CODE[api.status_code] ?? 'Out of stock',
+    // "Updated" in the table means "row last modified" — sortable on
+    // the backend by ``updated_at``. The previous fallback to
+    // ``last_movement_at`` showed a recent date that didn't match
+    // the sort key (sorting by updated_at could land an item with a
+    // newer movement above an item with a newer row mutation).
+    // Movement-recency lives on the detail page snapshot card instead.
+    updatedAt: api.updated_at,
+  };
+}

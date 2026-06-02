@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CellReady IMS — GitHub Actions OIDC trust + least-privilege deploy role.
+  Lets GitHub Actions assume an AWS role with NO long-lived access keys.
+  Deploy this ONCE per account; the role is reused by every environment.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cellready
+  EnvName:
+    Type: String
+    Default: dev
+  GitHubOrg:
+    Type: String
+    Default: drolle-bdl-arch
+    Description: GitHub org/user that owns the repo.
+  GitHubRepo:
+    Type: String
+    Default: InventoryTracking
+    Description: Repository name (without the org prefix).
+  AllowedBranches:
+    Type: CommaDelimitedList
+    Default: "main,dev"
+    Description: >-
+      Branches whose workflow runs may assume the deploy role. Keep this
+      tight — anyone able to push to these branches can deploy.
+
+Resources:
+  # The account may already have a GitHub OIDC provider. If so, DELETE this
+  # resource and instead pass the existing provider ARN where DeployRole
+  # references it (an OIDC provider URL is unique per account).
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # Thumbprints are no longer verified by AWS for this well-known
+      # provider, but the field is still required by the API.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${EnvName}-gha-deploy'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOIDCProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Only workflow runs on the named branches of THIS repo.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub
+                    - 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${B0}'
+                    - B0: !Select [0, !Ref AllowedBranches]
+                  - !Sub
+                    - 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/${B1}'
+                    - B1: !Select [1, !Ref AllowedBranches]
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}/backend'
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}/frontend'
+        - PolicyName: eb-deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Upload the source bundle (compose + .platform hooks) for each version.
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}'
+                  - !Sub 'arn:aws:s3:::${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}/*'
+              # Create a new application version and roll the environment to it.
+              - Effect: Allow
+                Action:
+                  - elasticbeanstalk:CreateApplicationVersion
+                  - elasticbeanstalk:UpdateEnvironment
+                  - elasticbeanstalk:DescribeEnvironments
+                  - elasticbeanstalk:DescribeEvents
+                  - elasticbeanstalk:DescribeApplicationVersions
+                  - elasticbeanstalk:DescribeEnvironmentResources
+                Resource: '*'
+              # EB UpdateEnvironment needs to pass the instance/service roles.
+              - Effect: Allow
+                Action:
+                  - autoscaling:Describe*
+                  - cloudformation:DescribeStackResource*
+                  - cloudformation:DescribeStacks
+                Resource: '*'
+
+Outputs:
+  DeployRoleArn:
+    Description: Set this as the GitHub repo variable DEPLOY_ROLE_ARN.
+    Value: !GetAtt DeployRole.Arn
+  OIDCProviderArn:
+    Value: !Ref GitHubOIDCProvider

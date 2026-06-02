@@ -1,0 +1,4 @@
+# Shell scripts must use LF and stay executable so they run on Linux (EB
+# instances, CI runners) regardless of the authoring OS.
+*.sh text eol=lf
+deploy/.platform/hooks/** text eol=lf

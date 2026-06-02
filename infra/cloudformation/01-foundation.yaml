@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CellReady IMS — foundation stack. Stateless/long-lived resources that the
+  app and pipeline depend on: ECR repos, S3 buckets (signatures + EB
+  artifacts), and a real Cognito User Pool (replaces cognito-local in prod).
+  NOTE: secret SSM parameters are NOT created here — CloudFormation cannot
+  create SecureString parameters. They are seeded by scripts/bootstrap_ssm.sh.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cellready
+  EnvName:
+    Type: String
+    Default: dev
+  JwtAccessTtlMinutes:
+    Type: Number
+    Default: 60
+  JwtIdTtlMinutes:
+    Type: Number
+    Default: 60
+  JwtRefreshTtlDays:
+    Type: Number
+    Default: 30
+
+Resources:
+  # ── Container registries ────────────────────────────────────────────────
+  BackendRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}/backend'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  FrontendRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}/frontend'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ── S3: e-signature object store (real S3 replaces MinIO in prod) ────────
+  SignaturesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-signatures-${AWS::AccountId}-${EnvName}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── S3: Elastic Beanstalk source bundles (compose + .platform hooks) ─────
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-bundles
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # ── Cognito User Pool (real auth backend for prod) ──────────────────────
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ProjectName}-${EnvName}'
+      # Admins create users (admin-create-user); no public self sign-up.
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      # Custom attributes the backend reads from the ID token
+      # (app/auth/provisioning.py: custom:role, custom:initials).
+      Schema:
+        - Name: role
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: '0'
+            MaxLength: '32'
+        - Name: initials
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: '0'
+            MaxLength: '8'
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${ProjectName}-${EnvName}-backend'
+      UserPoolId: !Ref UserPool
+      # Backend confidential client with no secret (matches the dev flow);
+      # USER_PASSWORD_AUTH is used by the FastAPI login endpoint.
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+      # Token TTLs mirror the backend/frontend JWT_* settings.
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      AccessTokenValidity: !Ref JwtAccessTtlMinutes
+      IdTokenValidity: !Ref JwtIdTtlMinutes
+      RefreshTokenValidity: !Ref JwtRefreshTtlDays
+
+Outputs:
+  BackendRepoUri:
+    Value: !GetAtt BackendRepo.RepositoryUri
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-BackendRepoUri' }
+  FrontendRepoUri:
+    Value: !GetAtt FrontendRepo.RepositoryUri
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-FrontendRepoUri' }
+  SignaturesBucketName:
+    Value: !Ref SignaturesBucket
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-SignaturesBucket' }
+  SignaturesBucketArn:
+    Value: !GetAtt SignaturesBucket.Arn
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-SignaturesBucketArn' }
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-ArtifactsBucket' }
+  UserPoolId:
+    Value: !Ref UserPool
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-UserPoolId' }
+  UserPoolArn:
+    Value: !GetAtt UserPool.Arn
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-UserPoolArn' }
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+    Export: { Name: !Sub '${ProjectName}-${EnvName}-UserPoolClientId' }

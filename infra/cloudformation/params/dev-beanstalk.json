@@ -1,0 +1,11 @@
+[
+  { "ParameterKey": "ProjectName", "ParameterValue": "cellready" },
+  { "ParameterKey": "EnvName", "ParameterValue": "dev" },
+  { "ParameterKey": "VpcId", "ParameterValue": "REPLACE_WITH_DEFAULT_VPC_ID" },
+  { "ParameterKey": "EBSubnetIds", "ParameterValue": "REPLACE_PUBLIC_SUBNET_A,REPLACE_PUBLIC_SUBNET_B" },
+  { "ParameterKey": "InstanceType", "ParameterValue": "t3.small" },
+  { "ParameterKey": "SolutionStackName", "ParameterValue": "REPLACE_e.g._64bit Amazon Linux 2023 v4.x.x running Docker" },
+  { "ParameterKey": "CNAMEPrefix", "ParameterValue": "cellready-dev-REPLACE_UNIQUE_SUFFIX" },
+  { "ParameterKey": "CloudFrontPrefixListId", "ParameterValue": "REPLACE_pl-xxxxxxxx" },
+  { "ParameterKey": "SSMParamPrefix", "ParameterValue": "/cellready/dev/" }
+]
