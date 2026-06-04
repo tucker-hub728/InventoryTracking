@@ -33,7 +33,8 @@ const KIND_CODES = LOCATION_KIND_OPTIONS.map((o) => o.code) as [LocationKind, ..
 
 const rackSchema = z.object({
   name: z.string().trim().min(1, 'Rack name is required').max(64),
-  positions: z.coerce.number().int().min(1, 'Min 1').max(200),
+  rows: z.coerce.number().int().min(1, 'Min 1').max(26, 'Max 26'),
+  cols: z.coerce.number().int().min(1, 'Min 1').max(26, 'Max 26'),
 });
 
 const schema = z.object({
@@ -71,18 +72,19 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
       name: '',
       kind: 'LN2',
       detail: '',
-      racks: [{ name: 'Rack 01', positions: 25 }],
+      racks: [{ name: 'Rack 01', rows: 5, cols: 5 }],
     },
   });
 
   const { fields, append, remove } = useFieldArray({ control, name: 'racks' });
   const kind = watch('kind');
+  const racks = watch('racks');
 
   React.useEffect(() => {
     if (!open) reset();
   }, [open, reset]);
 
-  const onSubmit = (values: FormValues): void => {
+  const onSubmit = async (values: FormValues): Promise<void> => {
     const input: AddLocationInput = {
       name: values.name.trim(),
       kind: values.kind,
@@ -90,15 +92,21 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
         values.detail?.trim() ||
         LOCATION_KIND_OPTIONS.find((o) => o.code === values.kind)?.label ||
         '',
-      racks: values.racks.map((r) => ({ name: r.name.trim(), positions: r.positions })),
+      racks: values.racks.map((r) => ({ name: r.name.trim(), rows: r.rows, cols: r.cols })),
     };
-    const totalPositions = input.racks.reduce((sum, r) => sum + r.positions, 0);
-    const id = addLocation(input);
-    toast.success('Location added', {
-      description: `${input.name} · ${input.racks.length} rack${input.racks.length === 1 ? '' : 's'} · ${totalPositions} positions`,
-    });
-    onCreated(id);
-    onOpenChange(false);
+    const totalPositions = input.racks.reduce((sum, r) => sum + r.rows * r.cols, 0);
+    try {
+      const id = await addLocation(input);
+      toast.success('Location added', {
+        description: `${input.name} · ${input.racks.length} rack${input.racks.length === 1 ? '' : 's'} · ${totalPositions} positions`,
+      });
+      onCreated(id);
+      onOpenChange(false);
+    } catch (err) {
+      toast.error('Could not add location', {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    }
   };
 
   return (
@@ -109,7 +117,7 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
             <DialogTitle>Add location</DialogTitle>
             <DialogDescription>
               Every location uses the same rack → position layout. Define each rack below — its
-              name and how many positions it holds.
+              name and grid size as rows × columns.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -175,7 +183,7 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
                   size="sm"
                   variant="default"
                   onClick={() =>
-                    append({ name: `Rack ${pad(fields.length + 1)}`, positions: 25 })
+                    append({ name: `Rack ${pad(fields.length + 1)}`, rows: 5, cols: 5 })
                   }
                 >
                   <Plus size={13} /> Add rack
@@ -184,49 +192,74 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
 
               <div className="space-y-2">
                 {/* Column headers */}
-                <div className="grid grid-cols-[minmax(0,1fr)_7rem_2.25rem] gap-2 px-0.5 text-[11px] font-medium uppercase tracking-wider text-text-3">
+                <div className="grid grid-cols-[minmax(0,1fr)_auto_2.25rem] gap-2 px-0.5 text-[11px] font-medium uppercase tracking-wider text-text-3">
                   <span>Rack name</span>
-                  <span>Positions</span>
+                  <span>Grid (rows × cols)</span>
                   <span className="sr-only">Remove</span>
                 </div>
 
-                {fields.map((field, index) => (
-                  <div key={field.id} className="space-y-1">
-                    <div className="grid grid-cols-[minmax(0,1fr)_7rem_2.25rem] items-center gap-2">
-                      <Input
-                        placeholder={`Rack ${pad(index + 1)}`}
-                        aria-label={`Rack ${index + 1} name`}
-                        aria-invalid={Boolean(errors.racks?.[index]?.name)}
-                        {...register(`racks.${index}.name`)}
-                      />
-                      <Input
-                        type="number"
-                        inputMode="numeric"
-                        min={1}
-                        max={200}
-                        aria-label={`Rack ${index + 1} positions`}
-                        aria-invalid={Boolean(errors.racks?.[index]?.positions)}
-                        {...register(`racks.${index}.positions`)}
-                      />
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        aria-label={`Remove rack ${index + 1}`}
-                        disabled={fields.length === 1}
-                        onClick={() => remove(index)}
-                      >
-                        <Trash2 size={14} />
-                      </Button>
+                {fields.map((field, index) => {
+                  const rows = Number(racks?.[index]?.rows) || 0;
+                  const cols = Number(racks?.[index]?.cols) || 0;
+                  const total = rows * cols;
+                  return (
+                    <div key={field.id} className="space-y-1">
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto_2.25rem] items-center gap-2">
+                        <Input
+                          placeholder={`Rack ${pad(index + 1)}`}
+                          aria-label={`Rack ${index + 1} name`}
+                          aria-invalid={Boolean(errors.racks?.[index]?.name)}
+                          {...register(`racks.${index}.name`)}
+                        />
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            type="number"
+                            inputMode="numeric"
+                            min={1}
+                            max={26}
+                            className="w-14 text-center"
+                            aria-label={`Rack ${index + 1} rows`}
+                            aria-invalid={Boolean(errors.racks?.[index]?.rows)}
+                            {...register(`racks.${index}.rows`)}
+                          />
+                          <span className="text-xs text-text-3">×</span>
+                          <Input
+                            type="number"
+                            inputMode="numeric"
+                            min={1}
+                            max={26}
+                            className="w-14 text-center"
+                            aria-label={`Rack ${index + 1} columns`}
+                            aria-invalid={Boolean(errors.racks?.[index]?.cols)}
+                            {...register(`racks.${index}.cols`)}
+                          />
+                          <span className="w-14 text-right font-mono text-[11px] text-text-3">
+                            = {total}
+                          </span>
+                        </div>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          aria-label={`Remove rack ${index + 1}`}
+                          disabled={fields.length === 1}
+                          onClick={() => remove(index)}
+                        >
+                          <Trash2 size={14} />
+                        </Button>
+                      </div>
+                      {(errors.racks?.[index]?.name ||
+                        errors.racks?.[index]?.rows ||
+                        errors.racks?.[index]?.cols) && (
+                        <p role="alert" className="px-0.5 text-xs text-danger">
+                          {errors.racks?.[index]?.name?.message ??
+                            errors.racks?.[index]?.rows?.message ??
+                            errors.racks?.[index]?.cols?.message}
+                        </p>
+                      )}
                     </div>
-                    {(errors.racks?.[index]?.name || errors.racks?.[index]?.positions) && (
-                      <p role="alert" className="px-0.5 text-xs text-danger">
-                        {errors.racks?.[index]?.name?.message ??
-                          errors.racks?.[index]?.positions?.message}
-                      </p>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
 
                 {errors.racks?.root && (
                   <p role="alert" className="text-xs text-danger">

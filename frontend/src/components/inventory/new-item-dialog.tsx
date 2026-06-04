@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import {
   Select,
@@ -42,8 +43,11 @@ const schema = z.object({
   // a soft "skipped" rather than an error.
   vendorId: z.string().optional(),
   leadDays: z.coerce.number().int().nonnegative('Must be ≥ 0'),
-  unitCost: z.coerce.number().nonnegative('Must be ≥ 0'),
+  unitPrice: z.coerce.number().nonnegative('Must be ≥ 0'),
+  unitsPerPackage: z.coerce.number().int().positive('Must be ≥ 1'),
   threshold: z.coerce.number().int().nonnegative('Must be ≥ 0'),
+  poNote: z.string().optional(),
+  notes: z.string().optional(),
 });
 
 type Values = z.infer<typeof schema>;
@@ -88,8 +92,11 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
       desc: '',
       vendorId: '',
       leadDays: 0,
-      unitCost: 0,
+      unitPrice: 0,
+      unitsPerPackage: 1,
       threshold: 0,
+      poNote: '',
+      notes: '',
     },
   });
 
@@ -152,8 +159,11 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
         desc: '',
         vendorId: '',
         leadDays: 0,
-        unitCost: 0,
+        unitPrice: 0,
+        unitsPerPackage: 1,
         threshold: 0,
+        poNote: '',
+        notes: '',
       });
       setSubmitError(null);
     }
@@ -170,8 +180,11 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
         vendor_id:
           data.vendorId && data.vendorId !== NO_VENDOR_VALUE ? data.vendorId : null,
         avg_lead_days: data.leadDays,
-        unit_price_amount: data.unitCost,
+        unit_price_amount: data.unitPrice,
+        units_per_package: data.unitsPerPackage,
         reorder_threshold: data.threshold,
+        po_note: data.poNote ? data.poNote : null,
+        notes: data.notes ? data.notes : null,
       });
       toast.success('Item created', {
         description: `${created.id} · ${created.desc}`,
@@ -307,17 +320,35 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-cost" label="Unit cost (USD)" error={errors.unitCost?.message}>
+              <Field id="ni-price" label="Unit price" error={errors.unitPrice?.message}>
                 <Input
-                  id="ni-cost"
+                  id="ni-price"
                   type="number"
                   inputMode="decimal"
                   step="0.01"
                   min={0}
                   placeholder="0.00"
-                  {...register('unitCost')}
+                  {...register('unitPrice')}
                 />
               </Field>
+              <Field
+                id="ni-uperpkg"
+                label="Units / package"
+                error={errors.unitsPerPackage?.message}
+              >
+                <Input
+                  id="ni-uperpkg"
+                  type="number"
+                  inputMode="numeric"
+                  step="1"
+                  min={1}
+                  placeholder="e.g. 50"
+                  {...register('unitsPerPackage')}
+                />
+              </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
               <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
                 <Input
                   id="ni-thr"
@@ -328,10 +359,21 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
                   {...register('threshold')}
                 />
               </Field>
+              <Field id="ni-po-note" label="PO note" error={errors.poNote?.message}>
+                <Input
+                  id="ni-po-note"
+                  placeholder="e.g. Quote ref #1234"
+                  {...register('poNote')}
+                />
+              </Field>
             </div>
 
+            <Field id="ni-notes" label="Notes" error={errors.notes?.message}>
+              <Textarea id="ni-notes" rows={3} {...register('notes')} />
+            </Field>
+
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
-              After creating, you’ll be able to record the first vendor receipt to bring the
+              After creating, you’ll be able to record the first unit in to bring the
               item into stock. The item is initially created with zero balance.
             </p>
 

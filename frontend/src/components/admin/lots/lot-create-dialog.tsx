@@ -44,7 +44,7 @@ const schema = z
     lot_number: z.string().trim().min(1, 'Lot number is required').max(64),
     vendor_id: z.string().optional(),
     manufacture_date: z.string().optional(),
-    expiration_date: z.string().optional(),
+    expiration_date: z.string().min(1, 'Expiration date is required'),
     coa_url: z.string().url('Must be a valid URL').optional().or(z.literal('')),
     status: z.enum(STATUS_CODES),
     notes: z.string().max(2048).optional(),
@@ -282,7 +282,9 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
                 <Input id="lot-mfg" type="date" {...register('manufacture_date')} />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="lot-exp">Expiration date</Label>
+                <Label htmlFor="lot-exp">
+                  Expiration date <span className="text-danger">*</span>
+                </Label>
                 <Input
                   id="lot-exp"
                   type="date"

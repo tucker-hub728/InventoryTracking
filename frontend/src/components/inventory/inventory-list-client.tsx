@@ -38,6 +38,10 @@ import { toast } from '@/components/ui/sonner';
 // handler stay wired; flip to true to re-enable the button.
 const SHOW_TRANSFER = false;
 
+// "Record movement" is hidden on the inventory list — movements are recorded
+// from an item's detail page. The wizard stays wired; flip to re-enable.
+const SHOW_RECORD_MOVEMENT = false;
+
 export function InventoryListClient() {
   const [creating, setCreating] = React.useState(false);
   const [picking, setPicking] = React.useState(false);
@@ -97,9 +101,11 @@ export function InventoryListClient() {
                     <ArrowRightLeft size={14} /> Transfer
                   </Button>
                 )}
-                <Button onClick={() => setPicking(true)}>
-                  <ArrowDownUp size={14} /> Record movement
-                </Button>
+                {SHOW_RECORD_MOVEMENT && (
+                  <Button onClick={() => setPicking(true)}>
+                    <ArrowDownUp size={14} /> Record movement
+                  </Button>
+                )}
               </>
             )}
             {canCreate && (

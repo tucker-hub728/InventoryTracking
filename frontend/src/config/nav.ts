@@ -47,7 +47,6 @@ export const navSections: readonly NavSection[] = [
         href: '/ln2',
         icon: Snowflake,
         resource: 'inventory',
-        disabled: true,
         disabledReason:
           'LN2 tank mapping is in active development — temperature streaming and position state are not yet wired to the backend.',
       },

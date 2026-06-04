@@ -6,14 +6,17 @@ query shape stays consistent and tests can fake one place.
 
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import UTC, date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal
 
 from sqlalchemy import Integer, Select, asc, cast, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased, lazyload, selectinload
 
+from app.models.identity import User
 from app.models.inventory import (
     Item,
     ItemStock,
@@ -22,6 +25,11 @@ from app.models.inventory import (
     StockMovement,
     UnitOfMeasure,
     Vendor,
+)
+from app.models.storage import (
+    StorageAssignmentEvent,
+    StoragePosition,
+    StorageRack,
 )
 
 # Whitelist for the ``status`` query filter. Aligned with the
@@ -793,10 +801,11 @@ async def create_dispense_movement(
     from_location_id: uuid.UUID,
     qty: Decimal,
     performed_by_user_id: uuid.UUID,
-    reauth_evidence_id: uuid.UUID,
-    reason_code: str,
+    reauth_evidence_id: uuid.UUID | None = None,
+    reason_code: str | None = None,
     notes: str | None = None,
     reference: str | None = None,
+    destination: str | None = None,
 ) -> StockMovement:
     """Insert a ``dispense`` movement row. Caller commits.
 
@@ -804,6 +813,7 @@ async def create_dispense_movement(
     CHECK ``ck_movements_type_sign`` enforces dispenses must have
     negative deltas; we honour it here. The route is responsible for
     proving the caller isn't trying to dispense more than is available.
+    ``destination`` is the free-text "where did it go" for the unit-out.
     """
     movement = StockMovement(
         item_id=item_id,
@@ -816,6 +826,7 @@ async def create_dispense_movement(
         reason_code=reason_code,
         notes=notes,
         reference=reference,
+        destination_text=destination,
         reversal_of_id=None,
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
@@ -835,7 +846,7 @@ async def create_discard_movement(
     from_location_id: uuid.UUID,
     qty: Decimal,
     performed_by_user_id: uuid.UUID,
-    reauth_evidence_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
     reason_code: str,
     notes: str | None = None,
     reference: str | None = None,
@@ -876,7 +887,7 @@ async def create_adjustment_movement(
     location_id: uuid.UUID,
     qty_delta: Decimal,
     performed_by_user_id: uuid.UUID,
-    reauth_evidence_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
     reason_code: str,
     notes: str | None = None,
     reference: str | None = None,
@@ -924,7 +935,7 @@ async def create_receipt_movement(
     to_location_id: uuid.UUID,
     qty: Decimal,
     performed_by_user_id: uuid.UUID,
-    reauth_evidence_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
     reason_code: str | None = None,
     notes: str | None = None,
     reference: str | None = None,
@@ -974,8 +985,8 @@ async def create_transfer_pair(
     to_location_id: uuid.UUID,
     qty: Decimal,
     performed_by_user_id: uuid.UUID,
-    reauth_evidence_id: uuid.UUID,
-    reason_code: str,
+    reauth_evidence_id: uuid.UUID | None = None,
+    reason_code: str | None = None,
     notes: str | None = None,
     reference: str | None = None,
 ) -> tuple[StockMovement, StockMovement]:
@@ -1076,7 +1087,7 @@ async def create_reversal_movement(
     *,
     original: StockMovement,
     performed_by_user_id: uuid.UUID,
-    reauth_evidence_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
     reason_code: str,
     notes: str | None = None,
 ) -> StockMovement:
@@ -1159,3 +1170,559 @@ async def create_reversal_movement(
     refreshed = await get_movement(session, counter.id)
     assert refreshed is not None
     return refreshed
+
+
+# ── Storage (racks + positions) ────────────────────────────────────────
+#
+# The LN2 / Storage grid: Location → Rack(rows×cols) → Position. Positions
+# are materialised on rack creation and immutable. See docs/modules/storage.md.
+
+
+def _storage_position_label(row_idx: int, col_idx: int) -> str:
+    """Human cell label: column-letter + row-number (col 3, row 2 -> 'C2').
+
+    ``cols`` is capped at 26, so the column letter is always A–Z.
+    """
+    return f"{chr(ord('A') + col_idx - 1)}{row_idx}"
+
+
+def _build_rack_positions(
+    rack_id: uuid.UUID, rows: int, cols: int
+) -> list[StoragePosition]:
+    """Materialise a rack's empty positions, row-major (left→right, top→bottom)."""
+    positions: list[StoragePosition] = []
+    seq = 0
+    for r in range(1, rows + 1):
+        for c in range(1, cols + 1):
+            seq += 1
+            positions.append(
+                StoragePosition(
+                    rack_id=rack_id,
+                    row_idx=r,
+                    col_idx=c,
+                    seq=seq,
+                    label=_storage_position_label(r, c),
+                    status="empty",
+                )
+            )
+    return positions
+
+
+def _slug_location_code(name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").upper()
+    return base or "LOC"
+
+
+async def _unique_location_code(session: AsyncSession, base: str) -> str:
+    taken = {
+        c.lower()
+        for c in (await session.execute(select(Location.code))).scalars().all()
+    }
+    if base.lower() not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}".lower() in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
+async def get_storage_location(
+    session: AsyncSession, location_id: uuid.UUID
+) -> tuple[Location, list[StorageRack]] | None:
+    """Load a location plus its active racks (positions eager-loaded)."""
+    loc = (
+        await session.execute(select(Location).where(Location.id == location_id))
+    ).scalar_one_or_none()
+    if loc is None:
+        return None
+    racks = list(
+        (
+            await session.execute(
+                select(StorageRack)
+                .where(
+                    StorageRack.location_id == location_id,
+                    StorageRack.is_active.is_(True),
+                )
+                .options(selectinload(StorageRack.positions))
+                .order_by(StorageRack.position_order, StorageRack.code)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return loc, racks
+
+
+async def list_storage_locations(
+    session: AsyncSession, *, active_only: bool = True
+) -> list[tuple[Location, list[StorageRack]]]:
+    """Every location that owns at least one active rack, hydrated + sorted."""
+    racks = list(
+        (
+            await session.execute(
+                select(StorageRack)
+                .where(StorageRack.is_active.is_(True))
+                .options(selectinload(StorageRack.positions))
+                .order_by(StorageRack.position_order, StorageRack.code)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not racks:
+        return []
+    loc_ids = {r.location_id for r in racks}
+    loc_stmt = select(Location).where(Location.id.in_(loc_ids))
+    if active_only:
+        loc_stmt = loc_stmt.where(Location.is_active.is_(True))
+    locs = {loc.id: loc for loc in (await session.execute(loc_stmt)).scalars().all()}
+    grouped: dict[uuid.UUID, list[StorageRack]] = {}
+    for rack in racks:
+        if rack.location_id in locs:
+            grouped.setdefault(rack.location_id, []).append(rack)
+    return sorted(
+        ((locs[lid], rks) for lid, rks in grouped.items()),
+        key=lambda pair: pair[0].name.lower(),
+    )
+
+
+async def create_storage_location(
+    session: AsyncSession,
+    *,
+    name: str,
+    kind: str,
+    detail: str | None,
+    racks: list,
+) -> Location:
+    """Create a location + its racks (positions materialised). Caller commits.
+
+    ``racks`` is a list of ``RackInput``-shaped objects (``.name/.rows/.cols``).
+    The location ``code`` is derived from ``name`` and de-duplicated.
+    """
+    code = await _unique_location_code(session, _slug_location_code(name))
+    loc = Location(
+        code=code,
+        name=name.strip(),
+        kind=kind,
+        notes=(detail.strip() if detail else None),
+        is_active=True,
+    )
+    session.add(loc)
+    await session.flush()  # assigns loc.id
+    for idx, rack_input in enumerate(racks, start=1):
+        rack = StorageRack(
+            location_id=loc.id,
+            code=f"R{idx:02d}",
+            name=rack_input.name.strip(),
+            rows=rack_input.rows,
+            cols=rack_input.cols,
+            position_order=idx,
+        )
+        session.add(rack)
+        await session.flush()  # assigns rack.id
+        for pos in _build_rack_positions(rack.id, rack_input.rows, rack_input.cols):
+            session.add(pos)
+    await session.flush()
+    return loc
+
+
+async def add_storage_rack(
+    session: AsyncSession,
+    *,
+    location_id: uuid.UUID,
+    name: str,
+    rows: int,
+    cols: int,
+) -> StorageRack:
+    """Append a rack to an existing location. Caller commits."""
+    count = (
+        await session.execute(
+            select(func.count())
+            .select_from(StorageRack)
+            .where(StorageRack.location_id == location_id)
+        )
+    ).scalar_one()
+    idx = int(count) + 1
+    rack = StorageRack(
+        location_id=location_id,
+        code=f"R{idx:02d}",
+        name=name.strip(),
+        rows=rows,
+        cols=cols,
+        position_order=idx,
+    )
+    session.add(rack)
+    await session.flush()
+    for pos in _build_rack_positions(rack.id, rows, cols):
+        session.add(pos)
+    await session.flush()
+    return rack
+
+
+async def get_storage_rack(
+    session: AsyncSession, rack_id: uuid.UUID
+) -> StorageRack | None:
+    return (
+        await session.execute(
+            select(StorageRack)
+            .where(StorageRack.id == rack_id)
+            .options(selectinload(StorageRack.positions))
+        )
+    ).scalar_one_or_none()
+
+
+async def get_storage_position(
+    session: AsyncSession,
+    position_id: uuid.UUID,
+    *,
+    refresh: bool = False,
+) -> StoragePosition | None:
+    """Load one position (its lot → item → vendor are eager-joined).
+
+    ``refresh=True`` forces ``populate_existing`` so a just-mutated row
+    re-hydrates its joined ``lot`` — needed because the session runs with
+    ``expire_on_commit=False``.
+    """
+    stmt = select(StoragePosition).where(StoragePosition.id == position_id)
+    if refresh:
+        stmt = stmt.execution_options(populate_existing=True)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def assign_storage_position(
+    session: AsyncSession,
+    *,
+    position: StoragePosition,
+    lot_id: uuid.UUID,
+    actor_id: uuid.UUID,
+) -> None:
+    """Occupy an empty slot with a lot (one vial). Caller commits."""
+    from_status = position.status
+    position.status = "occupied"
+    position.lot_id = lot_id
+    position.assigned_at = datetime.now(UTC)
+    session.add(
+        StorageAssignmentEvent(
+            position_id=position.id,
+            event_kind="assign",
+            from_status=from_status,
+            to_status="occupied",
+            lot_id=lot_id,
+            actor_id=actor_id,
+        )
+    )
+    await session.flush()
+
+
+async def empty_storage_position(
+    session: AsyncSession,
+    *,
+    position: StoragePosition,
+    actor_id: uuid.UUID,
+) -> None:
+    """Unmap a slot (reversible — the vial can be re-placed). Caller commits."""
+    from_status = position.status
+    prev_lot = position.lot_id
+    position.status = "empty"
+    position.lot_id = None
+    position.assigned_at = None
+    session.add(
+        StorageAssignmentEvent(
+            position_id=position.id,
+            event_kind="empty",
+            from_status=from_status,
+            to_status="empty",
+            lot_id=prev_lot,
+            actor_id=actor_id,
+        )
+    )
+    await session.flush()
+
+
+async def move_storage_position(
+    session: AsyncSession,
+    *,
+    source: StoragePosition,
+    dest: StoragePosition,
+    actor_id: uuid.UUID,
+) -> None:
+    """Move the occupant from ``source`` to ``dest`` (cross-location ok).
+
+    Writes a paired ``move_out`` / ``move_in`` history. Caller commits.
+    """
+    lot_id = source.lot_id
+    assigned_at = source.assigned_at or datetime.now(UTC)
+    source.status = "empty"
+    source.lot_id = None
+    source.assigned_at = None
+    dest.status = "occupied"
+    dest.lot_id = lot_id
+    dest.assigned_at = assigned_at
+    session.add(
+        StorageAssignmentEvent(
+            position_id=source.id,
+            event_kind="move_out",
+            from_status="occupied",
+            to_status="empty",
+            lot_id=lot_id,
+            counterpart_position_id=dest.id,
+            actor_id=actor_id,
+        )
+    )
+    session.add(
+        StorageAssignmentEvent(
+            position_id=dest.id,
+            event_kind="move_in",
+            from_status="empty",
+            to_status="occupied",
+            lot_id=lot_id,
+            counterpart_position_id=source.id,
+            actor_id=actor_id,
+        )
+    )
+    await session.flush()
+
+
+# ── Storage ↔ movement coupling (unit-in / unit-out) ───────────────────
+#
+# A unit-in (receipt) fills N empty positions in the target location's racks;
+# a unit-out (dispense) empties N of the lot's occupied positions there. One
+# unit = one vial = one position. Locations without racks are ledger-only.
+# See docs/modules/storage.md §5.1.
+
+
+async def location_has_racks(session: AsyncSession, location_id: uuid.UUID) -> bool:
+    """True when the location owns at least one active rack (so unit-in/out
+    can map to physical positions)."""
+    n = (
+        await session.execute(
+            select(func.count())
+            .select_from(StorageRack)
+            .where(
+                StorageRack.location_id == location_id,
+                StorageRack.is_active.is_(True),
+            )
+        )
+    ).scalar_one()
+    return int(n) > 0
+
+
+async def count_empty_positions(
+    session: AsyncSession, location_id: uuid.UUID
+) -> int:
+    """Empty positions across a location's active racks."""
+    n = (
+        await session.execute(
+            select(func.count())
+            .select_from(StoragePosition)
+            .join(StorageRack, StorageRack.id == StoragePosition.rack_id)
+            .where(
+                StorageRack.location_id == location_id,
+                StorageRack.is_active.is_(True),
+                StoragePosition.status == "empty",
+            )
+        )
+    ).scalar_one()
+    return int(n)
+
+
+async def count_occupied_positions_for_lot(
+    session: AsyncSession, location_id: uuid.UUID, lot_id: uuid.UUID
+) -> int:
+    """Occupied positions holding ``lot_id`` across a location's racks."""
+    n = (
+        await session.execute(
+            select(func.count())
+            .select_from(StoragePosition)
+            .join(StorageRack, StorageRack.id == StoragePosition.rack_id)
+            .where(
+                StorageRack.location_id == location_id,
+                StoragePosition.status == "occupied",
+                StoragePosition.lot_id == lot_id,
+            )
+        )
+    ).scalar_one()
+    return int(n)
+
+
+async def fill_positions_for_lot(
+    session: AsyncSession,
+    *,
+    location_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    n: int,
+    actor_id: uuid.UUID,
+) -> int:
+    """Occupy the next ``n`` empty positions in the location (row-major) with
+    ``lot_id``. Returns the count filled. Caller commits.
+
+    ``lazyload`` keeps the position's ``lot`` relationship off this SELECT so
+    ``FOR UPDATE`` doesn't hit the nullable side of an outer join.
+    """
+    if n <= 0:
+        return 0
+    stmt = (
+        select(StoragePosition)
+        .join(StorageRack, StorageRack.id == StoragePosition.rack_id)
+        .where(
+            StorageRack.location_id == location_id,
+            StorageRack.is_active.is_(True),
+            StoragePosition.status == "empty",
+        )
+        .order_by(StorageRack.position_order, StoragePosition.seq)
+        .limit(n)
+        .options(lazyload(StoragePosition.lot))
+        .with_for_update(of=StoragePosition)
+    )
+    positions = list((await session.execute(stmt)).scalars().all())
+    for pos in positions:
+        await assign_storage_position(
+            session, position=pos, lot_id=lot_id, actor_id=actor_id
+        )
+    return len(positions)
+
+
+async def empty_positions_for_lot(
+    session: AsyncSession,
+    *,
+    location_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    n: int,
+    actor_id: uuid.UUID,
+) -> int:
+    """Empty the next ``n`` occupied positions of ``lot_id`` in the location
+    (row-major). Returns the count emptied. Caller commits."""
+    if n <= 0:
+        return 0
+    stmt = (
+        select(StoragePosition)
+        .join(StorageRack, StorageRack.id == StoragePosition.rack_id)
+        .where(
+            StorageRack.location_id == location_id,
+            StoragePosition.status == "occupied",
+            StoragePosition.lot_id == lot_id,
+        )
+        .order_by(StorageRack.position_order, StoragePosition.seq)
+        .limit(n)
+        .options(lazyload(StoragePosition.lot))
+        .with_for_update(of=StoragePosition)
+    )
+    positions = list((await session.execute(stmt)).scalars().all())
+    for pos in positions:
+        await empty_storage_position(session, position=pos, actor_id=actor_id)
+    return len(positions)
+
+
+async def transfer_positions_for_lot(
+    session: AsyncSession,
+    *,
+    from_location_id: uuid.UUID,
+    to_location_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    n: int,
+    actor_id: uuid.UUID,
+) -> int:
+    """Move ``n`` of the lot's vials from one rack location to another.
+
+    Pairs each source position with a destination position and reuses
+    :func:`move_storage_position` so the history is a proper ``move_out`` /
+    ``move_in`` pair (not empty + assign). Caller commits and is responsible
+    for the capacity checks (enough occupied at source, enough empty at dest).
+    """
+    if n <= 0:
+        return 0
+    src_stmt = (
+        select(StoragePosition)
+        .join(StorageRack, StorageRack.id == StoragePosition.rack_id)
+        .where(
+            StorageRack.location_id == from_location_id,
+            StoragePosition.status == "occupied",
+            StoragePosition.lot_id == lot_id,
+        )
+        .order_by(StorageRack.position_order, StoragePosition.seq)
+        .limit(n)
+        .options(lazyload(StoragePosition.lot))
+        .with_for_update(of=StoragePosition)
+    )
+    dst_stmt = (
+        select(StoragePosition)
+        .join(StorageRack, StorageRack.id == StoragePosition.rack_id)
+        .where(
+            StorageRack.location_id == to_location_id,
+            StorageRack.is_active.is_(True),
+            StoragePosition.status == "empty",
+        )
+        .order_by(StorageRack.position_order, StoragePosition.seq)
+        .limit(n)
+        .options(lazyload(StoragePosition.lot))
+        .with_for_update(of=StoragePosition)
+    )
+    sources = list((await session.execute(src_stmt)).scalars().all())
+    dests = list((await session.execute(dst_stmt)).scalars().all())
+    count = min(len(sources), len(dests))
+    for i in range(count):
+        await move_storage_position(
+            session, source=sources[i], dest=dests[i], actor_id=actor_id
+        )
+    return count
+
+
+async def list_position_events(
+    session: AsyncSession, position_id: uuid.UUID
+) -> list[dict]:
+    """History for one position — newest first — hydrated with the lot, the
+    actor's name, and (for moves) the counterpart position + location."""
+    ev = StorageAssignmentEvent
+    cp = aliased(StoragePosition)  # counterpart position (for moves)
+    cp_rack = aliased(StorageRack)
+    cp_loc = aliased(Location)
+    stmt = (
+        select(
+            ev.id,
+            ev.event_kind,
+            ev.from_status,
+            ev.to_status,
+            ev.occurred_at,
+            Lot.lot_number,
+            User.full_name,
+            cp.label,
+            cp_loc.name,
+        )
+        .select_from(ev)
+        .outerjoin(Lot, Lot.id == ev.lot_id)
+        .outerjoin(User, User.id == ev.actor_id)
+        .outerjoin(cp, cp.id == ev.counterpart_position_id)
+        .outerjoin(cp_rack, cp_rack.id == cp.rack_id)
+        .outerjoin(cp_loc, cp_loc.id == cp_rack.location_id)
+        .where(ev.position_id == position_id)
+        .order_by(ev.occurred_at.desc(), ev.id.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        {
+            "id": str(r.id),
+            "event_kind": r.event_kind,
+            "from_status": r.from_status,
+            "to_status": r.to_status,
+            "lot_number": r.lot_number,
+            "actor_name": r.full_name,
+            "counterpart_label": r.label,
+            "counterpart_location": r.name,
+            "occurred_at": r.occurred_at,
+        }
+        for r in rows
+    ]
+
+
+async def position_location_id(
+    session: AsyncSession, position: StoragePosition
+) -> uuid.UUID:
+    """The ``meta.locations`` id that owns a position (via its rack). Used to
+    bind a grid assign / empty / move to the right ledger location."""
+    return (
+        await session.execute(
+            select(StorageRack.location_id).where(
+                StorageRack.id == position.rack_id
+            )
+        )
+    ).scalar_one()

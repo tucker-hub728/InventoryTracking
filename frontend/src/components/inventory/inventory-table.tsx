@@ -39,7 +39,7 @@ const COLUMNS: Column[] = [
   { key: 'desc', label: 'Name', sortKey: 'desc' },
   { key: 'category', label: 'Category', className: 'w-[170px]' },
   { key: 'vendor', label: 'Vendor', className: 'w-[160px]' },
-  { key: 'qty', label: 'Qty', align: 'right', className: 'w-[80px]' },
+  { key: 'qty', label: 'Units', align: 'right', className: 'w-[80px]' },
   { key: 'onOrder', label: 'On PO', align: 'right', className: 'w-[80px]' },
   { key: 'threshold', label: 'Reorder', align: 'right', className: 'w-[90px]' },
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter

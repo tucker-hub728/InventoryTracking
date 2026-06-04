@@ -21,8 +21,10 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
     AdjustmentRequest,
+    AssignPositionRequest,
     DiscardRequest,
     DispenseRequest,
+    EmptyPositionRequest,
     ItemCreate,
     ItemListResponse,
     ItemPrefix,
@@ -39,10 +41,18 @@ from app.inventory.schemas import (
     MovementListResponse,
     MovementRead,
     MovementType,
+    MovePositionRequest,
+    MovePositionResult,
     NextItemNumberResponse,
+    PositionEventRead,
+    PositionRead,
+    RackInput,
+    RackRead,
     ReceiptRequest,
     ReverseRequest,
     StockByLotEntry,
+    StorageLocationCreate,
+    StorageLocationRead,
     TransferRequest,
     TransferResponse,
     UnitOfMeasureRead,
@@ -58,6 +68,7 @@ from app.models.inventory import (
     UnitOfMeasure,
     Vendor,
 )
+from app.models.storage import StoragePosition, StorageRack
 from app.security.permissions import RequirePermission
 
 items_router = APIRouter(prefix="/items", tags=["items"])
@@ -66,6 +77,7 @@ uoms_router = APIRouter(prefix="/uoms", tags=["uoms"])
 locations_router = APIRouter(prefix="/locations", tags=["locations"])
 lots_router = APIRouter(prefix="/lots", tags=["lots"])
 movements_router = APIRouter(prefix="/movements", tags=["movements"])
+storage_router = APIRouter(prefix="/storage", tags=["storage"])
 
 
 # ── Serialisers ────────────────────────────────────────────────────────
@@ -97,6 +109,7 @@ def _movement_to_read(m: StockMovement) -> MovementRead:
         item_description=m.item.description if m.item else None,
         lot_id=str(m.lot_id) if m.lot_id else None,
         lot_number=m.lot.lot_number if m.lot else None,
+        lot_expiration_date=m.lot.expiration_date if m.lot else None,
         from_location_id=str(m.from_location_id) if m.from_location_id else None,
         from_location_code=m.from_location.code if m.from_location else None,
         from_location_name=m.from_location.name if m.from_location else None,
@@ -109,6 +122,7 @@ def _movement_to_read(m: StockMovement) -> MovementRead:
         reason_code=m.reason_code,
         notes=m.notes,
         reference=m.reference,
+        destination_text=m.destination_text,
         reversal_of_id=str(m.reversal_of_id) if m.reversal_of_id else None,
         reauth_evidence_id=str(m.reauth_evidence_id) if m.reauth_evidence_id else None,
         performed_by_user_id=str(m.performed_by_user_id),
@@ -1276,12 +1290,27 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
         ) from exc
 
 
+def _whole_units_or_422(qty: Decimal) -> int:
+    """Coerce a movement qty to whole vials for rack-mapped storage.
+
+    A storage position holds exactly one vial, so a unit-in / unit-out against
+    a location that has racks must be an integer number of units.
+    """
+    units = int(qty)
+    if Decimal(units) != qty:
+        raise ValidationError(
+            "Whole units are required when the location has racks",
+            code="fractional_units_in_rack",
+        )
+    return units
+
+
 @movements_router.post(
     "/receipt",
     response_model=MovementRead,
     status_code=status.HTTP_201_CREATED,
     summary=(
-        "Record a stock receipt (vendor → inventory). Requires a fresh "
+        "Record a unit in (vendor → inventory). Requires a fresh "
         "reauth evidence id for action='movement.receipt'."
     ),
     # ``sign`` permission — this is a GxP-significant action requiring
@@ -1394,10 +1423,27 @@ async def create_receipt(
         qty=payload.qty,
         performed_by_user_id=current.id,
         reauth_evidence_id=evidence_uuid,
-        reason_code=payload.reason_code,
-        notes=payload.notes,
-        reference=payload.reference,
     )
+
+    # 4b) Couple to LN2: if the destination has racks, fill that many empty
+    #     positions with this lot so the /ln2 grid mirrors the ledger. One
+    #     unit = one vial = one position. Rack-less locations stay ledger-only.
+    if await inv_repo.location_has_racks(db, location_uuid):
+        units = _whole_units_or_422(payload.qty)
+        empty = await inv_repo.count_empty_positions(db, location_uuid)
+        if empty < units:
+            raise ConflictError(
+                f"Location has only {empty} empty position(s); cannot place "
+                f"{units} unit(s). Add a rack or pick another location.",
+                code="not_enough_empty_positions",
+            )
+        await inv_repo.fill_positions_for_lot(
+            db,
+            location_id=location_uuid,
+            lot_id=lot_uuid,
+            n=units,
+            actor_id=current.id,
+        )
 
     # 5) Consume the evidence (replay-detected via PK conflict).
     await consume_reauth_evidence(
@@ -1423,7 +1469,7 @@ async def create_receipt(
     response_model=MovementRead,
     status_code=status.HTTP_201_CREATED,
     summary=(
-        "Record a stock dispense (inventory → consumed/discarded). "
+        "Record a unit out (inventory → consumed). "
         "Requires a fresh reauth evidence id for "
         "action='movement.dispense'."
     ),
@@ -1494,10 +1540,29 @@ async def create_dispense(
         qty=payload.qty,
         performed_by_user_id=current.id,
         reauth_evidence_id=evidence_uuid,
-        reason_code=payload.reason_code,
-        notes=payload.notes,
-        reference=payload.reference,
+        destination=payload.destination,
     )
+
+    # 4b) Couple to LN2: if the source has racks, free that many of the lot's
+    #     occupied positions so the /ln2 grid mirrors the ledger.
+    if await inv_repo.location_has_racks(db, location_uuid):
+        units = _whole_units_or_422(payload.qty)
+        mapped = await inv_repo.count_occupied_positions_for_lot(
+            db, location_uuid, lot_uuid
+        )
+        if mapped < units:
+            raise ConflictError(
+                f"Only {mapped} vial(s) of this lot are mapped at this location; "
+                f"cannot remove {units}.",
+                code="not_enough_mapped_positions",
+            )
+        await inv_repo.empty_positions_for_lot(
+            db,
+            location_id=location_uuid,
+            lot_id=lot_uuid,
+            n=units,
+            actor_id=current.id,
+        )
 
     # 5) Consume the evidence (replay-detected via PK conflict).
     await consume_reauth_evidence(
@@ -1700,7 +1765,7 @@ async def create_adjustment(
     response_model=TransferResponse,
     status_code=status.HTTP_201_CREATED,
     summary=(
-        "Transfer stock between two locations atomically. Writes both "
+        "Transfer units between two locations atomically. Writes both "
         "the ``transfer_out`` and the ``transfer_in`` leg in one tx. "
         "Requires action='movement.transfer' evidence."
     ),
@@ -1774,10 +1839,51 @@ async def create_transfer(
         qty=payload.qty,
         performed_by_user_id=current.id,
         reauth_evidence_id=evidence_uuid,
-        reason_code=payload.reason_code,
-        notes=payload.notes,
-        reference=payload.reference,
     )
+
+    # Couple to LN2: keep the rack grids in sync with the transfer. If both
+    # ends have racks, move that many of the lot's vials (paired move_out /
+    # move_in); if only one end does, free / fill there. Rack-less ends are
+    # ledger-only.
+    src_has = await inv_repo.location_has_racks(db, from_uuid)
+    dst_has = await inv_repo.location_has_racks(db, to_uuid)
+    if src_has or dst_has:
+        units = _whole_units_or_422(payload.qty)
+        if src_has:
+            mapped = await inv_repo.count_occupied_positions_for_lot(
+                db, from_uuid, lot_uuid
+            )
+            if mapped < units:
+                raise ConflictError(
+                    f"Only {mapped} vial(s) of this lot are mapped at the source; "
+                    f"cannot transfer {units}.",
+                    code="not_enough_mapped_positions",
+                )
+        if dst_has:
+            empty = await inv_repo.count_empty_positions(db, to_uuid)
+            if empty < units:
+                raise ConflictError(
+                    f"Destination has only {empty} empty position(s); cannot place "
+                    f"{units} unit(s).",
+                    code="not_enough_empty_positions",
+                )
+        if src_has and dst_has:
+            await inv_repo.transfer_positions_for_lot(
+                db,
+                from_location_id=from_uuid,
+                to_location_id=to_uuid,
+                lot_id=lot_uuid,
+                n=units,
+                actor_id=current.id,
+            )
+        elif src_has:
+            await inv_repo.empty_positions_for_lot(
+                db, location_id=from_uuid, lot_id=lot_uuid, n=units, actor_id=current.id
+            )
+        else:
+            await inv_repo.fill_positions_for_lot(
+                db, location_id=to_uuid, lot_id=lot_uuid, n=units, actor_id=current.id
+            )
 
     # One evidence covers both legs. We bind it to the OUT leg row id
     # so the consumption record points at the canonical "source" leg.
@@ -1966,3 +2072,303 @@ async def list_item_stock_by_lot(
         only_positive=not include_empty,
     )
     return [StockByLotEntry(**r) for r in rows]
+
+
+# ── Storage (racks + positions) ────────────────────────────────────────
+#
+# The LN2 / Storage grid. See ``docs/modules/storage.md``. Reads require
+# ``inventory:view``; creating racks requires ``inventory:create``;
+# assign / empty / move require ``inventory:edit``.
+
+
+def _position_to_read(p: StoragePosition) -> PositionRead:
+    lot = p.lot
+    item = lot.item if lot is not None else None
+    return PositionRead(
+        id=str(p.id),
+        index=p.seq,
+        row_idx=p.row_idx,
+        col_idx=p.col_idx,
+        label=p.label,
+        status=p.status,  # type: ignore[arg-type]
+        lot_id=str(p.lot_id) if p.lot_id else None,
+        lot_number=lot.lot_number if lot is not None else None,
+        item_id=item.item_number if item is not None else None,
+        item_uuid=str(item.id) if item is not None else None,
+        item_description=item.description if item is not None else None,
+        vendor_name=(item.vendor.name if item is not None and item.vendor else None),
+        assigned_at=p.assigned_at,
+    )
+
+
+def _rack_to_read(r: StorageRack) -> RackRead:
+    return RackRead(
+        id=str(r.id),
+        name=r.name,
+        rows=r.rows,
+        cols=r.cols,
+        position_order=r.position_order,
+        positions=[_position_to_read(p) for p in r.positions],
+    )
+
+
+def _storage_location_to_read(
+    loc: Location, racks: list[StorageRack]
+) -> StorageLocationRead:
+    return StorageLocationRead(
+        id=str(loc.id),
+        name=loc.name,
+        kind=loc.kind,  # type: ignore[arg-type]
+        detail=loc.notes or "",
+        racks=[_rack_to_read(r) for r in racks],
+    )
+
+
+@storage_router.get(
+    "/locations",
+    response_model=list[StorageLocationRead],
+    summary="List storage locations with their racks + positions",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_storage(
+    db: DBSession,
+    active_only: bool = Query(default=True, description="Hide deactivated locations"),
+) -> list[StorageLocationRead]:
+    rows = await inv_repo.list_storage_locations(db, active_only=active_only)
+    return [_storage_location_to_read(loc, racks) for loc, racks in rows]
+
+
+@storage_router.post(
+    "/locations",
+    response_model=StorageLocationRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a storage location with one or more racks",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def create_storage_location(
+    db: DBSession,
+    payload: StorageLocationCreate,
+) -> StorageLocationRead:
+    loc = await inv_repo.create_storage_location(
+        db,
+        name=payload.name,
+        kind=payload.kind,
+        detail=payload.detail,
+        racks=payload.racks,
+    )
+    loaded = await inv_repo.get_storage_location(db, loc.id)
+    assert loaded is not None
+    result = _storage_location_to_read(*loaded)
+    await db.commit()
+    return result
+
+
+@storage_router.post(
+    "/locations/{location_id}/racks",
+    response_model=RackRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a rack to an existing location",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_storage_rack(
+    db: DBSession,
+    location_id: Annotated[uuid.UUID, Path()],
+    payload: RackInput,
+) -> RackRead:
+    if (await inv_repo.get_location(db, location_id)) is None:
+        raise NotFoundError(f"Location {location_id} not found")
+    rack = await inv_repo.add_storage_rack(
+        db,
+        location_id=location_id,
+        name=payload.name,
+        rows=payload.rows,
+        cols=payload.cols,
+    )
+    loaded = await inv_repo.get_storage_rack(db, rack.id)
+    assert loaded is not None
+    result = _rack_to_read(loaded)
+    await db.commit()
+    return result
+
+
+@storage_router.post(
+    "/positions/{position_id}/assign",
+    response_model=PositionRead,
+    summary="Assign a lot (one vial) to an empty position",
+    dependencies=[Depends(RequirePermission("inventory", "edit"))],
+)
+async def assign_position(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    position_id: Annotated[uuid.UUID, Path()],
+    payload: AssignPositionRequest,
+) -> PositionRead:
+    position = await inv_repo.get_storage_position(db, position_id)
+    if position is None:
+        raise NotFoundError(f"Position {position_id} not found")
+    if position.status != "empty":
+        raise ConflictError("Position is already occupied", code="position_occupied")
+    try:
+        lot_uuid = uuid.UUID(payload.lot_id)
+    except ValueError as exc:
+        raise ValidationError("lot_id must be a UUID", code="invalid_lot_id") from exc
+    lot = await inv_repo.get_lot(db, lot_uuid)
+    if lot is None or lot.deleted_at is not None:
+        raise NotFoundError(f"Lot {payload.lot_id} not found")
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    await inv_repo.assign_storage_position(
+        db, position=position, lot_id=lot_uuid, actor_id=current.id
+    )
+    # Keep inventory in sync: placing one vial in a slot is a +1 receipt for
+    # this lot at the position's location, signed with the operator's
+    # e-signature (same 21 CFR Part 11 ceremony as a unit-in).
+    location_id = await inv_repo.position_location_id(db, position)
+    movement = await inv_repo.create_receipt_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot_uuid,
+        to_location_id=location_id,
+        qty=Decimal(1),
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.receipt",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+    )
+    await db.commit()
+    fresh = await inv_repo.get_storage_position(db, position_id, refresh=True)
+    assert fresh is not None
+    return _position_to_read(fresh)
+
+
+@storage_router.post(
+    "/positions/{position_id}/empty",
+    response_model=PositionRead,
+    summary="Empty a position (reversible unmap)",
+    dependencies=[Depends(RequirePermission("inventory", "edit"))],
+)
+async def empty_position(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    position_id: Annotated[uuid.UUID, Path()],
+    payload: EmptyPositionRequest,
+) -> PositionRead:
+    position = await inv_repo.get_storage_position(db, position_id)
+    if position is None:
+        raise NotFoundError(f"Position {position_id} not found")
+    if position.status == "empty":
+        return _position_to_read(position)  # idempotent
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    # Capture the occupant before we clear it so we can post the matching -1.
+    prev_lot_id = position.lot_id
+    prev_item_id = position.lot.item_id if position.lot is not None else None
+    location_id = await inv_repo.position_location_id(db, position)
+    await inv_repo.empty_storage_position(db, position=position, actor_id=current.id)
+    # Emptying a slot removes one vial — record a signed -1 dispense so
+    # inventory stays in sync with the grid.
+    if prev_lot_id is not None and prev_item_id is not None:
+        movement = await inv_repo.create_dispense_movement(
+            db,
+            item_id=prev_item_id,
+            lot_id=prev_lot_id,
+            from_location_id=location_id,
+            qty=Decimal(1),
+            performed_by_user_id=current.id,
+            reauth_evidence_id=evidence_uuid,
+            destination=payload.destination,
+        )
+        await consume_reauth_evidence(
+            db,
+            evidence_id=evidence_uuid,
+            user_id=current.id,
+            expected_action="movement.dispense",
+            target_table="app.stock_movements",
+            target_id=movement.id,
+        )
+    await db.commit()
+    fresh = await inv_repo.get_storage_position(db, position_id, refresh=True)
+    assert fresh is not None
+    return _position_to_read(fresh)
+
+
+@storage_router.post(
+    "/positions/{position_id}/move",
+    response_model=MovePositionResult,
+    summary="Move an occupant to another free position (any location)",
+    dependencies=[Depends(RequirePermission("inventory", "edit"))],
+)
+async def move_position(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    position_id: Annotated[uuid.UUID, Path()],
+    payload: MovePositionRequest,
+) -> MovePositionResult:
+    source = await inv_repo.get_storage_position(db, position_id)
+    if source is None:
+        raise NotFoundError(f"Position {position_id} not found")
+    if source.status != "occupied":
+        raise ConflictError("Source position is empty", code="source_empty")
+    try:
+        dest_uuid = uuid.UUID(payload.dest_position_id)
+    except ValueError as exc:
+        raise ValidationError(
+            "dest_position_id must be a UUID", code="invalid_dest_position_id"
+        ) from exc
+    if dest_uuid == position_id:
+        raise ValidationError(
+            "Source and destination are the same", code="same_position"
+        )
+    dest = await inv_repo.get_storage_position(db, dest_uuid)
+    if dest is None:
+        raise NotFoundError(f"Position {payload.dest_position_id} not found")
+    if dest.status != "empty":
+        raise ConflictError("Destination is occupied", code="dest_occupied")
+    # Capture source occupant + both locations before the move.
+    moved_lot_id = source.lot_id
+    moved_item_id = source.lot.item_id if source.lot is not None else None
+    src_loc = await inv_repo.position_location_id(db, source)
+    dst_loc = await inv_repo.position_location_id(db, dest)
+    await inv_repo.move_storage_position(
+        db, source=source, dest=dest, actor_id=current.id
+    )
+    # A cross-location move is a transfer in the ledger; a move within the same
+    # location is a pure slot relocation (no quantity change).
+    if src_loc != dst_loc and moved_lot_id is not None and moved_item_id is not None:
+        await inv_repo.create_transfer_pair(
+            db,
+            item_id=moved_item_id,
+            lot_id=moved_lot_id,
+            from_location_id=src_loc,
+            to_location_id=dst_loc,
+            qty=Decimal(1),
+            performed_by_user_id=current.id,
+        )
+    await db.commit()
+    fresh_source = await inv_repo.get_storage_position(db, position_id, refresh=True)
+    fresh_dest = await inv_repo.get_storage_position(db, dest_uuid, refresh=True)
+    assert fresh_source is not None and fresh_dest is not None
+    return MovePositionResult(
+        source=_position_to_read(fresh_source),
+        dest=_position_to_read(fresh_dest),
+    )
+
+
+@storage_router.get(
+    "/positions/{position_id}/history",
+    response_model=list[PositionEventRead],
+    summary="Event history for one position (unit in / out / move)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def position_history(
+    db: DBSession,
+    position_id: Annotated[uuid.UUID, Path()],
+) -> list[PositionEventRead]:
+    if (await inv_repo.get_storage_position(db, position_id)) is None:
+        raise NotFoundError(f"Position {position_id} not found")
+    rows = await inv_repo.list_position_events(db, position_id)
+    return [PositionEventRead(**r) for r in rows]

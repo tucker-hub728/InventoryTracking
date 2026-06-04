@@ -42,6 +42,10 @@ interface Props {
 // The dialogs + handlers stay wired; flip to true to re-enable the buttons.
 const SHOW_ADJUST_TRANSFER = false;
 
+// Reverse action hidden from the ledger for now. The dialog + handler stay
+// wired; flip to true to re-enable the per-row Reverse button.
+const SHOW_REVERSE = false;
+
 /**
  * Inventory detail page client.
  *
@@ -226,15 +230,13 @@ export function InventoryDetailClient({ itemNumber }: Props) {
             {canSign && (
               <>
                 {SHOW_ADJUST_TRANSFER && (
-                  <>
                     <Button onClick={() => setAdjusting(true)}>
                       <Scale size={14} /> Adjust
                     </Button>
-                    <Button onClick={() => setTransferring(true)}>
-                      <ArrowRightLeft size={14} /> Transfer
-                    </Button>
-                  </>
                 )}
+                <Button onClick={() => setTransferring(true)}>
+                  <ArrowRightLeft size={14} /> Transfer
+                </Button>
                 <Button variant="primary" onClick={() => setRecording(true)}>
                   <ArrowDownUp size={14} /> Record movement
                 </Button>
@@ -252,7 +254,7 @@ export function InventoryDetailClient({ itemNumber }: Props) {
                 <CardTitle>Snapshot</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
-                <KV label="On hand" value={formatNumber(item.qty)} mono />
+                <KV label="Inventory Qty" value={formatNumber(item.qty)} mono />
                 <KV
                   label="On order"
                   value={item.onOrder ? formatNumber(item.onOrder) : '—'}
@@ -264,11 +266,6 @@ export function InventoryDetailClient({ itemNumber }: Props) {
                   mono
                 />
                 <Separator />
-                {/* Batch dimensions land with the movements module. */}
-                <KV label="Location" value={item.location || '—'} mono />
-                <KV label="Active lot" value={item.lot || '—'} mono />
-                <KV label="Expires" value={item.expires || '—'} mono />
-                <Separator />
                 <KV label="Inventory $" value={`$${formatNumber(item.invValue)}`} mono />
                 <KV label="On-PO $" value={`$${formatNumber(item.poValue)}`} mono />
               </CardContent>
@@ -279,7 +276,7 @@ export function InventoryDetailClient({ itemNumber }: Props) {
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
                 <KV
-                  label="Stock in (lifetime)"
+                  label="Unit in (lifetime)"
                   value={formatNumber(
                     ledgerRows
                       .filter((m) => Number(m.qty_delta) > 0)
@@ -288,7 +285,7 @@ export function InventoryDetailClient({ itemNumber }: Props) {
                   mono
                 />
                 <KV
-                  label="Stock out (lifetime)"
+                  label="Unit out (lifetime)"
                   value={formatNumber(
                     ledgerRows
                       .filter((m) => Number(m.qty_delta) < 0)
@@ -305,7 +302,7 @@ export function InventoryDetailClient({ itemNumber }: Props) {
             <Tabs defaultValue="ledger" className="p-0">
               <div className="border-b border-border px-4">
                 <TabsList>
-                  <TabsTrigger value="ledger">Stock Ledger</TabsTrigger>
+                  <TabsTrigger value="ledger">Unit Ledger</TabsTrigger>
                   <TabsTrigger value="audit">Audit History</TabsTrigger>
                 </TabsList>
               </div>
@@ -321,7 +318,9 @@ export function InventoryDetailClient({ itemNumber }: Props) {
                     <LedgerTable
                       entries={ledgerEntries}
                       onReverseRequest={
-                        canSign ? (entry) => setReverseTarget(entry) : undefined
+                        SHOW_REVERSE && canSign
+                          ? (entry) => setReverseTarget(entry)
+                          : undefined
                       }
                     />
                   )}

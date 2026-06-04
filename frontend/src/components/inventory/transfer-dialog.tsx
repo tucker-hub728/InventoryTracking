@@ -38,25 +38,15 @@ import {
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 
-// Reasons capture intent — kept narrow because the same code drives
-// the audit / variance report bucketing later.
-const REASON_OPTIONS = [
-  { code: 'rebalance', label: 'Rebalance between freezers' },
-  { code: 'staging', label: 'Staging for use' },
-  { code: 'consolidation', label: 'Consolidate lots' },
-  { code: 'maintenance', label: 'Source equipment maintenance' },
-  { code: 'other', label: 'Other' },
-];
-
 const schema = z
   .object({
     item_id: z.string().uuid('Pick an item'),
     stock_row: z.string().min(1, 'Pick a lot at a source location'),
     to_location_id: z.string().uuid('Pick a destination location'),
-    qty: z.coerce.number().positive('Quantity must be > 0'),
-    reason_code: z.string().min(1, 'Pick a reason'),
-    notes: z.string().max(2048).optional(),
-    reference: z.string().max(256).optional(),
+    qty: z.coerce
+      .number()
+      .int('Units must be a whole number')
+      .positive('Units must be > 0'),
     available_qty: z.number().optional(),
     from_location_id: z.string().optional(),
   })
@@ -109,9 +99,8 @@ interface Props {
  *      Stock-Out picker.
  *   3. Destination location — separate select, filtered to active
  *      locations only and to anything that isn't the source.
- *   4. Quantity — gated against the source balance client-side.
- *   5. Reason + optional reference/notes.
- *   6. Live impact preview: source - qty / dest + qty.
+ *   4. Units — gated against the source balance client-side.
+ *   5. Live impact preview: source - qty / dest + qty.
  *
  * Reuses the PasswordReauthDialog with ``action='movement.transfer'``.
  */
@@ -147,9 +136,6 @@ export function TransferDialog({
       stock_row: '',
       to_location_id: '',
       qty: 1,
-      reason_code: 'rebalance',
-      notes: '',
-      reference: '',
       from_location_id: '',
     },
   });
@@ -159,7 +145,6 @@ export function TransferDialog({
   const fromLocationId = watch('from_location_id');
   const toLocationId = watch('to_location_id');
   const qty = watch('qty');
-  const reasonCode = watch('reason_code');
 
   // ── Load pickers when the dialog opens ───────────────────────────────
   React.useEffect(() => {
@@ -264,9 +249,6 @@ export function TransferDialog({
     return row ? Number(row.qty_available) : 0;
   }, [toLocationId, selectedRow, stockRows]);
 
-  const reasonLabel =
-    REASON_OPTIONS.find((o) => o.code === reasonCode)?.label ?? reasonCode;
-
   const chosenItem = items.find((i) => i.id === itemId) ?? null;
   const itemDesc =
     chosenItem?.description ?? chosenItem?.item_number ?? presetItemNumber ?? 'item';
@@ -274,7 +256,7 @@ export function TransferDialog({
 
   const attestation = (() => {
     if (!selectedRow || !destLoc) return '';
-    return `I attest this transfer of ${qtyNum} unit(s) of ${itemDesc} (lot ${selectedRow.lot_number}) from ${selectedRow.location_code} to ${destLoc.code} for ${reasonLabel.toLowerCase()} is accurate.`;
+    return `I attest this transfer of ${qtyNum} unit(s) of ${itemDesc} (lot ${selectedRow.lot_number}) from ${selectedRow.location_code} to ${destLoc.code} is accurate.`;
   })();
 
   const goToReview = (_values: FormValues): void => {
@@ -294,9 +276,6 @@ export function TransferDialog({
         from_location_id: selectedRow.location_id,
         to_location_id: v.to_location_id,
         qty: Number(v.qty),
-        reason_code: v.reason_code,
-        reference: v.reference ? v.reference : null,
-        notes: v.notes ? v.notes : null,
         evidence_id: evidence.evidence_id,
       };
       const resp = await movementsApi.transfer(payload);
@@ -332,11 +311,11 @@ export function TransferDialog({
           <form onSubmit={handleSubmit(goToReview)}>
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
-                <ArrowRightLeft size={16} aria-hidden /> Transfer stock
+                <ArrowRightLeft size={16} aria-hidden /> Transfer unit
               </DialogTitle>
               <DialogDescription>
-                Move stock between two locations. Both legs are recorded
-                atomically under one e-signature.
+                Move units between two locations. Both legs are recorded
+                atomically under one e-signature, and the LN2 grid updates to match.
               </DialogDescription>
             </DialogHeader>
 
@@ -484,14 +463,14 @@ export function TransferDialog({
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="tx-qty">
-                    Quantity <span className="text-danger">*</span>
+                    Units <span className="text-danger">*</span>
                   </Label>
                   <Input
                     id="tx-qty"
                     type="number"
-                    inputMode="decimal"
+                    inputMode="numeric"
                     min={0}
-                    step="0.001"
+                    step="1"
                     disabled={!selectedRow}
                     aria-invalid={Boolean(errors.qty)}
                     className="font-mono"
@@ -512,56 +491,6 @@ export function TransferDialog({
                     </p>
                   )}
                 </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="tx-reason">
-                    Reason <span className="text-danger">*</span>
-                  </Label>
-                  <Select
-                    value={reasonCode || ''}
-                    onValueChange={(v) =>
-                      setValue('reason_code', v, { shouldValidate: true })
-                    }
-                  >
-                    <SelectTrigger
-                      id="tx-reason"
-                      aria-invalid={Boolean(errors.reason_code)}
-                    >
-                      <SelectValue placeholder="Reason" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {REASON_OPTIONS.map((o) => (
-                        <SelectItem key={o.code} value={o.code}>
-                          {o.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {errors.reason_code && (
-                    <p role="alert" className="text-xs text-danger">
-                      {errors.reason_code.message}
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="tx-ref">Reference</Label>
-                  <Input
-                    id="tx-ref"
-                    placeholder="MOVE-001"
-                    {...register('reference')}
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="tx-notes">Notes</Label>
-                <Input
-                  id="tx-notes"
-                  placeholder="Staging for tomorrow's run"
-                  {...register('notes')}
-                />
               </div>
 
               {selectedRow && destLoc && validQty && srcBefore !== null && destBefore !== null && (

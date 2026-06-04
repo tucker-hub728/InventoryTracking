@@ -47,6 +47,8 @@ export interface ApiMovement {
 
   lot_id: string | null;
   lot_number: string | null;
+  /** Lot expiry (ISO date) — surfaced in the ledger's Expiry column. */
+  lot_expiration_date: string | null;
 
   from_location_id: string | null;
   from_location_code: string | null;
@@ -65,6 +67,8 @@ export interface ApiMovement {
   reason_code: string | null;
   notes: string | null;
   reference: string | null;
+  /** Free-text "where did it go" — set on unit-out (dispense) rows. */
+  destination_text: string | null;
 
   reversal_of_id: string | null;
   /**
@@ -120,10 +124,6 @@ export interface ReceiptInput {
   lot_id?: string;
   new_lot?: NewLotInput;
 
-  reason_code?: string | null;
-  notes?: string | null;
-  reference?: string | null;
-
   /** UUID from the most recent ``authApi.reauth({action:'movement.receipt'})``. */
   evidence_id: string;
 }
@@ -135,11 +135,8 @@ export interface DispenseInput {
   lot_id: string;
   /** Must be > 0 and ≤ available at (lot, location). */
   qty: number;
-
-  /** Required — reason captures patient_administration, qc_sample, etc. */
-  reason_code: string;
-  notes?: string | null;
-  reference?: string | null;
+  /** Free-text "where did it go". Required. */
+  destination: string;
 
   /** UUID from ``authApi.reauth({action:'movement.dispense'})``. */
   evidence_id: string;
@@ -180,9 +177,6 @@ export interface TransferInput {
   to_location_id: string;
   /** Must be > 0 and ≤ available at the source. Source ≠ destination. */
   qty: number;
-  reason_code: string;
-  notes?: string | null;
-  reference?: string | null;
   /** UUID from ``authApi.reauth({action:'movement.transfer'})``. */
   evidence_id: string;
 }
@@ -244,7 +238,7 @@ export const movementsApi = {
     }),
 
   /**
-   * Record a stock receipt (vendor → inventory). Requires a fresh
+   * Record a unit in (vendor → inventory). Requires a fresh
    * reauth evidence for ``action='movement.receipt'`` — see
    * ``useReauth`` for the UI helper that mints one.
    *
@@ -255,7 +249,7 @@ export const movementsApi = {
     api.post<ApiMovement>('/movements/receipt', { json: body }),
 
   /**
-   * Record a stock dispense (inventory → consumed/discarded). Requires
+   * Record a unit out (inventory → consumed). Requires
    * a fresh reauth evidence for ``action='movement.dispense'``.
    *
    * The backend rejects overdraws with a structured 422

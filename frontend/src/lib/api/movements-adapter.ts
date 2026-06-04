@@ -78,10 +78,14 @@ export function apiMovementsToLedgerEntries(
       in: qtyIn,
       out: qtyOut,
       balance: balanceAfterRow,
+      // For a unit-out (dispense) the "Location" column shows where it went —
+      // the free-text destination. Every other row shows the storage location.
       location:
-        m.to_location_code ?? m.from_location_code ?? '—',
+        m.movement_type === 'dispense'
+          ? m.destination_text ?? m.from_location_code ?? '—'
+          : m.to_location_code ?? m.from_location_code ?? '—',
       lot: m.lot_number ?? '—',
-      exp: '—', // expiry lives on the lot row; surface in a later polish pass.
+      exp: m.lot_expiration_date ?? '—',
       // ``initials`` is the compact form for the narrow ledger column —
       // ``actorName`` carries the full name for tooltips and the audit
       // timeline.

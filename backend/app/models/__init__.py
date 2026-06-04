@@ -21,6 +21,11 @@ from app.models.inventory import (
     UnitOfMeasure,
     Vendor,
 )
+from app.models.storage import (
+    StorageAssignmentEvent,
+    StoragePosition,
+    StorageRack,
+)
 
 __all__ = [
     "AuditEvent",
@@ -32,6 +37,9 @@ __all__ = [
     "ReauthEvent",
     "Role",
     "StockMovement",
+    "StorageAssignmentEvent",
+    "StoragePosition",
+    "StorageRack",
     "UnitOfMeasure",
     "User",
     "Vendor",

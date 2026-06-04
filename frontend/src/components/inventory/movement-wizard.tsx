@@ -42,7 +42,6 @@ import { locationsApi, type Location } from '@/lib/api/locations';
 import { lotsApi, type Lot } from '@/lib/api/lots';
 import {
   movementsApi,
-  type DiscardInput,
   type DispenseInput,
   type ReceiptInput,
   type StockByLotEntry,
@@ -54,64 +53,23 @@ export type MovementDirection = 'in' | 'out';
 
 const NEW_LOT = '__new__';
 
-// Receipts in CT manufacturing usually fall in one of these reasons.
-const REASON_OPTIONS_IN = [
-  { code: 'vendor_delivery', label: 'Vendor delivery' },
-  { code: 'restock', label: 'Restock from internal store' },
-  { code: 'opening_balance', label: 'Opening balance' },
-  { code: 'returned_unused', label: 'Returned unused' },
-];
-
-// Stock-out covers two distinct movement types under one UX. The reason
-// the operator picks decides which endpoint the wizard hits at submit:
-// expired / damaged / contaminated / recalled → ``movements/discard``
-// (audit reports separate "thrown away" from "used for purpose"); every
-// other reason → ``movements/dispense``.
-const REASON_OPTIONS_OUT = [
-  { code: 'patient_administration', label: 'Patient administration' },
-  { code: 'qc_sample', label: 'QC sample' },
-  { code: 'research_use', label: 'Research use' },
-  { code: 'training', label: 'Training' },
-  { code: 'expired', label: 'Expired removal' },
-  { code: 'damaged', label: 'Damaged / contaminated' },
-  { code: 'recalled', label: 'Recalled batch' },
-  { code: 'lost', label: 'Lost / inventory variance' },
-  { code: 'other', label: 'Other' },
-];
-
-/** Reasons that produce a ``movement_type='discard'`` row, not a dispense. */
-const DISCARD_REASONS: ReadonlySet<string> = new Set([
-  'expired',
-  'damaged',
-  'contaminated',
-  'recalled',
-]);
-
-const DEFAULT_REASON_IN = 'vendor_delivery';
-const DEFAULT_REASON_OUT = 'patient_administration';
-
-function defaultReasonFor(direction: MovementDirection): string {
-  return direction === 'in' ? DEFAULT_REASON_IN : DEFAULT_REASON_OUT;
-}
-
-function reasonOptionsFor(direction: MovementDirection) {
-  return direction === 'in' ? REASON_OPTIONS_IN : REASON_OPTIONS_OUT;
-}
-
 const schema = z
   .object({
     direction: z.enum(['in', 'out']),
     item_id: z.string().uuid('Pick an item'),
     location_id: z.string().uuid('Pick a location'),
-    qty: z.coerce.number().positive('Quantity must be > 0'),
+    qty: z.coerce
+      .number()
+      .int('Units must be a whole number')
+      .positive('Units must be > 0')
+      .max(5000, 'Max 5000 units'),
     lot_choice: z.string().min(1, 'Pick a lot'),
     // Inline-lot fields (only required when direction='in' && lot_choice === NEW_LOT):
     lot_number: z.string().optional(),
     expiration_date: z.string().optional(),
     manufacture_date: z.string().optional(),
-    reason_code: z.string().min(1, 'Pick a reason'),
-    reference: z.string().max(256).optional(),
-    notes: z.string().max(2048).optional(),
+    // Free-text "where did it go" — required on OUT (validated below).
+    destination: z.string().max(256).optional(),
     // Carried only so the OUT branch can validate qty against availability.
     available_qty: z.number().optional(),
   })
@@ -157,6 +115,14 @@ const schema = z
           message: `Only ${v.available_qty} available at this lot/location`,
         });
       }
+      // Destination is required on a unit-out.
+      if (!v.destination || v.destination.trim().length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['destination'],
+          message: 'Destination is required',
+        });
+      }
     }
   });
 
@@ -181,7 +147,7 @@ type Step = 'form' | 'review';
 
 /**
  * Unified stock movement wizard. Operator first picks direction
- * (Stock In = receipt, Stock Out = dispense); the form below adapts
+ * (Unit in = receipt, Unit out = dispense); the form below adapts
  * to the chosen direction:
  *
  *   * IN  — lot can be existing or created inline; no qty cap.
@@ -216,9 +182,6 @@ export function MovementWizard({
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
-  // Tracks whether the operator has manually flipped the direction
-  // toggle. Once true, we stop auto-switching on item changes.
-  const userTouchedDirectionRef = React.useRef(false);
 
   const {
     register,
@@ -239,9 +202,7 @@ export function MovementWizard({
       lot_number: '',
       expiration_date: '',
       manufacture_date: '',
-      reason_code: defaultReasonFor(defaultDirection ?? 'in'),
-      reference: '',
-      notes: '',
+      destination: '',
     },
   });
 
@@ -250,7 +211,6 @@ export function MovementWizard({
   const locationId = watch('location_id');
   const lotChoice = watch('lot_choice');
   const qty = watch('qty');
-  const reasonCode = watch('reason_code');
 
   // ── Pickers: items + locations once when the dialog opens ─────────────
   React.useEffect(() => {
@@ -279,39 +239,11 @@ export function MovementWizard({
     return () => ctrl.abort();
   }, [open]);
 
-  // ── Smart default-direction on preset item ───────────────────────────
-  // When the parent passes a presetItemId, look up its qty_on_hand once
-  // the item list has loaded and flip the direction toggle to ``out``
-  // if there's stock to draw from. Skip this if the parent already
-  // committed to a defaultDirection.
-  React.useEffect(() => {
-    if (!open) return;
-    if (!presetItemId || items.length === 0) return;
-    if (defaultDirection) return;
-    if (userTouchedDirectionRef.current) return;
-    const it = items.find((i) => i.id === presetItemId);
-    if (!it) return;
-    const nextDir: MovementDirection =
-      Number(it.qty_on_hand) > 0 ? 'out' : 'in';
-    setValue('direction', nextDir, { shouldValidate: false });
-    setValue('reason_code', defaultReasonFor(nextDir), { shouldValidate: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, presetItemId, items, defaultDirection]);
-
-  // ── Smart auto-switch when operator picks an item (no preset) ────────
-  React.useEffect(() => {
-    if (!open) return;
-    if (presetItemId) return; // preset case handled above
-    if (!itemId) return;
-    if (userTouchedDirectionRef.current) return;
-    const it = items.find((i) => i.id === itemId);
-    if (!it) return;
-    const nextDir: MovementDirection =
-      Number(it.qty_on_hand) > 0 ? 'out' : 'in';
-    setValue('direction', nextDir, { shouldValidate: false });
-    setValue('reason_code', defaultReasonFor(nextDir), { shouldValidate: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, itemId, items, presetItemId]);
+  // The wizard always opens on "Unit in" — the form default. The operator
+  // flips to "Unit out" with the toggle when dispensing. We deliberately do
+  // NOT auto-switch to "out" based on the item's stock: operators expect a
+  // fresh unit-in by default, and the auto-switch was surprising. A caller can
+  // still force a starting side via the ``defaultDirection`` prop.
 
   // ── Lot data: scoped to the chosen item ──────────────────────────────
   //
@@ -358,7 +290,6 @@ export function MovementWizard({
       setSubmitError(null);
       setShowReauth(false);
       setSubmitting(false);
-      userTouchedDirectionRef.current = false;
     }
   }, [open, reset]);
 
@@ -389,9 +320,7 @@ export function MovementWizard({
 
   // ── Direction toggle ──────────────────────────────────────────────────
   const flipDirection = (next: MovementDirection): void => {
-    userTouchedDirectionRef.current = true;
     setValue('direction', next, { shouldValidate: false });
-    setValue('reason_code', defaultReasonFor(next), { shouldValidate: false });
     // Reset lot choice — IN lot list and OUT stock-by-lot list are
     // different shapes, so the existing selection wouldn't make sense.
     setValue('lot_choice', '', { shouldValidate: false });
@@ -416,9 +345,6 @@ export function MovementWizard({
           item_id: v.item_id,
           location_id: v.location_id,
           qty: Number(v.qty),
-          reason_code: v.reason_code,
-          reference: v.reference ? v.reference : null,
-          notes: v.notes ? v.notes : null,
           evidence_id: evidence.evidence_id,
           ...(v.lot_choice === NEW_LOT
             ? {
@@ -431,26 +357,9 @@ export function MovementWizard({
             : { lot_id: v.lot_choice }),
         };
         created = await movementsApi.receipt(payload);
-        toast.success('Receipt recorded', {
+        toast.success('Unit in recorded', {
           description: `${created.item_number} · +${created.qty_abs} into ${
             created.to_location_code ?? '—'
-          }`,
-        });
-      } else if (DISCARD_REASONS.has(v.reason_code)) {
-        const payload: DiscardInput = {
-          item_id: v.item_id,
-          location_id: v.location_id,
-          lot_id: v.lot_choice,
-          qty: Number(v.qty),
-          reason_code: v.reason_code,
-          reference: v.reference ? v.reference : null,
-          notes: v.notes ? v.notes : null,
-          evidence_id: evidence.evidence_id,
-        };
-        created = await movementsApi.discard(payload);
-        toast.success('Discard recorded', {
-          description: `${created.item_number} · −${created.qty_abs} from ${
-            created.from_location_code ?? '—'
           }`,
         });
       } else {
@@ -459,13 +368,11 @@ export function MovementWizard({
           location_id: v.location_id,
           lot_id: v.lot_choice,
           qty: Number(v.qty),
-          reason_code: v.reason_code,
-          reference: v.reference ? v.reference : null,
-          notes: v.notes ? v.notes : null,
+          destination: (v.destination ?? '').trim(),
           evidence_id: evidence.evidence_id,
         };
         created = await movementsApi.dispense(payload);
-        toast.success('Dispense recorded', {
+        toast.success('Unit out recorded', {
           description: `${created.item_number} · −${created.qty_abs} from ${
             created.from_location_code ?? '—'
           }`,
@@ -509,32 +416,18 @@ export function MovementWizard({
   const chosenLotIn = lotsIn.find((l) => l.id === lotChoice) ?? null;
   const isIn = direction === 'in';
 
-  // The effective movement type is what the *backend* writes — Stock Out
-  // splits into dispense vs discard at submit time based on reason.
-  // Used to pick the e-sign action verb + the attestation wording so
-  // operator and audit row agree.
-  const effectiveType: 'receipt' | 'dispense' | 'discard' = (() => {
-    if (isIn) return 'receipt';
-    return DISCARD_REASONS.has(reasonCode ?? '') ? 'discard' : 'dispense';
-  })();
+  // The effective movement type the backend writes. Unit-out is always a
+  // dispense now (the discard reason-routing was removed with the Reason
+  // field). Drives the e-sign action verb + attestation wording.
+  const effectiveType: 'receipt' | 'dispense' = isIn ? 'receipt' : 'dispense';
 
   const action = `movement.${effectiveType}`;
-  const reasonLabel =
-    reasonOptionsFor(direction).find((o) => o.code === reasonCode)?.label ??
-    reasonCode ??
-    '';
   const itemDesc = chosenItem?.description ?? chosenItem?.item_number ?? 'item';
   const locDesc =
     chosenLocation?.code ?? selectedStockRow?.location_code ?? '—';
-  const attestation = (() => {
-    if (effectiveType === 'receipt') {
-      return `I attest this receipt of ${qty} unit(s) of ${itemDesc} into ${locDesc} is accurate.`;
-    }
-    if (effectiveType === 'discard') {
-      return `I attest this discard of ${qty} unit(s) of ${itemDesc} from ${locDesc} for ${reasonLabel.toLowerCase()} is accurate.`;
-    }
-    return `I attest this dispense of ${qty} unit(s) of ${itemDesc} from ${locDesc} for ${reasonLabel.toLowerCase()} is accurate.`;
-  })();
+  const attestation = isIn
+    ? `I attest this unit-in of ${qty} unit(s) of ${itemDesc} into ${locDesc} is accurate.`
+    : `I attest this unit-out of ${qty} unit(s) of ${itemDesc} from ${locDesc} is accurate.`;
 
   return (
     <>
@@ -543,21 +436,15 @@ export function MovementWizard({
           <form onSubmit={handleSubmit(goToReview)}>
             <DialogHeader>
               <DialogTitle>
-                {effectiveType === 'receipt'
-                  ? 'Record stock receipt'
-                  : effectiveType === 'discard'
-                    ? 'Record stock discard'
-                    : 'Record stock dispense'}
+                {isIn ? 'Record unit in' : 'Record unit out'}
                 <span className="ml-2 text-xs font-normal text-text-3">
                   Step {step === 'form' ? '1' : '2'} of 2
                 </span>
               </DialogTitle>
               <DialogDescription>
-                {effectiveType === 'receipt'
-                  ? 'Vendor → inventory. A new ledger row will be written under your e-signature.'
-                  : effectiveType === 'discard'
-                    ? 'Inventory → waste. Distinct movement type from dispense for variance reporting.'
-                    : 'Inventory → consumed. A new ledger row will be written under your e-signature.'}
+                {isIn
+                  ? 'Vendor → inventory. A new ledger row is written under your e-signature; units are placed into the location’s racks.'
+                  : 'Inventory → consumed. A new ledger row is written under your e-signature; the units are freed from their racks.'}
               </DialogDescription>
             </DialogHeader>
 
@@ -596,7 +483,6 @@ export function MovementWizard({
                     locationId,
                     lotChoice,
                     qty,
-                    reasonCode,
                   }}
                   errors={errors}
                 />
@@ -607,7 +493,6 @@ export function MovementWizard({
                   location={chosenLocation}
                   lotIn={chosenLotIn}
                   stockRow={selectedStockRow}
-                  reasonLabel={reasonLabel}
                   formValues={getValues()}
                 />
               )}
@@ -672,13 +557,7 @@ export function MovementWizard({
         action={action}
         meaning={attestation}
         onConfirmed={submitMovement}
-        title={
-          effectiveType === 'receipt'
-            ? 'Sign this receipt'
-            : effectiveType === 'discard'
-              ? 'Sign this discard'
-              : 'Sign this dispense'
-        }
+        title={isIn ? 'Sign this unit in' : 'Sign this unit out'}
         submitLabel="Sign & record"
       />
     </>
@@ -699,14 +578,14 @@ function DirectionToggle({
   const options = [
     {
       v: 'in' as const,
-      label: 'Stock In',
+      label: 'Unit in',
       hint: 'Add to inventory',
       Icon: ArrowDownToLine,
       activeColor: 'border-success bg-success/5',
     },
     {
       v: 'out' as const,
-      label: 'Stock Out',
+      label: 'Unit out',
       hint: 'Consume / remove',
       Icon: ArrowUpFromLine,
       activeColor: 'border-warning bg-warning/5',
@@ -715,7 +594,7 @@ function DirectionToggle({
   return (
     <div
       role="radiogroup"
-      aria-label="Stock movement direction"
+      aria-label="Unit movement direction"
       className="grid grid-cols-2 gap-2"
     >
       {options.map(({ v, label, hint, Icon, activeColor }) => {
@@ -767,7 +646,6 @@ interface FormStepProps {
     locationId: string;
     lotChoice: string;
     qty: number;
-    reasonCode: string | undefined;
   };
   errors: ReturnType<typeof useForm<FormValues>>['formState']['errors'];
 }
@@ -786,12 +664,10 @@ function FormStep({
   watchValues,
   errors,
 }: FormStepProps) {
-  const { direction, itemId, locationId, lotChoice, qty, reasonCode } =
-    watchValues;
+  const { direction, itemId, locationId, lotChoice, qty } = watchValues;
   const isIn = direction === 'in';
   const isOut = direction === 'out';
   const isNewLot = isIn && lotChoice === NEW_LOT;
-  const reasonOpts = reasonOptionsFor(direction);
   // OUT picker source — only rows with a positive balance.
   const outRows = React.useMemo(
     () => stockByLot.filter((r) => Number(r.qty_available) > 0),
@@ -970,14 +846,15 @@ function FormStep({
 
           <div className="space-y-1.5">
             <Label htmlFor="mv-qty">
-              Quantity <span className="text-danger">*</span>
+              Units <span className="text-danger">*</span>
             </Label>
             <Input
               id="mv-qty"
               type="number"
-              inputMode="decimal"
+              inputMode="numeric"
               min={0}
-              step="0.001"
+              max={5000}
+              step="1"
               aria-invalid={Boolean(errors.qty)}
               {...register('qty')}
             />
@@ -994,14 +871,15 @@ function FormStep({
       {isOut && (
         <div className="space-y-1.5">
           <Label htmlFor="mv-qty-out">
-            Quantity <span className="text-danger">*</span>
+            Units <span className="text-danger">*</span>
           </Label>
           <Input
             id="mv-qty-out"
             type="number"
-            inputMode="decimal"
+            inputMode="numeric"
             min={0}
-            step="0.001"
+            max={5000}
+            step="1"
             disabled={!selectedStockRow}
             aria-invalid={Boolean(errors.qty)}
             {...register('qty')}
@@ -1018,6 +896,26 @@ function FormStep({
           {errors.qty && (
             <p role="alert" className="text-xs text-danger">
               {errors.qty.message}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* OUT mode: where the units go (free text, required) */}
+      {isOut && (
+        <div className="space-y-1.5">
+          <Label htmlFor="mv-dest">
+            Destination <span className="text-danger">*</span>
+          </Label>
+          <Input
+            id="mv-dest"
+            placeholder="e.g. PD Lab, Patient 123, Shipment SH-001"
+            aria-invalid={Boolean(errors.destination)}
+            {...register('destination')}
+          />
+          {errors.destination && (
+            <p role="alert" className="text-xs text-danger">
+              {errors.destination.message}
             </p>
           )}
         </div>
@@ -1112,51 +1010,6 @@ function FormStep({
         </>
       )}
 
-      <Separator />
-
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="mv-reason">
-            Reason <span className="text-danger">*</span>
-          </Label>
-          <Select
-            value={reasonCode || ''}
-            onValueChange={(v) => setValue('reason_code', v, { shouldValidate: true })}
-          >
-            <SelectTrigger id="mv-reason" aria-invalid={Boolean(errors.reason_code)}>
-              <SelectValue placeholder="Reason" />
-            </SelectTrigger>
-            <SelectContent>
-              {reasonOpts.map((o) => (
-                <SelectItem key={o.code} value={o.code}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {errors.reason_code && (
-            <p role="alert" className="text-xs text-danger">
-              {errors.reason_code.message}
-            </p>
-          )}
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="mv-ref">
-            Reference {isIn ? '(PO #, batch record)' : '(batch #, patient ID)'}
-          </Label>
-          <Input
-            id="mv-ref"
-            placeholder={isIn ? 'PO-12345' : 'PT-789 / BR-456'}
-            {...register('reference')}
-          />
-        </div>
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="mv-notes">Notes</Label>
-        <Input id="mv-notes" {...register('notes')} />
-      </div>
-
       {previewBefore !== null && (() => {
         const signedDelta = isIn ? qtyNum : -qtyNum;
         return (
@@ -1238,7 +1091,6 @@ function ReviewStep({
   location,
   lotIn,
   stockRow,
-  reasonLabel,
   formValues,
 }: {
   direction: MovementDirection;
@@ -1246,7 +1098,6 @@ function ReviewStep({
   location: Location | null;
   lotIn: Lot | null;
   stockRow: StockByLotEntry | null;
-  reasonLabel: string;
   formValues: FormValues;
 }) {
   const isIn = direction === 'in';
@@ -1297,7 +1148,7 @@ function ReviewStep({
       {isNewLot && formValues.expiration_date && (
         <KV label="Expires">{formValues.expiration_date}</KV>
       )}
-      <KV label="Quantity">
+      <KV label="Units">
         <span
           className={cn(
             'font-mono',
@@ -1313,9 +1164,9 @@ function ReviewStep({
           </span>
         )}
       </KV>
-      <KV label="Reason">{reasonLabel}</KV>
-      {formValues.reference && <KV label="Reference">{formValues.reference}</KV>}
-      {formValues.notes && <KV label="Notes">{formValues.notes}</KV>}
+      {!isIn && formValues.destination && (
+        <KV label="Destination">{formValues.destination}</KV>
+      )}
     </dl>
   );
 }

@@ -3,7 +3,7 @@
 import * as React from 'react';
 
 import { cn } from '@/lib/utils';
-import { GRID_COLUMNS, POSITION_TONE, rackOccupied, type Rack } from './ln2-data';
+import { POSITION_TONE, rackOccupied, type Rack } from './ln2-data';
 
 interface RackTileProps {
   rack: Rack;
@@ -21,7 +21,12 @@ export const RackTile = React.memo(function RackTile({
   return (
     <div className="rounded-md border border-border bg-bg-elev p-3 shadow-elev-sm">
       <div className="mb-2 flex items-baseline justify-between">
-        <div className="text-xs font-semibold tracking-tight">{rack.name}</div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-xs font-semibold tracking-tight">{rack.name}</span>
+          <span className="font-mono text-[10px] text-text-3">
+            {rack.rows}×{rack.cols}
+          </span>
+        </div>
         <div className="font-mono text-[11px] text-text-3">
           {occupied}/{rack.positions.length}
         </div>
@@ -30,7 +35,7 @@ export const RackTile = React.memo(function RackTile({
         role="grid"
         aria-label={`${rack.name} positions`}
         className="grid gap-1"
-        style={{ gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0,1fr))` }}
+        style={{ gridTemplateColumns: `repeat(${rack.cols}, minmax(0,1fr))` }}
       >
         {rack.positions.map((pos) => {
           const tone = POSITION_TONE[pos.status];

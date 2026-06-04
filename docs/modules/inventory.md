@@ -452,6 +452,15 @@ lifecycle (see `forecast.md`).
 
 ## 5. LN2 mapping
 
+> **⚠️ Superseded for racks/positions (2026-06-04).** The rack/position model
+> below — `ln2_rack`/`ln2_position` nodes in `meta.locations` +
+> `app.ln2_position_state` — is **replaced** by explicit `meta.storage_racks` /
+> `app.storage_positions` tables in [storage.md](./storage.md). In the
+> authoritative model a rack is a `rows × cols` grid and **position status is
+> binary `occupied` / `empty`** (no `reserved` / `out_of_service`). The
+> `meta.locations` row-per-tank is retained. This section is kept for history;
+> follow `storage.md` when building.
+
 From the spec doc:
 > "The system will support assignment and reassignment of cryogenic
 > items to tank positions. The system will also allow status tracking
@@ -478,7 +487,7 @@ The mutable "what's here right now" overlay on top of the
 | col | type | notes |
 |--|--|--|
 | `location_id` | `UUID PK FK → meta.locations` | must reference a row with `kind='ln2_position'` (CHECK trigger) |
-| `status` | `TEXT NOT NULL CHECK (status IN ('empty','occupied','reserved','out_of_service'))` | `quarantine` removed (§99 Q3) |
+| `status` | `TEXT NOT NULL CHECK (status IN ('empty','occupied'))` | binary — `reserved` / `out_of_service` / `quarantine` dropped; see [storage.md §4.3](./storage.md) |
 | `current_batch_id` | `UUID FK → app.item_batches NULL` | when occupied; NULL when empty |
 | `current_lot_id` | `UUID FK → app.lots NULL` | denorm of `batches.lot_id` for cheap display |
 | `current_item_id` | `UUID FK → app.items NULL` | denorm |

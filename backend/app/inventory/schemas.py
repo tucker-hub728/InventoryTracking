@@ -432,6 +432,7 @@ class MovementRead(BaseModel):
 
     lot_id: str | None
     lot_number: str | None = None
+    lot_expiration_date: date | None = None
 
     from_location_id: str | None
     from_location_code: str | None = None
@@ -448,6 +449,7 @@ class MovementRead(BaseModel):
     reason_code: str | None
     notes: str | None
     reference: str | None
+    destination_text: str | None = None
 
     reversal_of_id: str | None
     # FK into ``audit.reauth_events``. The audit viewer hydrates the
@@ -515,11 +517,6 @@ class ReceiptRequest(BaseModel):
     lot_id: str | None = None
     new_lot: NewLotInput | None = None
 
-    # Movement metadata.
-    reason_code: str | None = Field(default=None, max_length=64)
-    notes: str | None = Field(default=None, max_length=2048)
-    reference: str | None = Field(default=None, max_length=256)
-
     # E-signature evidence.
     evidence_id: str  # UUID from /v1/auth/reauth (action=movement.receipt)
 
@@ -555,9 +552,10 @@ class DispenseRequest(BaseModel):
     lot_id: str  # UUID — required for dispense
     qty: Decimal = Field(gt=Decimal("0"))
 
-    reason_code: str = Field(min_length=1, max_length=64)
-    notes: str | None = Field(default=None, max_length=2048)
-    reference: str | None = Field(default=None, max_length=256)
+    # Free-text "where did it go" (lab, patient, shipment, …). Required.
+    destination: Annotated[str, _trimmed_non_blank("destination")] = Field(
+        max_length=256
+    )
 
     evidence_id: str  # UUID from /v1/auth/reauth (action=movement.dispense)
 
@@ -658,10 +656,6 @@ class TransferRequest(BaseModel):
     to_location_id: str
     qty: Decimal = Field(gt=Decimal("0"))
 
-    reason_code: str = Field(min_length=1, max_length=64)
-    notes: str | None = Field(default=None, max_length=2048)
-    reference: str | None = Field(default=None, max_length=256)
-
     evidence_id: str  # UUID from /v1/auth/reauth (action=movement.transfer)
     # Same-location is rejected at the route layer with a structured
     # ``transfer_same_location`` code (consistent with how the other
@@ -731,3 +725,137 @@ class StockByLotEntry(BaseModel):
 
     qty_available: Decimal
     last_movement_at: datetime | None = None
+
+
+# ── Storage (racks + positions) ────────────────────────────────────────
+#
+# The LN2 / Storage grid: Location → Rack(rows×cols) → Position. See
+# ``docs/modules/storage.md``. Position status is binary (empty/occupied).
+
+
+PositionStatus = Literal["empty", "occupied"]
+
+
+class RackInput(BaseModel):
+    """One rack defined while creating a location (or added later)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=64)
+    rows: int = Field(ge=1, le=26)
+    cols: int = Field(ge=1, le=26)
+
+
+class StorageLocationCreate(BaseModel):
+    """Payload for ``POST /v1/storage/locations``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=128)
+    kind: LocationKind
+    detail: str | None = Field(default=None, max_length=128)
+    racks: list[RackInput] = Field(min_length=1)
+
+
+class PositionRead(BaseModel):
+    """One slot, hydrated with its occupant (lot → item) for the grid."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    # Row-major 1-based number within the rack (the user-facing slot no.).
+    index: int
+    row_idx: int
+    col_idx: int
+    label: str
+    status: PositionStatus
+    lot_id: str | None = None
+    lot_number: str | None = None
+    # ``item_id`` is the human item_number (what ``/inventory/{id}`` keys on);
+    # ``item_uuid`` is the backend UUID.
+    item_id: str | None = None
+    item_uuid: str | None = None
+    item_description: str | None = None
+    vendor_name: str | None = None
+    assigned_at: datetime | None = None
+
+
+class RackRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    rows: int
+    cols: int
+    position_order: int
+    positions: list[PositionRead]
+
+
+class StorageLocationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    kind: LocationKind
+    detail: str
+    racks: list[RackRead]
+
+
+class AssignPositionRequest(BaseModel):
+    """Assign a lot (one vial) to a single empty slot.
+
+    A grid assign places a new vial and posts a ``+1`` receipt to the ledger,
+    so it carries an e-signature like the unit-in flow. ``evidence_id`` is the
+    UUID from ``POST /v1/auth/reauth`` (action ``movement.receipt``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    evidence_id: str
+
+
+class EmptyPositionRequest(BaseModel):
+    """Empty a single slot (one vial out).
+
+    Posts a ``-1`` dispense to the ledger, so it carries an e-signature and a
+    free-text destination (like any unit-out). ``evidence_id`` is the UUID from
+    ``POST /v1/auth/reauth`` (action ``movement.dispense``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    destination: Annotated[str, _trimmed_non_blank("destination")] = Field(
+        max_length=256
+    )
+    evidence_id: str
+
+
+class MovePositionRequest(BaseModel):
+    """Move the occupant to another free slot (may be in another location)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dest_position_id: str
+
+
+class MovePositionResult(BaseModel):
+    source: PositionRead
+    dest: PositionRead
+
+
+class PositionEventRead(BaseModel):
+    """One row of a position's history — unit in / out / move."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    event_kind: str  # assign | empty | move_in | move_out
+    from_status: str | None = None
+    to_status: str | None = None
+    lot_number: str | None = None
+    actor_name: str | None = None
+    # For moves: the other position + its location.
+    counterpart_label: str | None = None
+    counterpart_location: str | None = None
+    occurred_at: datetime

@@ -13,6 +13,7 @@ files reference those rather than re-stating them.
 | File | Scope | Status |
 |--|--|--|
 | [inventory.md](./inventory.md) | **Full Inventory Module** — items, lots, batches, balances, ledger, vendors, UOM, locations tree, **LN2 mapping** (tanks/racks/positions/state), **Kanban workflow** (stages, cards, transitions), **reorder + expiration notifications**, **21 CFR Part 11 electronic sign-off** | **finalised 2026-05-26** — questions 1–5 resolved, 6–10 still open |
+| [storage.md](./storage.md) | **Storage / LN2 Module** (`/ln2` page) — `Location → Rack(rows×cols) → Position` layout, per-slot occupancy + status, assignment history. **Supersedes** `inventory.md §5` for racks/positions (ltree nodes → explicit `storage_racks`/`storage_positions` tables) | **draft 2026-06-04** — frontend model live (in-memory); backend pending; §99 Q1–5 resolved 2026-06-04 (Q4 stock-in/consume deferred to a post-ln2 phase) |
 | identity-access.md | Users, roles, permissions, role/user assignments, sessions, app settings, super-admin bootstrap | not yet split |
 | purchase-orders.md | `purchase_orders`, `po_lines`, PO approval signatures | not yet split |
 | forecast.md | `forecast_periods`, `forecast_demand`, `mfg_schedule`, allocations linking lots to manufacturing runs (powers `lots.status='reserved'`) | not yet split |

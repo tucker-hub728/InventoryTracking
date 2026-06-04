@@ -40,9 +40,11 @@ const KIND_ICON: Record<LocationKind, LucideIcon> = {
 
 export function TankMapClient() {
   const locations = useLN2Store((s) => s.locations);
-  const updatePosition = useLN2Store((s) => s.updatePosition);
+  const loadStatus = useLN2Store((s) => s.status);
+  const loadError = useLN2Store((s) => s.error);
+  const load = useLN2Store((s) => s.load);
 
-  const [activeId, setActiveId] = React.useState<string>(locations[0]?.id ?? '');
+  const [activeId, setActiveId] = React.useState<string>('');
   const [selected, setSelected] = React.useState<{ rackKey: string; positionId: string } | null>(
     null,
   );
@@ -51,7 +53,14 @@ export function TankMapClient() {
   const debounced = useDebouncedValue(query, 150);
   const canEdit = usePermission('inventory', 'edit');
 
-  // Keep the active tab valid as locations are added/removed.
+  // Refresh the storage tree on every mount so changes made elsewhere
+  // (unit-in / unit-out / transfer on the inventory page) show up here
+  // without a hard reload. Existing data stays visible while it refetches.
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Keep the active tab valid as locations are added / loaded.
   const activeLoc = locations.find((l) => l.id === activeId) ?? locations[0];
   React.useEffect(() => {
     if (activeLoc && activeLoc.id !== activeId) setActiveId(activeLoc.id);
@@ -97,16 +106,52 @@ export function TankMapClient() {
     };
   }, [selected, activeLoc]);
 
+  const addDialog = (
+    <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={setActiveId} />
+  );
+
+  // ── Loading / error / empty states ───────────────────────────────────
+  // Only take over the screen on the FIRST load (no data yet). A background
+  // refresh on revisit keeps the existing grid visible while it updates.
+  if ((loadStatus === 'loading' || loadStatus === 'idle') && locations.length === 0) {
+    return (
+      <>
+        <PageHeader title="Storage" subtitle="Loading…" />
+        <div className="px-6 py-10 text-sm text-text-3 sm:px-8" role="status">
+          Loading storage locations…
+        </div>
+      </>
+    );
+  }
+
+  if (loadStatus === 'error' && locations.length === 0) {
+    return (
+      <>
+        <PageHeader title="Storage" subtitle="Couldn’t load" />
+        <div className="px-6 py-10 sm:px-8">
+          <p className="mb-3 text-sm text-danger">{loadError ?? 'Failed to load storage.'}</p>
+          <Button variant="default" onClick={() => void load()}>
+            Retry
+          </Button>
+        </div>
+      </>
+    );
+  }
+
   if (!activeLoc || !stats) {
     return (
       <>
         <PageHeader title="Storage" subtitle="No locations yet" />
         <div className="px-6 py-5 sm:px-8">
-          <Button variant="primary" onClick={() => setAddOpen(true)}>
-            <Plus size={14} /> Add location
-          </Button>
+          {canEdit ? (
+            <Button variant="primary" onClick={() => setAddOpen(true)}>
+              <Plus size={14} /> Add location
+            </Button>
+          ) : (
+            <p className="text-sm text-text-3">No storage locations have been created yet.</p>
+          )}
         </div>
-        <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={setActiveId} />
+        {addDialog}
       </>
     );
   }
@@ -165,16 +210,14 @@ export function TankMapClient() {
           <span className="text-xs text-text-3">{activeLoc.detail}</span>
         </div>
 
-        <ul className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <ul className="mb-4 grid grid-cols-3 gap-3">
           <Stat label="Capacity" value={stats.total} />
           <Stat label="Occupied" value={stats.occupied} variant="accent" />
-          <Stat label="Reserved" value={stats.reserved} variant="warning" />
-          <Stat label="Quarantine" value={stats.quarantine} variant="danger" />
           <Stat label="Empty" value={stats.empty} variant="muted" />
         </ul>
 
         <div className="mb-3 flex flex-wrap gap-4 text-[11px] text-text-2">
-          {(['Occupied', 'Reserved', 'Quarantine', 'Empty'] as const).map((s) => (
+          {(['Occupied', 'Empty'] as const).map((s) => (
             <div key={s} className="inline-flex items-center gap-1.5">
               <span className={cn('size-2.5 rounded-sm', POSITION_TONE[s].legend)} aria-hidden />
               {s}
@@ -196,17 +239,9 @@ export function TankMapClient() {
         </Card>
       </div>
 
-      <PositionSheet
-        selection={selection}
-        onClose={() => setSelected(null)}
-        onUpdate={(patch) => {
-          if (selection) {
-            updatePosition(selection.locationId, selection.rackKey, selection.position.id, patch);
-          }
-        }}
-      />
+      <PositionSheet selection={selection} onClose={() => setSelected(null)} />
 
-      <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={setActiveId} />
+      {addDialog}
     </>
   );
 }

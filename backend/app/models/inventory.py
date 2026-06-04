@@ -482,6 +482,9 @@ class StockMovement(Base):
     reason_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Free-text "where did it go" captured on a unit-out (dispense) — set by
+    # the dispense wizard and the /ln2 Empty-position action; NULL otherwise.
+    destination_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     reversal_of_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.stock_movements.id", ondelete="RESTRICT"),

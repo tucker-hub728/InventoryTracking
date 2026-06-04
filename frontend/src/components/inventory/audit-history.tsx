@@ -91,7 +91,7 @@ function buildEntries(item: InventoryItem, signoffs: Signoff[]): AuditEntry[] {
   signoffs.forEach((s, i) => {
     const { date, time } = splitDateTime(s.date);
     const kind: EventKind = s.direction === 'in' ? 'in' : 'out';
-    const verb = s.direction === 'in' ? 'Stock In' : 'Stock Out';
+    const verb = s.direction === 'in' ? 'Unit in' : 'Unit out';
     const action = s.direction === 'in' ? 'Received' : 'Released';
     const subject =
       s.direction === 'in'
