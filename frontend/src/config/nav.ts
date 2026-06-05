@@ -1,10 +1,12 @@
 import {
   Boxes,
   Building2,
+  Contact,
   History,
   KanbanSquare,
   Layers,
   MapPin,
+  Package,
   Ruler,
   Snowflake,
   Users,
@@ -41,6 +43,8 @@ export const navSections: readonly NavSection[] = [
     title: 'Operations',
     items: [
       { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
+      { id: 'products', label: 'Products', href: '/products', icon: Package, resource: 'inventory' },
+      { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
       {
         id: 'ln2',
         label: 'LN2 Tanks',

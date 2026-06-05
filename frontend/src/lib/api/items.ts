@@ -19,7 +19,10 @@ import { api } from './client';
 
 // ── Wire shape ─────────────────────────────────────────────────────────
 
-export type ApiItemPrefix = 'CM' | 'NM' | 'CR' | 'AY';
+// Free-form since Week 2: the item-number prefix is any 2–8 character,
+// letter-led code (the backend CHECK enforces the shape). Kept as a named
+// alias so call sites read clearly.
+export type ApiItemPrefix = string;
 
 export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
 

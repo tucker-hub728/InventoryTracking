@@ -21,6 +21,7 @@ from app.models.inventory import (
     UnitOfMeasure,
     Vendor,
 )
+from app.models.products import Customer, CustomerProduct, Product, ProductMaterial
 from app.models.storage import (
     StorageAssignmentEvent,
     StoragePosition,
@@ -29,10 +30,14 @@ from app.models.storage import (
 
 __all__ = [
     "AuditEvent",
+    "Customer",
+    "CustomerProduct",
     "Item",
     "ItemStock",
     "Location",
     "Lot",
+    "Product",
+    "ProductMaterial",
     "ReauthConsumption",
     "ReauthEvent",
     "Role",

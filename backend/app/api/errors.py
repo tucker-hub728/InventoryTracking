@@ -82,25 +82,32 @@ async def _handle_domain(request: Request, exc: DomainError) -> ORJSONResponse:
     )
 
 
-def _sanitize_pydantic_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Strip ``ctx`` entries that aren't JSON-serializable.
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce a value into something orjson can encode.
 
-    Pydantic v2 leaves the original exception object in ``ctx['error']``
-    when a ``BeforeValidator`` raises — orjson then can't encode the
-    response. We stringify any exception-typed values so the error
-    message survives but the encoder doesn't choke.
+    Pydantic v2 validation errors embed the raw ``input`` and constraint
+    ``ctx`` — which for ``Decimal``-typed fields are ``Decimal`` objects and
+    for ``BeforeValidator`` failures are exception instances. orjson can't
+    encode either, so anything that isn't a JSON-native type is stringified
+    (the error message survives; the encoder doesn't choke).
     """
-    cleaned: list[dict[str, Any]] = []
-    for err in errors:
-        e = dict(err)
-        ctx = e.get("ctx")
-        if isinstance(ctx, dict):
-            e["ctx"] = {
-                k: (str(v) if isinstance(v, BaseException) else v)
-                for k, v in ctx.items()
-            }
-        cleaned.append(e)
-    return cleaned
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+def _sanitize_pydantic_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make Pydantic validation errors JSON-encodable.
+
+    The raw error dicts can carry ``Decimal`` inputs / constraint bounds and
+    exception objects that orjson rejects — recursively stringify anything
+    that isn't a JSON-native type so the 422 response renders cleanly.
+    """
+    return [_json_safe(err) for err in errors]
 
 
 async def _handle_validation(request: Request, exc: RequestValidationError) -> ORJSONResponse:

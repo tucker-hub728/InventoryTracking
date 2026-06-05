@@ -1,4 +1,5 @@
 import * as React from 'react';
+import Link from 'next/link';
 
 import { cn } from '@/lib/utils';
 
@@ -39,12 +40,12 @@ export function PageHeader({
               <React.Fragment key={`${c.label}-${i}`}>
                 {i > 0 && <span aria-hidden>/</span>}
                 {c.href ? (
-                  <a
+                  <Link
                     href={c.href}
                     className="rounded-sm text-text-2 transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                   >
                     {c.label}
-                  </a>
+                  </Link>
                 ) : (
                   <span aria-current="page">{c.label}</span>
                 )}

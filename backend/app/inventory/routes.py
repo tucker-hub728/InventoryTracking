@@ -20,6 +20,7 @@ from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
+    PREFIX_CODE_PATTERN,
     AdjustmentRequest,
     AssignPositionRequest,
     DiscardRequest,
@@ -27,7 +28,6 @@ from app.inventory.schemas import (
     EmptyPositionRequest,
     ItemCreate,
     ItemListResponse,
-    ItemPrefix,
     ItemRead,
     ItemUpdate,
     LocationCreate,
@@ -426,7 +426,11 @@ async def list_items(
     db: DBSession,
     q: Annotated[str | None, Query(description="Search description + item_number")] = None,
     prefix: Annotated[
-        ItemPrefix | None, Query(description="Filter by 2-letter prefix")
+        str | None,
+        Query(
+            pattern=PREFIX_CODE_PATTERN,
+            description="Filter by category/prefix code (e.g. CM, MR)",
+        ),
     ] = None,
     vendor_id: Annotated[uuid.UUID | None, Query()] = None,
     status_filter: Annotated[
@@ -471,10 +475,16 @@ async def list_items(
 )
 async def next_item_number(
     db: DBSession,
-    prefix: Annotated[ItemPrefix, Query(description="2-letter prefix (CM, NM, CR, or AY)")],
+    prefix: Annotated[
+        str,
+        Query(
+            pattern=PREFIX_CODE_PATTERN,
+            description="Category/prefix code, e.g. CM, MR, PI",
+        ),
+    ],
 ) -> NextItemNumberResponse:
     suggested = await inv_repo.next_item_number(db, prefix)
-    return NextItemNumberResponse(prefix=prefix, item_number=suggested)
+    return NextItemNumberResponse(prefix=prefix.upper(), item_number=suggested)
 
 
 @items_router.get(
@@ -487,7 +497,7 @@ async def next_item_number(
 )
 async def get_item_by_number(
     db: DBSession,
-    item_number: Annotated[str, Path(pattern=r"^(CM|NM|CR|AY)-\d+$")],
+    item_number: Annotated[str, Path(pattern=r"^[A-Z][A-Z0-9]{1,7}-\d+$")],
 ) -> ItemRead:
     item = await inv_repo.get_item_by_number(db, item_number)
     if item is None:

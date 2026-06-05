@@ -32,8 +32,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.models.identity import User
 
-# Single source of truth for accepted item-number prefixes. The DB
-# CHECK enforces the same set; keep these aligned if either is changed.
+# The original item-number prefixes. Since Week 2 the prefix is free-form:
+# any 2–8 character, letter-led code (the DB CHECK enforces the *shape*,
+# ``^[A-Z][A-Z0-9]{1,7}-[0-9]+$``, not a fixed set). This tuple is kept as
+# the seed/legacy list and as UI quick-picks — it is NOT an exhaustive
+# whitelist anymore.
 ITEM_NUMBER_PREFIXES: tuple[str, ...] = ("CM-", "NM-", "CR-", "AY-")
 
 
@@ -105,7 +108,7 @@ class Item(Base):
     __tablename__ = "items"
     __table_args__ = (
         CheckConstraint(
-            "item_number ~ '^(CM|NM|CR|AY)-[0-9]+$'",
+            "item_number ~ '^[A-Z][A-Z0-9]{1,7}-[0-9]+$'",
             name="ck_items_item_number_format",
         ),
         CheckConstraint(
@@ -224,8 +227,12 @@ class Item(Base):
 
     @property
     def item_prefix(self) -> str:
-        """The 2-letter grouping prefix (without trailing dash)."""
-        return self.item_number[:2]
+        """The grouping prefix — the part before the dash (``CM``, ``MR``…).
+
+        Free-form since Week 2, so split on the first dash rather than
+        slicing two characters; multi-letter codes resolve correctly.
+        """
+        return self.item_number.split("-", 1)[0]
 
 
 # Single source of truth for accepted location kinds. The DB CHECK

@@ -24,19 +24,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { CATEGORY_OPTIONS } from '@/config/inventory';
-import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
 import { vendorsApi, type Vendor } from '@/lib/api/vendors';
-import type { ApiItemPrefix } from '@/lib/api/items';
 
 // ── Form schema ────────────────────────────────────────────────────────
 
 const schema = z.object({
-  category: z.enum(['CM', 'NM', 'CR', 'AY']),
-  itemId: z.string().regex(/^(CM|NM|CR|AY)-\d+$/, 'Item # must look like CM-0001'),
+  // Free-form, typed directly: a 2–8 char letter-led prefix, dash, digits
+  // (e.g. UR-0001). Mirrors the backend CHECK.
+  itemId: z
+    .string()
+    .regex(/^[A-Za-z][A-Za-z0-9]{1,7}-\d+$/, 'Item # must look like CM-0001'),
   desc: z.string().min(3, 'Description is required'),
   // Vendor is optional — backend accepts null. UI requires a selection
   // unless the user explicitly chooses "No vendor" so we treat empty as
@@ -57,12 +57,15 @@ const NO_VENDOR_VALUE = '__none__';
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Called after a successful create (in addition to the toast). Lets a
+   *  host list refresh itself — the inventory list relies on the store
+   *  refetch instead and omits this. */
+  onCreated?: () => void;
 }
 
-export function NewItemDialog({ open, onOpenChange }: Props) {
+export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
   // Store actions — the only thing this component does for I/O.
   const createItem = useInventoryStore((s) => s.create);
-  const getNextItemNumber = useInventoryStore((s) => s.getNextItemNumber);
   const createPending = useInventoryStore((s) => s.createPending);
 
   // Vendor dropdown source. Loaded once when the dialog opens — the
@@ -72,9 +75,6 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
   const [vendorsLoading, setVendorsLoading] = React.useState(false);
   const [vendorsError, setVendorsError] = React.useState<string | null>(null);
 
-  // Suggested item number for the current category. Refetched whenever
-  // the category changes so we always show a fresh suggestion.
-  const [suggestingNumber, setSuggestingNumber] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
@@ -87,7 +87,6 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
   } = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
-      category: 'CM',
       itemId: '',
       desc: '',
       vendorId: '',
@@ -100,8 +99,6 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
     },
   });
 
-  const category = watch('category');
-  const itemId = watch('itemId');
   const vendorId = watch('vendorId');
 
   // ── Side effects ─────────────────────────────────────────────────────
@@ -125,36 +122,10 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
     return () => ctrl.abort();
   }, [open]);
 
-  // Suggest the next item number from the backend each time the
-  // category changes (or the dialog reopens). Server-side suggestion
-  // matters because two admins on different machines would otherwise
-  // collide on the same locally-computed next ID.
-  React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    setSuggestingNumber(true);
-    getNextItemNumber(category as ApiItemPrefix)
-      .then((next) => {
-        if (!ctrl.signal.aborted) {
-          setValue('itemId', next, { shouldDirty: false, shouldValidate: false });
-        }
-      })
-      .catch(() => {
-        // Don't block the form on a suggestion failure — the user can
-        // still type their own number. The submit-side validation will
-        // catch any conflict with a clear error message.
-      })
-      .finally(() => {
-        if (!ctrl.signal.aborted) setSuggestingNumber(false);
-      });
-    return () => ctrl.abort();
-  }, [open, category, getNextItemNumber, setValue]);
-
   // Reset the form when the dialog closes.
   React.useEffect(() => {
     if (!open) {
       reset({
-        category: 'CM',
         itemId: '',
         desc: '',
         vendorId: '',
@@ -189,6 +160,7 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
       toast.success('Item created', {
         description: `${created.id} · ${created.desc}`,
       });
+      onCreated?.();
       onOpenChange(false);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -221,50 +193,11 @@ export function NewItemDialog({ open, onOpenChange }: Props) {
             <DialogTitle>New inventory item</DialogTitle>
           </DialogHeader>
           <DialogBody className="space-y-5">
-            <div className="space-y-2">
-              <Label>Category</Label>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {CATEGORY_OPTIONS.map((c) => {
-                  const active = category === c.code;
-                  return (
-                    <button
-                      key={c.code}
-                      type="button"
-                      onClick={() =>
-                        setValue('category', c.code, { shouldValidate: true })
-                      }
-                      aria-pressed={active}
-                      className={cn(
-                        'flex items-center gap-2 rounded-md border bg-bg-elev px-3 py-2.5 text-left text-sm transition-colors',
-                        active
-                          ? 'border-accent bg-accent-soft text-text ring-2 ring-accent/20'
-                          : 'border-border-strong text-text-2 hover:border-border-strong hover:bg-surface',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'font-mono text-xs font-semibold',
-                          active ? 'text-accent' : 'text-text-3',
-                        )}
-                      >
-                        {c.code}
-                      </span>
-                      <span aria-hidden className="text-text-3">
-                        —
-                      </span>
-                      <span className="truncate">{c.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-[140px_1fr]">
+            <div className="grid gap-4 sm:grid-cols-[160px_1fr]">
               <Field id="ni-itemId" label="Item #" error={errors.itemId?.message}>
                 <Input
                   id="ni-itemId"
-                  value={itemId}
-                  placeholder={suggestingNumber ? 'Suggesting…' : ''}
+                  placeholder="e.g. UR-0001"
                   className="font-mono"
                   aria-invalid={Boolean(errors.itemId)}
                   {...register('itemId')}

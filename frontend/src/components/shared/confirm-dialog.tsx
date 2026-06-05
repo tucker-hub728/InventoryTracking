@@ -4,7 +4,6 @@ import * as React from 'react';
 
 import {
   Dialog,
-  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -51,11 +50,12 @@ export function ConfirmDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
-          {description && <DialogDescription>{description}</DialogDescription>}
+          {description && (
+            <DialogDescription className="text-sm text-text-2">
+              {description}
+            </DialogDescription>
+          )}
         </DialogHeader>
-        <DialogBody>
-          <div className="text-sm text-text-2">{description}</div>
-        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={pending}>
             {cancelLabel}

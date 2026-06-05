@@ -19,21 +19,27 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
-from app.models.inventory import ITEM_NUMBER_PREFIXES
-
-# Item-number prefix is the *one* validation that's the same in the API,
-# the ORM, and the DB. Centralise the regex so they can't drift.
-_PREFIX_RE = re.compile(
-    rf"^({'|'.join(p.rstrip('-') for p in ITEM_NUMBER_PREFIXES)})-[0-9]+$"
-)
-ItemPrefix = Literal["CM", "NM", "CR", "AY"]
+# Item-number shape is the *one* validation that's the same in the API,
+# the ORM, and the DB. Centralise the regex so they can't drift. Since
+# Week 2 the prefix is free-form — any 2–8 character, letter-led code
+# (e.g. CM, MR, PI, OE) — so the regex enforces the *shape*, not a fixed
+# set. The DB CHECK ``ck_items_item_number_format`` mirrors this exactly.
+_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]{1,7}-[0-9]+$")
+# The accepted prefix-code shape on its own (no number). Routes reuse this
+# string as the ``pattern`` on the ``prefix`` Query/Path params.
+PREFIX_CODE_PATTERN = r"^[A-Za-z][A-Za-z0-9]{1,7}$"
+# Free-form prefix code. A named alias (was a ``Literal``) so route
+# signatures stay readable; the real check is the Query/Path ``pattern``.
+ItemPrefix = str
 
 
 def _validate_item_number(v: str) -> str:
     v = v.strip().upper()
     if not _PREFIX_RE.match(v):
-        accepted = ", ".join(p.rstrip("-") for p in ITEM_NUMBER_PREFIXES)
-        raise ValueError(f"item_number must look like '<{accepted}>-NNNN'")
+        raise ValueError(
+            "item_number must look like '<CODE>-NNNN' where CODE is a "
+            "2–8 character letter-led prefix (e.g. CM-0001, MR-0007)"
+        )
     return v
 
 

@@ -20,6 +20,12 @@ from app.inventory.routes import (
     uoms_router,
     vendors_router,
 )
+from app.products.routes import (
+    customers_router,
+    item_products_router,
+    materials_router,
+    products_router,
+)
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -32,4 +38,8 @@ api_router.include_router(locations_router)
 api_router.include_router(lots_router)
 api_router.include_router(movements_router)
 api_router.include_router(storage_router)
+api_router.include_router(products_router)
+api_router.include_router(materials_router)
+api_router.include_router(customers_router)
+api_router.include_router(item_products_router)
 api_router.include_router(audit_router)
