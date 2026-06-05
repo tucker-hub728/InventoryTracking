@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 import { ArrowDownLeft, ArrowUpRight, Undo2 } from 'lucide-react';
 
 import {
@@ -133,7 +134,19 @@ export function LedgerTable({ entries, onReverseRequest }: Props) {
                   </TableCell>
                   {/* Per-row balance lives on the lot Total row, like the workbook. */}
                   <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
-                  <TableCell className="font-mono text-xs text-text-2">{e.location}</TableCell>
+                  <TableCell className="font-mono text-xs text-text-2">
+                    {e.locationId && e.location !== '—' ? (
+                      <Link
+                        href={`/ln2?tab=${e.locationId}`}
+                        className="text-accent underline-offset-2 hover:underline focus-visible:underline focus-visible:outline-none"
+                        title={`View ${e.location} in Storage`}
+                      >
+                        {e.location}
+                      </Link>
+                    ) : (
+                      e.location
+                    )}
+                  </TableCell>
                   <TableCell className="font-mono text-xs text-text-2">{e.lot}</TableCell>
                   <TableCell className="font-mono text-xs text-text-2">{e.exp}</TableCell>
                   <TableCell className="text-xs text-text-2">

@@ -2152,8 +2152,6 @@ async def create_storage_location(
     loc = await inv_repo.create_storage_location(
         db,
         name=payload.name,
-        kind=payload.kind,
-        detail=payload.detail,
         racks=payload.racks,
     )
     loaded = await inv_repo.get_storage_location(db, loc.id)

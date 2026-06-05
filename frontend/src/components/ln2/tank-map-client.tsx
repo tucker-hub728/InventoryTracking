@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
   Boxes,
   FlaskConical,
@@ -44,7 +45,35 @@ export function TankMapClient() {
   const loadError = useLN2Store((s) => s.error);
   const load = useLN2Store((s) => s.load);
 
-  const [activeId, setActiveId] = React.useState<string>('');
+  // Deep link: ``/ln2?tab=<location-id>`` opens straight to that tab. The
+  // inventory ledger's Location cells link here. We seed state from the param
+  // and keep the URL in sync as the operator switches tabs.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get('tab');
+
+  const [activeId, setActiveId] = React.useState<string>(tabParam ?? '');
+
+  // Honor the ?tab= param once the locations load (or when a new deep link
+  // arrives), but only if it names a location that actually exists.
+  React.useEffect(() => {
+    if (tabParam && locations.some((l) => l.id === tabParam)) {
+      setActiveId(tabParam);
+    }
+  }, [tabParam, locations]);
+
+  // Switch tab + reflect it in the URL so the view is shareable / reloadable.
+  const selectTab = React.useCallback(
+    (id: string): void => {
+      setActiveId(id);
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('tab', id);
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
+
   const [selected, setSelected] = React.useState<{ rackKey: string; positionId: string } | null>(
     null,
   );
@@ -107,7 +136,7 @@ export function TankMapClient() {
   }, [selected, activeLoc]);
 
   const addDialog = (
-    <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={setActiveId} />
+    <LocationAddDialog open={addOpen} onOpenChange={setAddOpen} onCreated={selectTab} />
   );
 
   // ── Loading / error / empty states ───────────────────────────────────
@@ -172,7 +201,7 @@ export function TankMapClient() {
 
       <div className="px-6 py-5 sm:px-8">
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          <Tabs value={activeLoc.id} onValueChange={setActiveId}>
+          <Tabs value={activeLoc.id} onValueChange={selectTab}>
             <TabsList className="flex-wrap border-b-0">
               {locations.map((loc) => {
                 const Icon = KIND_ICON[loc.kind];

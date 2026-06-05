@@ -38,6 +38,10 @@ export interface LedgerEntry {
   out: number;
   balance: number;
   location: string;
+  /** Storage-location UUID backing the ``location`` cell, when it maps to a
+   *  real location. ``null`` for free-text dispense destinations (which aren't
+   *  storage locations). Lets the ledger deep-link to that location's /ln2 tab. */
+  locationId?: string | null;
   lot: string;
   exp: string;
   initials: string;

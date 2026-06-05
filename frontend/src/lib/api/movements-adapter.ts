@@ -84,6 +84,17 @@ export function apiMovementsToLedgerEntries(
         m.movement_type === 'dispense'
           ? m.destination_text ?? m.from_location_code ?? '—'
           : m.to_location_code ?? m.from_location_code ?? '—',
+      // The storage-location id behind that code, aligned with the same
+      // fallback so the cell can deep-link to /ln2. Null when the cell shows a
+      // free-text dispense destination (no backing storage location).
+      locationId:
+        m.movement_type === 'dispense'
+          ? m.destination_text
+            ? null
+            : m.from_location_id
+          : m.to_location_code
+            ? m.to_location_id
+            : m.from_location_id,
       lot: m.lot_number ?? '—',
       exp: m.lot_expiration_date ?? '—',
       // ``initials`` is the compact form for the narrow ledger column —

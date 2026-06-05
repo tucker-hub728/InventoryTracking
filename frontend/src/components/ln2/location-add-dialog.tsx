@@ -18,18 +18,8 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { LOCATION_KIND_OPTIONS, type LocationKind } from '@/lib/api/locations';
 import { useLN2Store, type AddLocationInput } from '@/stores/ln2.store';
 import { toast } from '@/components/ui/sonner';
-
-const KIND_CODES = LOCATION_KIND_OPTIONS.map((o) => o.code) as [LocationKind, ...LocationKind[]];
 
 const rackSchema = z.object({
   name: z.string().trim().min(1, 'Rack name is required').max(64),
@@ -39,8 +29,6 @@ const rackSchema = z.object({
 
 const schema = z.object({
   name: z.string().trim().min(1, 'Name is required').max(128),
-  kind: z.enum(KIND_CODES),
-  detail: z.string().trim().max(128).optional(),
   racks: z.array(rackSchema).min(1, 'Add at least one rack'),
 });
 
@@ -63,21 +51,17 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
     register,
     handleSubmit,
     reset,
-    setValue,
     watch,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
       name: '',
-      kind: 'LN2',
-      detail: '',
       racks: [{ name: 'Rack 01', rows: 5, cols: 5 }],
     },
   });
 
   const { fields, append, remove } = useFieldArray({ control, name: 'racks' });
-  const kind = watch('kind');
   const racks = watch('racks');
 
   React.useEffect(() => {
@@ -87,11 +71,6 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
   const onSubmit = async (values: FormValues): Promise<void> => {
     const input: AddLocationInput = {
       name: values.name.trim(),
-      kind: values.kind,
-      detail:
-        values.detail?.trim() ||
-        LOCATION_KIND_OPTIONS.find((o) => o.code === values.kind)?.label ||
-        '',
       racks: values.racks.map((r) => ({ name: r.name.trim(), rows: r.rows, cols: r.cols })),
     };
     const totalPositions = input.racks.reduce((sum, r) => sum + r.rows * r.cols, 0);
@@ -136,40 +115,6 @@ export function LocationAddDialog({ open, onOpenChange, onCreated }: Props) {
                   {errors.name.message}
                 </p>
               )}
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="loc-kind">
-                  Kind <span className="text-danger">*</span>
-                </Label>
-                <Select
-                  value={kind}
-                  onValueChange={(v) =>
-                    setValue('kind', v as LocationKind, { shouldValidate: true })
-                  }
-                >
-                  <SelectTrigger id="loc-kind">
-                    <SelectValue placeholder="Select kind" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {LOCATION_KIND_OPTIONS.map((o) => (
-                      <SelectItem key={o.code} value={o.code}>
-                        {o.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="loc-detail">Detail</Label>
-                <Input
-                  id="loc-detail"
-                  placeholder="e.g. -196 °C"
-                  aria-invalid={Boolean(errors.detail)}
-                  {...register('detail')}
-                />
-              </div>
             </div>
 
             {/* RACKS — dynamic field array */}

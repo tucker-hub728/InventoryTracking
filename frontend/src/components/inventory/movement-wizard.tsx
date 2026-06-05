@@ -46,6 +46,11 @@ import {
   type ReceiptInput,
   type StockByLotEntry,
 } from '@/lib/api/movements';
+import {
+  storageApi,
+  buildCapacityMap,
+  type LocationCapacity,
+} from '@/lib/api/storage';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 
@@ -72,9 +77,24 @@ const schema = z
     destination: z.string().max(256).optional(),
     // Carried only so the OUT branch can validate qty against availability.
     available_qty: z.number().optional(),
+    // Carried only so the IN branch can validate qty against the location's
+    // free rack positions. ``undefined`` for ledger-only (rack-less) locations,
+    // which the backend places without a position cap.
+    empty_positions: z.number().optional(),
   })
   .superRefine((v, ctx) => {
     if (v.direction === 'in') {
+      // Mirror the backend's not_enough_empty_positions guard so the operator
+      // sees the limit in Step 1 instead of after signing in Step 2.
+      if (v.empty_positions !== undefined && v.qty > v.empty_positions) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['qty'],
+          message:
+            `Location has only ${v.empty_positions} empty position(s); ` +
+            `cannot place ${v.qty} unit(s). Add a rack or pick another location.`,
+        });
+      }
       if (v.lot_choice === NEW_LOT) {
         if (!v.lot_number || v.lot_number.trim().length === 0) {
           ctx.addIssue({
@@ -172,6 +192,12 @@ export function MovementWizard({
   const [pickersError, setPickersError] = React.useState<string | null>(null);
   const [items, setItems] = React.useState<ApiItem[]>([]);
   const [locations, setLocations] = React.useState<Location[]>([]);
+  // Per-location rack capacity, keyed by location id. Locations absent from the
+  // map are ledger-only (no racks) and have no position cap. Drives the Step 1
+  // free-positions preview and the qty guard for unit-in.
+  const [capacityByLoc, setCapacityByLoc] = React.useState<
+    Map<string, LocationCapacity>
+  >(new Map());
   // Lot list when direction=in (every lot, regardless of balance).
   const [lotsIn, setLotsIn] = React.useState<Lot[]>([]);
   // Per-(lot, location) balances. Always fetched — with zero rows
@@ -224,10 +250,16 @@ export function MovementWizard({
         { signal: ctrl.signal },
       ),
       locationsApi.list({ activeOnly: true, signal: ctrl.signal }),
+      // Storage tree is optional context — a failure here must not block the
+      // wizard, so swallow errors and fall back to "no capacity known".
+      storageApi
+        .listLocations({ activeOnly: true, signal: ctrl.signal })
+        .catch(() => []),
     ])
-      .then(([itemList, locList]) => {
+      .then(([itemList, locList, storageLocs]) => {
         setItems(itemList.items);
         setLocations(locList);
+        setCapacityByLoc(buildCapacityMap(storageLocs));
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
@@ -317,6 +349,26 @@ export function MovementWizard({
       setValue('available_qty', undefined, { shouldValidate: false });
     }
   }, [direction, selectedStockRow, setValue]);
+
+  // Rack capacity for the location chosen in IN mode. Null when nothing is
+  // picked or the location is ledger-only (no racks → no position cap).
+  const selectedLocationCapacity: LocationCapacity | null = React.useMemo(() => {
+    if (direction !== 'in' || !locationId) return null;
+    return capacityByLoc.get(locationId) ?? null;
+  }, [direction, locationId, capacityByLoc]);
+
+  // Keep empty_positions (used by the schema's IN guard) in sync. Only
+  // rack-backed locations cap the qty; ledger-only locations clear it so the
+  // operator isn't blocked. Validate on change so the limit surfaces live.
+  React.useEffect(() => {
+    if (selectedLocationCapacity?.hasRacks) {
+      setValue('empty_positions', selectedLocationCapacity.empty, {
+        shouldValidate: true,
+      });
+    } else {
+      setValue('empty_positions', undefined, { shouldValidate: false });
+    }
+  }, [selectedLocationCapacity, setValue]);
 
   // ── Direction toggle ──────────────────────────────────────────────────
   const flipDirection = (next: MovementDirection): void => {
@@ -474,6 +526,7 @@ export function MovementWizard({
                   lotsLoading={lotsLoading}
                   stockByLot={stockByLot}
                   selectedStockRow={selectedStockRow}
+                  selectedLocationCapacity={selectedLocationCapacity}
                   pickersLoading={pickersLoading}
                   register={register}
                   setValue={setValue}
@@ -637,6 +690,7 @@ interface FormStepProps {
   lotsLoading: boolean;
   stockByLot: StockByLotEntry[];
   selectedStockRow: StockByLotEntry | null;
+  selectedLocationCapacity: LocationCapacity | null;
   pickersLoading: boolean;
   register: ReturnType<typeof useForm<FormValues>>['register'];
   setValue: ReturnType<typeof useForm<FormValues>>['setValue'];
@@ -658,6 +712,7 @@ function FormStep({
   lotsLoading,
   stockByLot,
   selectedStockRow,
+  selectedLocationCapacity,
   pickersLoading,
   register,
   setValue,
@@ -858,6 +913,25 @@ function FormStep({
               aria-invalid={Boolean(errors.qty)}
               {...register('qty')}
             />
+            {selectedLocationCapacity?.hasRacks && (
+              <p
+                className={cn(
+                  'text-xs',
+                  qtyNum > selectedLocationCapacity.empty
+                    ? 'text-warning'
+                    : 'text-text-3',
+                )}
+              >
+                <span className="font-mono">
+                  {selectedLocationCapacity.empty.toLocaleString()}
+                </span>{' '}
+                of{' '}
+                <span className="font-mono">
+                  {selectedLocationCapacity.total.toLocaleString()}
+                </span>{' '}
+                position{selectedLocationCapacity.total === 1 ? '' : 's'} free
+              </p>
+            )}
             {errors.qty && (
               <p role="alert" className="text-xs text-danger">
                 {errors.qty.message}

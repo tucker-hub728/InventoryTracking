@@ -2,7 +2,6 @@
 
 import { create } from 'zustand';
 
-import type { LocationKind } from '@/lib/api/locations';
 import {
   storageApi,
   type PositionRead,
@@ -20,8 +19,6 @@ export interface RackInput {
 
 export interface AddLocationInput {
   name: string;
-  kind: LocationKind;
-  detail: string;
   racks: RackInput[];
 }
 
@@ -136,8 +133,6 @@ export const useLN2Store = create<LN2State>((set) => ({
   addLocation: async (input) => {
     const created = await storageApi.createLocation({
       name: input.name,
-      kind: input.kind,
-      detail: input.detail || null,
       racks: input.racks,
     });
     const loc = mapLocation(created);

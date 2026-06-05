@@ -35,7 +35,13 @@ import {
   type StockByLotEntry,
   type TransferInput,
 } from '@/lib/api/movements';
+import {
+  storageApi,
+  buildCapacityMap,
+  type LocationCapacity,
+} from '@/lib/api/storage';
 import { ApiError } from '@/lib/api/client';
+import { cn } from '@/lib/utils';
 import type { ReauthResponse } from '@/lib/api/auth';
 
 const schema = z
@@ -49,6 +55,9 @@ const schema = z
       .positive('Units must be > 0'),
     available_qty: z.number().optional(),
     from_location_id: z.string().optional(),
+    // Free rack positions at the destination. ``undefined`` for a ledger-only
+    // (rack-less) destination, which the backend fills without a position cap.
+    dest_empty_positions: z.number().optional(),
   })
   .superRefine((v, ctx) => {
     if (
@@ -70,6 +79,20 @@ const schema = z
         code: z.ZodIssueCode.custom,
         path: ['qty'],
         message: `Only ${v.available_qty} available at the source`,
+      });
+    }
+    // Mirror the backend's not_enough_empty_positions guard on the destination
+    // leg so the operator sees the cap before signing.
+    if (
+      v.dest_empty_positions !== undefined &&
+      v.qty > v.dest_empty_positions
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['qty'],
+        message:
+          `Destination has only ${v.dest_empty_positions} empty position(s); ` +
+          `cannot place ${v.qty} unit(s).`,
       });
     }
   });
@@ -114,6 +137,11 @@ export function TransferDialog({
   const [items, setItems] = React.useState<ApiItem[]>([]);
   const [locations, setLocations] = React.useState<Location[]>([]);
   const [stockRows, setStockRows] = React.useState<StockByLotEntry[]>([]);
+  // Per-location rack capacity (id → free/total). Drives the destination
+  // free-positions preview and the qty guard. Racked locations only.
+  const [capacityByLoc, setCapacityByLoc] = React.useState<
+    Map<string, LocationCapacity>
+  >(new Map());
   const [pickersLoading, setPickersLoading] = React.useState(false);
   const [pickersError, setPickersError] = React.useState<string | null>(null);
   const [stockLoading, setStockLoading] = React.useState(false);
@@ -158,10 +186,15 @@ export function TransferDialog({
         { signal: ctrl.signal },
       ),
       locationsApi.list({ activeOnly: true, signal: ctrl.signal }),
+      // Optional context — a failure must not block the dialog.
+      storageApi
+        .listLocations({ activeOnly: true, signal: ctrl.signal })
+        .catch(() => []),
     ])
-      .then(([itemList, locList]) => {
+      .then(([itemList, locList, storageLocs]) => {
         setItems(itemList.items);
         setLocations(locList);
+        setCapacityByLoc(buildCapacityMap(storageLocs));
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
@@ -236,6 +269,25 @@ export function TransferDialog({
       (l) => l.id !== (selectedRow?.location_id ?? fromLocationId),
     );
   }, [locations, selectedRow, fromLocationId]);
+
+  // Rack capacity for the chosen destination. Null when none picked or the
+  // destination is ledger-only (no racks → no position cap).
+  const destCapacity: LocationCapacity | null = React.useMemo(() => {
+    if (!toLocationId) return null;
+    return capacityByLoc.get(toLocationId) ?? null;
+  }, [toLocationId, capacityByLoc]);
+
+  // Keep dest_empty_positions (used by the schema guard) in sync. Only
+  // rack-backed destinations cap the qty; ledger-only ones clear it.
+  React.useEffect(() => {
+    if (destCapacity?.hasRacks) {
+      setValue('dest_empty_positions', destCapacity.empty, {
+        shouldValidate: true,
+      });
+    } else {
+      setValue('dest_empty_positions', undefined, { shouldValidate: false });
+    }
+  }, [destCapacity, setValue]);
 
   // ── Live impact preview ──────────────────────────────────────────────
   const qtyNum = Number(qty);
@@ -455,6 +507,25 @@ export function TransferDialog({
                       ))}
                     </SelectContent>
                   </Select>
+                  {destCapacity?.hasRacks && (
+                    <p
+                      className={cn(
+                        'text-xs',
+                        qtyNum > destCapacity.empty
+                          ? 'text-warning'
+                          : 'text-text-3',
+                      )}
+                    >
+                      <span className="font-mono">
+                        {destCapacity.empty.toLocaleString()}
+                      </span>{' '}
+                      of{' '}
+                      <span className="font-mono">
+                        {destCapacity.total.toLocaleString()}
+                      </span>{' '}
+                      position{destCapacity.total === 1 ? '' : 's'} free
+                    </p>
+                  )}
                   {errors.to_location_id && (
                     <p role="alert" className="text-xs text-danger">
                       {errors.to_location_id.message}

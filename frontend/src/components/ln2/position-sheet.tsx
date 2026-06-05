@@ -8,7 +8,6 @@ import {
   ArrowRightLeft,
   ArrowUpFromLine,
   Check,
-  ShieldCheck,
   Trash2,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -176,6 +175,7 @@ export function PositionSheet({ selection, onClose }: Props) {
     try {
       await assignPosition(selection.position.id, selectedLot, evidence.evidence_id);
       toast.success('Unit in recorded', { description: slotCtx });
+      onClose();
     } catch (err) {
       toast.error('Could not assign position', {
         description: err instanceof Error ? err.message : undefined,
@@ -382,13 +382,6 @@ export function PositionSheet({ selection, onClose }: Props) {
                 )}
               </section>
 
-              {/* Audit footnote */}
-              <div className="rounded-md border border-border bg-bg-elev p-3 text-xs text-text-3">
-                <div className="mb-1 inline-flex items-center gap-1.5 font-medium text-text-2">
-                  <ShieldCheck size={12} /> Audit
-                </div>
-                Every change to this position is logged with username + timestamp.
-              </div>
             </SheetBody>
           </>
         )}

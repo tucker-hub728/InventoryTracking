@@ -46,8 +46,8 @@ const schema = z.object({
     .string()
     .optional()
     .refine(
-      (v) => !v || (/^\d+(\.\d+)?$/.test(v) && Number(v) >= 0),
-      'Threshold must be a non-negative number',
+      (v) => !v || (/^\d+$/.test(v) && Number(v) >= 0),
+      'Threshold must be a non-negative whole number',
     ),
   unit_price_amount: z
     .string()
@@ -145,9 +145,12 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
           vendor_id: freshItem.vendor_id ?? NULL_VENDOR,
           avg_lead_days:
             freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
+          // Reorder threshold is a whole count of units — never decimal. The
+          // API returns it as a NUMERIC string (e.g. "5.000"); show the whole
+          // number only.
           reorder_threshold:
             freshItem.reorder_threshold != null
-              ? String(freshItem.reorder_threshold)
+              ? String(Math.round(Number(freshItem.reorder_threshold)))
               : '',
           unit_price_amount:
             freshItem.unit_price_amount != null
@@ -268,7 +271,15 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label htmlFor="it-vendor">Vendor</Label>
+                {/*
+                  Remount once the item + vendor list have loaded. Radix Select
+                  resolves a controlled value's label from the items present at
+                  mount; the vendor list is fetched async, so without this key
+                  the pre-selected vendor renders as the "No vendor" placeholder
+                  until the dropdown is opened once.
+                */}
                 <Select
+                  key={item?.id ?? 'loading'}
                   value={vendorId}
                   onValueChange={(v) =>
                     setValue('vendor_id', v, {
@@ -318,8 +329,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                 <Input
                   id="it-threshold"
                   type="number"
-                  inputMode="decimal"
-                  step="0.001"
+                  inputMode="numeric"
+                  step="1"
                   min={0}
                   aria-invalid={Boolean(errors.reorder_threshold)}
                   {...register('reorder_threshold')}

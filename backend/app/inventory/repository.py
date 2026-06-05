@@ -1290,21 +1290,24 @@ async def create_storage_location(
     session: AsyncSession,
     *,
     name: str,
-    kind: str,
-    detail: str | None,
     racks: list,
 ) -> Location:
     """Create a location + its racks (positions materialised). Caller commits.
 
     ``racks`` is a list of ``RackInput``-shaped objects (``.name/.rows/.cols``).
     The location ``code`` is derived from ``name`` and de-duplicated.
+
+    Storage locations are created from name + racks only. ``kind`` /
+    ``temperature_c`` / ``notes`` aren't collected here, but the shared
+    ``locations`` table requires a non-null ``kind`` (CHECK-constrained), so we
+    store the neutral ``"other"`` default; ``temperature_c`` / ``notes`` stay
+    null and remain editable via the locations-admin CRUD.
     """
     code = await _unique_location_code(session, _slug_location_code(name))
     loc = Location(
         code=code,
         name=name.strip(),
-        kind=kind,
-        notes=(detail.strip() if detail else None),
+        kind="LN2",
         is_active=True,
     )
     session.add(loc)

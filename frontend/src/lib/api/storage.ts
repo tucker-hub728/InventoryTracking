@@ -56,8 +56,6 @@ export interface RackInput {
 
 export interface StorageLocationCreateInput {
   name: string;
-  kind: LocationKind;
-  detail?: string | null;
   racks: RackInput[];
 }
 
@@ -79,6 +77,39 @@ export interface PositionEventRead {
   counterpart_label: string | null;
   counterpart_location: string | null;
   occurred_at: string;
+}
+
+/** Free/total rack positions for one location (only racked locations appear). */
+export interface LocationCapacity {
+  hasRacks: boolean;
+  empty: number;
+  total: number;
+}
+
+/**
+ * Fold the storage tree (location → rack → position) into a per-location
+ * id → capacity map. Only locations that own at least one rack are included;
+ * everything else is ledger-only and uncapped. Mirrors the backend's
+ * ``count_empty_positions`` (status === 'empty' across the location's racks),
+ * which gates unit-in and the transfer destination leg.
+ */
+export function buildCapacityMap(
+  storageLocs: StorageLocationRead[],
+): Map<string, LocationCapacity> {
+  const map = new Map<string, LocationCapacity>();
+  for (const loc of storageLocs) {
+    if (loc.racks.length === 0) continue;
+    let empty = 0;
+    let total = 0;
+    for (const rack of loc.racks) {
+      for (const pos of rack.positions) {
+        total += 1;
+        if (pos.status === 'empty') empty += 1;
+      }
+    }
+    map.set(loc.id, { hasRacks: true, empty, total });
+  }
+  return map;
 }
 
 export const storageApi = {

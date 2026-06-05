@@ -747,13 +747,17 @@ class RackInput(BaseModel):
 
 
 class StorageLocationCreate(BaseModel):
-    """Payload for ``POST /v1/storage/locations``."""
+    """Payload for ``POST /v1/storage/locations``.
+
+    Storage locations are created from name + racks only. ``kind`` /
+    ``temperature_c`` / ``notes`` are not collected here — the backend stores a
+    default ``kind`` to satisfy the (shared) locations table; those columns are
+    still managed by the locations-admin CRUD.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=128)
-    kind: LocationKind
-    detail: str | None = Field(default=None, max_length=128)
     racks: list[RackInput] = Field(min_length=1)
 
 
