@@ -91,11 +91,11 @@ def _json_safe(value: Any) -> Any:
     encode either, so anything that isn't a JSON-native type is stringified
     (the error message survives; the encoder doesn't choke).
     """
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_json_safe(v) for v in value]
     return str(value)
 
