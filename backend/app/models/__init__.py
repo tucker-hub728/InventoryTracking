@@ -11,6 +11,7 @@ nothing imports.
 from __future__ import annotations
 
 from app.models.audit import AuditEvent, ReauthConsumption, ReauthEvent
+from app.models.forecast import ForecastEntry
 from app.models.identity import Role, User
 from app.models.inventory import (
     Item,
@@ -32,6 +33,7 @@ __all__ = [
     "AuditEvent",
     "Customer",
     "CustomerProduct",
+    "ForecastEntry",
     "Item",
     "ItemStock",
     "Location",

@@ -26,6 +26,7 @@ import { TransferDialog } from './transfer-dialog';
 import { ReverseDialog } from './reverse-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
 import { ItemProductsTab } from '@/components/products/item-products-tab';
+import { ForecastImpactTab } from './forecast-impact-tab';
 import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timeline';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
@@ -305,6 +306,7 @@ export function InventoryDetailClient({ itemNumber }: Props) {
                 <TabsList>
                   <TabsTrigger value="ledger">Unit Ledger</TabsTrigger>
                   <TabsTrigger value="products">Products</TabsTrigger>
+                  <TabsTrigger value="forecast">Forecast Impact</TabsTrigger>
                   <TabsTrigger value="audit">Audit History</TabsTrigger>
                 </TabsList>
               </div>
@@ -330,6 +332,9 @@ export function InventoryDetailClient({ itemNumber }: Props) {
               </TabsContent>
               <TabsContent value="products" className="m-0">
                 <ItemProductsTab itemId={item.uuid} />
+              </TabsContent>
+              <TabsContent value="forecast" className="m-0">
+                <ForecastImpactTab itemId={item.uuid} onHand={item.qty} />
               </TabsContent>
               <TabsContent value="audit" className="m-0">
                 <EntityAuditTimeline

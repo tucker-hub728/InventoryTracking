@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from app.api.v1.routes import auth, health, uploads
 from app.audit.routes import audit_router
+from app.forecast.routes import forecasts_router
 from app.inventory.routes import (
     items_router,
     locations_router,
@@ -42,4 +43,5 @@ api_router.include_router(products_router)
 api_router.include_router(materials_router)
 api_router.include_router(customers_router)
 api_router.include_router(item_products_router)
+api_router.include_router(forecasts_router)
 api_router.include_router(audit_router)

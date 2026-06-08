@@ -5,6 +5,7 @@ import {
   History,
   KanbanSquare,
   Layers,
+  LineChart,
   MapPin,
   Package,
   Ruler,
@@ -45,6 +46,7 @@ export const navSections: readonly NavSection[] = [
       { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
       { id: 'products', label: 'Products', href: '/products', icon: Package, resource: 'inventory' },
       { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
+      { id: 'forecast', label: 'Forecast', href: '/forecast', icon: LineChart, resource: 'inventory' },
       {
         id: 'ln2',
         label: 'LN2 Tanks',
