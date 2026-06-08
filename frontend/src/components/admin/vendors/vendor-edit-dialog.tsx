@@ -42,12 +42,6 @@ interface Props {
   onUpdated: (vendor: Vendor) => void;
 }
 
-/**
- * Partial-update dialog for an existing vendor. Pre-fills every field
- * from the current row; submit sends only the fields that actually
- * changed (using ``dirtyFields`` from react-hook-form). Empty diffs
- * are caught client-side so the server never sees a no-op PATCH.
- */
 export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Props) {
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
