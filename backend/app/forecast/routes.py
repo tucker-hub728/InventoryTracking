@@ -49,9 +49,7 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except (ValueError, AttributeError) as exc:
-        raise ValidationError(
-            f"{field} is not a valid UUID", code=f"invalid_{field}"
-        ) from exc
+        raise ValidationError(f"{field} is not a valid UUID", code=f"invalid_{field}") from exc
 
 
 def _entry_to_read(e: ForecastEntry) -> ForecastEntryRead:
@@ -84,12 +82,8 @@ async def list_forecasts(
     customer_id: Annotated[str | None, Query(description="Filter by customer")] = None,
 ) -> list[ForecastEntryRead]:
     target_year = year if year is not None else datetime.now(UTC).year
-    product_uuid = (
-        _parse_uuid_or_422(product_id, field="product_id") if product_id else None
-    )
-    customer_uuid = (
-        _parse_uuid_or_422(customer_id, field="customer_id") if customer_id else None
-    )
+    product_uuid = _parse_uuid_or_422(product_id, field="product_id") if product_id else None
+    customer_uuid = _parse_uuid_or_422(customer_id, field="customer_id") if customer_id else None
     rows = await forecast_repo.list_forecast_entries(
         db, year=target_year, product_id=product_uuid, customer_id=customer_uuid
     )

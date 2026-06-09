@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 import { Save } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -18,7 +19,8 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber } from '@/lib/utils';
-import { MONTH_LABELS, forecastYearOptions } from '@/lib/forecast/types';
+import { MONTH_LABELS } from '@/lib/forecast/types';
+import { YearPicker } from './year-picker';
 import {
   forecastApi,
   type ForecastChange,
@@ -336,18 +338,7 @@ export function ForecastClient() {
           </Filter>
 
           <Filter label="Year">
-            <Select value={String(year)} onValueChange={(v) => setYear(Number(v))}>
-              <SelectTrigger className="min-w-[110px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {forecastYearOptions(currentYear).map((y) => (
-                  <SelectItem key={y} value={String(y)}>
-                    {y}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <YearPicker value={year} onChange={setYear} ariaLabel="Forecast year" />
           </Filter>
         </div>
 
@@ -474,7 +465,12 @@ function ProductRow({ product, monthRuns, dirty, editable, onSet }: ProductRowPr
   return (
     <tr className="border-b border-border/60 hover:bg-surface/40">
       <td className="sticky left-0 z-10 bg-bg-elev px-3 py-1.5">
-        <span className="font-mono text-xs text-accent">{product.sku}</span>
+        <Link
+          href={`/products/${product.id}`}
+          className="font-mono text-xs text-accent hover:underline"
+        >
+          {product.sku}
+        </Link>
         <span className="ml-2 text-text-2">{product.name}</span>
       </td>
       {monthRuns.map((runs, m) => (

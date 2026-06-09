@@ -149,7 +149,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "DROP TRIGGER IF EXISTS tg_forecast_entries_touch_updated_at "
-        "ON app.forecast_entries;"
+        "DROP TRIGGER IF EXISTS tg_forecast_entries_touch_updated_at " "ON app.forecast_entries;"
     )
     op.drop_table("forecast_entries", schema="app")

@@ -1,15 +1,10 @@
-import type { Metadata } from 'next';
-
-import { ProductDetailClient } from '@/components/products/product-detail-client';
+import { redirect } from 'next/navigation';
 
 interface PageProps {
   params: { id: string };
 }
 
-export const metadata: Metadata = {
-  title: 'Product',
-};
-
-export default function ProductDetailPage({ params }: PageProps) {
-  return <ProductDetailClient productId={params.id} />;
+/** The product detail index has no content of its own — default to Materials. */
+export default function ProductDetailIndexPage({ params }: PageProps) {
+  redirect(`/products/${params.id}/material`);
 }

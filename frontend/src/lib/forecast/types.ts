@@ -48,8 +48,3 @@ export const PERIODS: readonly PeriodOption[] = [
 export function periodMonths(key: PeriodKey): number[] {
   return (PERIODS.find((p) => p.key === key) ?? PERIODS[0]!).months;
 }
-
-/** Years offered in the year selector, centered on the current year. */
-export function forecastYearOptions(current: number): number[] {
-  return [current - 1, current, current + 1];
-}

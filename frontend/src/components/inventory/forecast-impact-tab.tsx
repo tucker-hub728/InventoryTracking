@@ -1,33 +1,12 @@
 'use client';
 
 import * as React from 'react';
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import { AlertTriangle } from 'lucide-react';
+import Link from 'next/link';
+import { AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { YearPicker } from '@/components/forecast/year-picker';
 import { formatNumber } from '@/lib/utils';
-import {
-  MONTH_LABELS,
-  PERIODS,
-  periodMonths,
-  type PeriodKey,
-} from '@/lib/forecast/types';
 import { forecastApi, type ForecastEntry } from '@/lib/api/forecast';
 import { productsApi, type Product } from '@/lib/api/products';
 import { ApiError } from '@/lib/api/client';
@@ -35,29 +14,32 @@ import { ApiError } from '@/lib/api/client';
 interface Props {
   /** Inventory item UUID. */
   itemId: string;
-  /** Current quantity on hand — the starting point availability depletes from. */
+  /** Current quantity on hand. */
   onHand: number;
 }
 
+interface DemandRow {
+  product: Product;
+  perRun: number; // qty of this item consumed per run of that product
+  runs: number; // forecasted runs for the product this year
+  needed: number; // perRun × runs
+}
+
 /**
- * Forecast Impact tab — projects demand for this inventory item against its
- * availability over the selected period.
+ * Forecast Impact tab — a requirements breakdown for one inventory item.
  *
- * Demand = Σ over every product whose BOM uses this item of
- * (the item's qty-per-run in that product × the product's forecasted runs that
- * month, across all customers). Availability starts at the current on-hand
- * quantity and depletes cumulatively as demand accrues across the period,
- * surfacing the month a projected shortage begins. Forecast runs come from the
- * forecast API.
+ * For the full year it lists every product whose BOM uses this item with
+ * ``per run × forecasted runs = needed``, totals the demand, and compares it to
+ * the quantity on hand (covered, or short by N). Forecast runs come from the
+ * forecast API; the per-run quantity comes from each product's BOM.
  */
 export function ForecastImpactTab({ itemId, onHand }: Props) {
-  const year = React.useMemo(() => new Date().getFullYear(), []);
+  const [year, setYear] = React.useState(() => new Date().getFullYear());
 
   const [usingProducts, setUsingProducts] = React.useState<Product[]>([]);
   const [entries, setEntries] = React.useState<ForecastEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [period, setPeriod] = React.useState<PeriodKey>('full');
 
   React.useEffect(() => {
     const ctrl = new AbortController();
@@ -82,47 +64,23 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
     return () => ctrl.abort();
   }, [itemId, year]);
 
-  const months = periodMonths(period);
-
-  // Monthly demand for this item = Σ products(qty_per_run × runs that month,
-  // summed across all customers).
-  const monthlyDemand = React.useMemo(() => {
-    return months.map((m) =>
-      usingProducts.reduce((sum, p) => {
-        const perRun = Number(p.qty_per_run ?? 0);
+  // One row per product that has forecasted runs for this item this year.
+  const rows = React.useMemo<DemandRow[]>(() => {
+    return usingProducts
+      .map((product) => {
         const runs = entries
-          .filter((e) => e.productId === p.id && e.month === m)
-          .reduce((r, e) => r + e.runs, 0);
-        return sum + perRun * runs;
-      }, 0),
-    );
-  }, [months, usingProducts, entries]);
+          .filter((e) => e.productId === product.id)
+          .reduce((sum, e) => sum + e.runs, 0);
+        const perRun = Number(product.qty_per_run ?? 0);
+        return { product, perRun, runs, needed: perRun * runs };
+      })
+      .filter((r) => r.runs > 0)
+      .sort((a, b) => b.needed - a.needed);
+  }, [usingProducts, entries]);
 
-  // Cumulative demand + depleting availability across the displayed period.
-  const { chartData, totalDemand, shortfallMonthIdx, maxDeficit } = React.useMemo(() => {
-    let cumulative = 0;
-    let firstShort = -1;
-    let worst = 0;
-    const data = months.map((m, i) => {
-      cumulative += monthlyDemand[i] ?? 0;
-      const available = Math.max(0, onHand - cumulative);
-      if (cumulative > onHand && firstShort === -1) firstShort = m;
-      worst = Math.max(worst, cumulative - onHand);
-      return {
-        month: MONTH_LABELS[m]!,
-        demand: cumulative,
-        available,
-      };
-    });
-    return {
-      chartData: data,
-      totalDemand: cumulative,
-      shortfallMonthIdx: firstShort,
-      maxDeficit: Math.max(0, worst),
-    };
-  }, [months, monthlyDemand, onHand]);
-
-  const periodLabel = PERIODS.find((p) => p.key === period)?.label ?? 'Full year';
+  const totalNeeded = rows.reduce((sum, r) => sum + r.needed, 0);
+  const remaining = onHand - totalNeeded;
+  const short = remaining < 0;
 
   if (error) {
     return <EmptyState title="Couldn't load forecast impact" hint={error} />;
@@ -147,103 +105,102 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
     <div className="space-y-4 p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">Projected demand vs. availability</h3>
+          <h3 className="text-sm font-semibold">Projected demand for this item</h3>
           <p className="text-xs text-text-3">
-            Across {usingProducts.length} product{usingProducts.length === 1 ? '' : 's'} · {year}
+            Production runs planned across the products that consume it.
           </p>
         </div>
-        <Select value={period} onValueChange={(v) => setPeriod(v as PeriodKey)}>
-          <SelectTrigger className="w-[150px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PERIODS.map((p) => (
-              <SelectItem key={p.key} value={p.key}>
-                {p.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <YearPicker value={year} onChange={setYear} ariaLabel="Forecast year" />
       </div>
 
-      {totalDemand === 0 ? (
-        <div className="flex h-64 items-center justify-center rounded-md border border-dashed border-border text-sm text-text-3">
-          No forecasted demand for this item in {periodLabel.toLowerCase()} {year}.
+      {rows.length === 0 ? (
+        <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-sm text-text-3">
+          No production runs forecast for {year}.
         </div>
       ) : (
-        <>
-          <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="fc-demand" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--danger)" stopOpacity={0.25} />
-                    <stop offset="95%" stopColor="var(--danger)" stopOpacity={0.03} />
-                  </linearGradient>
-                  <linearGradient id="fc-available" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="var(--success)" stopOpacity={0.25} />
-                    <stop offset="95%" stopColor="var(--success)" stopOpacity={0.03} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis
-                  dataKey="month"
-                  tick={{ fontSize: 12, fill: 'var(--text-3)' }}
-                  tickLine={false}
-                  axisLine={{ stroke: 'var(--border)' }}
-                />
-                <YAxis
-                  allowDecimals={false}
-                  tick={{ fontSize: 12, fill: 'var(--text-3)' }}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <Tooltip
-                  contentStyle={{
-                    borderRadius: 8,
-                    border: '1px solid var(--border)',
-                    background: 'var(--bg-elev)',
-                    fontSize: 12,
-                  }}
-                />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Area
-                  type="monotone"
-                  name="Demand"
-                  dataKey="demand"
-                  stroke="var(--danger)"
-                  strokeDasharray="5 4"
-                  fill="url(#fc-demand)"
-                  strokeWidth={2}
-                />
-                <Area
-                  type="monotone"
-                  name="Available"
-                  dataKey="available"
-                  stroke="var(--success)"
-                  fill="url(#fc-available)"
-                  strokeWidth={2}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-
-          {shortfallMonthIdx >= 0 ? (
-            <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/5 px-3 py-2.5 text-xs text-danger">
-              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-              <span>
-                Projected shortage starting {MONTH_LABELS[shortfallMonthIdx]} {year} — demand
-                exceeds available stock by up to <strong>{formatNumber(maxDeficit)}</strong> units.
-              </span>
-            </div>
-          ) : (
-            <div className="rounded-md border border-success/30 bg-success/5 px-3 py-2.5 text-xs text-success">
-              On-hand stock of <strong>{formatNumber(onHand)}</strong> covers projected demand of{' '}
-              <strong>{formatNumber(totalDemand)}</strong> for {periodLabel.toLowerCase()} {year}.
-            </div>
-          )}
-        </>
+        <div className="overflow-hidden rounded-lg border border-border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-surface text-left text-[11px] uppercase tracking-wider text-text-3">
+                <th className="px-4 py-2.5 font-medium">Product</th>
+                <th className="px-4 py-2.5 text-right font-medium">Per run</th>
+                <th className="px-4 py-2.5 text-right font-medium">× Runs</th>
+                <th className="px-4 py-2.5 text-right font-medium">= Needed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ product, perRun, runs, needed }) => (
+                <tr key={product.id} className="border-b border-border/60">
+                  <td className="px-4 py-2.5">
+                    <Link
+                      href={`/products/${product.id}`}
+                      className="font-mono text-xs text-accent hover:underline"
+                    >
+                      {product.sku}
+                    </Link>
+                    <span className="ml-2 text-text-2">{product.name}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-mono">{formatNumber(perRun)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-accent">
+                    × {formatNumber(runs)}
+                  </td>
+                  <td className="px-4 py-2.5 text-right font-mono font-semibold">
+                    {formatNumber(needed)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-b border-border bg-surface/60">
+                <td colSpan={3} className="px-4 py-2.5 text-right text-text-2">
+                  Total needed
+                </td>
+                <td className="px-4 py-2.5 text-right font-mono font-semibold">
+                  {formatNumber(totalNeeded)}
+                </td>
+              </tr>
+              <tr className="border-b border-border/60">
+                <td colSpan={3} className="px-4 py-2 text-right text-text-2">
+                  Available (on hand)
+                </td>
+                <td className="px-4 py-2 text-right font-mono">{formatNumber(onHand)}</td>
+              </tr>
+              <tr className={short ? 'bg-danger/5' : 'bg-success/5'}>
+                <td colSpan={3} className="px-4 py-2.5 text-right font-medium">
+                  {short ? 'Short by' : 'Remaining'}
+                </td>
+                <td
+                  className={`px-4 py-2.5 text-right font-mono font-semibold ${
+                    short ? 'text-danger' : 'text-success'
+                  }`}
+                >
+                  {formatNumber(Math.abs(remaining))}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       )}
+
+      {rows.length > 0 &&
+        (short ? (
+          <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger/5 px-3 py-2.5 text-xs text-danger">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <span>
+              Forecast demand of <strong>{formatNumber(totalNeeded)}</strong> for {year} exceeds the{' '}
+              {formatNumber(onHand)} on hand — short by{' '}
+              <strong>{formatNumber(Math.abs(remaining))}</strong>. Reorder before these runs.
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-start gap-2 rounded-md border border-success/30 bg-success/5 px-3 py-2.5 text-xs text-success">
+            <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+            <span>
+              On-hand stock of <strong>{formatNumber(onHand)}</strong> covers forecast demand of{' '}
+              <strong>{formatNumber(totalNeeded)}</strong> for {year}.
+            </span>
+          </div>
+        ))}
     </div>
   );
 }
