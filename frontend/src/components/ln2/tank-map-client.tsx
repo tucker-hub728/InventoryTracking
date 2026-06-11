@@ -22,7 +22,12 @@ import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { usePermission } from '@/hooks/use-permission';
 import type { LocationKind } from '@/lib/api/locations';
 import { useLN2Store } from '@/stores/ln2.store';
-import { POSITION_TONE, computeStats } from './ln2-data';
+import {
+  POSITION_TONE,
+  buildItemColorMap,
+  buildItemLegend,
+  computeStats,
+} from './ln2-data';
 import { RackTile } from './rack-tile';
 import { PositionSheet, type PositionSelection } from './position-sheet';
 import { LocationAddDialog } from './location-add-dialog';
@@ -98,6 +103,16 @@ export function TankMapClient() {
   const stats = React.useMemo(
     () => (activeLoc ? computeStats(activeLoc) : null),
     [activeLoc],
+  );
+
+  // Color-code slots by the item that fills them, and aggregate a legend.
+  const colorMap = React.useMemo(
+    () => (activeLoc ? buildItemColorMap(activeLoc) : new Map()),
+    [activeLoc],
+  );
+  const legend = React.useMemo(
+    () => (activeLoc ? buildItemLegend(activeLoc, colorMap) : []),
+    [activeLoc, colorMap],
   );
 
   // Positions matching the search query (highlighted in the grid).
@@ -245,13 +260,38 @@ export function TankMapClient() {
           <Stat label="Empty" value={stats.empty} variant="muted" />
         </ul>
 
-        <div className="mb-3 flex flex-wrap gap-4 text-[11px] text-text-2">
-          {(['Occupied', 'Empty'] as const).map((s) => (
-            <div key={s} className="inline-flex items-center gap-1.5">
-              <span className={cn('size-2.5 rounded-sm', POSITION_TONE[s].legend)} aria-hidden />
-              {s}
-            </div>
-          ))}
+        {/* Legend: every item that occupies a slot, with its color, the
+            number of slots it fills, and its lot numbers. */}
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-text-2">
+          {legend.length === 0 ? (
+            <span className="text-text-3">No items stored yet</span>
+          ) : (
+            legend.map((entry) => (
+              <div
+                key={entry.id}
+                className="inline-flex items-center gap-1.5"
+                title={`${entry.id} · ${entry.desc} · ${entry.count} slot${entry.count === 1 ? '' : 's'}${entry.lots.length ? ` · Lot${entry.lots.length === 1 ? '' : 's'}: ${entry.lots.join(', ')}` : ''}`}
+              >
+                <span
+                  className="size-2.5 shrink-0 rounded-sm"
+                  style={{ backgroundColor: entry.color.bg }}
+                  aria-hidden
+                />
+                <span className="font-medium text-text-1">{entry.id}</span>
+                <span className="font-mono text-[10px] text-text-3">×{entry.count}</span>
+                {entry.lots.length > 0 && (
+                  <span className="text-text-3">
+                    · {entry.lots.slice(0, 2).join(', ')}
+                    {entry.lots.length > 2 ? ` +${entry.lots.length - 2}` : ''}
+                  </span>
+                )}
+              </div>
+            ))
+          )}
+          <div className="inline-flex items-center gap-1.5">
+            <span className={cn('size-2.5 rounded-sm', POSITION_TONE.Empty.legend)} aria-hidden />
+            Empty
+          </div>
         </div>
 
         <Card className="p-4 sm:p-5">
@@ -261,6 +301,8 @@ export function TankMapClient() {
                 key={rack.id}
                 rack={rack}
                 highlight={matched}
+                colorMap={colorMap}
+                dimUnmatched={matched.size > 0}
                 onSelectPosition={(rackKey, positionId) => setSelected({ rackKey, positionId })}
               />
             ))}
