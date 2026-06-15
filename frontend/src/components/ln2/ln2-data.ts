@@ -142,7 +142,7 @@ export function buildItemColorMap(location: StorageLocation): Map<string, ItemCo
   const map = new Map<string, ItemColor>();
   [...ids]
     .sort()
-    .forEach((id, i) => map.set(id, ITEM_PALETTE[i % ITEM_PALETTE.length]));
+    .forEach((id, i) => map.set(id, ITEM_PALETTE[i % ITEM_PALETTE.length]!));
   return map;
 }
 
@@ -171,7 +171,7 @@ export function buildItemLegend(
         entry = {
           id: pos.item.id,
           desc: pos.item.desc,
-          color: colorMap.get(pos.item.id) ?? ITEM_PALETTE[0],
+          color: colorMap.get(pos.item.id) ?? ITEM_PALETTE[0]!,
           count: 0,
           lots: [],
           lotSet: new Set(),
