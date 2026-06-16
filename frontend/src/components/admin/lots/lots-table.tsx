@@ -1,13 +1,17 @@
 'use client';
 
 import * as React from 'react';
+import { Pencil } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
 import { LOT_STATUS_LABEL, type Lot, type LotStatus } from '@/lib/api/lots';
 
 interface LotsTableProps {
   lots: Lot[];
   loading: boolean;
+  /** When set, an Edit action is shown per row (gated by the caller). */
+  onEdit?: (lot: Lot) => void;
 }
 
 function formatDate(iso: string | null): string {
@@ -30,7 +34,7 @@ const STATUS_TONE: Record<LotStatus, string> = {
   recalled: 'border-danger/30 bg-danger/5 text-danger',
 };
 
-export function LotsTable({ lots, loading }: LotsTableProps) {
+export function LotsTable({ lots, loading, onEdit }: LotsTableProps) {
   if (loading) {
     return (
       <div className="py-10 text-center text-sm text-text-3" role="status">
@@ -50,6 +54,7 @@ export function LotsTable({ lots, loading }: LotsTableProps) {
             <th className="px-3 py-2 font-medium">Mfg date</th>
             <th className="px-3 py-2 font-medium">Expires</th>
             <th className="px-3 py-2 font-medium">Status</th>
+            {onEdit && <th className="px-3 py-2 font-medium text-right">Actions</th>}
           </tr>
         </thead>
         <tbody>
@@ -80,6 +85,18 @@ export function LotsTable({ lots, loading }: LotsTableProps) {
                   {LOT_STATUS_LABEL[l.status]}
                 </span>
               </td>
+              {onEdit && (
+                <td className="px-3 py-2.5 text-right">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onEdit(l)}
+                    aria-label={`Edit lot ${l.lot_number}`}
+                  >
+                    <Pencil size={13} /> Edit
+                  </Button>
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

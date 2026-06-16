@@ -1086,8 +1086,12 @@ async def create_lot(
 @lots_router.patch(
     "/{lot_id}",
     response_model=LotRead,
-    summary="Update a lot",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
+    summary="Update a lot (e-signed; all changes audited)",
+    # Editing a lot after entry is a GxP-significant correction (e.g.
+    # fixing a wrong expiration date), so it requires an e-signature —
+    # the ``sign`` permission plus a fresh reauth ticket — not the
+    # routine ``create`` gate used for un-signed master-data writes.
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
 )
 async def update_lot(
     db: DBSession,
@@ -1095,15 +1099,26 @@ async def update_lot(
     lot_id: Annotated[uuid.UUID, Path()],
     payload: LotUpdate,
 ) -> LotRead:
-    """Partial lot update + audit-log row.
+    """Partial lot update under an electronic signature.
 
-    Editable: status, dates, vendor, CoA URL, notes. The DB CHECK on
-    date ordering is the authoritative guard; the route surfaces the
-    structured ``lot_dates_inverted`` code if the operator inverts them.
+    Editable: status, dates, vendor, CoA URL, notes (``lot_number`` and
+    the parent item are immutable identity). Every edit consumes a fresh
+    reauth ticket minted for action='lot.update' and writes an audit row
+    that links the signature (``signature_id``) and records the
+    mandatory reason for change. The DB CHECK on date ordering is the
+    authoritative guard; the route surfaces the structured
+    ``lot_dates_inverted`` code if the operator inverts them.
     """
     patch = payload.model_dump(exclude_unset=True)
+    # The signing fields ride on the same body but aren't lot columns —
+    # pull them out before the patch touches the ORM row. Both are
+    # required by the schema, so they're always present here.
+    evidence_str = patch.pop("evidence_id")
+    reason = patch.pop("reason")
     if not patch:
         raise ValidationError("No fields to update", code="empty_patch")
+
+    evidence_uuid = _parse_uuid_or_422(evidence_str, field="evidence_id")
 
     lot = await inv_repo.get_lot(db, lot_id)
     if lot is None or lot.deleted_at is not None:
@@ -1155,6 +1170,20 @@ async def update_lot(
         subject_label=updated.lot_number,
         before=before,
         after=after,
+        context={"reason": reason},
+        signature_id=evidence_uuid,
+    )
+
+    # Consume the e-signature evidence last so a replay / expiry rolls
+    # back the patch *and* the audit row together. ``expected_action``
+    # must match the verb the ticket was minted for.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="lot.update",
+        target_table="app.lots",
+        target_id=updated.id,
     )
 
     await db.refresh(updated)

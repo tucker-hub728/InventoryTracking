@@ -368,13 +368,19 @@ class LotCreate(BaseModel):
 
 
 class LotUpdate(BaseModel):
-    """Payload for ``PATCH /v1/lots/{id}`` — partial update.
+    """Payload for ``PATCH /v1/lots/{id}`` — partial, e-signed update.
 
     ``lot_number`` and ``item_id`` are immutable for the same reason
     item_number is — they're the identity of the lot. Editable fields:
     status (released → quarantined → recalled lifecycle), dates,
     vendor, CoA URL, notes. The DB CHECK on date ordering still
     applies; the route surfaces the structured error.
+
+    Editing a lot after entry is a GxP-significant correction (e.g.
+    fixing a wrong expiration date), so every edit is signed: the body
+    carries a fresh ``evidence_id`` minted for action='lot.update' and a
+    mandatory ``reason`` for the change. Both ride on the same payload
+    but are *not* lot columns — the route pops them before patching.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -385,6 +391,16 @@ class LotUpdate(BaseModel):
     coa_url: str | None = Field(default=None, max_length=2048)
     status: LotStatus | None = None
     notes: str | None = Field(default=None, max_length=2048)
+    # ── E-signature (21 CFR Part 11) ──────────────────────────────────
+    # Required on every edit — there is no un-signed lot-update path.
+    evidence_id: str = Field(
+        min_length=1,
+        description="Fresh reauth evidence id for action='lot.update'",
+    )
+    reason: Annotated[str, _trimmed_non_blank("reason")] = Field(
+        max_length=512,
+        description="Reason for change, recorded on the audit row",
+    )
 
 
 class LotRead(BaseModel):

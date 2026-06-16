@@ -28,11 +28,15 @@ import { ApiError } from '@/lib/api/client';
 
 import { LotsTable } from './lots-table';
 import { LotCreateDialog } from './lot-create-dialog';
+import { LotEditDialog } from './lot-edit-dialog';
 
 const STATUS_ALL = '__all__';
 
 export function LotsPageClient() {
   const canCreate = usePermission('inventory', 'create');
+  // Editing a lot after entry is an e-signed (GxP-significant) action,
+  // so it's gated on the same ``sign`` permission as the movement flows.
+  const canEdit = usePermission('inventory', 'sign');
 
   const [lots, setLots] = React.useState<Lot[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -42,6 +46,7 @@ export function LotsPageClient() {
     STATUS_ALL,
   );
   const [creating, setCreating] = React.useState(false);
+  const [editing, setEditing] = React.useState<Lot | null>(null);
 
   const debounced = useDebouncedValue(query, 150);
 
@@ -89,6 +94,10 @@ export function LotsPageClient() {
     toast.success('Lot added', {
       description: `${created.item_number ?? ''} · ${created.lot_number}`,
     });
+  };
+
+  const handleUpdated = (updated: Lot) => {
+    setLots((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
   };
 
   return (
@@ -162,7 +171,11 @@ export function LotsPageClient() {
               }
             />
           ) : (
-            <LotsTable lots={filtered} loading={loading} />
+            <LotsTable
+              lots={filtered}
+              loading={loading}
+              onEdit={canEdit ? setEditing : undefined}
+            />
           )}
         </Card>
       </div>
@@ -171,6 +184,14 @@ export function LotsPageClient() {
         open={creating}
         onOpenChange={setCreating}
         onCreated={handleCreated}
+      />
+
+      <LotEditDialog
+        lot={editing}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+        onUpdated={handleUpdated}
       />
     </>
   );

@@ -13,7 +13,9 @@ Verifies:
   * location PATCH + DELETE round-trip
   * item PATCH (description) writes audit row
   * item DELETE rejected when stock > 0 (item_has_stock)
-  * lot PATCH (status quarantined → released) writes audit row
+  * lot PATCH (status quarantined → released) is e-signed: writes audit
+    row with signature + reason; un-signed edit → 422; replayed
+    evidence → 401 reauth_evidence_replayed
   * lot DELETE rejected when lot has movements (lot_has_movements)
   * audit row is immutable — direct UPDATE on the DB raises
 """
@@ -62,6 +64,18 @@ def _login() -> str:
     s, b = _req("POST", "/auth/login", json_body={"email": EMAIL, "password": PASSWORD})
     assert s == 200, b
     return b["access_token"]
+
+
+def _reauth(token: str, action: str) -> str:
+    """Mint a fresh single-use e-signature evidence id for ``action``."""
+    s, b = _req(
+        "POST",
+        "/auth/reauth",
+        token=token,
+        json_body={"action": action, "password": PASSWORD},
+    )
+    assert s == 200, b
+    return b["evidence_id"]
 
 
 def _audit_rows_for(subject_table: str, subject_id: str) -> list[dict]:
@@ -242,26 +256,62 @@ def main() -> int:
     orig_status = lot["status"]
     target_status = "quarantined" if orig_status != "quarantined" else "released"
 
+    # Lot edits are e-signed (21 CFR Part 11): mint evidence + reason.
+    ev = _reauth(token, "lot.update")
     s, b = _req(
         "PATCH",
         f"/lots/{lot_id_}",
         token=token,
-        json_body={"status": target_status, "notes": f"smoke {suffix}"},
+        json_body={
+            "status": target_status,
+            "notes": f"smoke {suffix}",
+            "evidence_id": ev,
+            "reason": "Smoke test status correction",
+        },
     )
     assert s == 200 and b["status"] == target_status, b
     print(f"==> patched lot {lot['lot_number']} status {orig_status}->{target_status}")
+
+    # Un-signed lot edit (no evidence_id) is rejected at the schema edge.
+    s, b = _req(
+        "PATCH",
+        f"/lots/{lot_id_}",
+        token=token,
+        json_body={"status": orig_status},
+    )
+    assert s == 422, b
+    print("==> un-signed lot edit rejected: 422")
+
+    # Replaying the just-consumed evidence is rejected.
+    s, b = _req(
+        "PATCH",
+        f"/lots/{lot_id_}",
+        token=token,
+        json_body={
+            "status": orig_status,
+            "evidence_id": ev,
+            "reason": "replay attempt",
+        },
+    )
+    assert s == 401 and b.get("code") == "reauth_evidence_replayed", b
+    print("==> replayed lot-edit evidence rejected: 401 reauth_evidence_replayed")
 
     # DELETE: lots that have movements can't be soft-deleted.
     s, b = _req("DELETE", f"/lots/{lot_id_}", token=token)
     assert s == 422 and b.get("code") == "lot_has_movements", b
     print("==> delete lot with movements blocked: 422 lot_has_movements")
 
-    # Revert.
+    # Revert (signed, like any other lot edit).
+    ev = _reauth(token, "lot.update")
     s, _ = _req(
         "PATCH",
         f"/lots/{lot_id_}",
         token=token,
-        json_body={"status": orig_status},
+        json_body={
+            "status": orig_status,
+            "evidence_id": ev,
+            "reason": "Revert smoke-test change",
+        },
     )
     assert s == 200
 

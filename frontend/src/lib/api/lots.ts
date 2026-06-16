@@ -57,6 +57,29 @@ export interface LotCreateInput {
   notes?: string | null;
 }
 
+/**
+ * Body for ``PATCH /v1/lots/{id}``. ``lot_number`` and the parent item
+ * are immutable identity, so they're absent. Editing a lot after entry
+ * is a GxP-significant correction, so two fields are always required:
+ *
+ *   * ``evidence_id`` — a fresh reauth ticket minted for the
+ *     ``lot.update`` action (see {@link PasswordReauthDialog}).
+ *   * ``reason`` — the mandatory "reason for change" recorded on the
+ *     audit row.
+ *
+ * The editable fields are all optional — only send the ones that change.
+ */
+export interface LotUpdateInput {
+  vendor_id?: string | null;
+  manufacture_date?: string | null;
+  expiration_date?: string | null;
+  coa_url?: string | null;
+  status?: LotStatus;
+  notes?: string | null;
+  evidence_id: string;
+  reason: string;
+}
+
 export const lotsApi = {
   list: (opts?: {
     itemId?: string;
@@ -86,4 +109,12 @@ export const lotsApi = {
 
   create: (itemId: string, input: LotCreateInput) =>
     api.post<Lot>(`/items/${itemId}/lots`, { json: input }),
+
+  /**
+   * E-signed lot edit. ``input`` must carry a fresh ``evidence_id``
+   * (action='lot.update') and a ``reason``; the backend consumes the
+   * evidence and links it to the audit row.
+   */
+  update: (lotId: string, input: LotUpdateInput) =>
+    api.patch<Lot>(`/lots/${lotId}`, { json: input }),
 };
