@@ -53,7 +53,7 @@ export function LotsTable({ lots, loading, onEdit }: LotsTableProps) {
             <th className="px-3 py-2 font-medium">Vendor</th>
             <th className="px-3 py-2 font-medium">Mfg date</th>
             <th className="px-3 py-2 font-medium">Expires</th>
-            <th className="px-3 py-2 font-medium">Status</th>
+            <th className="px-3 py-2 font-medium">Lot status</th>
             {onEdit && <th className="px-3 py-2 font-medium text-right">Actions</th>}
           </tr>
         </thead>

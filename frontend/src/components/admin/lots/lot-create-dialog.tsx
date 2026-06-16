@@ -232,7 +232,7 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
                 )}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="lot-status">Status</Label>
+                <Label htmlFor="lot-status">Lot status</Label>
                 <Select
                   value={status}
                   onValueChange={(v) =>
@@ -240,7 +240,7 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
                   }
                 >
                   <SelectTrigger id="lot-status">
-                    <SelectValue placeholder="Status" />
+                    <SelectValue placeholder="Lot status" />
                   </SelectTrigger>
                   <SelectContent>
                     {LOT_STATUS_OPTIONS.map((o) => (

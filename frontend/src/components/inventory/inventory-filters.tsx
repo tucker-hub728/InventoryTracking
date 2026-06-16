@@ -59,12 +59,12 @@ export function InventoryFilters({ onExport }: InventoryFiltersProps) {
       <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
         <SelectTrigger
           className="w-[160px] [&>span]:min-w-0 [&>span]:truncate"
-          aria-label="Filter by status"
+          aria-label="Filter by stock status"
         >
-          <SelectValue placeholder="All statuses" />
+          <SelectValue placeholder="All stock statuses" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All statuses</SelectItem>
+          <SelectItem value="all">All stock statuses</SelectItem>
           {STATUS_FILTER_OPTIONS.map((s) => (
             <SelectItem key={s} value={s}>
               {s}

@@ -44,7 +44,7 @@ const COLUMNS: Column[] = [
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter
   // doesn't populate yet (per-item lot expiry isn't rolled up at item
   // level). Column re-lands once ``v_item_lot_summary`` ships.
-  { key: 'status', label: 'Status', className: 'w-[130px]' },
+  { key: 'status', label: 'Stock status', className: 'w-[130px]' },
   { key: 'lastUpdated', label: 'Updated', sortKey: 'lastUpdated', className: 'w-[120px]' },
 ];
 

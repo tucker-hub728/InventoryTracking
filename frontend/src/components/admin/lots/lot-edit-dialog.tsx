@@ -270,7 +270,7 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label htmlFor="edit-lot-status">Status</Label>
+                  <Label htmlFor="edit-lot-status">Lot status</Label>
                   <Select
                     value={status}
                     onValueChange={(v) =>
@@ -278,7 +278,7 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
                     }
                   >
                     <SelectTrigger id="edit-lot-status">
-                      <SelectValue placeholder="Status" />
+                      <SelectValue placeholder="Lot status" />
                     </SelectTrigger>
                     <SelectContent>
                       {LOT_STATUS_OPTIONS.map((o) => (

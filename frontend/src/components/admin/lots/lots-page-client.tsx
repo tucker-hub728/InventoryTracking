@@ -135,11 +135,11 @@ export function LotsPageClient() {
               value={statusFilter}
               onValueChange={(v) => setStatusFilter(v as LotStatus | typeof STATUS_ALL)}
             >
-              <SelectTrigger className="w-[180px]" aria-label="Filter by status">
-                <SelectValue placeholder="Status" />
+              <SelectTrigger className="w-[180px]" aria-label="Filter by lot status">
+                <SelectValue placeholder="Lot status" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={STATUS_ALL}>All statuses</SelectItem>
+                <SelectItem value={STATUS_ALL}>All lot statuses</SelectItem>
                 {LOT_STATUS_OPTIONS.map((o) => (
                   <SelectItem key={o.code} value={o.code}>
                     {o.label}
