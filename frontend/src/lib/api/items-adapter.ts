@@ -16,15 +16,10 @@
  * values until lots / batches / ledger / forecast modules land.
  */
 
-import type { InventoryItem, InventoryStatus } from '@/types/inventory';
+import { STOCK_STATUS_META } from '@/config/inventory';
+import type { InventoryItem } from '@/types/inventory';
 
-import type { ApiItem, ApiItemStatus } from './items';
-
-const STATUS_LABEL_BY_CODE: Record<ApiItemStatus, InventoryStatus> = {
-  available: 'Available',
-  low_stock: 'Low stock',
-  out_of_stock: 'Out of stock',
-};
+import type { ApiItem } from './items';
 
 /** Convert a numeric-string from the API to a plain number. */
 function num(s: string | null | undefined, fallback = 0): number {
@@ -56,7 +51,7 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     lot: '',
     expires: '',
     threshold: num(api.reorder_threshold),
-    status: STATUS_LABEL_BY_CODE[api.status_code] ?? 'Out of stock',
+    status: STOCK_STATUS_META[api.status_code]?.label ?? 'Out of stock',
     // "Updated" in the table means "row last modified" — sortable on
     // the backend by ``updated_at``. The previous fallback to
     // ``last_movement_at`` showed a recent date that didn't match

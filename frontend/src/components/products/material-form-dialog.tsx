@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/select';
 import { ApiError } from '@/lib/api/client';
 import { formatNumber } from '@/lib/utils';
+import { STOCK_STATUS_META } from '@/config/inventory';
 import { itemsApi, type ApiItem } from '@/lib/api/items';
 import {
   materialsApi,
@@ -47,15 +48,6 @@ const schema = z.object({
 });
 
 type FormValues = z.infer<typeof schema>;
-
-const STATUS_META: Record<
-  ProductMaterial['status_code'],
-  { label: string; tone: 'success' | 'warning' | 'danger' }
-> = {
-  available: { label: 'In Stock', tone: 'success' },
-  low_stock: { label: 'Low Stock', tone: 'warning' },
-  out_of_stock: { label: 'Critical', tone: 'danger' },
-};
 
 interface Props {
   open: boolean;
@@ -159,7 +151,7 @@ export function MaterialFormDialog({
     }
   };
 
-  const statusMeta = material ? STATUS_META[material.status_code] : null;
+  const statusMeta = material ? STOCK_STATUS_META[material.status_code] : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

@@ -13,18 +13,10 @@ import { usePermission } from '@/hooks/use-permission';
 import { formatNumber } from '@/lib/utils';
 import { materialsApi, type ProductMaterial } from '@/lib/api/products';
 import { ApiError } from '@/lib/api/client';
+import { STOCK_STATUS_META } from '@/config/inventory';
 
 import { MaterialFormDialog } from './material-form-dialog';
 import { useProductDetail } from './product-detail-context';
-
-const STATUS_META: Record<
-  ProductMaterial['status_code'],
-  { label: string; tone: 'success' | 'warning' | 'danger' }
-> = {
-  available: { label: 'In Stock', tone: 'success' },
-  low_stock: { label: 'Low Stock', tone: 'warning' },
-  out_of_stock: { label: 'Critical', tone: 'danger' },
-};
 
 /**
  * Materials tab (route ``/products/[id]/material``) — the product's "Required
@@ -134,7 +126,7 @@ export function ProductMaterialsPanel({ productId }: { productId: string }) {
             </thead>
             <tbody>
               {materials.map((m) => {
-                const meta = STATUS_META[m.status_code] ?? STATUS_META.out_of_stock;
+                const meta = STOCK_STATUS_META[m.status_code] ?? STOCK_STATUS_META.out_of_stock;
                 return (
                   <tr
                     key={m.id}
