@@ -32,11 +32,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.models.identity import User
 
-# The original item-number prefixes. Since Week 2 the prefix is free-form:
-# any 2–8 character, letter-led code (the DB CHECK enforces the *shape*,
-# ``^[A-Z][A-Z0-9]{1,7}-[0-9]+$``, not a fixed set). This tuple is kept as
-# the seed/legacy list and as UI quick-picks — it is NOT an exhaustive
-# whitelist anymore.
+# The original item-number prefixes, kept only as a seed/legacy list and
+# as UI quick-picks. ``item_number`` itself is free-form and user-supplied
+# (docs/modules/inventory.md §3.1): uniqueness is the only DB-level rule —
+# there is deliberately **no format CHECK** on the column. This tuple is
+# NOT a whitelist.
 ITEM_NUMBER_PREFIXES: tuple[str, ...] = ("CM-", "NM-", "CR-", "AY-")
 
 
@@ -107,10 +107,8 @@ class Item(Base):
 
     __tablename__ = "items"
     __table_args__ = (
-        CheckConstraint(
-            "item_number ~ '^[A-Z][A-Z0-9]{1,7}-[0-9]+$'",
-            name="ck_items_item_number_format",
-        ),
+        # No CHECK on item_number — it's free-form, uniqueness only (§3.1).
+        # The partial-unique index ``uq_items_item_number`` is the sole guard.
         CheckConstraint(
             "reorder_threshold >= 0",
             name="ck_items_reorder_threshold_nonneg",

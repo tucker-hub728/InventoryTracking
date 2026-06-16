@@ -141,8 +141,8 @@ export const itemsApi = {
   /**
    * Fetch by the human-readable item number (e.g. ``CM-0001``) — this is
    * what the detail page URL uses, so URL-driven fetches skip the UUID
-   * round-trip. ``itemNumber`` is sent as-is; the backend enforces the
-   * ``^(CM|NM|CR|AY)-\d+$`` shape and 404s on miss.
+   * round-trip. ``itemNumber`` is free-form and URL-encoded before send;
+   * the backend treats it as an opaque key and 404s on miss.
    */
   getByNumber: (itemNumber: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiItem>(`/items/by-number/${encodeURIComponent(itemNumber)}`, {

@@ -12,21 +12,25 @@ populated from ``app.item_balances``.
 
 from __future__ import annotations
 
-import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
-# Item-number shape is the *one* validation that's the same in the API,
-# the ORM, and the DB. Centralise the regex so they can't drift. Since
-# Week 2 the prefix is free-form — any 2–8 character, letter-led code
-# (e.g. CM, MR, PI, OE) — so the regex enforces the *shape*, not a fixed
-# set. The DB CHECK ``ck_items_item_number_format`` mirrors this exactly.
-_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]{1,7}-[0-9]+$")
-# The accepted prefix-code shape on its own (no number). Routes reuse this
-# string as the ``pattern`` on the ``prefix`` Query/Path params.
+# ``item_number`` is free-form and user-supplied. Per
+# docs/modules/inventory.md §3.1 / §4.1 / §9.2 the *only* backend rule is
+# uniqueness (the partial-unique index ``uq_items_item_number``); there is
+# deliberately **no format CHECK**. We trim, upper-case (preserving the
+# existing normalisation so case-variants can't masquerade as distinct
+# items), and reject blank / over-long values — everything else the user
+# types is accepted, so custom alphanumeric codes like ``CM-0001A``,
+# ``REF-017`` or ``WIDGET-12`` all go through.
+ITEM_NUMBER_MAX_LEN = 64
+# The shape used to *filter / group* by prefix (the part before the first
+# dash) — this constrains the ``prefix`` Query/Path params only and never
+# constrains what item numbers can be created. Routes reuse this string as
+# the ``pattern`` on those params.
 PREFIX_CODE_PATTERN = r"^[A-Za-z][A-Za-z0-9]{1,7}$"
 # Free-form prefix code. A named alias (was a ``Literal``) so route
 # signatures stay readable; the real check is the Query/Path ``pattern``.
@@ -35,10 +39,11 @@ ItemPrefix = str
 
 def _validate_item_number(v: str) -> str:
     v = v.strip().upper()
-    if not _PREFIX_RE.match(v):
+    if not v:
+        raise ValueError("item_number must not be blank")
+    if len(v) > ITEM_NUMBER_MAX_LEN:
         raise ValueError(
-            "item_number must look like '<CODE>-NNNN' where CODE is a "
-            "2–8 character letter-led prefix (e.g. CM-0001, MR-0007)"
+            f"item_number must be at most {ITEM_NUMBER_MAX_LEN} characters"
         )
     return v
 

@@ -367,7 +367,15 @@ async def next_item_number(session: AsyncSession, prefix: str) -> str:
     suffix = func.substring(Item.item_number, len(normalized) + 2)
     stmt = (
         select(func.max(cast(suffix, Integer)))
-        .where(Item.item_number.like(pattern))
+        # item_number is free-form now (e.g. ``CM-0001A``), so restrict the
+        # max-suffix scan to *numeric-suffixed* siblings — otherwise
+        # ``cast(... AS INTEGER)`` would blow up on a non-numeric suffix.
+        # Custom-format numbers under this prefix are simply ignored when
+        # computing the next suggestion.
+        .where(
+            Item.item_number.like(pattern),
+            Item.item_number.op("~")(f"^{normalized}-[0-9]+$"),
+        )
     )
     max_n = (await session.execute(stmt)).scalar_one_or_none()
     next_n = (max_n or 0) + 1

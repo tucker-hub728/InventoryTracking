@@ -32,11 +32,15 @@ import { vendorsApi, type Vendor } from '@/lib/api/vendors';
 // ── Form schema ────────────────────────────────────────────────────────
 
 const schema = z.object({
-  // Free-form, typed directly: a 2–8 char letter-led prefix, dash, digits
-  // (e.g. UR-0001). Mirrors the backend CHECK.
+  // Free-form item number — any non-blank code the operator issues
+  // (e.g. CM-0001, CM-0001A, REF-017). Per docs/modules/inventory.md §3.1
+  // the only backend rule is uniqueness, so we just trim, require non-blank
+  // and cap the length to match the server contract.
   itemId: z
     .string()
-    .regex(/^[A-Za-z][A-Za-z0-9]{1,7}-\d+$/, 'Item # must look like CM-0001'),
+    .trim()
+    .min(1, 'Item # is required')
+    .max(64, 'Item # must be at most 64 characters'),
   desc: z.string().min(3, 'Description is required'),
   // Vendor is optional — backend accepts null. UI requires a selection
   // unless the user explicitly chooses "No vendor" so we treat empty as

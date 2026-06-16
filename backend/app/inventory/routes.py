@@ -497,7 +497,9 @@ async def next_item_number(
 )
 async def get_item_by_number(
     db: DBSession,
-    item_number: Annotated[str, Path(pattern=r"^[A-Z][A-Z0-9]{1,7}-\d+$")],
+    # item_number is free-form (§3.1) — treat it as an opaque key here and
+    # let the repository 404 on miss, rather than constraining the shape.
+    item_number: Annotated[str, Path(min_length=1, max_length=64)],
 ) -> ItemRead:
     item = await inv_repo.get_item_by_number(db, item_number)
     if item is None:
