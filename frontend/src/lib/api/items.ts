@@ -1,5 +1,5 @@
 /**
- * Items API surface — wraps ``/api/v1/items`` (and ``/items/next-number``).
+ * Items API surface — wraps ``/api/v1/items``.
  *
  * Two layers of types here:
  *
@@ -19,18 +19,12 @@ import { api } from './client';
 
 // ── Wire shape ─────────────────────────────────────────────────────────
 
-// Free-form since Week 2: the item-number prefix is any 2–8 character,
-// letter-led code (the backend CHECK enforces the shape). Kept as a named
-// alias so call sites read clearly.
-export type ApiItemPrefix = string;
-
 export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
 
 /** Raw API row — numeric fields come back as strings (Postgres NUMERIC). */
 export interface ApiItem {
   id: string;
   item_number: string;
-  item_prefix: string;
   description: string;
   vendor_id: string | null;
   vendor_name: string | null;
@@ -64,11 +58,6 @@ export interface ApiItemListResponse {
   offset: number;
 }
 
-export interface ApiNextNumberResponse {
-  prefix: ApiItemPrefix;
-  item_number: string;
-}
-
 // ── Request shapes ─────────────────────────────────────────────────────
 
 export type ApiSortField = 'item_number' | 'description' | 'updated_at' | 'created_at';
@@ -76,7 +65,6 @@ export type ApiSortDirection = 'asc' | 'desc';
 
 export interface ListItemsParams {
   q?: string | null;
-  prefix?: ApiItemPrefix | null;
   vendor_id?: string | null;
   /** Filter by ``v_item_stock.status_code`` (server-side). */
   status?: ApiItemStatus | null;
@@ -124,7 +112,6 @@ export const itemsApi = {
     api.get<ApiItemListResponse>('/items', {
       query: {
         q: params.q ?? undefined,
-        prefix: params.prefix ?? undefined,
         vendor_id: params.vendor_id ?? undefined,
         status: params.status ?? undefined,
         sort: params.sort,
@@ -162,10 +149,4 @@ export const itemsApi = {
    * zero the qty (dispense or discard the remainder) first.
    */
   remove: (id: string) => api.delete<ApiItem>(`/items/${id}`),
-
-  nextNumber: (prefix: ApiItemPrefix, opts?: { signal?: AbortSignal }) =>
-    api.get<ApiNextNumberResponse>('/items/next-number', {
-      query: { prefix },
-      signal: opts?.signal,
-    }),
 };

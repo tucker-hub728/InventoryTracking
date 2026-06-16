@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import Integer, Select, asc, cast, desc, func, or_, select, text
+from sqlalchemy import Select, asc, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, lazyload, selectinload
 
@@ -136,15 +136,10 @@ def _apply_filters(
     stmt: Select[tuple[Item]],
     *,
     q: str | None,
-    prefix: str | None,
     vendor_id: uuid.UUID | None,
     status: str | None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
-    if prefix:
-        # Match e.g. "CM-" (or "CM" without the dash — accept either).
-        normalized = prefix.upper().rstrip("-") + "-"
-        stmt = stmt.where(Item.item_number.like(f"{normalized}%"))
     if vendor_id is not None:
         stmt = stmt.where(Item.vendor_id == vendor_id)
     if q:
@@ -179,7 +174,6 @@ async def list_items(
     session: AsyncSession,
     *,
     q: str | None = None,
-    prefix: str | None = None,
     vendor_id: uuid.UUID | None = None,
     status: str | None = None,
     sort: SortField = "item_number",
@@ -191,7 +185,6 @@ async def list_items(
     base = _apply_filters(
         select(Item),
         q=q,
-        prefix=prefix,
         vendor_id=vendor_id,
         status=status,
     )
@@ -199,7 +192,6 @@ async def list_items(
     count_stmt = _apply_filters(
         select(func.count()).select_from(Item),
         q=q,
-        prefix=prefix,
         vendor_id=vendor_id,
         status=status,
     )
@@ -350,36 +342,6 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
         "must_order_flag": item.must_order_flag,
         "deleted_at": item.deleted_at.isoformat() if item.deleted_at else None,
     }
-
-
-async def next_item_number(session: AsyncSession, prefix: str) -> str:
-    """Suggest the next free ``XX-NNNN`` for the given prefix.
-
-    Strategy: read the current MAX numeric suffix for the prefix, add 1,
-    zero-pad to 4 digits. Races are acceptable because the actual INSERT
-    is protected by the partial-unique index; on collision the caller
-    retries with this endpoint or types their own number.
-    """
-    normalized = prefix.upper().rstrip("-")
-    pattern = f"{normalized}-%"
-    # Strip the ``XX-`` prefix and cast the remainder to int so we sort
-    # numerically (``CM-0010`` > ``CM-0009``), not lexically.
-    suffix = func.substring(Item.item_number, len(normalized) + 2)
-    stmt = (
-        select(func.max(cast(suffix, Integer)))
-        # item_number is free-form now (e.g. ``CM-0001A``), so restrict the
-        # max-suffix scan to *numeric-suffixed* siblings — otherwise
-        # ``cast(... AS INTEGER)`` would blow up on a non-numeric suffix.
-        # Custom-format numbers under this prefix are simply ignored when
-        # computing the next suggestion.
-        .where(
-            Item.item_number.like(pattern),
-            Item.item_number.op("~")(f"^{normalized}-[0-9]+$"),
-        )
-    )
-    max_n = (await session.execute(stmt)).scalar_one_or_none()
-    next_n = (max_n or 0) + 1
-    return f"{normalized}-{next_n:04d}"
 
 
 # ── Locations ──────────────────────────────────────────────────────────

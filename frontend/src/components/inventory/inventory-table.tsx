@@ -19,8 +19,8 @@ import { cn, formatNumber } from '@/lib/utils';
 import type { InventoryItem } from '@/types/inventory';
 
 // Only the columns the backend can actually sort on are clickable. UI-only
-// columns (category / vendor / qty / status) read sort state but don't
-// drive it; we'd need new backend sort fields to make them sortable.
+// columns (vendor / qty / status) read sort state but don't drive it; we'd
+// need new backend sort fields to make them sortable.
 interface Column {
   key: keyof InventoryItem | 'lastUpdated';
   label: string;
@@ -37,7 +37,6 @@ interface Column {
 const COLUMNS: Column[] = [
   { key: 'id', label: 'Item ID', sortKey: 'id', className: 'w-[110px]' },
   { key: 'desc', label: 'Name', sortKey: 'desc' },
-  { key: 'category', label: 'Category', className: 'w-[170px]' },
   { key: 'vendor', label: 'Vendor', className: 'w-[160px]' },
   { key: 'qty', label: 'Units', align: 'right', className: 'w-[80px]' },
   { key: 'onOrder', label: 'On PO', align: 'right', className: 'w-[80px]' },
@@ -130,9 +129,6 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                 >
                   {item.desc}
                 </Link>
-              </TableCell>
-              <TableCell className="truncate text-xs text-text-2" title={item.category}>
-                {item.category}
               </TableCell>
               <TableCell className="truncate text-xs text-text-2" title={item.vendor}>
                 {item.vendor || '—'}

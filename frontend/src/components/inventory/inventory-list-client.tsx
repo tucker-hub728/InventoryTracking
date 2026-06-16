@@ -14,7 +14,6 @@ import { InventoryPagination } from './inventory-pagination';
 import { NewItemDialog } from './new-item-dialog';
 import { MovementWizard } from './movement-wizard';
 import { TransferDialog } from './transfer-dialog';
-import { CATEGORY_OPTIONS } from '@/config/inventory';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { toast } from '@/components/ui/sonner';
@@ -60,7 +59,6 @@ export function InventoryListClient() {
   // Zustand's referential equality only re-runs the effect when one of
   // these *primitives* actually changes.
   const query = useInventoryStore((s) => s.query);
-  const category = useInventoryStore((s) => s.category);
   const status = useInventoryStore((s) => s.status);
   const sortKey = useInventoryStore((s) => s.sortKey);
   const sortDir = useInventoryStore((s) => s.sortDir);
@@ -75,7 +73,7 @@ export function InventoryListClient() {
     const ctrl = new AbortController();
     void fetchItems({ signal: ctrl.signal });
     return () => ctrl.abort();
-  }, [fetchItems, query, category, status, sortKey, sortDir, page, pageSize]);
+  }, [fetchItems, query, status, sortKey, sortDir, page, pageSize]);
 
   // KPI tile inputs — until the movements module ships and we have a
   // ``/items/summary`` endpoint, derive what we can from the current
@@ -121,7 +119,6 @@ export function InventoryListClient() {
         {/* <InventoryKPIs items={items} total={total} /> */}
 
         <InventoryFilters
-          categories={CATEGORY_OPTIONS.map((c) => c.label)}
           onExport={() =>
             toast.info('Export queued', { description: 'You will be notified when ready.' })
           }

@@ -211,7 +211,6 @@ export function InventoryDetailShell({
             <span aria-hidden>·</span>
             <span>{item.vendor || '— No vendor —'}</span>
             <span aria-hidden>·</span>
-            <span>{item.category}</span>
             <StatusBadge status={item.status} />
           </span>
         }

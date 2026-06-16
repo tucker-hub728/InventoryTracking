@@ -1,5 +1,4 @@
 import type { InventoryItem, LedgerEntry, LedgerMap } from '@/types/inventory';
-import type { CategoryCode } from '@/config/inventory';
 import { daysFromNow } from './utils';
 
 export type ExpRisk = 'none' | 'soon' | 'imminent' | 'expired';
@@ -34,22 +33,4 @@ export function totalIn(entries: LedgerEntry[] | undefined): number {
 /** Sum of all stock-out units in a ledger. */
 export function totalOut(entries: LedgerEntry[] | undefined): number {
   return entries?.reduce((s, e) => s + (e.out ?? 0), 0) ?? 0;
-}
-
-/**
- * Find the next available Item ID for a category prefix, padded to 4 digits.
- * Scans existing items for the highest numeric suffix on that prefix and
- * returns prefix + (max + 1).
- */
-export function nextItemIdForCategory(
-  code: CategoryCode,
-  items: ReadonlyArray<Pick<InventoryItem, 'id'>>,
-): string {
-  let max = 0;
-  for (const it of items) {
-    if (!it.id.startsWith(`${code}-`)) continue;
-    const n = Number(it.id.slice(code.length + 1));
-    if (!Number.isNaN(n) && n > max) max = n;
-  }
-  return `${code}-${String(max + 1).padStart(4, '0')}`;
 }

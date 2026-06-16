@@ -13,7 +13,6 @@ export interface InventoryItem {
   uuid: string;
   desc: string;
   vendor: string;
-  category: string;
   lead: number;
   invValue: number;
   poValue: number;
@@ -87,7 +86,6 @@ export interface Signoff {
 export interface InventoryFilters {
   query: string;
   status: InventoryStatus | 'all';
-  category: string | 'all';
   sortKey: keyof InventoryItem | 'lastUpdated';
   sortDir: 'asc' | 'desc';
   page: number;

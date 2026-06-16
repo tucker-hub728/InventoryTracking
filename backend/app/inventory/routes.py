@@ -20,7 +20,6 @@ from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
-    PREFIX_CODE_PATTERN,
     AdjustmentRequest,
     AssignPositionRequest,
     DiscardRequest,
@@ -43,7 +42,6 @@ from app.inventory.schemas import (
     MovementType,
     MovePositionRequest,
     MovePositionResult,
-    NextItemNumberResponse,
     PositionEventRead,
     PositionRead,
     RackInput,
@@ -187,7 +185,6 @@ def _item_to_read(item: Item) -> ItemRead:
     return ItemRead(
         id=str(item.id),
         item_number=item.item_number,
-        item_prefix=item.item_prefix,
         description=item.description,
         vendor_id=str(item.vendor_id) if item.vendor_id else None,
         vendor_name=item.vendor.name if item.vendor else None,
@@ -425,13 +422,6 @@ async def delete_vendor(
 async def list_items(
     db: DBSession,
     q: Annotated[str | None, Query(description="Search description + item_number")] = None,
-    prefix: Annotated[
-        str | None,
-        Query(
-            pattern=PREFIX_CODE_PATTERN,
-            description="Filter by category/prefix code (e.g. CM, MR)",
-        ),
-    ] = None,
     vendor_id: Annotated[uuid.UUID | None, Query()] = None,
     status_filter: Annotated[
         Literal["available", "low_stock", "out_of_stock"] | None,
@@ -451,7 +441,6 @@ async def list_items(
     items, total = await inv_repo.list_items(
         db,
         q=q,
-        prefix=prefix,
         vendor_id=vendor_id,
         status=status_filter,
         sort=sort,
@@ -465,26 +454,6 @@ async def list_items(
         limit=limit,
         offset=offset,
     )
-
-
-@items_router.get(
-    "/next-number",
-    response_model=NextItemNumberResponse,
-    summary="Suggest the next free item_number for a given prefix",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def next_item_number(
-    db: DBSession,
-    prefix: Annotated[
-        str,
-        Query(
-            pattern=PREFIX_CODE_PATTERN,
-            description="Category/prefix code, e.g. CM, MR, PI",
-        ),
-    ],
-) -> NextItemNumberResponse:
-    suggested = await inv_repo.next_item_number(db, prefix)
-    return NextItemNumberResponse(prefix=prefix.upper(), item_number=suggested)
 
 
 @items_router.get(

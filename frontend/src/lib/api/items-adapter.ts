@@ -16,15 +16,9 @@
  * values until lots / batches / ledger / forecast modules land.
  */
 
-import { CATEGORY_OPTIONS } from '@/config/inventory';
 import type { InventoryItem, InventoryStatus } from '@/types/inventory';
 
 import type { ApiItem, ApiItemStatus } from './items';
-
-// ``CM`` / ``NM`` / ``CR`` / ``AY`` → human label for the Category column.
-const CATEGORY_LABEL_BY_PREFIX: Record<string, string> = Object.fromEntries(
-  CATEGORY_OPTIONS.map((c) => [c.code, c.label]),
-);
 
 const STATUS_LABEL_BY_CODE: Record<ApiItemStatus, InventoryStatus> = {
   available: 'Available',
@@ -48,7 +42,6 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     uuid: api.id,
     desc: api.description,
     vendor: api.vendor_name ?? '',
-    category: CATEGORY_LABEL_BY_PREFIX[api.item_prefix] ?? api.item_prefix,
     lead: api.avg_lead_days ?? 0,
     invValue: num(api.inv_value_amount),
     poValue: num(api.po_value_amount),

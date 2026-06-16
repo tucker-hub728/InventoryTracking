@@ -32,13 +32,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.models.identity import User
 
-# The original item-number prefixes, kept only as a seed/legacy list and
-# as UI quick-picks. ``item_number`` itself is free-form and user-supplied
-# (docs/modules/inventory.md §3.1): uniqueness is the only DB-level rule —
-# there is deliberately **no format CHECK** on the column. This tuple is
-# NOT a whitelist.
-ITEM_NUMBER_PREFIXES: tuple[str, ...] = ("CM-", "NM-", "CR-", "AY-")
-
 
 class UnitOfMeasure(Base):
     """Small lookup of measurement units. Seeded by the migration."""
@@ -222,15 +215,6 @@ class Item(Base):
         foreign_keys=[updated_by_user_id],
         viewonly=True,
     )
-
-    @property
-    def item_prefix(self) -> str:
-        """The grouping prefix — the part before the dash (``CM``, ``MR``…).
-
-        Free-form since Week 2, so split on the first dash rather than
-        slicing two characters; multi-letter codes resolve correctly.
-        """
-        return self.item_number.split("-", 1)[0]
 
 
 # Single source of truth for accepted location kinds. The DB CHECK

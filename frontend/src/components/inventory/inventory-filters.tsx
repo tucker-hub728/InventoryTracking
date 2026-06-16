@@ -17,7 +17,6 @@ import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import type { InventoryStatus } from '@/types/inventory';
 
 interface InventoryFiltersProps {
-  categories: string[];
   onExport?: () => void;
 }
 
@@ -32,13 +31,11 @@ const STATUS_FILTER_OPTIONS: readonly InventoryStatus[] = [
   'Out of stock',
 ] as const;
 
-export function InventoryFilters({ categories, onExport }: InventoryFiltersProps) {
+export function InventoryFilters({ onExport }: InventoryFiltersProps) {
   const query = useInventoryStore((s) => s.query);
   const status = useInventoryStore((s) => s.status);
-  const category = useInventoryStore((s) => s.category);
   const setQuery = useInventoryStore((s) => s.setQuery);
   const setStatus = useInventoryStore((s) => s.setStatus);
-  const setCategory = useInventoryStore((s) => s.setCategory);
 
   // Local input state for snappy typing; commit to store on debounce.
   const [local, setLocal] = React.useState(query);
@@ -58,23 +55,6 @@ export function InventoryFilters({ categories, onExport }: InventoryFiltersProps
         wrapperClassName="min-w-[260px] flex-1 max-w-[560px]"
         aria-label="Search inventory"
       />
-
-      <Select value={category} onValueChange={(v) => setCategory(v)}>
-        <SelectTrigger
-          className="w-[220px] [&>span]:min-w-0 [&>span]:truncate"
-          aria-label="Filter by category"
-        >
-          <SelectValue placeholder="All categories" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All categories</SelectItem>
-          {categories.map((c) => (
-            <SelectItem key={c} value={c}>
-              {c}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
 
       <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
         <SelectTrigger

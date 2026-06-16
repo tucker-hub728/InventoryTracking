@@ -3,11 +3,10 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
-import { DEFAULT_PAGE_SIZE, CATEGORY_OPTIONS } from '@/config/inventory';
+import { DEFAULT_PAGE_SIZE } from '@/config/inventory';
 import { ApiError } from '@/lib/api/client';
 import {
   itemsApi,
-  type ApiItemPrefix,
   type ApiItemStatus,
   type ApiSortField,
   type ApiSortDirection,
@@ -43,10 +42,6 @@ const SORT_KEY_TO_API: Partial<Record<SortKey, ApiSortField>> = {
   lastUpdated: 'updated_at',
 };
 
-const CATEGORY_PREFIX_BY_LABEL: Record<string, ApiItemPrefix> = Object.fromEntries(
-  CATEGORY_OPTIONS.map((c) => [c.label, c.code as ApiItemPrefix]),
-);
-
 // Frontend display label → backend ``v_item_stock.status_code``. Only
 // the three statuses the view actually computes are mapped here.
 // Lot-driven statuses (Expiring / Quarantine / Expired) need lot data
@@ -63,9 +58,6 @@ interface FilterState {
   /** UI display label. Forwarded to the API only when it maps to a
    *  status the backend view can compute (see ``STATUS_CODE_BY_LABEL``). */
   status: InventoryStatus | 'all';
-  /** Category *label* (e.g. ``Cell-therapy media / reagent``). Mapped
-   *  to the backend prefix code on fetch. ``all`` = no filter. */
-  category: string | 'all';
   sortKey: SortKey;
   sortDir: SortDir;
   page: number;
@@ -92,7 +84,6 @@ interface InventoryStore extends FilterState, DataState {
   // existing components don't need to change).
   setQuery: (q: string) => void;
   setStatus: (s: InventoryStatus | 'all') => void;
-  setCategory: (c: string | 'all') => void;
   setSort: (key: SortKey, dir?: SortDir) => void;
   toggleSort: (key: SortKey) => void;
   setPage: (p: number) => void;
@@ -114,14 +105,11 @@ interface InventoryStore extends FilterState, DataState {
   ) => Promise<InventoryItem | null>;
   /** Create an item, refetch the list, and return the created row. */
   create: (input: ItemCreateInput) => Promise<InventoryItem>;
-  /** Ask the backend for the next free item_number under ``prefix``. */
-  getNextItemNumber: (prefix: ApiItemPrefix) => Promise<string>;
 }
 
 const initialFilters: FilterState = {
   query: '',
   status: 'all',
-  category: 'all',
   sortKey: 'id',
   sortDir: 'asc',
   page: 1,
@@ -152,7 +140,6 @@ export const useInventoryStore = create<InventoryStore>()(
       // ── Filter mutators ────────────────────────────────────────────
       setQuery: (query) => set({ query, page: 1 }),
       setStatus: (status) => set({ status, page: 1 }),
-      setCategory: (category) => set({ category, page: 1 }),
       setSort: (sortKey, sortDir) => set({ sortKey, sortDir: sortDir ?? 'asc', page: 1 }),
       toggleSort: (sortKey) => {
         const cur = get();
@@ -173,8 +160,6 @@ export const useInventoryStore = create<InventoryStore>()(
 
         const apiSort: ApiSortField = SORT_KEY_TO_API[s.sortKey] ?? 'item_number';
         const apiDirection = s.sortDir as ApiSortDirection;
-        const prefix =
-          s.category === 'all' ? undefined : CATEGORY_PREFIX_BY_LABEL[s.category];
         const statusCode =
           s.status === 'all'
             ? undefined
@@ -184,7 +169,6 @@ export const useInventoryStore = create<InventoryStore>()(
           const resp = await itemsApi.list(
             {
               q: s.query.trim() || undefined,
-              prefix: prefix ?? undefined,
               status: statusCode,
               sort: apiSort,
               direction: apiDirection,
@@ -238,11 +222,6 @@ export const useInventoryStore = create<InventoryStore>()(
           throw err;
         }
       },
-
-      getNextItemNumber: async (prefix) => {
-        const { item_number } = await itemsApi.nextNumber(prefix);
-        return item_number;
-      },
     }),
     {
       name: 'ims:inventory-filters',
@@ -253,7 +232,6 @@ export const useInventoryStore = create<InventoryStore>()(
       partialize: (s): FilterState => ({
         query: s.query,
         status: s.status,
-        category: s.category,
         sortKey: s.sortKey,
         sortDir: s.sortDir,
         page: s.page,

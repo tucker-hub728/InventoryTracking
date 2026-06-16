@@ -27,14 +27,6 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_valida
 # types is accepted, so custom alphanumeric codes like ``CM-0001A``,
 # ``REF-017`` or ``WIDGET-12`` all go through.
 ITEM_NUMBER_MAX_LEN = 64
-# The shape used to *filter / group* by prefix (the part before the first
-# dash) — this constrains the ``prefix`` Query/Path params only and never
-# constrains what item numbers can be created. Routes reuse this string as
-# the ``pattern`` on those params.
-PREFIX_CODE_PATTERN = r"^[A-Za-z][A-Za-z0-9]{1,7}$"
-# Free-form prefix code. A named alias (was a ``Literal``) so route
-# signatures stay readable; the real check is the Query/Path ``pattern``.
-ItemPrefix = str
 
 
 def _validate_item_number(v: str) -> str:
@@ -130,9 +122,9 @@ class VendorUpdate(BaseModel):
 class ItemCreate(BaseModel):
     """Payload for ``POST /v1/items``.
 
-    ``item_number`` is supplied by the client — call
-    ``GET /v1/items/next-number?prefix=CM`` to get a suggestion. The
-    server validates the prefix + format and enforces uniqueness.
+    ``item_number`` is a single free-form field supplied by the client.
+    The only server-side rule is uniqueness — there is no prefix /
+    category constraint on what can be created.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -193,7 +185,6 @@ class ItemRead(BaseModel):
 
     id: str
     item_number: str
-    item_prefix: str
     description: str
     vendor_id: str | None
     vendor_name: str | None
@@ -229,13 +220,6 @@ class ItemListResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-class NextItemNumberResponse(BaseModel):
-    """Suggestion for the next free item number under a prefix."""
-
-    prefix: ItemPrefix
-    item_number: str
 
 
 # ── Locations ──────────────────────────────────────────────────────────

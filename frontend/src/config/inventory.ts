@@ -19,25 +19,6 @@ export const INVENTORY_STATUSES: readonly InventoryStatus[] = [
   'Out of stock',
 ] as const;
 
-/**
- * Category code ↔ label map. Codes drive auto-generated Item IDs
- * (e.g. "CR-0473"). Order is the order shown in the New-item card grid.
- */
-export const CATEGORY_OPTIONS = [
-  { code: 'CM', label: 'Cell-therapy media / reagent' },
-  { code: 'NM', label: 'Manufacturing reagent' },
-  { code: 'CR', label: 'Consumable / equipment' },
-  { code: 'AY', label: 'Assay / QC reference' },
-] as const;
-
-export type CategoryCode = (typeof CATEGORY_OPTIONS)[number]['code'];
-
-export const CATEGORY_CODE_BY_LABEL: Record<string, CategoryCode> =
-  Object.fromEntries(CATEGORY_OPTIONS.map((c) => [c.label, c.code])) as Record<
-    string,
-    CategoryCode
-  >;
-
 export const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 export const DEFAULT_PAGE_SIZE = 25;
 
