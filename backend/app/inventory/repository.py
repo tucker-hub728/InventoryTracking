@@ -226,6 +226,7 @@ async def create_item(
     vendor_id: uuid.UUID | None = None,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
+    near_expiry_threshold_days: int = 30,
     unit_price_amount: Decimal | None = None,
     units_per_package: int | None = None,
     uom_code: str = "unit",
@@ -249,6 +250,7 @@ async def create_item(
         vendor_id=vendor_id,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
+        near_expiry_threshold_days=near_expiry_threshold_days,
         unit_price_amount=unit_price_amount,
         units_per_package=units_per_package,
         price_per_package_amount=price_per_package,
@@ -332,6 +334,7 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
         "vendor_id": str(item.vendor_id) if item.vendor_id else None,
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
+        "near_expiry_threshold_days": item.near_expiry_threshold_days,
         "unit_price_amount": (
             str(item.unit_price_amount) if item.unit_price_amount is not None else None
         ),

@@ -134,6 +134,7 @@ class ItemCreate(BaseModel):
     vendor_id: str | None = None
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    near_expiry_threshold_days: int = Field(default=30, ge=0, le=3650)
     unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
     units_per_package: int | None = Field(default=None, ge=1)
     uom_code: str = Field(default="unit", min_length=1, max_length=16)
@@ -164,6 +165,7 @@ class ItemUpdate(BaseModel):
     vendor_id: str | None = None
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
+    near_expiry_threshold_days: int | None = Field(default=None, ge=0, le=3650)
     unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
     units_per_package: int | None = Field(default=None, ge=1)
     uom_code: str | None = Field(default=None, min_length=1, max_length=16)
@@ -190,6 +192,7 @@ class ItemRead(BaseModel):
     vendor_name: str | None
     avg_lead_days: int | None
     reorder_threshold: Decimal
+    near_expiry_threshold_days: int
     unit_price_amount: Decimal | None
     units_per_package: int | None
     price_per_package_amount: Decimal | None

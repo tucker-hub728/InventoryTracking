@@ -46,6 +46,7 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     poDue: api.po_due_text ?? '',
     onOrder: num(api.qty_on_order),
     mustOrder: api.must_order_flag ? 1 : 0,
+    nearExpiryThresholdDays: api.near_expiry_threshold_days ?? 30,
     // Batch dimensions land with the movements module.
     location: '',
     lot: '',

@@ -63,6 +63,13 @@ const schema = z.object({
       (v) => !v || (/^\d+$/.test(v) && Number(v) >= 1),
       'Units per package must be a positive integer',
     ),
+  near_expiry_threshold_days: z
+    .string()
+    .optional()
+    .refine(
+      (v) => !v || (/^\d+$/.test(v) && Number(v) >= 0 && Number(v) <= 3650),
+      'Near-expiry threshold must be a whole number of days (0–3650)',
+    ),
   po_note: z.string().max(1024).optional(),
   notes: z.string().max(2048).optional(),
   must_order_flag: z.boolean(),
@@ -114,6 +121,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       reorder_threshold: '',
       unit_price_amount: '',
       units_per_package: '',
+      near_expiry_threshold_days: '',
       po_note: '',
       notes: '',
       must_order_flag: false,
@@ -160,6 +168,10 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
             freshItem.units_per_package != null
               ? String(freshItem.units_per_package)
               : '',
+          near_expiry_threshold_days:
+            freshItem.near_expiry_threshold_days != null
+              ? String(freshItem.near_expiry_threshold_days)
+              : '',
           po_note: freshItem.po_note ?? '',
           notes: freshItem.notes ?? '',
           must_order_flag: freshItem.must_order_flag,
@@ -204,6 +216,13 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       patch.units_per_package = values.units_per_package
         ? Number(values.units_per_package)
         : null;
+    }
+    if (dirtyFields.near_expiry_threshold_days) {
+      // Non-nullable column (default 30): a cleared field falls back to 0,
+      // mirroring how reorder_threshold treats an empty value here.
+      patch.near_expiry_threshold_days = values.near_expiry_threshold_days
+        ? Number(values.near_expiry_threshold_days)
+        : 0;
     }
     if (dirtyFields.po_note) patch.po_note = values.po_note?.trim() || null;
     if (dirtyFields.notes) patch.notes = values.notes?.trim() || null;
@@ -377,13 +396,33 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="it-po-note">PO note</Label>
-              <Input
-                id="it-po-note"
-                placeholder="e.g. Quote ref #1234"
-                {...register('po_note')}
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="it-near-expiry">Near-expiry threshold (days)</Label>
+                <Input
+                  id="it-near-expiry"
+                  type="number"
+                  inputMode="numeric"
+                  step="1"
+                  min={0}
+                  max={3650}
+                  aria-invalid={Boolean(errors.near_expiry_threshold_days)}
+                  {...register('near_expiry_threshold_days')}
+                />
+                {errors.near_expiry_threshold_days && (
+                  <p role="alert" className="text-xs text-danger">
+                    {errors.near_expiry_threshold_days.message}
+                  </p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="it-po-note">PO note</Label>
+                <Input
+                  id="it-po-note"
+                  placeholder="e.g. Quote ref #1234"
+                  {...register('po_note')}
+                />
+              </div>
             </div>
 
             <div className="space-y-1.5">

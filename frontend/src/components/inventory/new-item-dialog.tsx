@@ -50,6 +50,11 @@ const schema = z.object({
   unitPrice: z.coerce.number().nonnegative('Must be ≥ 0'),
   unitsPerPackage: z.coerce.number().int().positive('Must be ≥ 1'),
   threshold: z.coerce.number().int().nonnegative('Must be ≥ 0'),
+  nearExpiryThresholdDays: z.coerce
+    .number()
+    .int()
+    .nonnegative('Must be ≥ 0')
+    .max(3650, 'Must be ≤ 3650'),
   poNote: z.string().optional(),
   notes: z.string().optional(),
 });
@@ -98,6 +103,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       unitPrice: 0,
       unitsPerPackage: 1,
       threshold: 0,
+      nearExpiryThresholdDays: 30,
       poNote: '',
       notes: '',
     },
@@ -158,6 +164,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
         unit_price_amount: data.unitPrice,
         units_per_package: data.unitsPerPackage,
         reorder_threshold: data.threshold,
+        near_expiry_threshold_days: data.nearExpiryThresholdDays,
         po_note: data.poNote ? data.poNote : null,
         notes: data.notes ? data.notes : null,
       });
@@ -296,6 +303,25 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
                   {...register('threshold')}
                 />
               </Field>
+              <Field
+                id="ni-near-expiry"
+                label="Near-expiry threshold (days)"
+                error={errors.nearExpiryThresholdDays?.message}
+              >
+                <Input
+                  id="ni-near-expiry"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={3650}
+                  step={1}
+                  placeholder="e.g. 30"
+                  {...register('nearExpiryThresholdDays')}
+                />
+              </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
               <Field id="ni-po-note" label="PO note" error={errors.poNote?.message}>
                 <Input
                   id="ni-po-note"

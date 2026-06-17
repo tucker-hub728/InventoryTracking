@@ -106,6 +106,10 @@ class Item(Base):
             "reorder_threshold >= 0",
             name="ck_items_reorder_threshold_nonneg",
         ),
+        CheckConstraint(
+            "near_expiry_threshold_days >= 0",
+            name="ck_items_near_expiry_threshold_days_nonneg",
+        ),
         Index(
             "uq_items_item_number",
             "item_number",
@@ -137,6 +141,15 @@ class Item(Base):
         Numeric(14, 3),
         nullable=False,
         server_default=text("0"),
+    )
+    # Near-expiry window (days). Lots on this item whose expiration falls
+    # within this many days are flagged "near expiry" on the unit ledger;
+    # already-past lots are "expired". Per-item so each material can carry
+    # its own shelf-life sensitivity. Default 30.
+    near_expiry_threshold_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("30"),
     )
     unit_price_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(14, 2),

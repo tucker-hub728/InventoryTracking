@@ -30,6 +30,7 @@ export interface ApiItem {
   vendor_name: string | null;
   avg_lead_days: number | null;
   reorder_threshold: string;
+  near_expiry_threshold_days: number;
   unit_price_amount: string | null;
   units_per_package: number | null;
   price_per_package_amount: string | null;
@@ -80,6 +81,7 @@ export interface ItemCreateInput {
   vendor_id?: string | null;
   avg_lead_days?: number | null;
   reorder_threshold?: number;
+  near_expiry_threshold_days?: number;
   unit_price_amount?: number | null;
   units_per_package?: number | null;
   uom_code?: string;
@@ -97,6 +99,7 @@ export interface ItemUpdateInput {
   vendor_id?: string | null;
   avg_lead_days?: number | null;
   reorder_threshold?: number;
+  near_expiry_threshold_days?: number;
   unit_price_amount?: number | null;
   units_per_package?: number | null;
   uom_code?: string;

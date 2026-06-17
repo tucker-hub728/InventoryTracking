@@ -13,12 +13,20 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
 import type { LedgerEntry } from '@/types/inventory';
+import { expiryStatus } from '@/lib/inventory-helpers';
 import { cn } from '@/lib/utils';
 
 interface Props {
   entries: LedgerEntry[];
+  /**
+   * Near-expiry window (days) for the colour-coded Expiry badges: lots
+   * within this many days read "Near expiry" (amber), past lots
+   * "Expired" (red), the rest "OK" (green).
+   */
+  nearExpiryThresholdDays: number;
   /**
    * Invoked when the operator clicks the per-row Reverse action. When
    * omitted, the action column is hidden — used by read-only viewers
@@ -62,7 +70,7 @@ function groupByLot(entries: LedgerEntry[]): LotGroup[] {
   });
 }
 
-export function LedgerTable({ entries, onReverseRequest }: Props) {
+export function LedgerTable({ entries, nearExpiryThresholdDays, onReverseRequest }: Props) {
   const showActions = Boolean(onReverseRequest);
 
   if (entries.length === 0) {
@@ -85,7 +93,7 @@ export function LedgerTable({ entries, onReverseRequest }: Props) {
           <TableHead className="w-[100px] text-right">Balance</TableHead>
           <TableHead className="w-[160px]">Location</TableHead>
           <TableHead className="w-[140px]">Lot</TableHead>
-          <TableHead className="w-[120px]">Expiry</TableHead>
+          <TableHead className="w-[150px]">Expiry</TableHead>
           <TableHead className="w-[160px]">By</TableHead>
           {showActions && <TableHead className="w-[80px]" />}
         </TableRow>
@@ -104,6 +112,7 @@ export function LedgerTable({ entries, onReverseRequest }: Props) {
                 : e.isReversed
                   ? 'Already reversed'
                   : undefined;
+              const expiry = expiryStatus(e.exp, nearExpiryThresholdDays);
               return (
                 <TableRow
                   key={e.movementId ?? `${group.lot}-${e.date}-${i}`}
@@ -148,7 +157,15 @@ export function LedgerTable({ entries, onReverseRequest }: Props) {
                     )}
                   </TableCell>
                   <TableCell className="font-mono text-xs text-text-2">{e.lot}</TableCell>
-                  <TableCell className="font-mono text-xs text-text-2">{e.exp}</TableCell>
+                  <TableCell className="text-xs">
+                    {expiry ? (
+                      <Badge tone={expiry.tone} dot className="font-mono" title={expiry.label}>
+                        {e.exp}
+                      </Badge>
+                    ) : (
+                      <span className="font-mono text-text-2">{e.exp}</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-xs text-text-2">
                     {e.actorName ? (
                       <span className="block truncate" title={e.actorName}>

@@ -22,6 +22,8 @@ export interface InventoryItem {
   poDue: string;
   onOrder: number;
   mustOrder: number;
+  /** Per-item near-expiry window (days) driving the ledger expiry colours. */
+  nearExpiryThresholdDays: number;
   location: string;
   lot: string;
   expires: string;

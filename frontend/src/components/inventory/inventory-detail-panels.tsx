@@ -16,7 +16,10 @@ import { useInventoryDetail } from './inventory-detail-context';
  */
 
 export function ItemLedgerPanel() {
-  const { ledger, onReverseRequest } = useInventoryDetail();
+  const { item, ledger, onReverseRequest } = useInventoryDetail();
+  // The near-expiry window is a per-item setting, managed from the
+  // create / edit item dialogs. The ledger only *reads* it to colour the
+  // expiry pills (green / amber / red) — no editing here.
   return (
     <div className="overflow-x-auto">
       {ledger.error ? (
@@ -26,7 +29,11 @@ export function ItemLedgerPanel() {
           Loading ledger…
         </div>
       ) : (
-        <LedgerTable entries={ledger.entries} onReverseRequest={onReverseRequest} />
+        <LedgerTable
+          entries={ledger.entries}
+          nearExpiryThresholdDays={item.nearExpiryThresholdDays}
+          onReverseRequest={onReverseRequest}
+        />
       )}
     </div>
   );
