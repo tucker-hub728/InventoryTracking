@@ -88,7 +88,7 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
       manufacture_date: '',
       expiration_date: '',
       coa_url: '',
-      status: 'released',
+      status: 'available',
       notes: '',
     },
   });

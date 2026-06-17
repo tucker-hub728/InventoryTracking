@@ -138,13 +138,13 @@ export function PositionSheet({ selection, onClose }: Props) {
     setRemoveDestination('');
   }, [selection?.position.id]);
 
-  // Load assignable (released) lots when an empty slot is opened.
+  // Load assignable (available) lots when an empty slot is opened.
   React.useEffect(() => {
     if (!open || !isEmpty || !canEdit) return;
     const ctrl = new AbortController();
     setLotsLoading(true);
     lotsApi
-      .list({ status: 'released', signal: ctrl.signal })
+      .list({ status: 'available', signal: ctrl.signal })
       .then((rows) => setLots(rows))
       .catch(() => {
         /* aborted or failed — leave the picker empty */

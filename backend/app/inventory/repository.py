@@ -498,7 +498,7 @@ async def create_lot(
     manufacture_date: date | None = None,
     expiration_date: date | None = None,
     coa_url: str | None = None,
-    status: str = "released",
+    status: str = "available",
     notes: str | None = None,
 ) -> Lot:
     """Insert a lot row. Caller commits."""

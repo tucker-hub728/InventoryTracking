@@ -299,11 +299,16 @@ class Location(Base):
 
 # Single source of truth for lot status values. Keep in sync with the
 # DB CHECK and the Pydantic enum.
+#
+# Two core statuses per the client's order model — "Quarantine" was
+# explicitly rejected (audit vs. physical-area discrepancy), and expiry
+# is handled by ``expiration_date`` (date-driven), not a manual status:
+#   * available — received & usable stock
+#   * on_order  — placed on a PO, not yet received (set manually)
+# How Released / QC Hold / Rejected ultimately fold in is TBD with the team.
 LOT_STATUSES: tuple[str, ...] = (
-    "quarantined",
-    "released",
-    "expired",
-    "recalled",
+    "on_order",
+    "available",
 )
 
 
@@ -330,7 +335,7 @@ class Lot(Base):
         Index(
             "ix_lots_expiration_date",
             "expiration_date",
-            postgresql_where=text("status IN ('released', 'quarantined')"),
+            postgresql_where=text("status IN ('available', 'on_order')"),
         ),
         CheckConstraint(
             "status IN (" + ", ".join(f"'{s}'" for s in LOT_STATUSES) + ")",
@@ -371,7 +376,7 @@ class Lot(Base):
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        server_default=text("'released'"),
+        server_default=text("'available'"),
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 

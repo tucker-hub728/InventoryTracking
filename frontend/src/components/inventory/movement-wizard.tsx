@@ -280,7 +280,7 @@ export function MovementWizard({
   // ── Lot data: scoped to the chosen item ──────────────────────────────
   //
   // Both lists fire in parallel any time the item changes. The IN
-  // picker uses ``lotsIn`` (all released/quarantined lots), the OUT
+  // picker uses ``lotsIn`` (all of the item's lots), the OUT
   // picker filters ``stockByLot`` to qty > 0 at render time, and the
   // impact preview at the bottom of the form reads ``stockByLot`` to
   // compute the "before" balance for either direction.

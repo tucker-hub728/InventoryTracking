@@ -13,7 +13,7 @@ Verifies:
   * location PATCH + DELETE round-trip
   * item PATCH (description) writes audit row
   * item DELETE rejected when stock > 0 (item_has_stock)
-  * lot PATCH (status quarantined → released) is e-signed: writes audit
+  * lot PATCH (status available → on_order) is e-signed: writes audit
     row with signature + reason; un-signed edit → 422; replayed
     evidence → 401 reauth_evidence_replayed
   * lot DELETE rejected when lot has movements (lot_has_movements)
@@ -254,7 +254,7 @@ def main() -> int:
     lot = lots[0]
     lot_id_ = lot["id"]
     orig_status = lot["status"]
-    target_status = "quarantined" if orig_status != "quarantined" else "released"
+    target_status = "on_order" if orig_status != "on_order" else "available"
 
     # Lot edits are e-signed (21 CFR Part 11): mint evidence + reason.
     ev = _reauth(token, "lot.update")

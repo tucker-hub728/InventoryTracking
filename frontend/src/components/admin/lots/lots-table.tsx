@@ -28,10 +28,8 @@ function formatDate(iso: string | null): string {
 }
 
 const STATUS_TONE: Record<LotStatus, string> = {
-  released: 'border-success/30 bg-success/5 text-success',
-  quarantined: 'border-accent/30 bg-accent/5 text-accent',
-  expired: 'border-warning/30 bg-warning/5 text-warning',
-  recalled: 'border-danger/30 bg-danger/5 text-danger',
+  available: 'border-success/30 bg-success/5 text-success',
+  on_order: 'border-accent/30 bg-accent/5 text-accent',
 };
 
 export function LotsTable({ lots, loading, onEdit }: LotsTableProps) {

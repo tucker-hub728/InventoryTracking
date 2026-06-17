@@ -337,7 +337,7 @@ class LocationRead(BaseModel):
 # ── Lots ───────────────────────────────────────────────────────────────
 
 
-LotStatus = Literal["quarantined", "released", "expired", "recalled"]
+LotStatus = Literal["on_order", "available"]
 
 
 class LotCreate(BaseModel):
@@ -353,7 +353,7 @@ class LotCreate(BaseModel):
     manufacture_date: date | None = None
     expiration_date: date | None = None
     coa_url: str | None = Field(default=None, max_length=2048)
-    status: LotStatus = "released"
+    status: LotStatus = "available"
     notes: str | None = Field(default=None, max_length=2048)
 
 

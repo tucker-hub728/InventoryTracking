@@ -111,7 +111,7 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
-      status: 'released',
+      status: 'available',
       vendor_id: NO_VENDOR,
       manufacture_date: '',
       expiration_date: '',

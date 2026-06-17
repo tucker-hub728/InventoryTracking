@@ -1391,7 +1391,7 @@ async def create_receipt(
                 manufacture_date=new_lot.manufacture_date,
                 expiration_date=new_lot.expiration_date,
                 coa_url=new_lot.coa_url,
-                status="released",
+                status="available",
                 notes=new_lot.notes,
             )
         except IntegrityError as exc:
@@ -1421,7 +1421,10 @@ async def create_receipt(
                 "Lot does not belong to this item",
                 code="lot_item_mismatch",
             )
-        if existing_lot.status not in ("released", "quarantined"):
+        # Both core statuses can receive: an 'available' lot tops up, an
+        # 'on_order' lot is arriving. (Guard kept for forward-safety if a
+        # terminal status like 'rejected' is added later.)
+        if existing_lot.status not in ("available", "on_order"):
             raise ValidationError(
                 f"Lot is '{existing_lot.status}' and cannot receive new stock",
                 code="lot_status_blocked",

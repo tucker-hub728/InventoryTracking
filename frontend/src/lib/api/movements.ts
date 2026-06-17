@@ -198,7 +198,7 @@ export interface ReverseInput {
 export interface StockByLotEntry {
   lot_id: string;
   lot_number: string;
-  lot_status: 'quarantined' | 'released' | 'expired' | 'recalled';
+  lot_status: 'on_order' | 'available';
   expiration_date: string | null;
   location_id: string;
   location_code: string;

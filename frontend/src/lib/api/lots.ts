@@ -14,13 +14,13 @@
 
 import { api } from './client';
 
-export type LotStatus = 'quarantined' | 'released' | 'expired' | 'recalled';
+// Two core lot statuses (the client's order model). "Quarantine" was
+// explicitly rejected; expiry is date-driven (expiration_date), not a status.
+export type LotStatus = 'on_order' | 'available';
 
 export const LOT_STATUS_OPTIONS: { code: LotStatus; label: string }[] = [
-  { code: 'released', label: 'Released' },
-  { code: 'quarantined', label: 'Quarantined' },
-  { code: 'expired', label: 'Expired' },
-  { code: 'recalled', label: 'Recalled' },
+  { code: 'available', label: 'Available' },
+  { code: 'on_order', label: 'On Order' },
 ];
 
 export const LOT_STATUS_LABEL: Record<LotStatus, string> = Object.fromEntries(
