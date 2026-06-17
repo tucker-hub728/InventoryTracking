@@ -166,7 +166,7 @@ export function ProductCatalogClient() {
                     >
                       <td className="px-3 py-2.5">
                         <Link
-                          href={`/products/${p.id}`}
+                          href={`/products/${p.id}/material`}
                           className="font-mono text-xs text-accent hover:underline"
                         >
                           {p.sku}
@@ -174,7 +174,7 @@ export function ProductCatalogClient() {
                       </td>
                       <td className="px-3 py-2.5">
                         <Link
-                          href={`/products/${p.id}`}
+                          href={`/products/${p.id}/material`}
                           className="font-medium text-text hover:underline"
                         >
                           {p.name}

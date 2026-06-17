@@ -46,7 +46,8 @@ export function ItemProductsPanel() {
 
 export function ItemForecastPanel() {
   const { item } = useInventoryDetail();
-  return <ForecastImpactTab itemId={item.uuid} onHand={item.qty} />;
+  // Forecasting uses *available* (date-expired units excluded).
+  return <ForecastImpactTab itemId={item.uuid} onHand={item.qtyAvailable} />;
 }
 
 export function ItemAuditPanel() {

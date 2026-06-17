@@ -57,6 +57,9 @@ export interface ProductMaterial {
   uom_code: string;
   qty_per_run: string;
   qty_on_hand: string;
+  /** Available = on-hand minus date-expired lots. What "Available" and the
+   *  forecast coverage use; ``qty_on_hand`` is the physical total. */
+  qty_available: string;
   status_code: 'available' | 'low_stock' | 'out_of_stock';
 }
 

@@ -50,6 +50,9 @@ export interface ApiItem {
   po_value_amount: string;
   status_code: ApiItemStatus;
   last_movement_at: string | null;
+  /** On-hand minus units in date-expired lots — the count used for
+   *  reorder + forecasting. ``qty_on_hand`` stays as the physical total. */
+  qty_available: string;
 }
 
 export interface ApiItemListResponse {

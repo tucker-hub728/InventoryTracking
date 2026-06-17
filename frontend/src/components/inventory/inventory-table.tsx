@@ -110,12 +110,16 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
       </TableHeader>
       <TableBody>
         {rows.map((item) => {
-          const lowQty = item.qty > 0 && item.qty <= item.threshold;
+          const lowQty = item.qtyAvailable > 0 && item.qtyAvailable <= item.threshold;
+          // Units shown = available (excludes date-expired lots). Any
+          // expired remainder is still physically on hand — surface it
+          // as a hint so it stays visible from the list, not just detail.
+          const expired = item.qty - item.qtyAvailable;
           return (
             <TableRow key={item.id} className="group">
               <TableCell className="font-mono text-xs">
                 <Link
-                  href={`/inventory/${item.id}`}
+                  href={`/inventory/${item.id}/ledger`}
                   className="text-accent transition-opacity hover:opacity-80"
                 >
                   {item.id}
@@ -123,7 +127,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
               </TableCell>
               <TableCell className="truncate">
                 <Link
-                  href={`/inventory/${item.id}`}
+                  href={`/inventory/${item.id}/ledger`}
                   title={item.desc}
                   className="text-sm font-medium text-text transition-colors hover:text-accent"
                 >
@@ -136,11 +140,19 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
               <TableCell
                 className={cn(
                   'text-right font-mono text-xs font-semibold',
-                  item.qty === 0 && 'text-danger',
+                  item.qtyAvailable === 0 && 'text-danger',
                   lowQty && 'text-warning',
                 )}
               >
-                {formatNumber(item.qty)}
+                {formatNumber(item.qtyAvailable)}
+                {expired > 0 && (
+                  <span
+                    className="ml-1 font-normal text-text-3"
+                    title={`${formatNumber(expired)} expired unit(s) on hand (excluded from available)`}
+                  >
+                    (+{formatNumber(expired)} exp)
+                  </span>
+                )}
               </TableCell>
               <TableCell className="text-right font-mono text-xs text-text-2">
                 {item.onOrder > 0 ? formatNumber(item.onOrder) : '—'}

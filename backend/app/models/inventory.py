@@ -570,6 +570,9 @@ class ItemStock(Base):
         primary_key=True,  # not a real PK on the view, just a mapper requirement
     )
     qty_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    # Available = on-hand minus units in date-expired lots. Drives
+    # status_code, reorder and forecasting; on-hand stays for visibility.
+    qty_available: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
     status_code: Mapped[str] = mapped_column(Text, nullable=False)
     last_movement_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

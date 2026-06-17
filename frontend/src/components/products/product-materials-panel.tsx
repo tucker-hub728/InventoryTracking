@@ -149,7 +149,7 @@ export function ProductMaterialsPanel({ productId }: { productId: string }) {
                       {formatNumber(Number(m.qty_per_run))}
                     </td>
                     <td className="px-4 py-2.5 text-right font-mono text-xs">
-                      {formatNumber(Number(m.qty_on_hand))}
+                      {formatNumber(Number(m.qty_available))}
                     </td>
                     <td className="px-4 py-2.5">
                       <Badge tone={meta.tone} dot>

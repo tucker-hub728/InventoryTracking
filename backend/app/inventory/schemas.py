@@ -209,6 +209,9 @@ class ItemRead(BaseModel):
 
     # Derived placeholders — populated by the movements module later.
     qty_on_hand: Decimal = Decimal("0")
+    # Available = on-hand minus units in date-expired lots (the count used
+    # for reorder + forecasting). ``qty_on_hand`` stays for visibility.
+    qty_available: Decimal = Decimal("0")
     qty_on_order: Decimal = Decimal("0")
     inv_value_amount: Decimal = Decimal("0")
     po_value_amount: Decimal = Decimal("0")

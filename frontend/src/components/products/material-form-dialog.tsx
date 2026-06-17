@@ -184,7 +184,7 @@ export function MaterialFormDialog({
                   <span className="text-text-3">
                     Available:{' '}
                     <span className="font-mono text-text-2">
-                      {formatNumber(Number(material.qty_on_hand))}
+                      {formatNumber(Number(material.qty_available))}
                     </span>{' '}
                     {material.uom_code}
                   </span>

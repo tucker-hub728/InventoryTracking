@@ -90,6 +90,7 @@ def _material_to_read(m: ProductMaterial) -> ProductMaterialRead:
     item = m.item
     stock = item.stock if item else None
     qty_on_hand = stock.qty_on_hand if stock else Decimal("0")
+    qty_available = stock.qty_available if stock else Decimal("0")
     status_code = stock.status_code if stock else "out_of_stock"
     return ProductMaterialRead(
         id=str(m.id),
@@ -99,6 +100,7 @@ def _material_to_read(m: ProductMaterial) -> ProductMaterialRead:
         uom_code=item.uom_code if item else "unit",
         qty_per_run=m.qty_per_run,
         qty_on_hand=qty_on_hand,
+        qty_available=qty_available,
         status_code=status_code,  # type: ignore[arg-type]
     )
 

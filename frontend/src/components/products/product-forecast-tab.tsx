@@ -87,7 +87,8 @@ export function ProductForecastTab({ productId }: { productId: string }) {
     () =>
       materials.map((mat) => {
         const perRun = Number(mat.qty_per_run);
-        const onHand = Number(mat.qty_on_hand);
+        // Coverage uses *available* stock (date-expired units excluded).
+        const onHand = Number(mat.qty_available);
         const yearTotal = perRun * runs;
         const deficit = Math.max(0, yearTotal - onHand);
         const coverage = yearTotal > 0 ? Math.min(1, onHand / yearTotal) : 1;

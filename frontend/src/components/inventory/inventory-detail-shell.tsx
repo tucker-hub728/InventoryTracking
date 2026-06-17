@@ -198,7 +198,10 @@ export function InventoryDetailShell({
   if (!item) return null;
 
   const activeSeg = pathname.split('/').pop();
-  const shortfall = demand != null ? Math.max(0, demand - item.qty) : null;
+  // Forecast shortfall is against *available* stock (date-expired excluded).
+  const shortfall = demand != null ? Math.max(0, demand - item.qtyAvailable) : null;
+  // Expired = physically on hand but not available; shown for visibility.
+  const expiredQty = Math.max(0, item.qty - item.qtyAvailable);
 
   return (
     <>
@@ -253,7 +256,16 @@ export function InventoryDetailShell({
                 <CardTitle>Snapshot</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
-                <KV label="Inventory Qty" value={formatNumber(item.qty)} mono />
+                <KV label="Available" value={formatNumber(item.qtyAvailable)} mono />
+                <KV
+                  label="On hand"
+                  value={
+                    expiredQty > 0
+                      ? `${formatNumber(item.qty)} (${formatNumber(expiredQty)} expired)`
+                      : formatNumber(item.qty)
+                  }
+                  mono
+                />
                 <KV
                   label="On order"
                   value={item.onOrder ? formatNumber(item.onOrder) : '—'}

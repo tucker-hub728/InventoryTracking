@@ -172,11 +172,14 @@ def _item_to_read(item: Item) -> ItemRead:
     # ``status_code = 'out_of_stock'``).
     stock = item.stock
     qty_on_hand = stock.qty_on_hand if stock else Decimal("0")
+    qty_available = stock.qty_available if stock else Decimal("0")
     status_code = stock.status_code if stock else "out_of_stock"
     last_movement_at = stock.last_movement_at if stock else None
     # ``inv_value_amount`` is qty × unit_price when both are known.
     # Pricing module / FX / per-package math comes later; this is the
-    # straight-line cost projection for the inventory tile.
+    # straight-line cost projection for the inventory tile. Kept on
+    # *physical* on-hand — expired stock is still a held asset until it's
+    # scrapped, so it shouldn't vanish from the inventory value.
     inv_value_amount = (
         qty_on_hand * item.unit_price_amount
         if item.unit_price_amount is not None
@@ -206,6 +209,7 @@ def _item_to_read(item: Item) -> ItemRead:
         updated_by_user_id=str(item.updated_by_user_id),
         # Derived from the ledger view.
         qty_on_hand=qty_on_hand,
+        qty_available=qty_available,
         inv_value_amount=inv_value_amount,
         status_code=status_code,  # type: ignore[arg-type]
         last_movement_at=last_movement_at,

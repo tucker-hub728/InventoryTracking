@@ -41,6 +41,7 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     invValue: num(api.inv_value_amount),
     poValue: num(api.po_value_amount),
     qty: num(api.qty_on_hand),
+    qtyAvailable: num(api.qty_available),
     months: null, // forecast module
     poNote: api.po_note ?? '',
     poDue: api.po_due_text ?? '',

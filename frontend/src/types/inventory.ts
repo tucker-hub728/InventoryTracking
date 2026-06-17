@@ -16,7 +16,11 @@ export interface InventoryItem {
   lead: number;
   invValue: number;
   poValue: number;
+  /** Physical on-hand (includes expired). Ledger balances reconcile to this. */
   qty: number;
+  /** Available = on-hand minus date-expired units. Used for the Units count,
+   *  reorder and forecasting; expired stock stays counted in ``qty``. */
+  qtyAvailable: number;
   months: number | null;
   poNote: string;
   poDue: string;
