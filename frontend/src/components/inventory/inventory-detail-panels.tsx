@@ -6,7 +6,7 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { ItemProductsTab } from '@/components/products/item-products-tab';
 import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timeline';
 
-import { LedgerTable } from './ledger-table';
+import { LedgerExpiryToolbar, LedgerTable, useLedgerExpiryControls } from './ledger-table';
 import { ForecastImpactTab } from './forecast-impact-tab';
 import { useInventoryDetail } from './inventory-detail-context';
 
@@ -20,21 +20,49 @@ export function ItemLedgerPanel() {
   // The near-expiry window is a per-item setting, managed from the
   // create / edit item dialogs. The ledger only *reads* it to colour the
   // expiry pills (green / amber / red) — no editing here.
+  const controls = useLedgerExpiryControls(ledger.entries, item.nearExpiryThresholdDays);
+
+  if (ledger.error) {
+    return <EmptyState title="Couldn't load ledger" hint={ledger.error} />;
+  }
+  if (ledger.loading && ledger.entries.length === 0) {
+    return (
+      <div className="py-10 text-center text-sm text-text-3" role="status">
+        Loading ledger…
+      </div>
+    );
+  }
+  if (ledger.entries.length === 0) {
+    return <EmptyState title="No movements yet" hint="Recorded transactions will appear here." />;
+  }
+
+  // Toolbar sits outside the horizontal-scroll container so the filter never
+  // scrolls with the table. Its padding matches the table cells' ``px-3.5`` so
+  // the controls line up with the columns, with top room off the tab bar.
   return (
-    <div className="overflow-x-auto">
-      {ledger.error ? (
-        <EmptyState title="Couldn't load ledger" hint={ledger.error} />
-      ) : ledger.loading && ledger.entries.length === 0 ? (
-        <div className="py-10 text-center text-sm text-text-3" role="status">
-          Loading ledger…
-        </div>
-      ) : (
+    <div>
+      <div className="px-3.5 pb-3 pt-4">
+        <LedgerExpiryToolbar
+          statusFilter={controls.statusFilter}
+          setStatusFilter={controls.setStatusFilter}
+          withinInput={controls.withinInput}
+          setWithinInput={controls.setWithinInput}
+          filtersActive={controls.filtersActive}
+          resetFilters={controls.resetFilters}
+          visibleLots={controls.visibleLots}
+          totalLots={controls.totalLots}
+        />
+      </div>
+      <div className="overflow-x-auto">
         <LedgerTable
-          entries={ledger.entries}
+          groups={controls.groups}
           nearExpiryThresholdDays={item.nearExpiryThresholdDays}
+          sortDir={controls.sortDir}
+          onCycleSort={controls.cycleSort}
+          filtersActive={controls.filtersActive}
           onReverseRequest={onReverseRequest}
         />
-      )}
+      </div>
     </div>
   );
 }

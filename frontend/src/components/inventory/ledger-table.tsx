@@ -2,7 +2,15 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { ArrowDownLeft, ArrowUpRight, Undo2 } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowDownLeft,
+  ArrowUp,
+  ArrowUpRight,
+  CalendarClock,
+  ChevronsUpDown,
+  Undo2,
+} from 'lucide-react';
 
 import {
   Table,
@@ -14,26 +22,18 @@ import {
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { EmptyState } from '@/components/shared/empty-state';
 import type { LedgerEntry } from '@/types/inventory';
 import { expiryStatus } from '@/lib/inventory-helpers';
-import { cn } from '@/lib/utils';
-
-interface Props {
-  entries: LedgerEntry[];
-  /**
-   * Near-expiry window (days) for the colour-coded Expiry badges: lots
-   * within this many days read "Near expiry" (amber), past lots
-   * "Expired" (red), the rest "OK" (green).
-   */
-  nearExpiryThresholdDays: number;
-  /**
-   * Invoked when the operator clicks the per-row Reverse action. When
-   * omitted, the action column is hidden — used by read-only viewers
-   * who lack the ``inventory:sign`` permission.
-   */
-  onReverseRequest?: (entry: LedgerEntry) => void;
-}
+import { cn, daysFromNow } from '@/lib/utils';
 
 interface LotGroup {
   lot: string;
@@ -41,7 +41,26 @@ interface LotGroup {
   totalIn: number;
   totalOut: number;
   balance: number;
+  /**
+   * Representative expiry for the lot — the *soonest* usable expiration date
+   * among the group's rows (lots normally share one date, but we take the
+   * earliest to be conservative). ``null`` when no row has a usable date.
+   */
+  exp: string | null;
+  /** ``daysFromNow(exp)`` for the representative date; ``null`` if no date. */
+  expDays: number | null;
 }
+
+/** Tri-state expiry sort: off → soonest-first → latest-first → off. */
+type SortDir = 'asc' | 'desc' | null;
+/** Expiry-status filter; ``all`` disables it. */
+type StatusFilter = 'all' | 'expired' | 'near' | 'ok';
+
+const STATUS_LABEL: Record<Exclude<StatusFilter, 'all'>, string> = {
+  expired: 'Expired',
+  near: 'Near expiry',
+  ok: 'OK',
+};
 
 /**
  * Group ledger rows by lot, preserving first-appearance order. Each group
@@ -66,22 +85,248 @@ function groupByLot(entries: LedgerEntry[]): LotGroup[] {
     const rows = byLot.get(lot)!;
     const totalIn = rows.reduce((s, e) => s + e.in, 0);
     const totalOut = rows.reduce((s, e) => s + e.out, 0);
-    return { lot, rows, totalIn, totalOut, balance: totalIn - totalOut };
+    // Soonest usable expiry across the lot's rows drives its expiry risk.
+    let exp: string | null = null;
+    let expDays: number | null = null;
+    for (const e of rows) {
+      const d = daysFromNow(e.exp);
+      if (d === null) continue;
+      if (expDays === null || d < expDays) {
+        expDays = d;
+        exp = e.exp;
+      }
+    }
+    return { lot, rows, totalIn, totalOut, balance: totalIn - totalOut, exp, expDays };
   });
 }
 
-export function LedgerTable({ entries, nearExpiryThresholdDays, onReverseRequest }: Props) {
+/**
+ * Filter lot groups by expiry status and/or an "expiring within N days"
+ * horizon. Lots with **no usable expiry date are always kept** (they can't be
+ * judged against an expiry filter, so we don't hide them). The horizon matches
+ * only *upcoming* lots (``0 <= days <= within``) — already-expired lots are
+ * excluded, since "expiring" means about to expire, not already past. Use the
+ * status filter set to "Expired" to see those.
+ */
+function filterGroups(
+  groups: LotGroup[],
+  status: StatusFilter,
+  within: number | null,
+  thresholdDays: number,
+): LotGroup[] {
+  if (status === 'all' && within === null) return groups;
+  return groups.filter((g) => {
+    if (g.expDays === null) return true; // always visible — no date to filter on
+    if (status !== 'all') {
+      const s = expiryStatus(g.exp, thresholdDays);
+      if (!s || s.label !== STATUS_LABEL[status]) return false;
+    }
+    if (within !== null && (g.expDays < 0 || g.expDays > within)) return false;
+    return true;
+  });
+}
+
+/**
+ * Sort lot groups by representative expiry. Lots without a usable date stay
+ * pinned to their original slots; dated lots sort amongst themselves and fill
+ * the remaining slots in order, so undated lots never jump position.
+ */
+function sortGroups(groups: LotGroup[], dir: SortDir): LotGroup[] {
+  if (dir === null) return groups;
+  const dated: LotGroup[] = [];
+  const datedSlots: number[] = [];
+  groups.forEach((g, i) => {
+    if (g.expDays !== null) {
+      dated.push(g);
+      datedSlots.push(i);
+    }
+  });
+  dated.sort((a, b) =>
+    dir === 'asc' ? a.expDays! - b.expDays! : b.expDays! - a.expDays!,
+  );
+  const result = groups.slice();
+  datedSlots.forEach((slot, k) => {
+    result[slot] = dated[k]!;
+  });
+  return result;
+}
+
+/** Parse the "within N days" input into a non-negative number, or null. */
+function parseWithin(raw: string): number | null {
+  const t = raw.trim();
+  if (t === '') return null;
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.floor(n);
+}
+
+/**
+ * Owns the expiry sort + filter state and derives the visible, ordered lot
+ * groups. Lives in a hook so the toolbar can render *outside* the table's
+ * horizontal-scroll container while the table consumes the same result.
+ */
+export function useLedgerExpiryControls(
+  entries: LedgerEntry[],
+  nearExpiryThresholdDays: number,
+) {
+  const [sortDir, setSortDir] = React.useState<SortDir>(null);
+  const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('all');
+  const [withinInput, setWithinInput] = React.useState('');
+
+  const allGroups = React.useMemo(() => groupByLot(entries), [entries]);
+  const within = parseWithin(withinInput);
+  const groups = React.useMemo(
+    () =>
+      sortGroups(
+        filterGroups(allGroups, statusFilter, within, nearExpiryThresholdDays),
+        sortDir,
+      ),
+    [allGroups, statusFilter, within, nearExpiryThresholdDays, sortDir],
+  );
+
+  const filtersActive = statusFilter !== 'all' || withinInput.trim() !== '';
+  const cycleSort = React.useCallback(
+    () => setSortDir((d) => (d === null ? 'asc' : d === 'asc' ? 'desc' : null)),
+    [],
+  );
+  const resetFilters = React.useCallback(() => {
+    setStatusFilter('all');
+    setWithinInput('');
+  }, []);
+
+  return {
+    groups,
+    totalLots: allGroups.length,
+    visibleLots: groups.length,
+    sortDir,
+    cycleSort,
+    statusFilter,
+    setStatusFilter,
+    withinInput,
+    setWithinInput,
+    filtersActive,
+    resetFilters,
+  };
+}
+
+export type LedgerExpiryControls = ReturnType<typeof useLedgerExpiryControls>;
+
+/**
+ * The expiry filter toolbar — rendered above (outside) the ledger table, so it
+ * isn't tied to the table's horizontal scroll. Mirrors the inventory list
+ * filter bar: self-describing controls, no leading captions.
+ */
+export function LedgerExpiryToolbar({
+  statusFilter,
+  setStatusFilter,
+  withinInput,
+  setWithinInput,
+  filtersActive,
+  resetFilters,
+  visibleLots,
+  totalLots,
+}: Pick<
+  LedgerExpiryControls,
+  | 'statusFilter'
+  | 'setStatusFilter'
+  | 'withinInput'
+  | 'setWithinInput'
+  | 'filtersActive'
+  | 'resetFilters'
+  | 'visibleLots'
+  | 'totalLots'
+>) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as StatusFilter)}>
+        <SelectTrigger
+          className="w-[170px] [&>span]:min-w-0 [&>span]:truncate"
+          aria-label="Filter by expiry status"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All expiry statuses</SelectItem>
+          <SelectItem value="expired">Expired</SelectItem>
+          <SelectItem value="near">Near expiry</SelectItem>
+          <SelectItem value="ok">OK</SelectItem>
+        </SelectContent>
+      </Select>
+
+      <Input
+        type="number"
+        min={0}
+        inputMode="numeric"
+        icon={CalendarClock}
+        value={withinInput}
+        onChange={(e) => setWithinInput(e.target.value)}
+        placeholder="Expiring within…"
+        trailing={<span className="shrink-0 text-xs text-text-3">days</span>}
+        aria-label="Expiring within N days"
+        wrapperClassName="w-[200px]"
+      />
+
+      {filtersActive && (
+        <Button variant="ghost" size="sm" onClick={resetFilters}>
+          Clear
+        </Button>
+      )}
+      <span className="ml-auto text-xs text-text-3" role="status">
+        {visibleLots} of {totalLots} lots
+      </span>
+    </div>
+  );
+}
+
+interface Props {
+  /** Visible, ordered lot groups from {@link useLedgerExpiryControls}. */
+  groups: LotGroup[];
+  /**
+   * Near-expiry window (days) for the colour-coded Expiry badges: lots
+   * within this many days read "Near expiry" (amber), past lots
+   * "Expired" (red), the rest "OK" (green).
+   */
+  nearExpiryThresholdDays: number;
+  /** Current expiry sort direction (drives the header arrow). */
+  sortDir: SortDir;
+  /** Cycle the expiry sort: off → asc → desc → off. */
+  onCycleSort: () => void;
+  /** Whether a filter is active — switches the grand-total label + empty copy. */
+  filtersActive: boolean;
+  /**
+   * Invoked when the operator clicks the per-row Reverse action. When
+   * omitted, the action column is hidden — used by read-only viewers
+   * who lack the ``inventory:sign`` permission.
+   */
+  onReverseRequest?: (entry: LedgerEntry) => void;
+}
+
+export function LedgerTable({
+  groups,
+  nearExpiryThresholdDays,
+  sortDir,
+  onCycleSort,
+  filtersActive,
+  onReverseRequest,
+}: Props) {
   const showActions = Boolean(onReverseRequest);
 
-  if (entries.length === 0) {
-    return <EmptyState title="No movements yet" hint="Recorded transactions will appear here." />;
+  if (groups.length === 0) {
+    return (
+      <EmptyState
+        title="No lots match"
+        hint="Adjust the expiry filters to see more lots."
+      />
+    );
   }
 
-  const groups = groupByLot(entries);
   const grandIn = groups.reduce((s, g) => s + g.totalIn, 0);
   const grandOut = groups.reduce((s, g) => s + g.totalOut, 0);
   const grandBalance = grandIn - grandOut;
   const cols = showActions ? 9 : 8;
+
+  const SortIcon = sortDir === 'asc' ? ArrowUp : sortDir === 'desc' ? ArrowDown : ChevronsUpDown;
+  const sortAria = sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none';
 
   return (
     <Table>
@@ -93,7 +338,21 @@ export function LedgerTable({ entries, nearExpiryThresholdDays, onReverseRequest
           <TableHead className="w-[100px] text-right">Balance</TableHead>
           <TableHead className="w-[160px]">Location</TableHead>
           <TableHead className="w-[140px]">Lot</TableHead>
-          <TableHead className="w-[150px]">Expiry</TableHead>
+          <TableHead className="w-[150px]" aria-sort={sortAria}>
+            <button
+              type="button"
+              onClick={onCycleSort}
+              className="inline-flex items-center gap-1 text-inherit transition-colors hover:text-text"
+              title="Sort lots by expiry date"
+            >
+              Expiry
+              <SortIcon
+                size={11}
+                className={cn(sortDir === null && 'opacity-60')}
+                aria-hidden
+              />
+            </button>
+          </TableHead>
           <TableHead className="w-[160px]">By</TableHead>
           {showActions && <TableHead className="w-[80px]" />}
         </TableRow>
@@ -217,9 +476,11 @@ export function LedgerTable({ entries, nearExpiryThresholdDays, onReverseRequest
           </React.Fragment>
         ))}
 
-        {/* Item grand total */}
+        {/* Item grand total — over the currently visible lots. */}
         <TableRow className="border-t-2 border-accent/40 bg-accent-soft font-bold">
-          <TableCell className="text-[11px] uppercase tracking-wide">Item total</TableCell>
+          <TableCell className="text-[11px] uppercase tracking-wide">
+            {filtersActive ? 'Filtered total' : 'Item total'}
+          </TableCell>
           <TableCell className="text-right font-mono text-sm text-success">{grandIn}</TableCell>
           <TableCell className="text-right font-mono text-sm text-danger">{grandOut}</TableCell>
           <TableCell className="text-right font-mono text-sm">{grandBalance}</TableCell>
