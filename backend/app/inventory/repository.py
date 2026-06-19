@@ -19,9 +19,11 @@ from sqlalchemy.orm import aliased, lazyload, selectinload
 from app.models.identity import User
 from app.models.inventory import (
     Item,
+    ItemApprovedVendor,
     ItemStock,
     Location,
     Lot,
+    ReceiptTransaction,
     StockMovement,
     UnitOfMeasure,
     Vendor,
@@ -223,6 +225,7 @@ async def create_item(
     item_number: str,
     description: str,
     created_by_user_id: uuid.UUID,
+    category: str | None = None,
     vendor_id: uuid.UUID | None = None,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
@@ -247,6 +250,7 @@ async def create_item(
     item = Item(
         item_number=item_number,
         description=description,
+        category=category,
         vendor_id=vendor_id,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
@@ -331,6 +335,7 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     return {
         "item_number": item.item_number,
         "description": item.description,
+        "category": item.category,
         "vendor_id": str(item.vendor_id) if item.vendor_id else None,
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
@@ -500,8 +505,19 @@ async def create_lot(
     coa_url: str | None = None,
     status: str = "available",
     notes: str | None = None,
+    unit_price_amount: Decimal | None = None,
+    po_reference: str | None = None,
+    metadata: dict[str, object] | None = None,
+    receipt_transaction_id: uuid.UUID | None = None,
+    parent_lot_id: uuid.UUID | None = None,
 ) -> Lot:
-    """Insert a lot row. Caller commits."""
+    """Insert a lot row. Caller commits.
+
+    Receipt Admin v2 fields (``unit_price_amount``, ``po_reference``,
+    ``metadata``, ``receipt_transaction_id``, ``parent_lot_id``) default to
+    None/empty so existing callers (admin lot create, direct receipt) are
+    unaffected.
+    """
     lot = Lot(
         item_id=item_id,
         lot_number=lot_number.strip(),
@@ -511,6 +527,11 @@ async def create_lot(
         coa_url=coa_url,
         status=status,
         notes=notes,
+        unit_price_amount=unit_price_amount,
+        po_reference=po_reference,
+        metadata_=metadata if metadata is not None else {},
+        receipt_transaction_id=receipt_transaction_id,
+        parent_lot_id=parent_lot_id,
         created_by_user_id=created_by_user_id,
         updated_by_user_id=created_by_user_id,
     )
@@ -570,6 +591,15 @@ def lot_to_audit_snapshot(lot: Lot) -> dict[str, object | None]:
         "coa_url": lot.coa_url,
         "status": lot.status,
         "notes": lot.notes,
+        "unit_price_amount": (
+            str(lot.unit_price_amount) if lot.unit_price_amount is not None else None
+        ),
+        "po_reference": lot.po_reference,
+        "metadata": lot.metadata_ or {},
+        "receipt_transaction_id": (
+            str(lot.receipt_transaction_id) if lot.receipt_transaction_id else None
+        ),
+        "parent_lot_id": str(lot.parent_lot_id) if lot.parent_lot_id else None,
         "deleted_at": lot.deleted_at.isoformat() if lot.deleted_at else None,
     }
 
@@ -905,7 +935,7 @@ async def create_receipt_movement(
     *,
     item_id: uuid.UUID,
     lot_id: uuid.UUID,
-    to_location_id: uuid.UUID,
+    to_location_id: uuid.UUID | None,
     qty: Decimal,
     performed_by_user_id: uuid.UUID,
     reauth_evidence_id: uuid.UUID | None = None,
@@ -914,6 +944,10 @@ async def create_receipt_movement(
     reference: str | None = None,
 ) -> StockMovement:
     """Insert a ``receipt`` movement row. Caller commits.
+
+    ``to_location_id`` may be ``None`` — a receipt with no destination
+    (stock received but not yet placed). The ``ck_movements_locations``
+    CHECK permits a receipt with an empty ``from`` and either-or ``to``.
 
     Quantities are stored as ``qty_delta = +qty`` (receipts add stock)
     and ``qty_abs = qty``. The DB CHECK ``ck_movements_type_sign``
@@ -1702,3 +1736,265 @@ async def position_location_id(
             )
         )
     ).scalar_one()
+
+
+# ── Receipt Admin v2 ───────────────────────────────────────────────────
+#
+# Approved-vendor mapping, dynamic vendor resolution, and the receipt
+# transaction header. See docs/modules/receipt-admin.md.
+
+
+async def get_or_create_vendor_by_name(
+    session: AsyncSession, *, name: str
+) -> tuple[Vendor, bool]:
+    """Resolve a vendor by case-insensitive name, creating it if absent.
+
+    Returns ``(vendor, created)``. Mirrors the dynamic-vendor edge case
+    (v2 §6 case 2): an unknown vendor typed during a receipt is created
+    on the fly. Caller commits.
+    """
+    existing = await get_vendor_by_name(session, name)
+    if existing is not None:
+        return existing, False
+    vendor = await create_vendor(session, name=name)
+    return vendor, True
+
+
+async def item_has_approved_vendors(
+    session: AsyncSession, item_id: uuid.UUID
+) -> bool:
+    """True iff the item has at least one ``approved`` vendor mapping.
+
+    Drives the "suggest only approved vendors" behaviour and the
+    ``unverified_vendor_for_item`` flag (only meaningful when a list exists).
+    """
+    stmt = (
+        select(ItemApprovedVendor.id)
+        .where(
+            ItemApprovedVendor.item_id == item_id,
+            ItemApprovedVendor.approval_status == "approved",
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
+
+
+async def is_vendor_approved_for_item(
+    session: AsyncSession, *, item_id: uuid.UUID, vendor_id: uuid.UUID
+) -> bool:
+    """True iff there's an ``approved`` mapping for this (item, vendor)."""
+    stmt = (
+        select(ItemApprovedVendor.id)
+        .where(
+            ItemApprovedVendor.item_id == item_id,
+            ItemApprovedVendor.vendor_id == vendor_id,
+            ItemApprovedVendor.approval_status == "approved",
+        )
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
+
+
+async def vendor_used_on_item_before(
+    session: AsyncSession, *, item_id: uuid.UUID, vendor_id: uuid.UUID
+) -> bool:
+    """True iff a (non-deleted) lot for this item already used this vendor.
+
+    Used to compute ``vendor_not_previously_associated_with_item`` — a lot
+    is "not previously associated" when neither a prior lot nor any
+    approved/pending mapping links the vendor to the item.
+    """
+    lot_stmt = (
+        select(Lot.id)
+        .where(
+            Lot.item_id == item_id,
+            Lot.vendor_id == vendor_id,
+            Lot.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    if (await session.execute(lot_stmt)).first() is not None:
+        return True
+    map_stmt = (
+        select(ItemApprovedVendor.id)
+        .where(
+            ItemApprovedVendor.item_id == item_id,
+            ItemApprovedVendor.vendor_id == vendor_id,
+        )
+        .limit(1)
+    )
+    return (await session.execute(map_stmt)).first() is not None
+
+
+async def list_approved_vendors(
+    session: AsyncSession, item_id: uuid.UUID
+) -> list[ItemApprovedVendor]:
+    """Approved + pending vendor mappings for an item (approved first)."""
+    stmt = (
+        select(ItemApprovedVendor)
+        .where(ItemApprovedVendor.item_id == item_id)
+        .order_by(
+            # 'approved' sorts before 'pending' alphabetically — good enough.
+            ItemApprovedVendor.approval_status,
+            ItemApprovedVendor.created_at,
+        )
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def get_approved_vendor(
+    session: AsyncSession, *, item_id: uuid.UUID, vendor_id: uuid.UUID
+) -> ItemApprovedVendor | None:
+    stmt = select(ItemApprovedVendor).where(
+        ItemApprovedVendor.item_id == item_id,
+        ItemApprovedVendor.vendor_id == vendor_id,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def add_approved_vendor(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    vendor_id: uuid.UUID,
+    approval_status: str,
+    created_by_user_id: uuid.UUID,
+) -> ItemApprovedVendor:
+    """Insert an item↔vendor mapping. Caller handles the unique-violation
+    path (already-mapped) and commits.
+    """
+    mapping = ItemApprovedVendor(
+        item_id=item_id,
+        vendor_id=vendor_id,
+        approval_status=approval_status,
+        created_by_user_id=created_by_user_id,
+    )
+    session.add(mapping)
+    await session.flush()
+    refreshed = await get_approved_vendor(
+        session, item_id=item_id, vendor_id=vendor_id
+    )
+    assert refreshed is not None
+    return refreshed
+
+
+async def remove_approved_vendor(
+    session: AsyncSession, *, mapping: ItemApprovedVendor
+) -> None:
+    """Hard-delete a mapping row (it carries no history). Caller commits."""
+    await session.delete(mapping)
+    await session.flush()
+
+
+# ── Receipt transactions ───────────────────────────────────────────────
+
+
+async def create_receipt_transaction(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    created_by_user_id: uuid.UUID,
+    po_reference: str | None = None,
+    notes: str | None = None,
+) -> ReceiptTransaction:
+    """Insert an ``open`` receipt-transaction header. Caller commits."""
+    txn = ReceiptTransaction(
+        item_id=item_id,
+        status="open",
+        po_reference=po_reference,
+        notes=notes,
+        created_by_user_id=created_by_user_id,
+    )
+    session.add(txn)
+    await session.flush()
+    refreshed = await get_receipt_transaction(session, txn.id)
+    assert refreshed is not None
+    return refreshed
+
+
+async def get_receipt_transaction(
+    session: AsyncSession, txn_id: uuid.UUID
+) -> ReceiptTransaction | None:
+    """Load a transaction with its (non-deleted) lots eager-loaded.
+
+    ``populate_existing`` forces the eager ``lots`` collection to refresh
+    even when the transaction instance is already in the session identity
+    map. Without it, the intake flow (which loads the txn once with an
+    empty ``lots`` before adding lots, then re-reads) would return the
+    stale empty collection, and the receive flow would show pre-mutation
+    lot statuses.
+    """
+    stmt = (
+        select(ReceiptTransaction)
+        .where(ReceiptTransaction.id == txn_id)
+        .options(selectinload(ReceiptTransaction.lots))
+        .execution_options(populate_existing=True)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def list_receipt_transactions(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[ReceiptTransaction], int]:
+    """Return ``(transactions, total)`` newest first, lots eager-loaded."""
+
+    def _apply(stmt):
+        if item_id is not None:
+            stmt = stmt.where(ReceiptTransaction.item_id == item_id)
+        if status is not None:
+            stmt = stmt.where(ReceiptTransaction.status == status)
+        return stmt
+
+    count_stmt = _apply(select(func.count()).select_from(ReceiptTransaction))
+    total = int((await session.execute(count_stmt)).scalar_one())
+
+    base = _apply(
+        select(ReceiptTransaction).options(
+            selectinload(ReceiptTransaction.lots)
+        )
+    )
+    base = (
+        base.order_by(desc(ReceiptTransaction.created_at)).limit(limit).offset(offset)
+    )
+    rows = (await session.execute(base)).scalars().unique().all()
+    return list(rows), total
+
+
+async def set_receipt_transaction_status(
+    session: AsyncSession,
+    *,
+    txn: ReceiptTransaction,
+    status: str,
+    received_by_user_id: uuid.UUID | None = None,
+) -> ReceiptTransaction:
+    """Flip a transaction's status (``received`` stamps the receiver).
+    Caller commits.
+    """
+    txn.status = status
+    if status == "received":
+        txn.received_by_user_id = received_by_user_id
+        txn.received_at = datetime.now(UTC)
+    await session.flush()
+    refreshed = await get_receipt_transaction(session, txn.id)
+    assert refreshed is not None
+    return refreshed
+
+
+def receipt_transaction_to_audit_snapshot(
+    txn: ReceiptTransaction,
+) -> dict[str, object | None]:
+    return {
+        "item_id": str(txn.item_id),
+        "status": txn.status,
+        "po_reference": txn.po_reference,
+        "notes": txn.notes,
+        "received_by_user_id": (
+            str(txn.received_by_user_id) if txn.received_by_user_id else None
+        ),
+        "received_at": txn.received_at.isoformat() if txn.received_at else None,
+    }

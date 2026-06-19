@@ -41,6 +41,21 @@ export interface Lot {
   coa_url: string | null;
   status: LotStatus;
   notes: string | null;
+  // ── Receipt Admin v2 ──────────────────────────────────────────────
+  /** Price paid for this lot (Postgres NUMERIC → string), captured at receipt. */
+  unit_price_amount: string | null;
+  /** Manual PO text (no PO-system integration). */
+  po_reference: string | null;
+  /** The intake (receipt transaction) that created this lot, if any. */
+  receipt_transaction_id: string | null;
+  /** Split lineage — set on child lots produced by a split receipt. */
+  parent_lot_id: string | null;
+  /** Vendor not in the item's approved list (flag, not a status). */
+  unverified_vendor_for_item: boolean;
+  /** Vendor never previously associated with this item (flag, not a status). */
+  vendor_not_previously_associated_with_item: boolean;
+  /** Ordered qty captured at intake (planning data; NUMERIC → string). */
+  ordered_qty: string | null;
   created_at: string;
   updated_at: string;
   created_by_user_id: string;

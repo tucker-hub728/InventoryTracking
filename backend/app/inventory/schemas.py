@@ -131,6 +131,9 @@ class ItemCreate(BaseModel):
 
     item_number: ItemNumber
     description: str = Field(min_length=1, max_length=512)
+    # Free-form, optional grouping label (Requirements v2). No lookup table,
+    # no format rule — mirrors the free-form ``item_number`` decision.
+    category: str | None = Field(default=None, max_length=128)
     vendor_id: str | None = None
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
@@ -162,6 +165,7 @@ class ItemUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str | None = Field(default=None, min_length=1, max_length=512)
+    category: str | None = Field(default=None, max_length=128)
     vendor_id: str | None = None
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
@@ -188,6 +192,7 @@ class ItemRead(BaseModel):
     id: str
     item_number: str
     description: str
+    category: str | None = None
     vendor_id: str | None
     vendor_name: str | None
     avg_lead_days: int | None
@@ -408,6 +413,17 @@ class LotRead(BaseModel):
     coa_url: str | None
     status: LotStatus
     notes: str | None
+    # ── Receipt Admin v2 ──────────────────────────────────────────────
+    unit_price_amount: Decimal | None = None
+    po_reference: str | None = None
+    receipt_transaction_id: str | None = None
+    parent_lot_id: str | None = None
+    # Surfaced from ``metadata_`` for the UI (not status values).
+    unverified_vendor_for_item: bool = False
+    vendor_not_previously_associated_with_item: bool = False
+    # Ordered quantity captured at intake (planning data; the received
+    # quantity is the ledger movement, not this). Lives in ``metadata_``.
+    ordered_qty: Decimal | None = None
     created_at: datetime
     updated_at: datetime
     created_by_user_id: str
@@ -880,3 +896,190 @@ class PositionEventRead(BaseModel):
     counterpart_label: str | None = None
     counterpart_location: str | None = None
     occurred_at: datetime
+
+
+# ── Receipt Admin (v2) ─────────────────────────────────────────────────
+#
+# Item→Vendor approved mapping + the two-step intake → physical-receipt
+# flow with splitting. See docs/modules/receipt-admin.md.
+
+
+VendorApprovalStatus = Literal["approved", "pending"]
+
+
+class ApprovedVendorRead(BaseModel):
+    """One approved/pending vendor mapping for an item."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    item_id: str
+    vendor_id: str
+    vendor_name: str
+    approval_status: VendorApprovalStatus
+    created_at: datetime
+
+
+class ApprovedVendorCreate(BaseModel):
+    """Add a vendor to an item's approved list.
+
+    Provide an existing ``vendor_id`` OR a free-text ``vendor_name`` (a
+    matching active vendor is reused; otherwise one is created). Exactly
+    one of the two must be set.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vendor_id: str | None = None
+    vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
+        default=None, max_length=128
+    )
+    approval_status: VendorApprovalStatus = "approved"
+
+    @model_validator(mode="after")
+    def _check_vendor_xor(self) -> ApprovedVendorCreate:
+        if (self.vendor_id is None) == (self.vendor_name is None):
+            raise ValueError(
+                "exactly one of 'vendor_id' or 'vendor_name' must be provided"
+            )
+        return self
+
+
+class ReceiptIntakeLotInput(BaseModel):
+    """One lot line in a receipt intake (Requirements v2 §4).
+
+    Resolves a **mandatory** vendor — by id or free-text name. ``quantity``
+    is the *ordered* quantity (planning data); it is stored in the lot's
+    ``metadata_`` and does NOT post a ledger movement. The received
+    quantity is recorded at physical receipt (§5).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
+    quantity: Decimal = Field(gt=Decimal("0"))
+
+    # Vendor resolution — exactly one of id / name (vendor is mandatory).
+    # Any vendor used here is automatically attached to the item's vendor
+    # list (the item's vendors ARE its approved vendors). No separate
+    # approval step.
+    vendor_id: str | None = None
+    vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
+        default=None, max_length=128
+    )
+
+    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
+    po_reference: str | None = Field(default=None, max_length=128)
+    manufacture_date: date | None = None
+    expiration_date: date | None = None
+    coa_url: str | None = Field(default=None, max_length=2048)
+    notes: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _check_vendor_xor(self) -> ReceiptIntakeLotInput:
+        if (self.vendor_id is None) == (self.vendor_name is None):
+            raise ValueError(
+                "exactly one of 'vendor_id' or 'vendor_name' must be provided "
+                "(vendor is mandatory for every lot)"
+            )
+        return self
+
+
+class ReceiptIntakeRequest(BaseModel):
+    """Body for ``POST /v1/receiving/transactions`` — create ON_ORDER lots.
+
+    Not e-signed: no stock moves yet. One item per transaction; multiple
+    vendors / lots allowed (edge case 3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    po_reference: str | None = Field(default=None, max_length=128)
+    notes: str | None = Field(default=None, max_length=2048)
+    lots: list[ReceiptIntakeLotInput] = Field(min_length=1, max_length=50)
+
+
+class ReceiveSplitInput(BaseModel):
+    """One portion of an ON_ORDER lot being physically received (§5).
+
+    The first split with no ``lot_number`` is received into the original
+    lot; any split carrying a ``lot_number`` (and/or a different vendor)
+    creates a child lot linked via ``parent_lot_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    received_qty: Decimal = Field(gt=Decimal("0"))
+    # Optional vendor override; defaults to the original lot's vendor.
+    vendor_id: str | None = None
+    vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
+        default=None, max_length=128
+    )
+    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
+    po_reference: str | None = Field(default=None, max_length=128)
+    # New lot identity for a child split. Omit to receive into the original.
+    lot_number: Annotated[str | None, _trimmed_non_blank("lot_number")] = Field(
+        default=None, max_length=64
+    )
+    # Optional per-split destination override (else the request location).
+    location_id: str | None = None
+    manufacture_date: date | None = None
+    expiration_date: date | None = None
+    coa_url: str | None = Field(default=None, max_length=2048)
+    notes: str | None = Field(default=None, max_length=2048)
+
+
+class ReceiveLineInput(BaseModel):
+    """Receive instructions for one ON_ORDER lot in the transaction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    splits: list[ReceiveSplitInput] = Field(min_length=1, max_length=20)
+
+
+class ReceiveRequest(BaseModel):
+    """Body for ``POST /v1/receiving/transactions/{id}/receive`` (§5).
+
+    E-signed: one ``evidence_id`` minted for ``action='receipt.confirm'``
+    covers the whole receipt (consumed once against the transaction).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Optional default destination. Omit it (and per-split location_id) to
+    # receive without placing the stock — the lot becomes AVAILABLE and the
+    # received qty is recorded, but it stays unplaced until the Location
+    # System maps it to a node. A per-split location_id still overrides this.
+    location_id: str | None = None
+    lines: list[ReceiveLineInput] = Field(min_length=1, max_length=50)
+    evidence_id: str  # UUID from /v1/auth/reauth (action=receipt.confirm)
+
+
+class ReceiptTransactionRead(BaseModel):
+    """A receipt transaction header plus the lots it created."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    item_id: str
+    item_number: str | None = None
+    item_description: str | None = None
+    status: Literal["open", "received", "cancelled"]
+    po_reference: str | None = None
+    notes: str | None = None
+    created_by_user_id: str
+    received_by_user_id: str | None = None
+    received_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    lots: list[LotRead] = Field(default_factory=list)
+
+
+class ReceiptTransactionListResponse(BaseModel):
+    """Paged receipt-transaction list."""
+
+    items: list[ReceiptTransactionRead]
+    total: int
+    limit: int
+    offset: int

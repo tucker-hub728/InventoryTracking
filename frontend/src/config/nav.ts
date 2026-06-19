@@ -10,6 +10,7 @@ import {
   Package,
   Ruler,
   Snowflake,
+  Truck,
   Users,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -44,16 +45,19 @@ export const navSections: readonly NavSection[] = [
     title: 'Operations',
     items: [
       { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
+      { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
       { id: 'products', label: 'Products', href: '/products', icon: Package, resource: 'inventory' },
       { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
       { id: 'forecast', label: 'Forecast', href: '/forecast', icon: LineChart, resource: 'inventory' },
-      {
-        id: 'ln2',
-        label: 'LN2 Tanks',
-        href: '/ln2',
-        icon: Snowflake,
-        resource: 'inventory'
-      },
+      // Hidden for now — route stays wired; uncomment to restore.
+      // {
+      //   id: 'ln2',
+      //   label: 'LN2 Tanks',
+      //   href: '/ln2',
+      //   icon: Snowflake,
+      //   resource: 'inventory'
+      // },
+      { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'inventory' },
       // {
       //   id: 'kanban',
       //   label: 'Kanban',

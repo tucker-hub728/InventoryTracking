@@ -21,6 +21,8 @@ from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
     AdjustmentRequest,
+    ApprovedVendorCreate,
+    ApprovedVendorRead,
     AssignPositionRequest,
     DiscardRequest,
     DispenseRequest,
@@ -46,7 +48,11 @@ from app.inventory.schemas import (
     PositionRead,
     RackInput,
     RackRead,
+    ReceiptIntakeRequest,
     ReceiptRequest,
+    ReceiptTransactionListResponse,
+    ReceiptTransactionRead,
+    ReceiveRequest,
     ReverseRequest,
     StockByLotEntry,
     StorageLocationCreate,
@@ -60,8 +66,10 @@ from app.inventory.schemas import (
 )
 from app.models.inventory import (
     Item,
+    ItemApprovedVendor,
     Location,
     Lot,
+    ReceiptTransaction,
     StockMovement,
     UnitOfMeasure,
     Vendor,
@@ -76,6 +84,7 @@ locations_router = APIRouter(prefix="/locations", tags=["locations"])
 lots_router = APIRouter(prefix="/lots", tags=["lots"])
 movements_router = APIRouter(prefix="/movements", tags=["movements"])
 storage_router = APIRouter(prefix="/storage", tags=["storage"])
+receiving_router = APIRouter(prefix="/receiving", tags=["receiving"])
 
 
 # ── Serialisers ────────────────────────────────────────────────────────
@@ -132,6 +141,8 @@ def _movement_to_read(m: StockMovement) -> MovementRead:
 
 
 def _lot_to_read(lot: Lot) -> LotRead:
+    meta = lot.metadata_ or {}
+    ordered_raw = meta.get("ordered_qty")
     return LotRead(
         id=str(lot.id),
         item_id=str(lot.item_id),
@@ -145,6 +156,17 @@ def _lot_to_read(lot: Lot) -> LotRead:
         coa_url=lot.coa_url,
         status=lot.status,  # type: ignore[arg-type]
         notes=lot.notes,
+        unit_price_amount=lot.unit_price_amount,
+        po_reference=lot.po_reference,
+        receipt_transaction_id=(
+            str(lot.receipt_transaction_id) if lot.receipt_transaction_id else None
+        ),
+        parent_lot_id=str(lot.parent_lot_id) if lot.parent_lot_id else None,
+        unverified_vendor_for_item=bool(meta.get("unverified_vendor_for_item", False)),
+        vendor_not_previously_associated_with_item=bool(
+            meta.get("vendor_not_previously_associated_with_item", False)
+        ),
+        ordered_qty=Decimal(str(ordered_raw)) if ordered_raw is not None else None,
         created_at=lot.created_at,
         updated_at=lot.updated_at,
         created_by_user_id=str(lot.created_by_user_id),
@@ -189,6 +211,7 @@ def _item_to_read(item: Item) -> ItemRead:
         id=str(item.id),
         item_number=item.item_number,
         description=item.description,
+        category=item.category,
         vendor_id=str(item.vendor_id) if item.vendor_id else None,
         vendor_name=item.vendor.name if item.vendor else None,
         avg_lead_days=item.avg_lead_days,
@@ -536,6 +559,7 @@ async def create_item(
             item_number=payload.item_number,
             description=payload.description,
             created_by_user_id=current.id,
+            category=payload.category,
             vendor_id=vendor_uuid,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
@@ -2389,3 +2413,720 @@ async def position_history(
         raise NotFoundError(f"Position {position_id} not found")
     rows = await inv_repo.list_position_events(db, position_id)
     return [PositionEventRead(**r) for r in rows]
+
+
+# ── Receipt Admin v2 ───────────────────────────────────────────────────
+#
+# Approved-vendor mapping + the two-step intake (ON_ORDER) → physical
+# receipt (AVAILABLE, with splitting). See docs/modules/receipt-admin.md.
+
+
+def _approved_vendor_to_read(m: ItemApprovedVendor) -> ApprovedVendorRead:
+    return ApprovedVendorRead(
+        item_id=str(m.item_id),
+        vendor_id=str(m.vendor_id),
+        vendor_name=m.vendor.name if m.vendor else "",
+        approval_status=m.approval_status,  # type: ignore[arg-type]
+        created_at=m.created_at,
+    )
+
+
+def _receipt_txn_to_read(txn: ReceiptTransaction) -> ReceiptTransactionRead:
+    # ``txn.lots`` is the eager (selectinload) relationship — newest last.
+    # Soft-deleted lots are filtered here (the relationship has no WHERE).
+    lots = [_lot_to_read(lot) for lot in txn.lots if lot.deleted_at is None]
+    return ReceiptTransactionRead(
+        id=str(txn.id),
+        item_id=str(txn.item_id),
+        item_number=txn.item.item_number if txn.item else None,
+        item_description=txn.item.description if txn.item else None,
+        status=txn.status,  # type: ignore[arg-type]
+        po_reference=txn.po_reference,
+        notes=txn.notes,
+        created_by_user_id=str(txn.created_by_user_id),
+        received_by_user_id=(
+            str(txn.received_by_user_id) if txn.received_by_user_id else None
+        ),
+        received_at=txn.received_at,
+        created_at=txn.created_at,
+        updated_at=txn.updated_at,
+        lots=lots,
+    )
+
+
+async def _resolve_vendor(
+    db: DBSession,
+    *,
+    vendor_id: str | None,
+    vendor_name: str | None,
+) -> tuple[Vendor, bool]:
+    """Resolve a (mandatory) vendor from an id or a free-text name.
+
+    Returns ``(vendor, created)``. An ``id`` must reference an existing
+    vendor (404 otherwise); a ``name`` reuses a case-insensitive match or
+    creates a new vendor (edge case 2). Exactly one of the two is set —
+    the schema validators already enforce the XOR.
+    """
+    if vendor_id is not None:
+        vendor_uuid = _parse_uuid_or_422(vendor_id, field="vendor_id")
+        vendor = await inv_repo.get_vendor(db, vendor_uuid)
+        if vendor is None:
+            raise NotFoundError(f"Vendor {vendor_id} not found")
+        if not vendor.is_active:
+            raise ValidationError(
+                "Vendor is inactive; pick an active vendor",
+                code="vendor_inactive",
+            )
+        return vendor, False
+    assert vendor_name is not None
+    return await inv_repo.get_or_create_vendor_by_name(db, name=vendor_name)
+
+
+async def _ensure_item_vendor(
+    db: DBSession,
+    *,
+    item_id: uuid.UUID,
+    vendor_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> bool:
+    """Idempotently attach a vendor to an item's vendor list.
+
+    The item's vendor list IS its approved-vendor list — using a vendor on
+    a receipt attaches it (approved). Returns True when a new mapping was
+    created. The pre-check (plus ``add_approved_vendor``'s flush) makes this
+    safe to call repeatedly within one request, including for two lot lines
+    that share a vendor.
+    """
+    if (
+        await inv_repo.get_approved_vendor(db, item_id=item_id, vendor_id=vendor_id)
+    ) is not None:
+        return False
+    await inv_repo.add_approved_vendor(
+        db,
+        item_id=item_id,
+        vendor_id=vendor_id,
+        approval_status="approved",
+        created_by_user_id=user_id,
+    )
+    return True
+
+
+async def _compute_vendor_flags(
+    db: DBSession,
+    *,
+    item_id: uuid.UUID,
+    vendor_id: uuid.UUID,
+    has_approved: bool,
+) -> dict[str, bool]:
+    """The two non-status vendor flags for a lot (v2 §3 / §6).
+
+    Computed against the *prior* state — call before inserting any new
+    approved-vendor mapping for this receipt.
+    """
+    unverified = has_approved and not await inv_repo.is_vendor_approved_for_item(
+        db, item_id=item_id, vendor_id=vendor_id
+    )
+    not_assoc = not await inv_repo.vendor_used_on_item_before(
+        db, item_id=item_id, vendor_id=vendor_id
+    )
+    return {
+        "unverified_vendor_for_item": unverified,
+        "vendor_not_previously_associated_with_item": not_assoc,
+    }
+
+
+# ── Approved-vendor mapping (per item) ─────────────────────────────────
+
+
+@items_router.get(
+    "/{item_id}/approved-vendors",
+    response_model=list[ApprovedVendorRead],
+    summary="List an item's approved/pending vendors",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_item_approved_vendors(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+) -> list[ApprovedVendorRead]:
+    if (await inv_repo.get_item(db, item_id)) is None:
+        raise NotFoundError(f"Item {item_id} not found")
+    rows = await inv_repo.list_approved_vendors(db, item_id)
+    return [_approved_vendor_to_read(m) for m in rows]
+
+
+@items_router.post(
+    "/{item_id}/approved-vendors",
+    response_model=ApprovedVendorRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a vendor to an item's approved list",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_item_approved_vendor(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    item_id: Annotated[uuid.UUID, Path()],
+    payload: ApprovedVendorCreate,
+) -> ApprovedVendorRead:
+    item = await inv_repo.get_item(db, item_id)
+    if item is None:
+        raise NotFoundError(f"Item {item_id} not found")
+
+    vendor, created = await _resolve_vendor(
+        db, vendor_id=payload.vendor_id, vendor_name=payload.vendor_name
+    )
+
+    if (
+        await inv_repo.get_approved_vendor(
+            db, item_id=item_id, vendor_id=vendor.id
+        )
+    ) is not None:
+        raise ConflictError(
+            f"Vendor '{vendor.name}' is already mapped to this item",
+            code="approved_vendor_exists",
+        )
+
+    try:
+        mapping = await inv_repo.add_approved_vendor(
+            db,
+            item_id=item_id,
+            vendor_id=vendor.id,
+            approval_status=payload.approval_status,
+            created_by_user_id=current.id,
+        )
+    except IntegrityError as exc:
+        await db.rollback()
+        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
+        if "uq_item_approved_vendors_item_vendor" in msg:
+            raise ConflictError(
+                f"Vendor '{vendor.name}' is already mapped to this item",
+                code="approved_vendor_exists",
+            ) from exc
+        raise
+
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="meta.item_approved_vendors",
+        subject_id=mapping.id,
+        subject_label=f"{item.item_number} → {vendor.name}",
+        before=None,
+        after={
+            "item_id": str(item_id),
+            "vendor_id": str(vendor.id),
+            "vendor_name": vendor.name,
+            "approval_status": mapping.approval_status,
+            "vendor_created": created,
+        },
+    )
+    response = _approved_vendor_to_read(mapping)
+    await db.commit()
+    return response
+
+
+@items_router.delete(
+    "/{item_id}/approved-vendors/{vendor_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a vendor from an item's approved list",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def remove_item_approved_vendor(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    item_id: Annotated[uuid.UUID, Path()],
+    vendor_id: Annotated[uuid.UUID, Path()],
+) -> None:
+    mapping = await inv_repo.get_approved_vendor(
+        db, item_id=item_id, vendor_id=vendor_id
+    )
+    if mapping is None:
+        raise NotFoundError(
+            f"Vendor {vendor_id} is not mapped to item {item_id}"
+        )
+    label = f"{item_id} → {mapping.vendor.name if mapping.vendor else vendor_id}"
+    before = {
+        "item_id": str(item_id),
+        "vendor_id": str(vendor_id),
+        "approval_status": mapping.approval_status,
+    }
+    await inv_repo.remove_approved_vendor(db, mapping=mapping)
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="deleted",
+        subject_table="meta.item_approved_vendors",
+        subject_id=mapping.id,
+        subject_label=label,
+        before=before,
+        after=None,
+    )
+    await db.commit()
+
+
+# ── Receipt transactions (intake → receive) ────────────────────────────
+
+
+@receiving_router.get(
+    "/transactions",
+    response_model=ReceiptTransactionListResponse,
+    summary="List receipt transactions (newest first)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_receipt_transactions(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID | None, Query()] = None,
+    status_filter: Annotated[
+        Literal["open", "received", "cancelled"] | None,
+        Query(alias="status", description="Filter by transaction status"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ReceiptTransactionListResponse:
+    rows, total = await inv_repo.list_receipt_transactions(
+        db, item_id=item_id, status=status_filter, limit=limit, offset=offset
+    )
+    return ReceiptTransactionListResponse(
+        items=[_receipt_txn_to_read(t) for t in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@receiving_router.get(
+    "/transactions/{txn_id}",
+    response_model=ReceiptTransactionRead,
+    summary="Get one receipt transaction + its lots",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def get_receipt_transaction(
+    db: DBSession,
+    txn_id: Annotated[uuid.UUID, Path()],
+) -> ReceiptTransactionRead:
+    txn = await inv_repo.get_receipt_transaction(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Receipt transaction {txn_id} not found")
+    return _receipt_txn_to_read(txn)
+
+
+@receiving_router.post(
+    "/transactions",
+    response_model=ReceiptTransactionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a receipt intake — ON_ORDER lots (Receipt Admin §4)",
+    # Intake places an order; no stock moves yet, so it's the routine
+    # ``create`` gate (not the e-signed ``sign`` path the physical receipt uses).
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def create_receipt_intake(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: ReceiptIntakeRequest,
+) -> ReceiptTransactionRead:
+    """Step 1–4: resolve item + vendors, create ON_ORDER lots under a new
+    receipt-transaction header. Atomic — any failure rolls the whole
+    intake back. No ledger movement is posted (goods aren't in yet)."""
+    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
+    item = await inv_repo.get_item(db, item_uuid)
+    if item is None:
+        raise NotFoundError(f"Item {payload.item_id} not found")
+
+    has_approved = await inv_repo.item_has_approved_vendors(db, item_uuid)
+
+    # Reject duplicate lot numbers within the same intake up-front.
+    seen_numbers: set[str] = set()
+    for line in payload.lots:
+        key = line.lot_number.strip().lower()
+        if key in seen_numbers:
+            raise ValidationError(
+                f"Duplicate lot_number '{line.lot_number}' in this intake",
+                code="duplicate_lot_number_in_request",
+            )
+        seen_numbers.add(key)
+
+    txn = await inv_repo.create_receipt_transaction(
+        db,
+        item_id=item_uuid,
+        created_by_user_id=current.id,
+        po_reference=payload.po_reference,
+        notes=payload.notes,
+    )
+
+    for line in payload.lots:
+        vendor, created = await _resolve_vendor(
+            db, vendor_id=line.vendor_id, vendor_name=line.vendor_name
+        )
+        # Flags reflect prior state — compute BEFORE adding any mapping.
+        flags = await _compute_vendor_flags(
+            db, item_id=item_uuid, vendor_id=vendor.id, has_approved=has_approved
+        )
+
+        # Lot-number uniqueness pre-check (clean 409; index is the guard).
+        if (
+            await inv_repo.get_lot_by_item_and_number(
+                db, item_id=item_uuid, lot_number=line.lot_number
+            )
+        ) is not None:
+            raise ConflictError(
+                f"lot_number '{line.lot_number}' already exists for this item",
+                code="lot_number_conflict",
+            )
+
+        lot_metadata: dict[str, object] = {
+            "ordered_qty": str(line.quantity),
+            **flags,
+        }
+        try:
+            lot = await inv_repo.create_lot(
+                db,
+                item_id=item_uuid,
+                lot_number=line.lot_number,
+                created_by_user_id=current.id,
+                vendor_id=vendor.id,
+                manufacture_date=line.manufacture_date,
+                expiration_date=line.expiration_date,
+                coa_url=line.coa_url,
+                status="on_order",
+                notes=line.notes,
+                unit_price_amount=line.unit_price,
+                po_reference=line.po_reference or payload.po_reference,
+                metadata=lot_metadata,
+                receipt_transaction_id=txn.id,
+            )
+        except IntegrityError as exc:
+            await db.rollback()
+            msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
+            if "uq_lots_item_lot_number" in msg:
+                raise ConflictError(
+                    f"lot_number '{line.lot_number}' already exists for this item",
+                    code="lot_number_conflict",
+                ) from exc
+            if "ck_lots_dates_ordered" in msg:
+                raise ValidationError(
+                    "expiration_date must be on or after manufacture_date",
+                    code="lot_dates_inverted",
+                ) from exc
+            raise
+
+        # Attach the vendor to the item (idempotent). The item's vendor list
+        # IS its approved-vendor list, so any vendor used here becomes one of
+        # the item's vendors. ``created`` (a brand-new vendor record) is only
+        # used for the audit context below.
+        await _ensure_item_vendor(
+            db, item_id=item_uuid, vendor_id=vendor.id, user_id=current.id
+        )
+
+        # Audit the vendor assignment + lot creation (v2 §8).
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="created",
+            subject_table="app.lots",
+            subject_id=lot.id,
+            subject_label=lot.lot_number,
+            before=None,
+            after=inv_repo.lot_to_audit_snapshot(lot),
+            context={
+                "receipt_transaction_id": str(txn.id),
+                "vendor_created": created,
+                **flags,
+            },
+        )
+
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="app.receipt_transactions",
+        subject_id=txn.id,
+        subject_label=f"{item.item_number} intake ({len(payload.lots)} lot(s))",
+        before=None,
+        after=inv_repo.receipt_transaction_to_audit_snapshot(txn),
+    )
+
+    refreshed = await inv_repo.get_receipt_transaction(db, txn.id)
+    assert refreshed is not None
+    response = _receipt_txn_to_read(refreshed)
+    await db.commit()
+    return response
+
+
+@receiving_router.post(
+    "/transactions/{txn_id}/receive",
+    response_model=ReceiptTransactionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Physical receipt — ON_ORDER → AVAILABLE (+split). E-signed.",
+    # Posts ledger movements, so it's GxP-significant: ``sign`` permission +
+    # a fresh reauth ticket for action='receipt.confirm' (consumed once).
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def receive_transaction(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    txn_id: Annotated[uuid.UUID, Path()],
+    payload: ReceiveRequest,
+) -> ReceiptTransactionRead:
+    """Step 5: confirm a physical receipt. Per ON_ORDER lot the operator
+    submits one or more splits; the first receives into the original lot
+    (flip → AVAILABLE), the rest create child lots (``parent_lot_id``).
+    Every split posts a ``+received_qty`` receipt movement; all share one
+    e-signature and commit atomically."""
+    txn = await inv_repo.get_receipt_transaction(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Receipt transaction {txn_id} not found")
+    if txn.status != "open":
+        raise ValidationError(
+            f"Transaction is '{txn.status}'; only open transactions can be received",
+            code="receipt_not_open",
+        )
+
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    # Destination is optional now: when neither the request nor a split names
+    # a location, the receipt is recorded without placing the stock (the lot
+    # is mapped to a node later via the Location System).
+    default_location = (
+        await _get_active_location_or_4xx(db, payload.location_id)
+        if payload.location_id is not None
+        else None
+    )
+
+    # Index the transaction's still-ON_ORDER lots for line resolution.
+    lots_by_id = {
+        lot.id: lot
+        for lot in txn.lots
+        if lot.deleted_at is None and lot.status == "on_order"
+    }
+    has_approved = await inv_repo.item_has_approved_vendors(db, txn.item_id)
+
+    for line in payload.lines:
+        lot_uuid = _parse_uuid_or_422(line.lot_id, field="lot_id")
+        lot = lots_by_id.get(lot_uuid)
+        if lot is None:
+            raise ValidationError(
+                f"Lot {line.lot_id} is not an open ON_ORDER lot in this transaction",
+                code="lot_not_in_transaction",
+            )
+
+        child_numbers: set[str] = set()
+        for idx, split in enumerate(line.splits):
+            dest = (
+                default_location
+                if split.location_id is None
+                else await _get_active_location_or_4xx(db, split.location_id)
+            )  # may be None → received but not placed
+            # Vendor: explicit override, else inherit the on-order lot's vendor
+            # (which intake guaranteed is set).
+            if split.vendor_id is not None or split.vendor_name is not None:
+                vendor, _created = await _resolve_vendor(
+                    db, vendor_id=split.vendor_id, vendor_name=split.vendor_name
+                )
+                vendor_id = vendor.id
+            else:
+                if lot.vendor_id is None:  # pragma: no cover — intake guarantees it
+                    raise ValidationError(
+                        "Lot has no vendor; supply a vendor for this split",
+                        code="vendor_required",
+                    )
+                vendor_id = lot.vendor_id
+
+            # Attach the (possibly overridden) vendor to the item — keeps the
+            # item's vendor list complete as supplier lots are split out.
+            await _ensure_item_vendor(
+                db, item_id=txn.item_id, vendor_id=vendor_id, user_id=current.id
+            )
+
+            if idx == 0:
+                # Receive into the original lot.
+                if split.lot_number is not None:
+                    raise ValidationError(
+                        "The first split receives into the original lot and "
+                        "must not set lot_number",
+                        code="first_split_lot_number",
+                    )
+                patch: dict[str, object] = {"status": "available"}
+                if split.unit_price is not None:
+                    patch["unit_price_amount"] = split.unit_price
+                if split.po_reference is not None:
+                    patch["po_reference"] = split.po_reference
+                if vendor_id != lot.vendor_id:
+                    patch["vendor_id"] = vendor_id
+                target_lot = await inv_repo.apply_lot_patch(
+                    db, lot=lot, patch=patch, updated_by_user_id=current.id
+                )
+                await _post_receipt_and_fill(
+                    db,
+                    item_id=txn.item_id,
+                    lot_id=target_lot.id,
+                    location=dest,
+                    qty=split.received_qty,
+                    actor_id=current.id,
+                    evidence_id=evidence_uuid,
+                )
+                await record_entity_change(
+                    db,
+                    actor_user_id=current.id,
+                    action="updated",
+                    subject_table="app.lots",
+                    subject_id=target_lot.id,
+                    subject_label=target_lot.lot_number,
+                    before={"status": "on_order"},
+                    after={"status": "available"},
+                    context={
+                        "received_qty": str(split.received_qty),
+                        "receipt_transaction_id": str(txn.id),
+                    },
+                    signature_id=evidence_uuid,
+                )
+            else:
+                # Child lot (split). lot_number is required + unique.
+                if split.lot_number is None:
+                    raise ValidationError(
+                        "Splits after the first must each set a distinct lot_number",
+                        code="split_lot_number_required",
+                    )
+                ckey = split.lot_number.strip().lower()
+                if ckey in child_numbers:
+                    raise ValidationError(
+                        f"Duplicate split lot_number '{split.lot_number}'",
+                        code="duplicate_split_lot_number",
+                    )
+                child_numbers.add(ckey)
+                if (
+                    await inv_repo.get_lot_by_item_and_number(
+                        db, item_id=txn.item_id, lot_number=split.lot_number
+                    )
+                ) is not None:
+                    raise ConflictError(
+                        f"lot_number '{split.lot_number}' already exists for this item",
+                        code="lot_number_conflict",
+                    )
+                flags = await _compute_vendor_flags(
+                    db,
+                    item_id=txn.item_id,
+                    vendor_id=vendor_id,
+                    has_approved=has_approved,
+                )
+                child = await inv_repo.create_lot(
+                    db,
+                    item_id=txn.item_id,
+                    lot_number=split.lot_number,
+                    created_by_user_id=current.id,
+                    vendor_id=vendor_id,
+                    manufacture_date=split.manufacture_date or lot.manufacture_date,
+                    expiration_date=split.expiration_date or lot.expiration_date,
+                    coa_url=split.coa_url,
+                    status="available",
+                    notes=split.notes,
+                    unit_price_amount=split.unit_price,
+                    po_reference=split.po_reference or lot.po_reference,
+                    metadata={"split_from": str(lot.lot_number), **flags},
+                    receipt_transaction_id=txn.id,
+                    parent_lot_id=lot.id,
+                )
+                await _post_receipt_and_fill(
+                    db,
+                    item_id=txn.item_id,
+                    lot_id=child.id,
+                    location=dest,
+                    qty=split.received_qty,
+                    actor_id=current.id,
+                    evidence_id=evidence_uuid,
+                )
+                await record_entity_change(
+                    db,
+                    actor_user_id=current.id,
+                    action="created",
+                    subject_table="app.lots",
+                    subject_id=child.id,
+                    subject_label=child.lot_number,
+                    before=None,
+                    after=inv_repo.lot_to_audit_snapshot(child),
+                    context={
+                        "split_from_lot_id": str(lot.id),
+                        "received_qty": str(split.received_qty),
+                        "receipt_transaction_id": str(txn.id),
+                        **flags,
+                    },
+                    signature_id=evidence_uuid,
+                )
+
+    # One e-signature for the whole receipt, consumed against the txn.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="receipt.confirm",
+        target_table="app.receipt_transactions",
+        target_id=txn.id,
+    )
+
+    updated = await inv_repo.set_receipt_transaction_status(
+        db, txn=txn, status="received", received_by_user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.receipt_transactions",
+        subject_id=updated.id,
+        subject_label="receipt confirmed",
+        before={"status": "open"},
+        after=inv_repo.receipt_transaction_to_audit_snapshot(updated),
+        signature_id=evidence_uuid,
+    )
+
+    response = _receipt_txn_to_read(updated)
+    await db.commit()
+    return response
+
+
+async def _get_active_location_or_4xx(db: DBSession, location_id: str) -> Location:
+    """Parse + load an active location, or raise a structured 4xx."""
+    loc_uuid = _parse_uuid_or_422(location_id, field="location_id")
+    location = await inv_repo.get_location(db, loc_uuid)
+    if location is None:
+        raise NotFoundError(f"Location {location_id} not found")
+    if not location.is_active:
+        raise ValidationError(
+            "Location is inactive; cannot receive stock here",
+            code="location_inactive",
+        )
+    return location
+
+
+async def _post_receipt_and_fill(
+    db: DBSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    location: Location | None,
+    qty: Decimal,
+    actor_id: uuid.UUID,
+    evidence_id: uuid.UUID,
+) -> None:
+    """Post a ``+qty`` receipt movement and, for rack-mapped locations,
+    fill that many empty positions (one unit = one vial = one slot).
+
+    ``location`` may be ``None`` — the receipt is recorded without a
+    destination (stock received but not yet placed); no positions fill."""
+    await inv_repo.create_receipt_movement(
+        db,
+        item_id=item_id,
+        lot_id=lot_id,
+        to_location_id=location.id if location is not None else None,
+        qty=qty,
+        performed_by_user_id=actor_id,
+        reauth_evidence_id=evidence_id,
+    )
+    if location is not None and await inv_repo.location_has_racks(db, location.id):
+        units = _whole_units_or_422(qty)
+        empty = await inv_repo.count_empty_positions(db, location.id)
+        if empty < units:
+            raise ConflictError(
+                f"Location has only {empty} empty position(s); cannot place "
+                f"{units} unit(s). Add a rack or pick another location.",
+                code="not_enough_empty_positions",
+            )
+        await inv_repo.fill_positions_for_lot(
+            db, location_id=location.id, lot_id=lot_id, n=units, actor_id=actor_id
+        )

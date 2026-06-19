@@ -23,6 +23,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -131,6 +132,14 @@ class Item(Base):
     item_number: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Free-form, optional grouping label. Reintroduced for Requirements v2
+    # (Receipt Admin) — no lookup table and no CHECK, mirroring the
+    # free-form ``item_number`` decision. See docs/modules/receipt-admin.md §1.1.
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Optional *default* vendor. NOT the source of truth for what a lot was
+    # sourced from (the lot is). The full approved-vendor set lives in
+    # ``meta.item_approved_vendors`` (Requirements v2). See receipt-admin.md §1.3.
     vendor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
@@ -333,6 +342,16 @@ class Lot(Base):
         Index("ix_lots_vendor_id", "vendor_id"),
         Index("ix_lots_status", "status"),
         Index(
+            "ix_lots_receipt_transaction_id",
+            "receipt_transaction_id",
+            postgresql_where=text("receipt_transaction_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_lots_parent_lot_id",
+            "parent_lot_id",
+            postgresql_where=text("parent_lot_id IS NOT NULL"),
+        ),
+        Index(
             "ix_lots_expiration_date",
             "expiration_date",
             postgresql_where=text("status IN ('available', 'on_order')"),
@@ -379,6 +398,37 @@ class Lot(Base):
         server_default=text("'available'"),
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Receipt Admin v2 (docs/modules/receipt-admin.md §1.4) ──────────
+    # The lot is the source of truth for the price paid and the PO it was
+    # ordered against. Quantity is NOT stored here — it stays ledger-derived
+    # (the receipt movement is the quantity).
+    unit_price_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2),
+        nullable=True,
+    )
+    po_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Non-status flags: unverified_vendor_for_item,
+    # vendor_not_previously_associated_with_item, plus future QC/Hold/Rejected.
+    # Never status values (the status set is on_order/available only).
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata_",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    # The intake that created this lot (NULL for seeded / direct-receipt lots).
+    receipt_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.receipt_transactions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Split lineage — set on child lots produced when a receipt is split.
+    parent_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.lots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -595,3 +645,155 @@ Item.stock = relationship(  # type: ignore[assignment]
     lazy="joined",
     viewonly=True,
 )
+
+
+# ── Receipt Admin v2 ───────────────────────────────────────────────────
+#
+# Item→Vendor approved mapping + the inbound receipt-transaction header.
+# See docs/modules/receipt-admin.md.
+
+# Approval state for an item↔vendor mapping. ``pending`` = added during a
+# receipt for a previously-unknown vendor (edge case 2). Keep in lock-step
+# with the DB CHECK and the Pydantic enum.
+VENDOR_APPROVAL_STATUSES: tuple[str, ...] = ("approved", "pending")
+
+
+class ItemApprovedVendor(Base):
+    """Zero-or-more approved vendors per item (Requirements v2 §3).
+
+    Receipt is never *blocked* by this list — it only drives which vendors
+    are suggested and whether a created lot is flagged
+    ``unverified_vendor_for_item``.
+    """
+
+    __tablename__ = "item_approved_vendors"
+    __table_args__ = (
+        UniqueConstraint(
+            "item_id", "vendor_id", name="uq_item_approved_vendors_item_vendor"
+        ),
+        Index("ix_item_approved_vendors_item_id", "item_id"),
+        Index("ix_item_approved_vendors_vendor_id", "vendor_id"),
+        CheckConstraint(
+            "approval_status IN ("
+            + ", ".join(f"'{s}'" for s in VENDOR_APPROVAL_STATUSES)
+            + ")",
+            name="ck_item_approved_vendors_status",
+        ),
+        {"schema": "meta"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    vendor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    approval_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'approved'"),
+    )
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    vendor: Mapped[Vendor] = relationship(lazy="joined", viewonly=True)
+
+
+# Lifecycle of an inbound receipt transaction. ``open`` = lots created
+# ON_ORDER; ``received`` = physical receipt confirmed; ``cancelled`` =
+# abandoned before receipt. Keep in lock-step with the DB CHECK + enum.
+RECEIPT_TRANSACTION_STATUSES: tuple[str, ...] = ("open", "received", "cancelled")
+
+
+class ReceiptTransaction(Base):
+    """Header for one inbound processing event (Requirements v2 §4–§5).
+
+    Groups the lots created by a single intake and records the physical
+    receipt confirmation. One item per transaction; multiple vendors / lots
+    are allowed within it (edge case 3).
+    """
+
+    __tablename__ = "receipt_transactions"
+    __table_args__ = (
+        Index("ix_receipt_transactions_item_id", "item_id"),
+        Index("ix_receipt_transactions_status", "status"),
+        Index("ix_receipt_transactions_created_at_desc", text("created_at DESC")),
+        CheckConstraint(
+            "status IN ("
+            + ", ".join(f"'{s}'" for s in RECEIPT_TRANSACTION_STATUSES)
+            + ")",
+            name="ck_receipt_transactions_status",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'open'"),
+    )
+    po_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    received_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
+    # The lots created by this intake (newest-first), read-only.
+    lots: Mapped[list[Lot]] = relationship(
+        "Lot",
+        primaryjoin="ReceiptTransaction.id == foreign(Lot.receipt_transaction_id)",
+        order_by="Lot.created_at",
+        viewonly=True,
+    )

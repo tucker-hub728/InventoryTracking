@@ -15,12 +15,19 @@ from app.models.forecast import ForecastEntry
 from app.models.identity import Role, User
 from app.models.inventory import (
     Item,
+    ItemApprovedVendor,
     ItemStock,
     Location,
     Lot,
+    ReceiptTransaction,
     StockMovement,
     UnitOfMeasure,
     Vendor,
+)
+from app.models.locations import (
+    AllocationMovement,
+    LocationNode,
+    LotAllocation,
 )
 from app.models.products import Customer, CustomerProduct, Product, ProductMaterial
 from app.models.storage import (
@@ -30,18 +37,23 @@ from app.models.storage import (
 )
 
 __all__ = [
+    "AllocationMovement",
     "AuditEvent",
     "Customer",
     "CustomerProduct",
     "ForecastEntry",
     "Item",
+    "ItemApprovedVendor",
     "ItemStock",
     "Location",
+    "LocationNode",
     "Lot",
+    "LotAllocation",
     "Product",
     "ProductMaterial",
     "ReauthConsumption",
     "ReauthEvent",
+    "ReceiptTransaction",
     "Role",
     "StockMovement",
     "StorageAssignmentEvent",

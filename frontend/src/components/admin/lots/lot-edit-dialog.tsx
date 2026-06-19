@@ -48,8 +48,6 @@ const schema = z
     vendor_id: z.string().optional(),
     manufacture_date: z.string().optional(),
     expiration_date: z.string().optional(),
-    coa_url: z.string().url('Must be a valid URL').optional().or(z.literal('')),
-    notes: z.string().max(2048).optional(),
     reason: z
       .string()
       .trim()
@@ -115,8 +113,6 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
       vendor_id: NO_VENDOR,
       manufacture_date: '',
       expiration_date: '',
-      coa_url: '',
-      notes: '',
       reason: '',
     },
   });
@@ -129,8 +125,6 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
       vendor_id: lot.vendor_id ?? NO_VENDOR,
       manufacture_date: lot.manufacture_date ?? '',
       expiration_date: lot.expiration_date ?? '',
-      coa_url: lot.coa_url ?? '',
-      notes: lot.notes ?? '',
       reason: '',
     });
     setSubmitError(null);
@@ -173,8 +167,6 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
         changed.manufacture_date = nz(v.manufacture_date);
       if (nz(v.expiration_date) !== (lot.expiration_date ?? null))
         changed.expiration_date = nz(v.expiration_date);
-      if (nz(v.coa_url) !== (lot.coa_url ?? null)) changed.coa_url = nz(v.coa_url);
-      if (nz(v.notes) !== (lot.notes ?? null)) changed.notes = nz(v.notes);
       return changed;
     },
     [lot],
@@ -332,27 +324,6 @@ export function LotEditDialog({ lot, onOpenChange, onUpdated }: Props) {
                     </p>
                   )}
                 </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="edit-lot-coa">Certificate of Analysis URL</Label>
-                <Input
-                  id="edit-lot-coa"
-                  type="url"
-                  placeholder="https://..."
-                  aria-invalid={Boolean(errors.coa_url)}
-                  {...register('coa_url')}
-                />
-                {errors.coa_url && (
-                  <p role="alert" className="text-xs text-danger">
-                    {errors.coa_url.message}
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="edit-lot-notes">Notes</Label>
-                <Input id="edit-lot-notes" {...register('notes')} />
               </div>
 
               <div className="space-y-1.5">

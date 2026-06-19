@@ -17,10 +17,12 @@ from app.inventory.routes import (
     locations_router,
     lots_router,
     movements_router,
+    receiving_router,
     storage_router,
     uoms_router,
     vendors_router,
 )
+from app.locations.routes import alloc_router, nodes_router
 from app.products.routes import (
     customers_router,
     item_products_router,
@@ -39,6 +41,9 @@ api_router.include_router(locations_router)
 api_router.include_router(lots_router)
 api_router.include_router(movements_router)
 api_router.include_router(storage_router)
+api_router.include_router(receiving_router)
+api_router.include_router(nodes_router)
+api_router.include_router(alloc_router)
 api_router.include_router(products_router)
 api_router.include_router(materials_router)
 api_router.include_router(customers_router)

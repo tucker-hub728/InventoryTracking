@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { Plus, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Button } from '@/components/ui/button';
@@ -33,7 +33,6 @@ import { LotEditDialog } from './lot-edit-dialog';
 const STATUS_ALL = '__all__';
 
 export function LotsPageClient() {
-  const canCreate = usePermission('inventory', 'create');
   // Editing a lot after entry is an e-signed (GxP-significant) action,
   // so it's gated on the same ``sign`` permission as the movement flows.
   const canEdit = usePermission('inventory', 'sign');
@@ -105,13 +104,6 @@ export function LotsPageClient() {
       <PageHeader
         title="Lots"
         subtitle="Manufacturer batches per item — used for traceability and expiry tracking."
-        actions={
-          canCreate ? (
-            <Button variant="primary" onClick={() => setCreating(true)}>
-              <Plus size={14} /> Add lot
-            </Button>
-          ) : undefined
-        }
       />
 
       <div className="px-6 py-5 sm:px-8">
@@ -161,14 +153,7 @@ export function LotsPageClient() {
           ) : !loading && lots.length === 0 ? (
             <EmptyState
               title="No lots yet"
-              hint="Lots are usually created at receipt time, but you can add one here for catalog setup."
-              action={
-                canCreate ? (
-                  <Button variant="primary" onClick={() => setCreating(true)}>
-                    <Plus size={14} /> Add lot
-                  </Button>
-                ) : undefined
-              }
+              hint="Lots are usually created at receipt time."
             />
           ) : (
             <LotsTable

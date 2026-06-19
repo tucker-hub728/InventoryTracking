@@ -26,6 +26,8 @@ export interface ApiItem {
   id: string;
   item_number: string;
   description: string;
+  /** Free-form optional grouping label (Requirements v2). */
+  category: string | null;
   vendor_id: string | null;
   vendor_name: string | null;
   avg_lead_days: number | null;
@@ -81,6 +83,7 @@ export interface ListItemsParams {
 export interface ItemCreateInput {
   item_number: string;
   description: string;
+  category?: string | null;
   vendor_id?: string | null;
   avg_lead_days?: number | null;
   reorder_threshold?: number;
@@ -99,6 +102,7 @@ export interface ItemCreateInput {
  */
 export interface ItemUpdateInput {
   description?: string;
+  category?: string | null;
   vendor_id?: string | null;
   avg_lead_days?: number | null;
   reorder_threshold?: number;
@@ -109,6 +113,29 @@ export interface ItemUpdateInput {
   po_note?: string | null;
   notes?: string | null;
   must_order_flag?: boolean;
+}
+
+// ── Approved vendors (Requirements v2 §3) ──────────────────────────────
+
+export type VendorApprovalStatus = 'approved' | 'pending';
+
+export interface ApprovedVendor {
+  item_id: string;
+  vendor_id: string;
+  vendor_name: string;
+  approval_status: VendorApprovalStatus;
+  created_at: string;
+}
+
+/**
+ * Add a vendor to an item's approved list. Provide an existing
+ * ``vendor_id`` OR a free-text ``vendor_name`` (a matching active vendor
+ * is reused, otherwise created) — exactly one of the two.
+ */
+export interface ApprovedVendorCreateInput {
+  vendor_id?: string | null;
+  vendor_name?: string | null;
+  approval_status?: VendorApprovalStatus;
 }
 
 // ── Client ─────────────────────────────────────────────────────────────
@@ -155,4 +182,16 @@ export const itemsApi = {
    * zero the qty (dispense or discard the remainder) first.
    */
   remove: (id: string) => api.delete<ApiItem>(`/items/${id}`),
+
+  // ── Approved-vendor mapping ──────────────────────────────────────────
+  listApprovedVendors: (itemId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApprovedVendor[]>(`/items/${itemId}/approved-vendors`, {
+      signal: opts?.signal,
+    }),
+
+  addApprovedVendor: (itemId: string, input: ApprovedVendorCreateInput) =>
+    api.post<ApprovedVendor>(`/items/${itemId}/approved-vendors`, { json: input }),
+
+  removeApprovedVendor: (itemId: string, vendorId: string) =>
+    api.delete<void>(`/items/${itemId}/approved-vendors/${vendorId}`),
 };
