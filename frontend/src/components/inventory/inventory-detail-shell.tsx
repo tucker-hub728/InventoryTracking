@@ -2,8 +2,8 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { notFound, usePathname, useSearchParams } from 'next/navigation';
-import { ArrowDownUp, ArrowLeft, ArrowRightLeft, Loader2, Pencil, Scale } from 'lucide-react';
+import { notFound, usePathname } from 'next/navigation';
+import { ArrowLeft, Loader2, Pencil } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,10 +11,6 @@ import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
-import { MovementWizard } from './movement-wizard';
-import { AdjustmentDialog } from './adjustment-dialog';
-import { TransferDialog } from './transfer-dialog';
-import { ReverseDialog } from './reverse-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
@@ -27,11 +23,6 @@ import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
-
-// Adjust / Transfer movement flows are hidden for now (frontend only).
-const SHOW_ADJUST_TRANSFER = false;
-// Reverse action hidden from the ledger for now.
-const SHOW_REVERSE = false;
 
 const TABS = [
   { seg: 'ledger', label: 'Unit Ledger' },
@@ -54,7 +45,6 @@ export function InventoryDetailShell({
   itemNumber: string;
   children: React.ReactNode;
 }) {
-  const params = useSearchParams();
   const pathname = usePathname();
   const fetchOne = useInventoryStore((s) => s.fetchOne);
   const canSign = usePermission('inventory', 'sign');
@@ -64,10 +54,6 @@ export function InventoryDetailShell({
   const [item, setItem] = React.useState<InventoryItem | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [recording, setRecording] = React.useState(false);
-  const [adjusting, setAdjusting] = React.useState(false);
-  const [transferring, setTransferring] = React.useState(false);
-  const [reverseTarget, setReverseTarget] = React.useState<LedgerEntry | null>(null);
   const [editing, setEditing] = React.useState(false);
 
   const [ledgerRows, setLedgerRows] = React.useState<ApiMovement[]>([]);
@@ -105,12 +91,6 @@ export function InventoryDetailShell({
     void load(ctrl.signal);
     return () => ctrl.abort();
   }, [load]);
-
-  // Deep-link "/inventory/:id/...?action=record" opens the wizard once loaded.
-  React.useEffect(() => {
-    if (params.get('action') === 'record' && canSign && item) setRecording(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item]);
 
   // Per-item ledger (keyed on the UUID).
   React.useEffect(() => {
@@ -229,21 +209,6 @@ export function InventoryDetailShell({
                 <Pencil size={14} /> Edit
               </Button>
             )}
-            {canSign && (
-              <>
-                {SHOW_ADJUST_TRANSFER && (
-                  <Button onClick={() => setAdjusting(true)}>
-                    <Scale size={14} /> Adjust
-                  </Button>
-                )}
-                <Button onClick={() => setTransferring(true)}>
-                  <ArrowRightLeft size={14} /> Transfer
-                </Button>
-                <Button variant="primary" onClick={() => setRecording(true)}>
-                  <ArrowDownUp size={14} /> Record movement
-                </Button>
-              </>
-            )}
           </>
         }
       />
@@ -361,8 +326,7 @@ export function InventoryDetailShell({
                   error: ledgerError,
                   total: ledgerTotal,
                 },
-                onReverseRequest:
-                  SHOW_REVERSE && canSign ? (entry) => setReverseTarget(entry) : undefined,
+                onReverseRequest: undefined,
                 canSign,
               }}
             >
@@ -372,35 +336,6 @@ export function InventoryDetailShell({
         </div>
       </div>
 
-      <MovementWizard
-        open={recording}
-        onOpenChange={setRecording}
-        presetItemId={item.uuid}
-        onCompleted={refresh}
-      />
-      <AdjustmentDialog
-        open={adjusting}
-        onOpenChange={setAdjusting}
-        itemId={item.uuid}
-        itemNumber={item.id}
-        itemDescription={item.desc}
-        onCompleted={refresh}
-      />
-      <TransferDialog
-        open={transferring}
-        onOpenChange={setTransferring}
-        presetItemId={item.uuid}
-        presetItemNumber={item.id}
-        onCompleted={refresh}
-      />
-      <ReverseDialog
-        open={reverseTarget !== null}
-        onOpenChange={(o) => {
-          if (!o) setReverseTarget(null);
-        }}
-        entry={reverseTarget}
-        onCompleted={refresh}
-      />
       <ItemEditDialog
         open={editing}
         onOpenChange={setEditing}

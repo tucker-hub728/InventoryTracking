@@ -1,11 +1,17 @@
 /**
  * Location system API — wraps ``/api/v1/location-nodes`` and
- * ``/api/v1/allocations`` (Requirements v2 §5–§13).
+ * ``/api/v1/allocations`` (Requirements v2 §4.1).
  *
- * Strict LN2 hierarchy (tank_quadrant → rack → cassette_rack → box →
- * sub_slot) + flat operational locations. Only sub_slot / flat nodes can
- * hold a lot; placement creates allocation records; transfers/consumption
- * are logged in an append-only movement history.
+ * Hierarchy: tank_quadrant → rack → (cassette | cryo_box_rack) → box. The
+ * **Box** is the grid-bearing leaf (grid_rows × grid_cols); a lot is placed
+ * into a (grid_row, grid_col) cell. Cassette / Cryo Box Rack are navigation
+ * containers. Flat operational locations store lots directly. Only ``box`` and
+ * ``flat`` nodes can hold a lot.
+ *
+ * Quantity events go to the GxP ledger: ``consume`` (dispense/discard) and
+ * ``transfer`` are e-signed (pass an ``evidence_id`` from a reauth). ``place``
+ * is quantity-neutral (audit only). A tank_quadrant may be dedicated to a
+ * customer XOR a product (advisory; descendants inherit it).
  */
 
 import { api } from './client';
@@ -13,22 +19,42 @@ import { api } from './client';
 export type NodeType =
   | 'tank_quadrant'
   | 'rack'
-  | 'cassette_rack'
+  | 'cassette'
+  | 'cryo_box_rack'
   | 'box'
-  | 'sub_slot'
+  | 'flat'
+  // Retired (read-only — old rows only):
+  | 'cassette_rack'
+  | 'sub_slot';
+
+/** Node types the UI can create. */
+export type CreatableNodeType =
+  | 'tank_quadrant'
+  | 'rack'
+  | 'cassette'
+  | 'cryo_box_rack'
+  | 'box'
   | 'flat';
 
 export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials';
-export type MovementKind = 'place' | 'transfer' | 'consume';
+export type MovementType =
+  | 'receipt'
+  | 'dispense'
+  | 'discard'
+  | 'adjustment'
+  | 'transfer_out'
+  | 'transfer_in';
 
 /** Human labels for each node level. */
 export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   tank_quadrant: 'Tank Quadrant',
   rack: 'Rack',
-  cassette_rack: 'Cassette / Box Rack',
+  cassette: 'Cassette',
+  cryo_box_rack: 'Cryo Box Rack',
   box: 'Box',
-  sub_slot: 'Sub-slot',
   flat: 'Flat location',
+  cassette_rack: 'Cassette Rack (legacy)',
+  sub_slot: 'Sub-slot (legacy)',
 };
 
 export const FLAT_CATEGORY_LABEL: Record<FlatCategory, string> = {
@@ -47,14 +73,20 @@ export const FLAT_CATEGORIES: FlatCategory[] = [
   'materials',
 ];
 
-/** The single allowed child type for each LN2 level (null = leaf / no children). */
-export const CHILD_TYPE_OF: Record<NodeType, NodeType | null> = {
-  tank_quadrant: 'rack',
-  rack: 'cassette_rack',
-  cassette_rack: 'box',
-  box: 'sub_slot',
-  sub_slot: null,
-  flat: null,
+/**
+ * Allowed child types for each LN2 level. A Rack accepts EITHER a Cassette or a
+ * Cryo Box Rack (the user picks); everything else has a single child type. An
+ * empty array = leaf (no children — the Box stores units in its grid cells).
+ */
+export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
+  tank_quadrant: ['rack'],
+  rack: ['cassette', 'cryo_box_rack'],
+  cassette: ['box'],
+  cryo_box_rack: ['box'],
+  box: [],
+  flat: [],
+  cassette_rack: [],
+  sub_slot: [],
 };
 
 export interface LocationNode {
@@ -66,6 +98,12 @@ export interface LocationNode {
   name: string;
   is_active: boolean;
   notes: string | null;
+  grid_rows: number | null;
+  grid_cols: number | null;
+  dedicated_customer_id: string | null;
+  dedicated_product_id: string | null;
+  inherited_customer_id: string | null;
+  inherited_product_id: string | null;
   can_store: boolean;
   child_count: number;
   active_allocation_count: number;
@@ -77,6 +115,28 @@ export interface NodeTree extends LocationNode {
   children: NodeTree[];
 }
 
+/**
+ * Aggregate capacity + occupied across a subtree. A Box contributes
+ * ``rows × cols`` capacity and its active-allocation count; containers sum
+ * their descendants. Used for the hierarchy counts and the detail stat cards.
+ */
+export function subtreeStats(node: NodeTree): { capacity: number; occupied: number } {
+  if (node.node_type === 'box') {
+    return {
+      capacity: (node.grid_rows ?? 0) * (node.grid_cols ?? 0),
+      occupied: node.active_allocation_count,
+    };
+  }
+  let capacity = 0;
+  let occupied = 0;
+  for (const child of node.children) {
+    const s = subtreeStats(child);
+    capacity += s.capacity;
+    occupied += s.occupied;
+  }
+  return { capacity, occupied };
+}
+
 export interface Allocation {
   id: string;
   lot_id: string;
@@ -85,56 +145,85 @@ export interface Allocation {
   location_node_id: string;
   location_name: string | null;
   location_node_type: NodeType | null;
-  /** NUMERIC → string. */
-  qty: string;
+  grid_row: number | null;
+  grid_col: number | null;
+  /** Whole units (integer). */
+  qty: number;
   is_active: boolean;
   created_at: string;
 }
 
-export interface AllocationMovement {
+export interface NodeMovement {
   id: string;
-  lot_id: string;
+  lot_id: string | null;
   lot_number: string | null;
-  movement_kind: MovementKind;
-  from_node_id: string | null;
-  from_node_name: string | null;
-  to_node_id: string | null;
-  to_node_name: string | null;
-  qty: string;
+  item_number: string | null;
+  movement_type: MovementType;
+  from_location_node_id: string | null;
+  to_location_node_id: string | null;
+  /** Whole units (integer); negative for out-bound. */
+  qty_delta: number;
   notes: string | null;
   performed_by_user_id: string;
   performed_at: string;
 }
 
 export interface NodeCreateInput {
-  node_type: NodeType;
+  node_type: CreatableNodeType;
   code: string;
   name: string;
   parent_id?: string | null;
   flat_category?: FlatCategory | null;
+  grid_rows?: number | null;
+  grid_cols?: number | null;
+  dedicated_customer_id?: string | null;
+  dedicated_product_id?: string | null;
   notes?: string | null;
+}
+
+export interface GridUpdateInput {
+  grid_rows: number;
+  grid_cols: number;
+}
+
+export interface DedicationUpdateInput {
+  dedicated_customer_id?: string | null;
+  dedicated_product_id?: string | null;
 }
 
 export interface PlaceInput {
   lot_id: string;
   node_id: string;
   qty: number;
+  grid_row?: number | null;
+  grid_col?: number | null;
   override?: boolean;
-  notes?: string | null;
+  /** Unit-IN is e-signed (action movement.receipt). */
+  evidence_id: string;
+  /** Required comment (§3). */
+  notes: string;
 }
 
 export interface TransferInput {
   allocation_id: string;
   to_node_id: string;
   qty: number;
+  to_grid_row?: number | null;
+  to_grid_col?: number | null;
   override?: boolean;
-  notes?: string | null;
+  evidence_id: string;
+  /** Required comment (§3). */
+  notes: string;
 }
 
 export interface ConsumeInput {
   allocation_id: string;
+  /** The Flat location that consumed the unit (where it went). */
+  to_node_id: string;
   qty: number;
-  notes?: string | null;
+  evidence_id: string;
+  /** Required comment (§3). */
+  notes: string;
 }
 
 export const locationNodesApi = {
@@ -168,6 +257,12 @@ export const locationNodesApi = {
 
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 
+  updateGrid: (id: string, input: GridUpdateInput) =>
+    api.put<LocationNode>(`/location-nodes/${id}/grid`, { json: input }),
+
+  updateDedication: (id: string, input: DedicationUpdateInput) =>
+    api.put<LocationNode>(`/location-nodes/${id}/dedication`, { json: input }),
+
   place: (input: PlaceInput) => api.post<Allocation>('/allocations/place', { json: input }),
 
   transfer: (input: TransferInput) =>
@@ -180,7 +275,7 @@ export const locationNodesApi = {
     api.get<Allocation[]>(`/allocations/by-lot/${lotId}`, { signal: opts?.signal }),
 
   movements: (opts?: { lotId?: string; nodeId?: string; signal?: AbortSignal }) =>
-    api.get<AllocationMovement[]>('/allocations/movements', {
+    api.get<NodeMovement[]>('/allocations/movements', {
       query: { lot_id: opts?.lotId, node_id: opts?.nodeId },
       signal: opts?.signal,
     }),

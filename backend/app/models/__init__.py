@@ -17,7 +17,6 @@ from app.models.inventory import (
     Item,
     ItemApprovedVendor,
     ItemStock,
-    Location,
     Lot,
     ReceiptTransaction,
     StockMovement,
@@ -25,19 +24,12 @@ from app.models.inventory import (
     Vendor,
 )
 from app.models.locations import (
-    AllocationMovement,
     LocationNode,
     LotAllocation,
 )
 from app.models.products import Customer, CustomerProduct, Product, ProductMaterial
-from app.models.storage import (
-    StorageAssignmentEvent,
-    StoragePosition,
-    StorageRack,
-)
 
 __all__ = [
-    "AllocationMovement",
     "AuditEvent",
     "Customer",
     "CustomerProduct",
@@ -45,7 +37,6 @@ __all__ = [
     "Item",
     "ItemApprovedVendor",
     "ItemStock",
-    "Location",
     "LocationNode",
     "Lot",
     "LotAllocation",
@@ -56,9 +47,6 @@ __all__ = [
     "ReceiptTransaction",
     "Role",
     "StockMovement",
-    "StorageAssignmentEvent",
-    "StoragePosition",
-    "StorageRack",
     "UnitOfMeasure",
     "User",
     "Vendor",

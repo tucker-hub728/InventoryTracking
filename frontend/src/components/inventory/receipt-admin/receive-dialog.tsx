@@ -42,7 +42,6 @@ const SAME_VENDOR = '__same__';
 
 interface SplitDraft {
   key: string;
-  received_qty: string;
   isChild: boolean;
   lot_number: string;
   vendorChoice: string; // SAME_VENDOR | vendor id | NEW_VENDOR
@@ -55,7 +54,6 @@ function newSplit(child: boolean): SplitDraft {
   _seq += 1;
   return {
     key: `split-${_seq}`,
-    received_qty: '',
     isChild: child,
     lot_number: '',
     vendorChoice: SAME_VENDOR,
@@ -74,9 +72,10 @@ interface Props {
 /**
  * Physical receipt (Requirements v2 §5). Per ON_ORDER lot the operator
  * submits one or more splits: the first receives into the original lot
- * (flips it AVAILABLE), the rest create child supplier lots. Every split
- * posts a receipt movement; the whole receipt is covered by one
- * e-signature (action ``receipt.confirm``).
+ * (flips it AVAILABLE), the rest create child supplier lots. Receive records
+ * NO quantity and NO placement — quantity is added later as a unit-IN (place)
+ * in the Location System. The whole receipt is covered by one e-signature
+ * (action ``receipt.confirm``).
  */
 export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: Props) {
   const [vendors, setVendors] = React.useState<Vendor[]>([]);
@@ -120,15 +119,12 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
     return () => ctrl.abort();
   }, [open, transaction]);
 
-  // Seed one "into original lot" split per on-order lot, defaulted to the
-  // ordered quantity.
+  // Seed one "into original lot" split per on-order lot.
   React.useEffect(() => {
     if (!open) return;
     const seed: Record<string, SplitDraft[]> = {};
     for (const lot of onOrderLots) {
-      const first = newSplit(false);
-      first.received_qty = lot.ordered_qty ?? '';
-      seed[lot.id] = [first];
+      seed[lot.id] = [newSplit(false)];
     }
     setSplitsByLot(seed);
   }, [open, onOrderLots]);
@@ -174,12 +170,8 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
       const seenChild = new Set<string>();
       const splits: ReceiveSplitInput[] = [];
       drafts.forEach((d, idx) => {
-        const qty = Number(d.received_qty);
-        if (!Number.isFinite(qty) || qty <= 0) {
-          throw new SplitError(`Lot ${lot.lot_number}: received qty must be > 0.`);
-        }
         const usingNew = d.vendorChoice === NEW_VENDOR;
-        const split: ReceiveSplitInput = { received_qty: qty };
+        const split: ReceiveSplitInput = {};
         if (idx > 0) {
           const childNo = d.lot_number.trim();
           if (!childNo) {
@@ -278,9 +270,9 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
           <DialogHeader>
             <DialogTitle>Confirm physical receipt</DialogTitle>
             <DialogDescription>
-              Record what arrived. Adjust received quantities and split a lot into
-              multiple supplier lots if needed. On confirmation the lots become
-              available and the ledger is updated under your e-signature.
+              Confirm what arrived and split a lot into multiple supplier lots if
+              needed. On confirmation the lots become available under your
+              e-signature. Quantity is added later by placing vials in Locations.
             </DialogDescription>
           </DialogHeader>
 
@@ -341,21 +333,7 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
                             </Button>
                           )}
                         </div>
-                        <div className="grid grid-cols-3 gap-2.5">
-                          <div className="space-y-1">
-                            <Label className="text-xs">Received qty</Label>
-                            <Input
-                              type="number"
-                              min={0}
-                              step="1"
-                              value={d.received_qty}
-                              onChange={(e) =>
-                                patchSplit(lot.id, d.key, {
-                                  received_qty: e.target.value,
-                                })
-                              }
-                            />
-                          </div>
+                        <div className="grid grid-cols-2 gap-2.5">
                           {idx > 0 ? (
                             <div className="space-y-1">
                               <Label className="text-xs">Lot number</Label>

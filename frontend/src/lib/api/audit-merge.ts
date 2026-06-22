@@ -20,13 +20,9 @@
  */
 
 import type { ApiAuditEvent, ApiAuditSeverity } from './audit';
-import {
-  MOVEMENT_TYPE_LABEL,
-  type ApiMovement,
-} from './movements';
+import type { ApiMovement } from './movements';
 
 function severityFor(m: ApiMovement): ApiAuditSeverity {
-  if (m.reversal_of_id !== null) return 'warning';
   if (m.movement_type === 'discard') return 'warning';
   return 'info';
 }
@@ -50,7 +46,6 @@ function subjectLabel(m: ApiMovement): string {
  *  groups them. The first segment is hard-coded ``inventory`` to match
  *  the recorder's namespace. */
 function eventType(m: ApiMovement): string {
-  if (m.reversal_of_id !== null) return 'inventory.movement.reversal';
   return `inventory.movement.${m.movement_type}`;
 }
 

@@ -62,7 +62,6 @@ export interface ReceiptIntakeLotInput {
   po_reference?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;
-  coa_url?: string | null;
   notes?: string | null;
 }
 
@@ -76,7 +75,6 @@ export interface ReceiptIntakeInput {
 // ── Receive (step 5) ─────────────────────────────────────────────────────
 
 export interface ReceiveSplitInput {
-  received_qty: number;
   /** Optional vendor override; defaults to the on-order lot's vendor. */
   vendor_id?: string | null;
   vendor_name?: string | null;
@@ -84,10 +82,8 @@ export interface ReceiveSplitInput {
   po_reference?: string | null;
   /** Set on splits after the first to create a child supplier lot. */
   lot_number?: string | null;
-  location_id?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;
-  coa_url?: string | null;
   notes?: string | null;
 }
 
@@ -98,12 +94,10 @@ export interface ReceiveLineInput {
 
 export interface ReceiveInput {
   /**
-   * Optional default destination. Omit it (and per-split location_id) to
-   * receive without placing the stock: the lot becomes available and the
-   * received qty is recorded, but it stays unplaced until the Location
-   * System maps it to a node.
+   * Receive captures no quantity and no placement — it only flips the lot to
+   * available (+ optional split into supplier lots). Quantity arrives later as
+   * a unit-IN (place) in the Location System.
    */
-  location_id?: string | null;
   lines: ReceiveLineInput[];
   /** Fresh reauth evidence id (action ``receipt.confirm``). */
   evidence_id: string;

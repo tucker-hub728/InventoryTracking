@@ -14,11 +14,9 @@ from app.audit.routes import audit_router
 from app.forecast.routes import forecasts_router
 from app.inventory.routes import (
     items_router,
-    locations_router,
     lots_router,
     movements_router,
     receiving_router,
-    storage_router,
     uoms_router,
     vendors_router,
 )
@@ -37,10 +35,8 @@ api_router.include_router(uploads.router)
 api_router.include_router(items_router)
 api_router.include_router(vendors_router)
 api_router.include_router(uoms_router)
-api_router.include_router(locations_router)
 api_router.include_router(lots_router)
 api_router.include_router(movements_router)
-api_router.include_router(storage_router)
 api_router.include_router(receiving_router)
 api_router.include_router(nodes_router)
 api_router.include_router(alloc_router)

@@ -3,15 +3,11 @@ import {
   Building2,
   Contact,
   History,
-  KanbanSquare,
   Layers,
   LineChart,
   MapPin,
   Package,
-  Ruler,
-  Snowflake,
   Truck,
-  Users,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 

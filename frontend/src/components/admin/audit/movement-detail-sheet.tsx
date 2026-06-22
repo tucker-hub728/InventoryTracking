@@ -69,7 +69,6 @@ export function MovementDetailSheet({ open, onOpenChange, movement }: Props) {
 }
 
 function MovementBody({ movement }: { movement: ApiMovement }) {
-  const isReversal = movement.reversal_of_id !== null;
   const typeLabel = MOVEMENT_TYPE_LABEL[movement.movement_type];
   const qtyDelta = Number(movement.qty_delta);
   const qtyAbs = Number(movement.qty_abs).toLocaleString();
@@ -94,11 +93,6 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           >
             {typeLabel}
           </span>
-          {isReversal && (
-            <span className="inline-flex items-center rounded-sm border border-border bg-bg-elev px-2 py-0.5 text-[11px] uppercase tracking-wide text-text-3">
-              Reversal
-            </span>
-          )}
           <span className={cn('font-mono text-base font-semibold', signTint)}>
             {sign}
             {qtyAbs}
@@ -159,15 +153,9 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
         <KV
           label="From"
           value={
-            movement.from_location_code ? (
-              <span className="font-mono">
-                {movement.from_location_code}
-                {movement.from_location_name && (
-                  <span className="text-text-3">
-                    {' '}
-                    · {movement.from_location_name}
-                  </span>
-                )}
+            movement.from_location_node_name ? (
+              <span title={movement.from_location_node_path ?? undefined}>
+                {movement.from_location_node_name}
               </span>
             ) : (
               '—'
@@ -177,50 +165,20 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
         <KV
           label="To"
           value={
-            movement.to_location_code ? (
-              <span className="font-mono">
-                {movement.to_location_code}
-                {movement.to_location_name && (
-                  <span className="text-text-3">
-                    {' '}
-                    · {movement.to_location_name}
-                  </span>
-                )}
+            movement.to_location_node_name ? (
+              <span title={movement.to_location_node_path ?? undefined}>
+                {movement.to_location_node_name}
               </span>
             ) : (
               '—'
             )
           }
         />
-        <KV
-          label="Reason"
-          value={
-            movement.reason_code ? (
-              <span>{movement.reason_code.replace(/_/g, ' ')}</span>
-            ) : (
-              '—'
-            )
-          }
-        />
-        {movement.reference && (
-          <KV
-            label="Reference"
-            value={<span className="font-mono">{movement.reference}</span>}
-          />
-        )}
-        {movement.notes && <KV label="Notes" value={movement.notes} />}
+        {movement.notes && <KV label="Comment" value={movement.notes} />}
         <KV
           label="Movement ID"
           value={<span className="font-mono text-xs">{movement.id}</span>}
         />
-        {movement.reversal_of_id && (
-          <KV
-            label="Reverses"
-            value={
-              <span className="font-mono text-xs">{movement.reversal_of_id}</span>
-            }
-          />
-        )}
         {movement.reauth_evidence_id && (
           <KV
             label="Evidence"

@@ -43,6 +43,25 @@ def _validate_item_number(v: str) -> str:
 ItemNumber = Annotated[str, BeforeValidator(_validate_item_number)]
 
 
+def _trimmed_non_blank(field_name: str):
+    """Strip whitespace and reject the empty result.
+
+    None passes through (so the same validator guards required Create
+    fields and optional ``str | None`` Update fields). Empty / whitespace
+    strings raise a clean 422 instead of slipping to a DB CHECK 500.
+    """
+
+    def _check(v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError(f"{field_name} must not be blank")
+        return stripped
+
+    return BeforeValidator(_check)
+
+
 # ── Vendors ────────────────────────────────────────────────────────────
 
 
@@ -233,115 +252,6 @@ class ItemListResponse(BaseModel):
     offset: int
 
 
-# ── Locations ──────────────────────────────────────────────────────────
-
-
-# Single source of truth on the API side. The DB ``CHECK`` and the
-# frontend kind picker must mirror this exact list.
-LocationKind = Literal[
-    "LN2",
-    "minus_80",
-    "minus_20",
-    "fridge",
-    "room_temp",
-    "cold_room",
-    "incubator",
-    "other",
-]
-
-
-def _trimmed_non_blank(field_name: str):
-    """Strip whitespace and reject the empty result.
-
-    None is passed through (so the same validator can guard required
-    fields on Create payloads and optional ``str | None`` fields on
-    Update payloads). Empty strings still raise — sending ``""``
-    explicitly is treated the same as sending whitespace.
-
-    Pydantic's ``min_length`` counts whitespace as content, so
-    ``"  "`` would otherwise pass a ``min_length=1`` check, slip through
-    to the DB, and hit a ``CHECK`` that bubbles up as a 500. Doing the
-    strip + check in Pydantic keeps the response at a clean 422.
-    """
-
-    def _check(v: str | None) -> str | None:
-        if v is None:
-            return None
-        stripped = v.strip()
-        if not stripped:
-            raise ValueError(f"{field_name} must not be blank")
-        return stripped
-
-    return BeforeValidator(_check)
-
-
-class LocationUpdate(BaseModel):
-    """Payload for ``PATCH /v1/locations/{id}`` — partial update.
-
-    ``code`` is editable but the unique constraint still applies; an
-    operator renaming ``LN2-A`` to ``LN2-North`` will hit a 409 if
-    another location already holds that code. ``kind`` can be changed
-    too — historic movements continue to reference this row by id
-    and the column is denormalised on the audit row anyway.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    code: Annotated[str | None, _trimmed_non_blank("code")] = Field(
-        default=None, max_length=64
-    )
-    name: Annotated[str | None, _trimmed_non_blank("name")] = Field(
-        default=None, max_length=128
-    )
-    kind: LocationKind | None = None
-    temperature_c: Decimal | None = Field(
-        default=None,
-        ge=Decimal("-273"),
-        le=Decimal("100"),
-    )
-    notes: str | None = Field(default=None, max_length=2048)
-    is_active: bool | None = None
-
-
-class LocationCreate(BaseModel):
-    """Payload for ``POST /v1/locations``.
-
-    ``code`` is the operator-visible handle (``LN2-A``); we trim it
-    before saving so ``" LN2-A "`` and ``"LN2-A"`` collide on the
-    case-insensitive unique index.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    code: Annotated[str, _trimmed_non_blank("code")] = Field(max_length=64)
-    name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=128)
-    kind: LocationKind
-    temperature_c: Decimal | None = Field(
-        default=None,
-        ge=Decimal("-273"),
-        le=Decimal("100"),
-    )
-    notes: str | None = Field(default=None, max_length=2048)
-    is_active: bool = True
-
-
-class LocationRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    code: str
-    name: str
-    kind: LocationKind
-    temperature_c: Decimal | None = None
-    notes: str | None = None
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
-
-
-# ── Lots ───────────────────────────────────────────────────────────────
-
-
 LotStatus = Literal["on_order", "available"]
 
 
@@ -357,7 +267,6 @@ class LotCreate(BaseModel):
     vendor_id: str | None = None
     manufacture_date: date | None = None
     expiration_date: date | None = None
-    coa_url: str | None = Field(default=None, max_length=2048)
     status: LotStatus = "available"
     notes: str | None = Field(default=None, max_length=2048)
 
@@ -368,7 +277,7 @@ class LotUpdate(BaseModel):
     ``lot_number`` and ``item_id`` are immutable for the same reason
     item_number is — they're the identity of the lot. Editable fields:
     status (released → quarantined → recalled lifecycle), dates,
-    vendor, CoA URL, notes. The DB CHECK on date ordering still
+    vendor, notes. The DB CHECK on date ordering still
     applies; the route surfaces the structured error.
 
     Editing a lot after entry is a GxP-significant correction (e.g.
@@ -383,7 +292,6 @@ class LotUpdate(BaseModel):
     vendor_id: str | None = None
     manufacture_date: date | None = None
     expiration_date: date | None = None
-    coa_url: str | None = Field(default=None, max_length=2048)
     status: LotStatus | None = None
     notes: str | None = Field(default=None, max_length=2048)
     # ── E-signature (21 CFR Part 11) ──────────────────────────────────
@@ -410,7 +318,6 @@ class LotRead(BaseModel):
     item_description: str | None = None
     manufacture_date: date | None
     expiration_date: date | None
-    coa_url: str | None
     status: LotStatus
     notes: str | None
     # ── Receipt Admin v2 ──────────────────────────────────────────────
@@ -418,12 +325,9 @@ class LotRead(BaseModel):
     po_reference: str | None = None
     receipt_transaction_id: str | None = None
     parent_lot_id: str | None = None
-    # Surfaced from ``metadata_`` for the UI (not status values).
-    unverified_vendor_for_item: bool = False
-    vendor_not_previously_associated_with_item: bool = False
     # Ordered quantity captured at intake (planning data; the received
-    # quantity is the ledger movement, not this). Lives in ``metadata_``.
-    ordered_qty: Decimal | None = None
+    # quantity stays ledger-derived, not this). Whole units only.
+    ordered_qty: int | None = None
     created_at: datetime
     updated_at: datetime
     created_by_user_id: str
@@ -467,27 +371,25 @@ class MovementRead(BaseModel):
     lot_number: str | None = None
     lot_expiration_date: date | None = None
 
-    from_location_id: str | None
-    from_location_code: str | None = None
-    from_location_name: str | None = None
-
-    to_location_id: str | None
-    to_location_code: str | None = None
-    to_location_name: str | None = None
+    # Location System node references. For consume, ``to_location_node_id`` is
+    # the Flat location that consumed the unit. ``*_name`` / ``*_path`` are
+    # resolved for the ledger's Location column (name + breadcrumb tooltip).
+    from_location_node_id: str | None = None
+    from_location_node_name: str | None = None
+    from_location_node_path: str | None = None
+    to_location_node_id: str | None = None
+    to_location_node_name: str | None = None
+    to_location_node_path: str | None = None
 
     movement_type: MovementType
-    qty_delta: Decimal
-    qty_abs: Decimal
+    qty_delta: int
+    qty_abs: int
 
-    reason_code: str | None
+    # Mandatory §3 comment captured on every e-signed movement.
     notes: str | None
-    reference: str | None
-    destination_text: str | None = None
 
-    reversal_of_id: str | None
     # FK into ``audit.reauth_events``. The audit viewer hydrates the
-    # canvas signature image via ``GET /v1/uploads/signature/{evidence}``.
-    # Nullable for the Chunk 2 smoke rows that pre-date e-sign capture.
+    # signature via ``GET /v1/uploads/signature/{evidence}``.
     reauth_evidence_id: str | None = None
 
     performed_by_user_id: str
@@ -507,401 +409,6 @@ class MovementListResponse(BaseModel):
     total: int
     limit: int
     offset: int
-
-
-# ── Receipt (write) ────────────────────────────────────────────────────
-
-
-class NewLotInput(BaseModel):
-    """Inline lot creation as part of a first receipt.
-
-    Used when the vendor delivery introduces a batch that doesn't
-    exist yet in ``app.lots``. Subsequent receipts of the same batch
-    pass ``lot_id`` instead.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    lot_number: str = Field(min_length=1, max_length=64)
-    expiration_date: date | None = None
-    manufacture_date: date | None = None
-    vendor_id: str | None = None
-    coa_url: str | None = Field(default=None, max_length=2048)
-    notes: str | None = Field(default=None, max_length=2048)
-
-
-class ReceiptRequest(BaseModel):
-    """Body for ``POST /v1/movements/receipt``.
-
-    The receipt either references an existing lot (``lot_id``) or
-    creates one inline (``new_lot``) — exactly one of the two must be
-    set. ``evidence_id`` is the UUID returned by ``POST /v1/auth/reauth``
-    for ``action='movement.receipt'``. It's single-use and bound to
-    the authenticated user.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    item_id: str  # UUID
-    location_id: str  # UUID
-    qty: Decimal = Field(gt=Decimal("0"))
-
-    # Lot — exactly one of these must be set; validated below.
-    lot_id: str | None = None
-    new_lot: NewLotInput | None = None
-
-    # E-signature evidence.
-    evidence_id: str  # UUID from /v1/auth/reauth (action=movement.receipt)
-
-    @model_validator(mode="after")
-    def _check_lot_xor(self) -> ReceiptRequest:
-        if (self.lot_id is None) == (self.new_lot is None):
-            raise ValueError(
-                "exactly one of 'lot_id' or 'new_lot' must be provided"
-            )
-        return self
-
-
-# ── Dispense (write) ───────────────────────────────────────────────────
-
-
-class DispenseRequest(BaseModel):
-    """Body for ``POST /v1/movements/dispense``.
-
-    Stock leaves the system — either consumed (patient, QC, research)
-    or removed (expired, damaged, lost). Either way the row reduces
-    the (lot, location) balance and the API rejects overdraws with a
-    structured ``dispense_exceeds_available`` 422.
-
-    ``lot_id`` is required: you can't dispense something that doesn't
-    have a lot on record. ``evidence_id`` mints from
-    ``POST /v1/auth/reauth`` with ``action='movement.dispense'``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    item_id: str  # UUID
-    location_id: str  # UUID — physical source of stock
-    lot_id: str  # UUID — required for dispense
-    qty: Decimal = Field(gt=Decimal("0"))
-
-    # Free-text "where did it go" (lab, patient, shipment, …). Required.
-    destination: Annotated[str, _trimmed_non_blank("destination")] = Field(
-        max_length=256
-    )
-
-    evidence_id: str  # UUID from /v1/auth/reauth (action=movement.dispense)
-
-
-# ── Discard (write) ────────────────────────────────────────────────────
-
-
-class DiscardRequest(BaseModel):
-    """Body for ``POST /v1/movements/discard``.
-
-    Stock is removed because it's no longer fit for use — expired,
-    damaged, contaminated, recalled. Same wire shape as
-    ``DispenseRequest`` but produces ``movement_type='discard'`` so
-    audit reports can distinguish "consumed for purpose" from "thrown
-    away" without parsing reason_code strings.
-
-    ``lot_id`` is required (you can't discard what isn't in a lot) and
-    the API rejects overdraws with ``discard_exceeds_available`` 422.
-    ``evidence_id`` mints from ``POST /v1/auth/reauth`` with
-    ``action='movement.discard'``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    item_id: str
-    location_id: str
-    lot_id: str
-    qty: Decimal = Field(gt=Decimal("0"))
-
-    reason_code: str = Field(min_length=1, max_length=64)
-    notes: str | None = Field(default=None, max_length=2048)
-    reference: str | None = Field(default=None, max_length=256)
-
-    evidence_id: str  # UUID from /v1/auth/reauth (action=movement.discard)
-
-
-# ── Adjustment (write) ─────────────────────────────────────────────────
-
-
-class AdjustmentRequest(BaseModel):
-    """Body for ``POST /v1/movements/adjustment``.
-
-    Signed correction to the (lot, location) balance — used after a
-    physical count, to back-fill opening balances, or to write down
-    a system error. ``qty_delta`` is the **signed** change applied to
-    the balance:
-
-      * ``+5`` adds 5 units (operator found 5 extra during a count)
-      * ``-2`` removes 2 units (operator found 2 fewer)
-
-    Zero is rejected (``qty_abs > 0`` enforced at the DB and here).
-    Negative deltas can't exceed available balance —
-    ``adjustment_exceeds_available`` 422.
-
-    Reason code is required (Part 11 mandates a stated reason for any
-    inventory variance); the audit row carries the operator-typed
-    free-text plus the structured code.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    item_id: str
-    location_id: str
-    lot_id: str
-    # NOTE: signed, not gt=0. The route handler enforces non-zero so
-    # the DB CHECK ``qty_abs > 0`` doesn't surface as a 500.
-    qty_delta: Decimal
-
-    reason_code: str = Field(min_length=1, max_length=64)
-    notes: str | None = Field(default=None, max_length=2048)
-    reference: str | None = Field(default=None, max_length=256)
-
-    evidence_id: str  # UUID from /v1/auth/reauth (action=movement.adjustment)
-
-
-# ── Transfer (write) ───────────────────────────────────────────────────
-
-
-class TransferRequest(BaseModel):
-    """Body for ``POST /v1/movements/transfer``.
-
-    Move stock between two locations within the same org. Writes two
-    rows atomically — a ``transfer_out`` from the source location and a
-    ``transfer_in`` into the destination — linked through
-    ``paired_movement_id`` on the ``transfer_in`` row. One e-signature
-    covers both legs (``action='movement.transfer'``).
-
-    Source and destination must be distinct; same-location transfers
-    are rejected (``transfer_same_location``). Overdraws on the source
-    rejected with ``transfer_exceeds_available``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    item_id: str
-    lot_id: str
-    from_location_id: str
-    to_location_id: str
-    qty: Decimal = Field(gt=Decimal("0"))
-
-    evidence_id: str  # UUID from /v1/auth/reauth (action=movement.transfer)
-    # Same-location is rejected at the route layer with a structured
-    # ``transfer_same_location`` code (consistent with how the other
-    # write endpoints flag domain-invariant failures).
-
-
-class TransferResponse(BaseModel):
-    """Two-row response for ``POST /v1/movements/transfer``.
-
-    Returns both legs so the UI can show the pair without a follow-up
-    fetch. ``transfer_out`` reduces the source balance; ``transfer_in``
-    bumps the destination balance.
-    """
-
-    transfer_out: MovementRead
-    transfer_in: MovementRead
-
-
-# ── Reverse (write) ────────────────────────────────────────────────────
-
-
-class ReverseRequest(BaseModel):
-    """Body for ``POST /v1/movements/{movement_id}/reverse``.
-
-    Posts a counter-movement that cancels out an earlier ledger entry —
-    the original row stays untouched (the ledger is append-only) but
-    the new row carries ``reversal_of_id=<original>`` so audit reports
-    can pair them. The counter's ``movement_type`` is derived from the
-    original:
-
-      * receipt        → dispense  (− from original.to_location)
-      * dispense       → receipt   (+ into original.from_location)
-      * discard        → receipt   (+ into original.from_location)
-      * adjustment     → adjustment with negated qty_delta
-      * transfer_out / transfer_in → both legs reversed atomically
-
-    Originals can only be reversed once; a second attempt returns
-    ``movement_already_reversed``. ``evidence_id`` mints from
-    ``POST /v1/auth/reauth`` with ``action='movement.reverse'``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    reason_code: str = Field(min_length=1, max_length=64)
-    notes: str | None = Field(default=None, max_length=2048)
-
-    evidence_id: str  # UUID from /v1/auth/reauth (action=movement.reverse)
-
-
-# ── Stock by lot (read) ────────────────────────────────────────────────
-
-
-class StockByLotEntry(BaseModel):
-    """One row of ``GET /v1/items/{id}/stock-by-lot`` — the per-lot,
-    per-location available quantity used to build the dispense picker."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    lot_id: str
-    lot_number: str
-    lot_status: LotStatus
-    expiration_date: date | None = None
-
-    location_id: str
-    location_code: str
-    location_name: str
-
-    qty_available: Decimal
-    last_movement_at: datetime | None = None
-
-
-# ── Storage (racks + positions) ────────────────────────────────────────
-#
-# The LN2 / Storage grid: Location → Rack(rows×cols) → Position. See
-# ``docs/modules/storage.md``. Position status is binary (empty/occupied).
-
-
-PositionStatus = Literal["empty", "occupied"]
-
-
-class RackInput(BaseModel):
-    """One rack defined while creating a location (or added later)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=64)
-    rows: int = Field(ge=1, le=26)
-    cols: int = Field(ge=1, le=26)
-
-
-class StorageLocationCreate(BaseModel):
-    """Payload for ``POST /v1/storage/locations``.
-
-    Storage locations are created from name + racks only. ``kind`` /
-    ``temperature_c`` / ``notes`` are not collected here — the backend stores a
-    default ``kind`` to satisfy the (shared) locations table; those columns are
-    still managed by the locations-admin CRUD.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=128)
-    racks: list[RackInput] = Field(min_length=1)
-
-
-class PositionRead(BaseModel):
-    """One slot, hydrated with its occupant (lot → item) for the grid."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    # Row-major 1-based number within the rack (the user-facing slot no.).
-    index: int
-    row_idx: int
-    col_idx: int
-    label: str
-    status: PositionStatus
-    lot_id: str | None = None
-    lot_number: str | None = None
-    # ``item_id`` is the human item_number (what ``/inventory/{id}`` keys on);
-    # ``item_uuid`` is the backend UUID.
-    item_id: str | None = None
-    item_uuid: str | None = None
-    item_description: str | None = None
-    vendor_name: str | None = None
-    assigned_at: datetime | None = None
-
-
-class RackRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    rows: int
-    cols: int
-    position_order: int
-    positions: list[PositionRead]
-
-
-class StorageLocationRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    kind: LocationKind
-    detail: str
-    racks: list[RackRead]
-
-
-class AssignPositionRequest(BaseModel):
-    """Assign a lot (one vial) to a single empty slot.
-
-    A grid assign places a new vial and posts a ``+1`` receipt to the ledger,
-    so it carries an e-signature like the unit-in flow. ``evidence_id`` is the
-    UUID from ``POST /v1/auth/reauth`` (action ``movement.receipt``).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    lot_id: str
-    evidence_id: str
-
-
-class EmptyPositionRequest(BaseModel):
-    """Empty a single slot (one vial out).
-
-    Posts a ``-1`` dispense to the ledger, so it carries an e-signature and a
-    free-text destination (like any unit-out). ``evidence_id`` is the UUID from
-    ``POST /v1/auth/reauth`` (action ``movement.dispense``).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    destination: Annotated[str, _trimmed_non_blank("destination")] = Field(
-        max_length=256
-    )
-    evidence_id: str
-
-
-class MovePositionRequest(BaseModel):
-    """Move the occupant to another free slot (may be in another location)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    dest_position_id: str
-
-
-class MovePositionResult(BaseModel):
-    source: PositionRead
-    dest: PositionRead
-
-
-class PositionEventRead(BaseModel):
-    """One row of a position's history — unit in / out / move."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    event_kind: str  # assign | empty | move_in | move_out
-    from_status: str | None = None
-    to_status: str | None = None
-    lot_number: str | None = None
-    actor_name: str | None = None
-    # For moves: the other position + its location.
-    counterpart_label: str | None = None
-    counterpart_location: str | None = None
-    occurred_at: datetime
-
-
-# ── Receipt Admin (v2) ─────────────────────────────────────────────────
-#
-# Item→Vendor approved mapping + the two-step intake → physical-receipt
-# flow with splitting. See docs/modules/receipt-admin.md.
 
 
 VendorApprovalStatus = Literal["approved", "pending"]
@@ -949,14 +456,15 @@ class ReceiptIntakeLotInput(BaseModel):
 
     Resolves a **mandatory** vendor — by id or free-text name. ``quantity``
     is the *ordered* quantity (planning data); it is stored in the lot's
-    ``metadata_`` and does NOT post a ledger movement. The received
+    ``ordered_qty`` column and does NOT post a ledger movement. The received
     quantity is recorded at physical receipt (§5).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
-    quantity: Decimal = Field(gt=Decimal("0"))
+    # Ordered quantity — whole units only (stored on the lot as ordered_qty).
+    quantity: int = Field(gt=0)
 
     # Vendor resolution — exactly one of id / name (vendor is mandatory).
     # Any vendor used here is automatically attached to the item's vendor
@@ -971,7 +479,6 @@ class ReceiptIntakeLotInput(BaseModel):
     po_reference: str | None = Field(default=None, max_length=128)
     manufacture_date: date | None = None
     expiration_date: date | None = None
-    coa_url: str | None = Field(default=None, max_length=2048)
     notes: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
@@ -1000,16 +507,19 @@ class ReceiptIntakeRequest(BaseModel):
 
 
 class ReceiveSplitInput(BaseModel):
-    """One portion of an ON_ORDER lot being physically received (§5).
+    """One portion of an ON_ORDER lot being received (§5).
 
-    The first split with no ``lot_number`` is received into the original
-    lot; any split carrying a ``lot_number`` (and/or a different vendor)
-    creates a child lot linked via ``parent_lot_id``.
+    The first split with no ``lot_number`` is received into the original lot
+    (flip → AVAILABLE); any split carrying a ``lot_number`` (and/or a different
+    vendor) creates a child supplier lot linked via ``parent_lot_id``.
+
+    Receive captures **no quantity and no placement** — it only adjusts lot
+    details and lifecycle. Quantity arrives later as a unit-IN (place) in the
+    Location System.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    received_qty: Decimal = Field(gt=Decimal("0"))
     # Optional vendor override; defaults to the original lot's vendor.
     vendor_id: str | None = None
     vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
@@ -1021,11 +531,8 @@ class ReceiveSplitInput(BaseModel):
     lot_number: Annotated[str | None, _trimmed_non_blank("lot_number")] = Field(
         default=None, max_length=64
     )
-    # Optional per-split destination override (else the request location).
-    location_id: str | None = None
     manufacture_date: date | None = None
     expiration_date: date | None = None
-    coa_url: str | None = Field(default=None, max_length=2048)
     notes: str | None = Field(default=None, max_length=2048)
 
 
@@ -1047,11 +554,6 @@ class ReceiveRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Optional default destination. Omit it (and per-split location_id) to
-    # receive without placing the stock — the lot becomes AVAILABLE and the
-    # received qty is recorded, but it stays unplaced until the Location
-    # System maps it to a node. A per-split location_id still overrides this.
-    location_id: str | None = None
     lines: list[ReceiveLineInput] = Field(min_length=1, max_length=50)
     evidence_id: str  # UUID from /v1/auth/reauth (action=receipt.confirm)
 

@@ -42,11 +42,12 @@ export interface LedgerEntry {
   in: number;
   out: number;
   balance: number;
+  /** Node name shown in the Location cell (e.g. "Box 01" / a flat name). */
   location: string;
-  /** Storage-location UUID backing the ``location`` cell, when it maps to a
-   *  real location. ``null`` for free-text dispense destinations (which aren't
-   *  storage locations). Lets the ledger deep-link to that location's /ln2 tab. */
+  /** Storage node UUID behind the cell, if any. */
   locationId?: string | null;
+  /** Full hierarchy breadcrumb for the cell's tooltip (e.g. "Q1 › R01 › C01 › Box 01"). */
+  locationPath?: string | null;
   lot: string;
   exp: string;
   initials: string;

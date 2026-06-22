@@ -173,8 +173,8 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
       }
       seenNumbers.add(lotNo.toLowerCase());
       const qty = Number(l.quantity);
-      if (!Number.isFinite(qty) || qty <= 0) {
-        setFormError(`Lot "${lotNo}" needs a quantity greater than 0.`);
+      if (!Number.isInteger(qty) || qty <= 0) {
+        setFormError(`Lot "${lotNo}" needs a whole quantity greater than 0.`);
         return null;
       }
       const usingNew = l.vendorChoice === NEW_VENDOR;

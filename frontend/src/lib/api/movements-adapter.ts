@@ -16,7 +16,7 @@ import type { LedgerEntry } from '@/types/inventory';
 
 import type { ApiMovement } from './movements';
 
-function num(s: string | null | undefined): number {
+function num(s: number | string | null | undefined): number {
   if (s == null || s === '') return 0;
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
@@ -53,14 +53,6 @@ export function apiMovementsToLedgerEntries(
   apiRows: ApiMovement[],
   totalQtyOnHand?: number,
 ): LedgerEntry[] {
-  // Build the set of "already reversed" originals — one pass through
-  // the page lets the table disable the Reverse action on rows whose
-  // counter has already been posted.
-  const reversedOriginalIds = new Set<string>();
-  for (const m of apiRows) {
-    if (m.reversal_of_id) reversedOriginalIds.add(m.reversal_of_id);
-  }
-
   // Walk newest-first, subtracting each delta to back-compute earlier
   // balances. That way row[0].balance always equals the live qty_on_hand.
   let runningBalance = totalQtyOnHand ?? 0;
@@ -78,23 +70,14 @@ export function apiMovementsToLedgerEntries(
       in: qtyIn,
       out: qtyOut,
       balance: balanceAfterRow,
-      // For a unit-out (dispense) the "Location" column shows where it went —
-      // the free-text destination. Every other row shows the storage location.
+      // The storage node touched. For a consume (dispense) that's the Flat
+      // location that used it; otherwise the to (else from) node. Show the
+      // node name; the breadcrumb path is the cell's tooltip.
       location:
-        m.movement_type === 'dispense'
-          ? m.destination_text ?? m.from_location_code ?? '—'
-          : m.to_location_code ?? m.from_location_code ?? '—',
-      // The storage-location id behind that code, aligned with the same
-      // fallback so the cell can deep-link to /ln2. Null when the cell shows a
-      // free-text dispense destination (no backing storage location).
-      locationId:
-        m.movement_type === 'dispense'
-          ? m.destination_text
-            ? null
-            : m.from_location_id
-          : m.to_location_code
-            ? m.to_location_id
-            : m.from_location_id,
+        m.to_location_node_name ?? m.from_location_node_name ?? '—',
+      locationId: m.to_location_node_id ?? m.from_location_node_id,
+      locationPath:
+        m.to_location_node_path ?? m.from_location_node_path ?? null,
       lot: m.lot_number ?? '—',
       exp: m.lot_expiration_date ?? '—',
       // ``initials`` is the compact form for the narrow ledger column —
@@ -102,11 +85,11 @@ export function apiMovementsToLedgerEntries(
       // timeline.
       initials: initialsFromName(m.performed_by_user_name) ?? '—',
       actorName: m.performed_by_user_name,
-      reason: m.reason_code ?? m.notes ?? m.movement_type,
+      reason: m.notes ?? m.movement_type,
       movementId: m.id,
       movementType: m.movement_type,
-      isReversal: m.reversal_of_id !== null,
-      isReversed: reversedOriginalIds.has(m.id),
+      isReversal: false,
+      isReversed: false,
     };
   });
 }

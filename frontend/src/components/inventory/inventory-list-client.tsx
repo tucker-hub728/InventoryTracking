@@ -1,19 +1,16 @@
 'use client';
 
 import * as React from 'react';
-import { ArrowDownUp, ArrowRightLeft, Plus } from 'lucide-react';
+import { Plus } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/shared/empty-state';
-import { InventoryKPIs } from './inventory-kpis';
 import { InventoryFilters } from './inventory-filters';
 import { InventoryTable } from './inventory-table';
 import { InventoryPagination } from './inventory-pagination';
 import { NewItemDialog } from './new-item-dialog';
-import { MovementWizard } from './movement-wizard';
-import { TransferDialog } from './transfer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { toast } from '@/components/ui/sonner';
@@ -33,20 +30,9 @@ import { toast } from '@/components/ui/sonner';
  * through the store — components never call the API directly.
  */
 
-// Transfer movement flow is hidden for now (frontend only). The dialog +
-// handler stay wired; flip to true to re-enable the button.
-const SHOW_TRANSFER = false;
-
-// "Record movement" is hidden on the inventory list — movements are recorded
-// from an item's detail page. The wizard stays wired; flip to re-enable.
-const SHOW_RECORD_MOVEMENT = false;
-
 export function InventoryListClient() {
   const [creating, setCreating] = React.useState(false);
-  const [picking, setPicking] = React.useState(false);
-  const [transferring, setTransferring] = React.useState(false);
   const canCreate = usePermission('inventory', 'create');
-  const canSign = usePermission('inventory', 'sign');
 
   // Server data + actions from the store.
   const items = useInventoryStore((s) => s.items);
@@ -91,27 +77,11 @@ export function InventoryListClient() {
             : `${total.toLocaleString()} items tracked`
         }
         actions={
-          <>
-            {canSign && (
-              <>
-                {SHOW_TRANSFER && (
-                  <Button onClick={() => setTransferring(true)}>
-                    <ArrowRightLeft size={14} /> Transfer
-                  </Button>
-                )}
-                {SHOW_RECORD_MOVEMENT && (
-                  <Button onClick={() => setPicking(true)}>
-                    <ArrowDownUp size={14} /> Record movement
-                  </Button>
-                )}
-              </>
-            )}
-            {canCreate && (
-              <Button variant="primary" onClick={() => setCreating(true)}>
-                <Plus size={14} /> Add item
-              </Button>
-            )}
-          </>
+          canCreate ? (
+            <Button variant="primary" onClick={() => setCreating(true)}>
+              <Plus size={14} /> Add item
+            </Button>
+          ) : undefined
         }
       />
 
@@ -154,16 +124,6 @@ export function InventoryListClient() {
       </div>
 
       <NewItemDialog open={creating} onOpenChange={setCreating} />
-      <MovementWizard
-        open={picking}
-        onOpenChange={setPicking}
-        onCompleted={() => void fetchItems()}
-      />
-      <TransferDialog
-        open={transferring}
-        onOpenChange={setTransferring}
-        onCompleted={() => void fetchItems()}
-      />
     </>
   );
 }

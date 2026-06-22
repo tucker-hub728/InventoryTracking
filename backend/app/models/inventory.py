@@ -239,73 +239,6 @@ class Item(Base):
     )
 
 
-# Single source of truth for accepted location kinds. The DB CHECK
-# enforces the same set; keep these aligned with the Pydantic enum.
-LOCATION_KINDS: tuple[str, ...] = (
-    "LN2",
-    "minus_80",
-    "minus_20",
-    "fridge",
-    "room_temp",
-    "cold_room",
-    "incubator",
-    "other",
-)
-
-
-class Location(Base):
-    """Physical storage position — freezer, LN2 tank, fridge, bench, …
-
-    Movements FK to this table via ``from_location_id`` / ``to_location_id``
-    once the ledger ships. Master data: admin-created, rare changes;
-    deactivate (not delete) when retired so historical movements still
-    resolve their location name.
-    """
-
-    __tablename__ = "locations"
-    __table_args__ = (
-        Index("uq_locations_code", func.lower(text("code")), unique=True),
-        Index("ix_locations_active", "is_active"),
-        Index("ix_locations_kind", "kind"),
-        CheckConstraint(
-            "kind IN (" + ", ".join(f"'{k}'" for k in LOCATION_KINDS) + ")",
-            name="ck_locations_kind",
-        ),
-        {"schema": "meta"},
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        server_default=text("gen_random_uuid()"),
-    )
-    code: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    temperature_c: Mapped[Decimal | None] = mapped_column(
-        Numeric(6, 2),
-        nullable=True,
-    )
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("TRUE"),
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-
-
 # Single source of truth for lot status values. Keep in sync with the
 # DB CHECK and the Pydantic enum.
 #
@@ -391,7 +324,6 @@ class Lot(Base):
     )
     manufacture_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     expiration_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    coa_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -401,21 +333,20 @@ class Lot(Base):
 
     # ── Receipt Admin v2 (docs/modules/receipt-admin.md §1.4) ──────────
     # The lot is the source of truth for the price paid and the PO it was
-    # ordered against. Quantity is NOT stored here — it stays ledger-derived
-    # (the receipt movement is the quantity).
+    # ordered against.
     unit_price_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(14, 2),
         nullable=True,
     )
     po_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Non-status flags: unverified_vendor_for_item,
-    # vendor_not_previously_associated_with_item, plus future QC/Hold/Rejected.
-    # Never status values (the status set is on_order/available only).
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata_",
-        JSONB,
-        nullable=False,
-        server_default=text("'{}'::jsonb"),
+    # Ordered quantity captured at intake (planning data for ON_ORDER lots) —
+    # whole units only (integer). It also caps total unit-IN: a lot's placed
+    # quantity across all locations may not exceed ordered_qty. The *received*
+    # / on-hand quantity stays ledger-derived (summed from app.stock_movements
+    # via app.v_item_stock) — this is NOT that.
+    ordered_qty: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
     # The intake that created this lot (NULL for seeded / direct-receipt lots).
     receipt_transaction_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -477,13 +408,9 @@ class StockMovement(Base):
     """One row in the append-only stock ledger.
 
     Immutable at the DB level — BEFORE UPDATE / BEFORE DELETE triggers
-    raise on any attempt to mutate. To correct a wrong entry, the API
-    posts a counter-movement with ``reversal_of_id`` pointing at the
-    original; both rows remain visible forever.
-
-    E-signature columns (signed_by, signature_meaning, reauth_evidence_id)
-    are intentionally absent — they're added in Chunk 4 along with the
-    receipt endpoint.
+    raise on any attempt to mutate. Written by the Location System:
+    place = unit-IN (receipt), transfer = transfer_out/in pair, consume =
+    unit-OUT (dispense, recording the consuming flat location as ``to``).
     """
 
     __tablename__ = "stock_movements"
@@ -500,6 +427,16 @@ class StockMovement(Base):
         ),
         Index("ix_movements_type", "movement_type"),
         Index("ix_movements_performed_at_desc", text("performed_at DESC")),
+        Index(
+            "ix_movements_from_location_node_id",
+            "from_location_node_id",
+            postgresql_where=text("from_location_node_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_movements_to_location_node_id",
+            "to_location_node_id",
+            postgresql_where=text("to_location_node_id IS NOT NULL"),
+        ),
         CheckConstraint(
             "movement_type IN (" + ", ".join(f"'{t}'" for t in MOVEMENT_TYPES) + ")",
             name="ck_movements_type",
@@ -523,30 +460,26 @@ class StockMovement(Base):
         ForeignKey("app.lots.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    from_location_id: Mapped[uuid.UUID | None] = mapped_column(
+    # Location System (Requirements v2 §4.1) node references — the only
+    # location columns. A unit-IN (place) / transfer / unit-OUT (consume) sets
+    # these; ``ck_movements_locations`` enforces the per-type rules.
+    from_location_node_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("meta.locations.id", ondelete="RESTRICT"),
+        ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
         nullable=True,
     )
-    to_location_id: Mapped[uuid.UUID | None] = mapped_column(
+    to_location_node_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("meta.locations.id", ondelete="RESTRICT"),
+        ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
         nullable=True,
     )
     movement_type: Mapped[str] = mapped_column(Text, nullable=False)
-    qty_delta: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
-    qty_abs: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
-    reason_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Whole units only (integer). qty_delta is signed; qty_abs is the magnitude.
+    qty_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    qty_abs: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Mandatory comment (§3) captured on every e-signed place / transfer /
+    # consume — the rationale for the action.
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reference: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Free-text "where did it go" captured on a unit-out (dispense) — set by
-    # the dispense wizard and the /ln2 Empty-position action; NULL otherwise.
-    destination_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reversal_of_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.stock_movements.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
     # Links the second leg of a transfer back at the first. Only set on
     # the ``transfer_in`` row (the ``transfer_out`` is inserted first and
     # stays unlinked — the inverse lookup gets you to the partner).
@@ -582,16 +515,6 @@ class StockMovement(Base):
     # ── Relationships (read-only views) ────────────────────────────────
     item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
     lot: Mapped[Lot | None] = relationship(lazy="joined", viewonly=True)
-    from_location: Mapped[Location | None] = relationship(
-        foreign_keys=[from_location_id],
-        lazy="joined",
-        viewonly=True,
-    )
-    to_location: Mapped[Location | None] = relationship(
-        foreign_keys=[to_location_id],
-        lazy="joined",
-        viewonly=True,
-    )
     # Joined eagerly so the ledger and audit-timeline can show "by
     # <full_name>" without a per-row N+1.
     performed_by: Mapped[User] = relationship(

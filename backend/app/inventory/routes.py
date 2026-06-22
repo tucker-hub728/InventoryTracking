@@ -20,21 +20,12 @@ from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
-    AdjustmentRequest,
     ApprovedVendorCreate,
     ApprovedVendorRead,
-    AssignPositionRequest,
-    DiscardRequest,
-    DispenseRequest,
-    EmptyPositionRequest,
     ItemCreate,
     ItemListResponse,
     ItemRead,
     ItemUpdate,
-    LocationCreate,
-    LocationKind,
-    LocationRead,
-    LocationUpdate,
     LotCreate,
     LotRead,
     LotStatus,
@@ -42,48 +33,32 @@ from app.inventory.schemas import (
     MovementListResponse,
     MovementRead,
     MovementType,
-    MovePositionRequest,
-    MovePositionResult,
-    PositionEventRead,
-    PositionRead,
-    RackInput,
-    RackRead,
     ReceiptIntakeRequest,
-    ReceiptRequest,
     ReceiptTransactionListResponse,
     ReceiptTransactionRead,
     ReceiveRequest,
-    ReverseRequest,
-    StockByLotEntry,
-    StorageLocationCreate,
-    StorageLocationRead,
-    TransferRequest,
-    TransferResponse,
     UnitOfMeasureRead,
     VendorCreate,
     VendorRead,
     VendorUpdate,
 )
+from app.locations import repository as loc_repo
 from app.models.inventory import (
     Item,
     ItemApprovedVendor,
-    Location,
     Lot,
     ReceiptTransaction,
     StockMovement,
     UnitOfMeasure,
     Vendor,
 )
-from app.models.storage import StoragePosition, StorageRack
 from app.security.permissions import RequirePermission
 
 items_router = APIRouter(prefix="/items", tags=["items"])
 vendors_router = APIRouter(prefix="/vendors", tags=["vendors"])
 uoms_router = APIRouter(prefix="/uoms", tags=["uoms"])
-locations_router = APIRouter(prefix="/locations", tags=["locations"])
 lots_router = APIRouter(prefix="/lots", tags=["lots"])
 movements_router = APIRouter(prefix="/movements", tags=["movements"])
-storage_router = APIRouter(prefix="/storage", tags=["storage"])
 receiving_router = APIRouter(prefix="/receiving", tags=["receiving"])
 
 
@@ -94,21 +69,13 @@ def _uom_to_read(u: UnitOfMeasure) -> UnitOfMeasureRead:
     return UnitOfMeasureRead(code=u.code, label=u.label, is_discrete=u.is_discrete)
 
 
-def _location_to_read(loc: Location) -> LocationRead:
-    return LocationRead(
-        id=str(loc.id),
-        code=loc.code,
-        name=loc.name,
-        kind=loc.kind,  # type: ignore[arg-type]
-        temperature_c=loc.temperature_c,
-        notes=loc.notes,
-        is_active=loc.is_active,
-        created_at=loc.created_at,
-        updated_at=loc.updated_at,
-    )
-
-
-def _movement_to_read(m: StockMovement) -> MovementRead:
+def _movement_to_read(
+    m: StockMovement,
+    labels: dict[uuid.UUID, tuple[str, str]] | None = None,
+) -> MovementRead:
+    labels = labels or {}
+    from_label = labels.get(m.from_location_node_id) if m.from_location_node_id else None
+    to_label = labels.get(m.to_location_node_id) if m.to_location_node_id else None
     return MovementRead(
         id=str(m.id),
         item_id=str(m.item_id),
@@ -117,20 +84,20 @@ def _movement_to_read(m: StockMovement) -> MovementRead:
         lot_id=str(m.lot_id) if m.lot_id else None,
         lot_number=m.lot.lot_number if m.lot else None,
         lot_expiration_date=m.lot.expiration_date if m.lot else None,
-        from_location_id=str(m.from_location_id) if m.from_location_id else None,
-        from_location_code=m.from_location.code if m.from_location else None,
-        from_location_name=m.from_location.name if m.from_location else None,
-        to_location_id=str(m.to_location_id) if m.to_location_id else None,
-        to_location_code=m.to_location.code if m.to_location else None,
-        to_location_name=m.to_location.name if m.to_location else None,
+        from_location_node_id=(
+            str(m.from_location_node_id) if m.from_location_node_id else None
+        ),
+        from_location_node_name=from_label[0] if from_label else None,
+        from_location_node_path=from_label[1] if from_label else None,
+        to_location_node_id=(
+            str(m.to_location_node_id) if m.to_location_node_id else None
+        ),
+        to_location_node_name=to_label[0] if to_label else None,
+        to_location_node_path=to_label[1] if to_label else None,
         movement_type=m.movement_type,  # type: ignore[arg-type]
         qty_delta=m.qty_delta,
         qty_abs=m.qty_abs,
-        reason_code=m.reason_code,
         notes=m.notes,
-        reference=m.reference,
-        destination_text=m.destination_text,
-        reversal_of_id=str(m.reversal_of_id) if m.reversal_of_id else None,
         reauth_evidence_id=str(m.reauth_evidence_id) if m.reauth_evidence_id else None,
         performed_by_user_id=str(m.performed_by_user_id),
         performed_by_user_name=m.performed_by.full_name if m.performed_by else None,
@@ -141,8 +108,6 @@ def _movement_to_read(m: StockMovement) -> MovementRead:
 
 
 def _lot_to_read(lot: Lot) -> LotRead:
-    meta = lot.metadata_ or {}
-    ordered_raw = meta.get("ordered_qty")
     return LotRead(
         id=str(lot.id),
         item_id=str(lot.item_id),
@@ -153,7 +118,6 @@ def _lot_to_read(lot: Lot) -> LotRead:
         item_description=lot.item.description if lot.item else None,
         manufacture_date=lot.manufacture_date,
         expiration_date=lot.expiration_date,
-        coa_url=lot.coa_url,
         status=lot.status,  # type: ignore[arg-type]
         notes=lot.notes,
         unit_price_amount=lot.unit_price_amount,
@@ -162,11 +126,7 @@ def _lot_to_read(lot: Lot) -> LotRead:
             str(lot.receipt_transaction_id) if lot.receipt_transaction_id else None
         ),
         parent_lot_id=str(lot.parent_lot_id) if lot.parent_lot_id else None,
-        unverified_vendor_for_item=bool(meta.get("unverified_vendor_for_item", False)),
-        vendor_not_previously_associated_with_item=bool(
-            meta.get("vendor_not_previously_associated_with_item", False)
-        ),
-        ordered_qty=Decimal(str(ordered_raw)) if ordered_raw is not None else None,
+        ordered_qty=lot.ordered_qty,
         created_at=lot.created_at,
         updated_at=lot.updated_at,
         created_by_user_id=str(lot.created_by_user_id),
@@ -744,197 +704,6 @@ async def list_uoms(db: DBSession) -> list[UnitOfMeasureRead]:
     return [_uom_to_read(u) for u in await inv_repo.list_uoms(db)]
 
 
-# ── Locations ──────────────────────────────────────────────────────────
-
-
-@locations_router.get(
-    "",
-    response_model=list[LocationRead],
-    summary="List storage locations",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def list_locations(
-    db: DBSession,
-    active_only: bool = Query(default=True, description="Hide deactivated locations"),
-    kind: Annotated[LocationKind | None, Query(description="Filter by kind")] = None,
-) -> list[LocationRead]:
-    rows = await inv_repo.list_locations(db, active_only=active_only, kind=kind)
-    return [_location_to_read(r) for r in rows]
-
-
-@locations_router.get(
-    "/{location_id}",
-    response_model=LocationRead,
-    summary="Get one location",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def get_location(
-    db: DBSession,
-    location_id: Annotated[uuid.UUID, Path()],
-) -> LocationRead:
-    loc = await inv_repo.get_location(db, location_id)
-    if loc is None:
-        raise NotFoundError(f"Location {location_id} not found")
-    return _location_to_read(loc)
-
-
-@locations_router.post(
-    "",
-    response_model=LocationRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a storage location (admin master-data write)",
-    # PATCH / DELETE deliberately omitted until audit module ships —
-    # location renames cascade into every historical movement.
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def create_location(
-    db: DBSession,
-    payload: LocationCreate,
-) -> LocationRead:
-    # Pre-check for a clean 409. The partial-unique index on lower(code)
-    # is the authoritative guard (handled in the except).
-    if (await inv_repo.get_location_by_code(db, payload.code)) is not None:
-        raise ConflictError(
-            f"Location with code '{payload.code}' already exists",
-            code="location_code_conflict",
-        )
-    try:
-        loc = await inv_repo.create_location(
-            db,
-            code=payload.code,
-            name=payload.name,
-            kind=payload.kind,
-            temperature_c=payload.temperature_c,
-            notes=payload.notes,
-            is_active=payload.is_active,
-        )
-    except IntegrityError as exc:
-        await db.rollback()
-        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-        if "uq_locations_code" in msg:
-            raise ConflictError(
-                f"Location with code '{payload.code}' already exists",
-                code="location_code_conflict",
-            ) from exc
-        if "ck_locations_kind" in msg:
-            raise ValidationError(
-                f"invalid location kind: {payload.kind}",
-                code="invalid_location_kind",
-            ) from exc
-        raise
-    return _location_to_read(loc)
-
-
-@locations_router.patch(
-    "/{location_id}",
-    response_model=LocationRead,
-    summary="Update a storage location",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def update_location(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    location_id: Annotated[uuid.UUID, Path()],
-    payload: LocationUpdate,
-) -> LocationRead:
-    """Partial location update + audit-log row."""
-    patch = payload.model_dump(exclude_unset=True)
-    if not patch:
-        raise ValidationError("No fields to update", code="empty_patch")
-
-    location = await inv_repo.get_location(db, location_id)
-    if location is None:
-        raise NotFoundError(f"Location {location_id} not found")
-
-    if "code" in patch and isinstance(patch["code"], str):
-        new_code = patch["code"].strip()
-        if new_code.lower() != location.code.lower():
-            existing = await inv_repo.get_location_by_code(db, new_code)
-            if existing is not None and existing.id != location.id:
-                raise ConflictError(
-                    f"Location with code '{new_code}' already exists",
-                    code="location_code_conflict",
-                )
-
-    before = inv_repo.location_to_audit_snapshot(location)
-    try:
-        updated = await inv_repo.apply_location_patch(
-            db, location=location, patch=patch
-        )
-    except IntegrityError as exc:
-        await db.rollback()
-        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-        if "uq_locations_code" in msg:
-            raise ConflictError(
-                "Location code conflict",
-                code="location_code_conflict",
-            ) from exc
-        if "ck_locations_kind" in msg:
-            raise ValidationError(
-                "Invalid location kind",
-                code="invalid_location_kind",
-            ) from exc
-        raise
-    after = inv_repo.location_to_audit_snapshot(updated)
-
-    await record_entity_change(
-        db,
-        actor_user_id=current.id,
-        action="updated",
-        subject_table="meta.locations",
-        subject_id=updated.id,
-        subject_label=f"{updated.code} · {updated.name}",
-        before=before,
-        after=after,
-    )
-
-    await db.refresh(updated)
-    response = _location_to_read(updated)
-    await db.commit()
-    return response
-
-
-@locations_router.delete(
-    "/{location_id}",
-    response_model=LocationRead,
-    summary="Deactivate a location (soft delete via is_active=false)",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def delete_location(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    location_id: Annotated[uuid.UUID, Path()],
-) -> LocationRead:
-    """Soft-delete a location by flipping ``is_active=false``."""
-    location = await inv_repo.get_location(db, location_id)
-    if location is None:
-        raise NotFoundError(f"Location {location_id} not found")
-    if not location.is_active:
-        return _location_to_read(location)
-
-    before = inv_repo.location_to_audit_snapshot(location)
-    updated = await inv_repo.apply_location_patch(
-        db, location=location, patch={"is_active": False}
-    )
-    after = inv_repo.location_to_audit_snapshot(updated)
-
-    await record_entity_change(
-        db,
-        actor_user_id=current.id,
-        action="deleted",
-        subject_table="meta.locations",
-        subject_id=updated.id,
-        subject_label=f"{updated.code} · {updated.name}",
-        before=before,
-        after=after,
-    )
-
-    await db.refresh(updated)
-    response = _location_to_read(updated)
-    await db.commit()
-    return response
-
-
 # ── Lots ───────────────────────────────────────────────────────────────
 
 
@@ -1056,7 +825,6 @@ async def create_lot(
             vendor_id=vendor_uuid,
             manufacture_date=payload.manufacture_date,
             expiration_date=payload.expiration_date,
-            coa_url=payload.coa_url,
             status=payload.status,
             notes=payload.notes,
         )
@@ -1259,9 +1027,9 @@ async def list_movements(
     db: DBSession,
     item_id: Annotated[uuid.UUID | None, Query()] = None,
     lot_id: Annotated[uuid.UUID | None, Query()] = None,
-    location_id: Annotated[
+    location_node_id: Annotated[
         uuid.UUID | None,
-        Query(description="Matches from_location_id OR to_location_id"),
+        Query(description="Matches from_location_node_id OR to_location_node_id"),
     ] = None,
     movement_type: Annotated[
         MovementType | None,
@@ -1274,13 +1042,14 @@ async def list_movements(
         db,
         item_id=item_id,
         lot_id=lot_id,
-        location_id=location_id,
+        location_node_id=location_node_id,
         movement_type=movement_type,
         limit=limit,
         offset=offset,
     )
+    labels = await loc_repo.node_label_map(db)
     return MovementListResponse(
-        items=[_movement_to_read(m) for m in rows],
+        items=[_movement_to_read(m, labels) for m in rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -1306,8 +1075,9 @@ async def list_item_ledger(
     rows, total = await inv_repo.list_item_ledger(
         db, item_id=item_id, limit=limit, offset=offset
     )
+    labels = await loc_repo.node_label_map(db)
     return MovementListResponse(
-        items=[_movement_to_read(m) for m in rows],
+        items=[_movement_to_read(m, labels) for m in rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -1328,1091 +1098,6 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
             f"{field} is not a valid UUID",
             code=f"invalid_{field}",
         ) from exc
-
-
-def _whole_units_or_422(qty: Decimal) -> int:
-    """Coerce a movement qty to whole vials for rack-mapped storage.
-
-    A storage position holds exactly one vial, so a unit-in / unit-out against
-    a location that has racks must be an integer number of units.
-    """
-    units = int(qty)
-    if Decimal(units) != qty:
-        raise ValidationError(
-            "Whole units are required when the location has racks",
-            code="fractional_units_in_rack",
-        )
-    return units
-
-
-@movements_router.post(
-    "/receipt",
-    response_model=MovementRead,
-    status_code=status.HTTP_201_CREATED,
-    summary=(
-        "Record a unit in (vendor → inventory). Requires a fresh "
-        "reauth evidence id for action='movement.receipt'."
-    ),
-    # ``sign`` permission — this is a GxP-significant action requiring
-    # an e-signature, not the routine ``create`` permission for master data.
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def create_receipt(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    payload: ReceiptRequest,
-) -> MovementRead:
-    """Atomic receipt: validate → (create lot if inline) → insert
-    movement → consume evidence → commit. Any failure rolls back the
-    whole transaction so a half-applied receipt can't exist."""
-
-    # 1) Parse UUIDs from the body. Pydantic only checked they're
-    #    non-empty strings; we surface bad UUIDs as 422 with structured codes.
-    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
-    location_uuid = _parse_uuid_or_422(payload.location_id, field="location_id")
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-
-    # 2) Validate the domain objects.
-    item = await inv_repo.get_item(db, item_uuid)
-    if item is None:
-        raise NotFoundError(f"Item {payload.item_id} not found")
-    location = await inv_repo.get_location(db, location_uuid)
-    if location is None:
-        raise NotFoundError(f"Location {payload.location_id} not found")
-    if not location.is_active:
-        raise ValidationError(
-            "Location is inactive; cannot receive stock here",
-            code="location_inactive",
-        )
-
-    # 3) Resolve the lot — existing reference or inline create.
-    if payload.new_lot is not None:
-        new_lot = payload.new_lot
-        # Vendor defaults to the item's vendor; explicit override allowed.
-        vendor_uuid: uuid.UUID | None = item.vendor_id
-        if new_lot.vendor_id is not None:
-            vendor_uuid = _parse_uuid_or_422(new_lot.vendor_id, field="vendor_id")
-            if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
-                raise NotFoundError(f"Vendor {new_lot.vendor_id} not found")
-        # Pre-check for clean 409 (auth index is the real guard).
-        if (
-            await inv_repo.get_lot_by_item_and_number(
-                db, item_id=item_uuid, lot_number=new_lot.lot_number
-            )
-        ) is not None:
-            raise ConflictError(
-                f"lot_number '{new_lot.lot_number}' already exists for this item; "
-                "pass lot_id instead to top it up",
-                code="lot_number_conflict",
-            )
-        try:
-            lot = await inv_repo.create_lot(
-                db,
-                item_id=item_uuid,
-                lot_number=new_lot.lot_number,
-                created_by_user_id=current.id,
-                vendor_id=vendor_uuid,
-                manufacture_date=new_lot.manufacture_date,
-                expiration_date=new_lot.expiration_date,
-                coa_url=new_lot.coa_url,
-                status="available",
-                notes=new_lot.notes,
-            )
-        except IntegrityError as exc:
-            await db.rollback()
-            msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-            if "uq_lots_item_lot_number" in msg:
-                raise ConflictError(
-                    f"lot_number '{new_lot.lot_number}' already exists for this item",
-                    code="lot_number_conflict",
-                ) from exc
-            if "ck_lots_dates_ordered" in msg:
-                raise ValidationError(
-                    "expiration_date must be on or after manufacture_date",
-                    code="lot_dates_inverted",
-                ) from exc
-            raise
-        lot_uuid = lot.id
-    else:
-        # XOR validated at the schema layer; this branch must have lot_id.
-        assert payload.lot_id is not None
-        lot_uuid = _parse_uuid_or_422(payload.lot_id, field="lot_id")
-        existing_lot = await inv_repo.get_lot(db, lot_uuid)
-        if existing_lot is None:
-            raise NotFoundError(f"Lot {payload.lot_id} not found")
-        if existing_lot.item_id != item_uuid:
-            raise ValidationError(
-                "Lot does not belong to this item",
-                code="lot_item_mismatch",
-            )
-        # Both core statuses can receive: an 'available' lot tops up, an
-        # 'on_order' lot is arriving. (Guard kept for forward-safety if a
-        # terminal status like 'rejected' is added later.)
-        if existing_lot.status not in ("available", "on_order"):
-            raise ValidationError(
-                f"Lot is '{existing_lot.status}' and cannot receive new stock",
-                code="lot_status_blocked",
-            )
-
-    # 4) Insert the movement first so we know its id, then consume
-    #    the evidence pointing at that exact movement. Both inside the
-    #    same transaction so a replay-detection rollback also undoes
-    #    the movement.
-    movement = await inv_repo.create_receipt_movement(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        to_location_id=location_uuid,
-        qty=payload.qty,
-        performed_by_user_id=current.id,
-        reauth_evidence_id=evidence_uuid,
-    )
-
-    # 4b) Couple to LN2: if the destination has racks, fill that many empty
-    #     positions with this lot so the /ln2 grid mirrors the ledger. One
-    #     unit = one vial = one position. Rack-less locations stay ledger-only.
-    if await inv_repo.location_has_racks(db, location_uuid):
-        units = _whole_units_or_422(payload.qty)
-        empty = await inv_repo.count_empty_positions(db, location_uuid)
-        if empty < units:
-            raise ConflictError(
-                f"Location has only {empty} empty position(s); cannot place "
-                f"{units} unit(s). Add a rack or pick another location.",
-                code="not_enough_empty_positions",
-            )
-        await inv_repo.fill_positions_for_lot(
-            db,
-            location_id=location_uuid,
-            lot_id=lot_uuid,
-            n=units,
-            actor_id=current.id,
-        )
-
-    # 5) Consume the evidence (replay-detected via PK conflict).
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.receipt",
-        target_table="app.stock_movements",
-        target_id=movement.id,
-    )
-
-    # 6) Commit everything together.
-    await db.commit()
-
-    return _movement_to_read(movement)
-
-
-# ── Dispense (second write path) ───────────────────────────────────────
-
-
-@movements_router.post(
-    "/dispense",
-    response_model=MovementRead,
-    status_code=status.HTTP_201_CREATED,
-    summary=(
-        "Record a unit out (inventory → consumed). "
-        "Requires a fresh reauth evidence id for "
-        "action='movement.dispense'."
-    ),
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def create_dispense(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    payload: DispenseRequest,
-) -> MovementRead:
-    """Atomic dispense: validate → check available → insert movement →
-    consume evidence → commit. Overdraws are rejected with a
-    structured ``dispense_exceeds_available`` 422 *before* the movement
-    is inserted, so the DB never sees the partial state.
-    """
-    # 1) Parse UUIDs from the body.
-    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
-    location_uuid = _parse_uuid_or_422(payload.location_id, field="location_id")
-    lot_uuid = _parse_uuid_or_422(payload.lot_id, field="lot_id")
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-
-    # 2) Validate the domain objects.
-    item = await inv_repo.get_item(db, item_uuid)
-    if item is None:
-        raise NotFoundError(f"Item {payload.item_id} not found")
-    location = await inv_repo.get_location(db, location_uuid)
-    if location is None:
-        raise NotFoundError(f"Location {payload.location_id} not found")
-    # ``is_active`` isn't required for dispense — you might be cleaning
-    # out a deactivated freezer. The check that matters is "is there
-    # stock here?" which happens below.
-
-    lot = await inv_repo.get_lot(db, lot_uuid)
-    if lot is None:
-        raise NotFoundError(f"Lot {payload.lot_id} not found")
-    if lot.item_id != item_uuid:
-        raise ValidationError(
-            "Lot does not belong to this item",
-            code="lot_item_mismatch",
-        )
-    # Expired / recalled lots can still be dispensed — but the reason
-    # code should reflect that (e.g. ``expired``). We don't second-guess
-    # the operator here.
-
-    # 3) Check available qty BEFORE inserting the movement. This is the
-    #    canonical "you can't take more than you have" guard.
-    available = await inv_repo.get_lot_location_available(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        location_id=location_uuid,
-    )
-    if payload.qty > available:
-        raise ValidationError(
-            (
-                f"Requested {payload.qty} exceeds available {available} "
-                f"for this lot at this location"
-            ),
-            code="dispense_exceeds_available",
-        )
-
-    # 4) Insert the movement, then consume the evidence pointing at it.
-    movement = await inv_repo.create_dispense_movement(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        from_location_id=location_uuid,
-        qty=payload.qty,
-        performed_by_user_id=current.id,
-        reauth_evidence_id=evidence_uuid,
-        destination=payload.destination,
-    )
-
-    # 4b) Couple to LN2: if the source has racks, free that many of the lot's
-    #     occupied positions so the /ln2 grid mirrors the ledger.
-    if await inv_repo.location_has_racks(db, location_uuid):
-        units = _whole_units_or_422(payload.qty)
-        mapped = await inv_repo.count_occupied_positions_for_lot(
-            db, location_uuid, lot_uuid
-        )
-        if mapped < units:
-            raise ConflictError(
-                f"Only {mapped} vial(s) of this lot are mapped at this location; "
-                f"cannot remove {units}.",
-                code="not_enough_mapped_positions",
-            )
-        await inv_repo.empty_positions_for_lot(
-            db,
-            location_id=location_uuid,
-            lot_id=lot_uuid,
-            n=units,
-            actor_id=current.id,
-        )
-
-    # 5) Consume the evidence (replay-detected via PK conflict).
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.dispense",
-        target_table="app.stock_movements",
-        target_id=movement.id,
-    )
-
-    # 6) Commit everything together.
-    await db.commit()
-
-    return _movement_to_read(movement)
-
-
-# ── Discard (third write path) ─────────────────────────────────────────
-
-
-@movements_router.post(
-    "/discard",
-    response_model=MovementRead,
-    status_code=status.HTTP_201_CREATED,
-    summary=(
-        "Record a stock discard (expired / damaged / contaminated). "
-        "Distinct movement_type from dispense so audit reports can "
-        "separate \"used\" from \"thrown away\" without parsing reasons."
-    ),
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def create_discard(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    payload: DiscardRequest,
-) -> MovementRead:
-    """Atomic discard. Mirrors dispense but writes ``movement_type='discard'``
-    so the variance reports can distinguish the two categories.
-    """
-    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
-    location_uuid = _parse_uuid_or_422(payload.location_id, field="location_id")
-    lot_uuid = _parse_uuid_or_422(payload.lot_id, field="lot_id")
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-
-    item = await inv_repo.get_item(db, item_uuid)
-    if item is None:
-        raise NotFoundError(f"Item {payload.item_id} not found")
-    location = await inv_repo.get_location(db, location_uuid)
-    if location is None:
-        raise NotFoundError(f"Location {payload.location_id} not found")
-
-    lot = await inv_repo.get_lot(db, lot_uuid)
-    if lot is None:
-        raise NotFoundError(f"Lot {payload.lot_id} not found")
-    if lot.item_id != item_uuid:
-        raise ValidationError(
-            "Lot does not belong to this item",
-            code="lot_item_mismatch",
-        )
-
-    available = await inv_repo.get_lot_location_available(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        location_id=location_uuid,
-    )
-    if payload.qty > available:
-        raise ValidationError(
-            (
-                f"Requested {payload.qty} exceeds available {available} "
-                f"for this lot at this location"
-            ),
-            code="discard_exceeds_available",
-        )
-
-    movement = await inv_repo.create_discard_movement(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        from_location_id=location_uuid,
-        qty=payload.qty,
-        performed_by_user_id=current.id,
-        reauth_evidence_id=evidence_uuid,
-        reason_code=payload.reason_code,
-        notes=payload.notes,
-        reference=payload.reference,
-    )
-
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.discard",
-        target_table="app.stock_movements",
-        target_id=movement.id,
-    )
-
-    await db.commit()
-    return _movement_to_read(movement)
-
-
-# ── Adjustment (fourth write path) ─────────────────────────────────────
-
-
-@movements_router.post(
-    "/adjustment",
-    response_model=MovementRead,
-    status_code=status.HTTP_201_CREATED,
-    summary=(
-        "Record a signed adjustment to the (lot, location) balance. "
-        "Use after a physical count or to back-fill opening balances. "
-        "Requires action='movement.adjustment' evidence."
-    ),
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def create_adjustment(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    payload: AdjustmentRequest,
-) -> MovementRead:
-    """Atomic signed correction. ``qty_delta = 0`` is rejected (no-op
-    audit rows are confusing); negative deltas can't exceed the
-    current balance.
-    """
-    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
-    location_uuid = _parse_uuid_or_422(payload.location_id, field="location_id")
-    lot_uuid = _parse_uuid_or_422(payload.lot_id, field="lot_id")
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-
-    if payload.qty_delta == 0:
-        raise ValidationError(
-            "qty_delta must be non-zero",
-            code="adjustment_zero_delta",
-        )
-
-    item = await inv_repo.get_item(db, item_uuid)
-    if item is None:
-        raise NotFoundError(f"Item {payload.item_id} not found")
-    location = await inv_repo.get_location(db, location_uuid)
-    if location is None:
-        raise NotFoundError(f"Location {payload.location_id} not found")
-
-    lot = await inv_repo.get_lot(db, lot_uuid)
-    if lot is None:
-        raise NotFoundError(f"Lot {payload.lot_id} not found")
-    if lot.item_id != item_uuid:
-        raise ValidationError(
-            "Lot does not belong to this item",
-            code="lot_item_mismatch",
-        )
-
-    # Overdraw guard — only for negative adjustments.
-    if payload.qty_delta < 0:
-        available = await inv_repo.get_lot_location_available(
-            db,
-            item_id=item_uuid,
-            lot_id=lot_uuid,
-            location_id=location_uuid,
-        )
-        if abs(payload.qty_delta) > available:
-            raise ValidationError(
-                (
-                    f"Negative adjustment {payload.qty_delta} would push "
-                    f"the balance below zero (available {available})"
-                ),
-                code="adjustment_exceeds_available",
-            )
-
-    movement = await inv_repo.create_adjustment_movement(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        location_id=location_uuid,
-        qty_delta=payload.qty_delta,
-        performed_by_user_id=current.id,
-        reauth_evidence_id=evidence_uuid,
-        reason_code=payload.reason_code,
-        notes=payload.notes,
-        reference=payload.reference,
-    )
-
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.adjustment",
-        target_table="app.stock_movements",
-        target_id=movement.id,
-    )
-
-    await db.commit()
-    return _movement_to_read(movement)
-
-
-# ── Transfer (two-leg write path) ──────────────────────────────────────
-
-
-@movements_router.post(
-    "/transfer",
-    response_model=TransferResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary=(
-        "Transfer units between two locations atomically. Writes both "
-        "the ``transfer_out`` and the ``transfer_in`` leg in one tx. "
-        "Requires action='movement.transfer' evidence."
-    ),
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def create_transfer(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    payload: TransferRequest,
-) -> TransferResponse:
-    """Atomic two-leg transfer."""
-    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
-    lot_uuid = _parse_uuid_or_422(payload.lot_id, field="lot_id")
-    from_uuid = _parse_uuid_or_422(payload.from_location_id, field="from_location_id")
-    to_uuid = _parse_uuid_or_422(payload.to_location_id, field="to_location_id")
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-
-    if from_uuid == to_uuid:
-        raise ValidationError(
-            "from_location_id and to_location_id must differ",
-            code="transfer_same_location",
-        )
-
-    item = await inv_repo.get_item(db, item_uuid)
-    if item is None:
-        raise NotFoundError(f"Item {payload.item_id} not found")
-    from_loc = await inv_repo.get_location(db, from_uuid)
-    if from_loc is None:
-        raise NotFoundError(f"Location {payload.from_location_id} not found")
-    to_loc = await inv_repo.get_location(db, to_uuid)
-    if to_loc is None:
-        raise NotFoundError(f"Location {payload.to_location_id} not found")
-    if not to_loc.is_active:
-        # Source can be deactivated (cleanup workflow), destination can't.
-        raise ValidationError(
-            "Destination location is inactive; cannot receive stock",
-            code="location_inactive",
-        )
-
-    lot = await inv_repo.get_lot(db, lot_uuid)
-    if lot is None:
-        raise NotFoundError(f"Lot {payload.lot_id} not found")
-    if lot.item_id != item_uuid:
-        raise ValidationError(
-            "Lot does not belong to this item",
-            code="lot_item_mismatch",
-        )
-
-    # Overdraw check against the source side.
-    available = await inv_repo.get_lot_location_available(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        location_id=from_uuid,
-    )
-    if payload.qty > available:
-        raise ValidationError(
-            (
-                f"Requested {payload.qty} exceeds available {available} "
-                f"at the source location"
-            ),
-            code="transfer_exceeds_available",
-        )
-
-    out_leg, in_leg = await inv_repo.create_transfer_pair(
-        db,
-        item_id=item_uuid,
-        lot_id=lot_uuid,
-        from_location_id=from_uuid,
-        to_location_id=to_uuid,
-        qty=payload.qty,
-        performed_by_user_id=current.id,
-        reauth_evidence_id=evidence_uuid,
-    )
-
-    # Couple to LN2: keep the rack grids in sync with the transfer. If both
-    # ends have racks, move that many of the lot's vials (paired move_out /
-    # move_in); if only one end does, free / fill there. Rack-less ends are
-    # ledger-only.
-    src_has = await inv_repo.location_has_racks(db, from_uuid)
-    dst_has = await inv_repo.location_has_racks(db, to_uuid)
-    if src_has or dst_has:
-        units = _whole_units_or_422(payload.qty)
-        if src_has:
-            mapped = await inv_repo.count_occupied_positions_for_lot(
-                db, from_uuid, lot_uuid
-            )
-            if mapped < units:
-                raise ConflictError(
-                    f"Only {mapped} vial(s) of this lot are mapped at the source; "
-                    f"cannot transfer {units}.",
-                    code="not_enough_mapped_positions",
-                )
-        if dst_has:
-            empty = await inv_repo.count_empty_positions(db, to_uuid)
-            if empty < units:
-                raise ConflictError(
-                    f"Destination has only {empty} empty position(s); cannot place "
-                    f"{units} unit(s).",
-                    code="not_enough_empty_positions",
-                )
-        if src_has and dst_has:
-            await inv_repo.transfer_positions_for_lot(
-                db,
-                from_location_id=from_uuid,
-                to_location_id=to_uuid,
-                lot_id=lot_uuid,
-                n=units,
-                actor_id=current.id,
-            )
-        elif src_has:
-            await inv_repo.empty_positions_for_lot(
-                db, location_id=from_uuid, lot_id=lot_uuid, n=units, actor_id=current.id
-            )
-        else:
-            await inv_repo.fill_positions_for_lot(
-                db, location_id=to_uuid, lot_id=lot_uuid, n=units, actor_id=current.id
-            )
-
-    # One evidence covers both legs. We bind it to the OUT leg row id
-    # so the consumption record points at the canonical "source" leg.
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.transfer",
-        target_table="app.stock_movements",
-        target_id=out_leg.id,
-    )
-
-    await db.commit()
-    return TransferResponse(
-        transfer_out=_movement_to_read(out_leg),
-        transfer_in=_movement_to_read(in_leg),
-    )
-
-
-# ── Reverse (counter-movement) ─────────────────────────────────────────
-
-
-@movements_router.post(
-    "/{movement_id}/reverse",
-    response_model=list[MovementRead],
-    status_code=status.HTTP_201_CREATED,
-    summary=(
-        "Reverse a single ledger entry by writing a counter-movement. "
-        "Transfer legs reverse both halves atomically. Requires "
-        "action='movement.reverse' evidence."
-    ),
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def reverse_movement(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    movement_id: Annotated[uuid.UUID, Path()],
-    payload: ReverseRequest,
-) -> list[MovementRead]:
-    """Atomic counter-movement.
-
-    Returns the inserted counter rows (one row for non-transfer
-    originals, two for transfer pairs). Originals can only be reversed
-    once — a second attempt returns ``movement_already_reversed`` 422.
-    A reversal row itself cannot be reversed (use a fresh receipt /
-    adjustment instead) — guarded by ``reversal_already_a_reversal``.
-    """
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-
-    original = await inv_repo.get_movement(db, movement_id)
-    if original is None:
-        raise NotFoundError(f"Movement {movement_id} not found")
-    if original.reversal_of_id is not None:
-        raise ValidationError(
-            "This row is itself a reversal; you cannot reverse a reversal",
-            code="reversal_already_a_reversal",
-        )
-
-    existing = await inv_repo.get_existing_reversal(db, original.id)
-    if existing is not None:
-        raise ValidationError(
-            (
-                f"Movement {original.id} has already been reversed by "
-                f"{existing.id}"
-            ),
-            code="movement_already_reversed",
-        )
-
-    # Transfer pairs: both legs reverse together. Pick the partner and
-    # also block if the partner is already reversed (shouldn't happen
-    # since pairs must reverse together, but be defensive).
-    counter_rows: list[StockMovement] = []
-    if original.movement_type in ("transfer_in", "transfer_out"):
-        partner = await inv_repo.get_transfer_partner(db, original)
-        if partner is None:
-            raise ValidationError(
-                "Transfer partner leg not found; cannot reverse",
-                code="transfer_partner_missing",
-            )
-        if (await inv_repo.get_existing_reversal(db, partner.id)) is not None:
-            raise ValidationError(
-                "Partner leg of this transfer has already been reversed",
-                code="movement_already_reversed",
-            )
-        # Reverse the OUT first so the resulting transfer_in (into the
-        # original source) precedes the transfer_out (out of the
-        # original destination). Order doesn't change correctness — both
-        # land in the same tx — but it keeps the ledger readable.
-        out_original = original if original.movement_type == "transfer_out" else partner
-        in_original = original if original.movement_type == "transfer_in" else partner
-        counter_out = await inv_repo.create_reversal_movement(
-            db,
-            original=out_original,
-            performed_by_user_id=current.id,
-            reauth_evidence_id=evidence_uuid,
-            reason_code=payload.reason_code,
-            notes=payload.notes,
-        )
-        counter_in = await inv_repo.create_reversal_movement(
-            db,
-            original=in_original,
-            performed_by_user_id=current.id,
-            reauth_evidence_id=evidence_uuid,
-            reason_code=payload.reason_code,
-            notes=payload.notes,
-        )
-        counter_rows = [counter_out, counter_in]
-    else:
-        # Non-transfer: also block reversals that would push the
-        # destination balance negative. Reversing a ``receipt`` of 10
-        # vials that have since been mostly dispensed would create a
-        # negative balance on the source side; flag rather than allow.
-        if original.movement_type in ("receipt", "transfer_in"):
-            # Counter dispense from original.to_location.
-            assert original.to_location_id is not None
-            available = await inv_repo.get_lot_location_available(
-                db,
-                item_id=original.item_id,
-                lot_id=original.lot_id,  # type: ignore[arg-type]
-                location_id=original.to_location_id,
-            )
-            if original.qty_abs > available:
-                raise ValidationError(
-                    (
-                        f"Reversing this receipt would require removing "
-                        f"{original.qty_abs} but only {available} remain at "
-                        f"the destination; dispense the difference first"
-                    ),
-                    code="reversal_exceeds_available",
-                )
-        counter = await inv_repo.create_reversal_movement(
-            db,
-            original=original,
-            performed_by_user_id=current.id,
-            reauth_evidence_id=evidence_uuid,
-            reason_code=payload.reason_code,
-            notes=payload.notes,
-        )
-        counter_rows = [counter]
-
-    # Bind evidence to the FIRST counter row.
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.reverse",
-        target_table="app.stock_movements",
-        target_id=counter_rows[0].id,
-    )
-
-    await db.commit()
-    return [_movement_to_read(m) for m in counter_rows]
-
-
-# ── Stock-by-lot (read, for the dispense wizard's lot picker) ──────────
-
-
-@items_router.get(
-    "/{item_id}/stock-by-lot",
-    response_model=list[StockByLotEntry],
-    summary=(
-        "Per-lot, per-location available quantity for one item. "
-        "Used by the dispense wizard to show 'L-123 at LN2-A — "
-        "25 vials available'."
-    ),
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def list_item_stock_by_lot(
-    db: DBSession,
-    item_id: Annotated[uuid.UUID, Path()],
-    location_id: Annotated[
-        uuid.UUID | None,
-        Query(description="Narrow to a single location"),
-    ] = None,
-    include_empty: Annotated[
-        bool,
-        Query(description="Include (lot, location) pairs with qty_available <= 0"),
-    ] = False,
-) -> list[StockByLotEntry]:
-    if (await inv_repo.get_item(db, item_id)) is None:
-        raise NotFoundError(f"Item {item_id} not found")
-    rows = await inv_repo.list_stock_by_lot(
-        db,
-        item_id=item_id,
-        location_id=location_id,
-        only_positive=not include_empty,
-    )
-    return [StockByLotEntry(**r) for r in rows]
-
-
-# ── Storage (racks + positions) ────────────────────────────────────────
-#
-# The LN2 / Storage grid. See ``docs/modules/storage.md``. Reads require
-# ``inventory:view``; creating racks requires ``inventory:create``;
-# assign / empty / move require ``inventory:edit``.
-
-
-def _position_to_read(p: StoragePosition) -> PositionRead:
-    lot = p.lot
-    item = lot.item if lot is not None else None
-    return PositionRead(
-        id=str(p.id),
-        index=p.seq,
-        row_idx=p.row_idx,
-        col_idx=p.col_idx,
-        label=p.label,
-        status=p.status,  # type: ignore[arg-type]
-        lot_id=str(p.lot_id) if p.lot_id else None,
-        lot_number=lot.lot_number if lot is not None else None,
-        item_id=item.item_number if item is not None else None,
-        item_uuid=str(item.id) if item is not None else None,
-        item_description=item.description if item is not None else None,
-        vendor_name=(item.vendor.name if item is not None and item.vendor else None),
-        assigned_at=p.assigned_at,
-    )
-
-
-def _rack_to_read(r: StorageRack) -> RackRead:
-    return RackRead(
-        id=str(r.id),
-        name=r.name,
-        rows=r.rows,
-        cols=r.cols,
-        position_order=r.position_order,
-        positions=[_position_to_read(p) for p in r.positions],
-    )
-
-
-def _storage_location_to_read(
-    loc: Location, racks: list[StorageRack]
-) -> StorageLocationRead:
-    return StorageLocationRead(
-        id=str(loc.id),
-        name=loc.name,
-        kind=loc.kind,  # type: ignore[arg-type]
-        detail=loc.notes or "",
-        racks=[_rack_to_read(r) for r in racks],
-    )
-
-
-@storage_router.get(
-    "/locations",
-    response_model=list[StorageLocationRead],
-    summary="List storage locations with their racks + positions",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def list_storage(
-    db: DBSession,
-    active_only: bool = Query(default=True, description="Hide deactivated locations"),
-) -> list[StorageLocationRead]:
-    rows = await inv_repo.list_storage_locations(db, active_only=active_only)
-    return [_storage_location_to_read(loc, racks) for loc, racks in rows]
-
-
-@storage_router.post(
-    "/locations",
-    response_model=StorageLocationRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a storage location with one or more racks",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def create_storage_location(
-    db: DBSession,
-    payload: StorageLocationCreate,
-) -> StorageLocationRead:
-    loc = await inv_repo.create_storage_location(
-        db,
-        name=payload.name,
-        racks=payload.racks,
-    )
-    loaded = await inv_repo.get_storage_location(db, loc.id)
-    assert loaded is not None
-    result = _storage_location_to_read(*loaded)
-    await db.commit()
-    return result
-
-
-@storage_router.post(
-    "/locations/{location_id}/racks",
-    response_model=RackRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Add a rack to an existing location",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def add_storage_rack(
-    db: DBSession,
-    location_id: Annotated[uuid.UUID, Path()],
-    payload: RackInput,
-) -> RackRead:
-    if (await inv_repo.get_location(db, location_id)) is None:
-        raise NotFoundError(f"Location {location_id} not found")
-    rack = await inv_repo.add_storage_rack(
-        db,
-        location_id=location_id,
-        name=payload.name,
-        rows=payload.rows,
-        cols=payload.cols,
-    )
-    loaded = await inv_repo.get_storage_rack(db, rack.id)
-    assert loaded is not None
-    result = _rack_to_read(loaded)
-    await db.commit()
-    return result
-
-
-@storage_router.post(
-    "/positions/{position_id}/assign",
-    response_model=PositionRead,
-    summary="Assign a lot (one vial) to an empty position",
-    dependencies=[Depends(RequirePermission("inventory", "edit"))],
-)
-async def assign_position(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    position_id: Annotated[uuid.UUID, Path()],
-    payload: AssignPositionRequest,
-) -> PositionRead:
-    position = await inv_repo.get_storage_position(db, position_id)
-    if position is None:
-        raise NotFoundError(f"Position {position_id} not found")
-    if position.status != "empty":
-        raise ConflictError("Position is already occupied", code="position_occupied")
-    try:
-        lot_uuid = uuid.UUID(payload.lot_id)
-    except ValueError as exc:
-        raise ValidationError("lot_id must be a UUID", code="invalid_lot_id") from exc
-    lot = await inv_repo.get_lot(db, lot_uuid)
-    if lot is None or lot.deleted_at is not None:
-        raise NotFoundError(f"Lot {payload.lot_id} not found")
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    await inv_repo.assign_storage_position(
-        db, position=position, lot_id=lot_uuid, actor_id=current.id
-    )
-    # Keep inventory in sync: placing one vial in a slot is a +1 receipt for
-    # this lot at the position's location, signed with the operator's
-    # e-signature (same 21 CFR Part 11 ceremony as a unit-in).
-    location_id = await inv_repo.position_location_id(db, position)
-    movement = await inv_repo.create_receipt_movement(
-        db,
-        item_id=lot.item_id,
-        lot_id=lot_uuid,
-        to_location_id=location_id,
-        qty=Decimal(1),
-        performed_by_user_id=current.id,
-        reauth_evidence_id=evidence_uuid,
-    )
-    await consume_reauth_evidence(
-        db,
-        evidence_id=evidence_uuid,
-        user_id=current.id,
-        expected_action="movement.receipt",
-        target_table="app.stock_movements",
-        target_id=movement.id,
-    )
-    await db.commit()
-    fresh = await inv_repo.get_storage_position(db, position_id, refresh=True)
-    assert fresh is not None
-    return _position_to_read(fresh)
-
-
-@storage_router.post(
-    "/positions/{position_id}/empty",
-    response_model=PositionRead,
-    summary="Empty a position (reversible unmap)",
-    dependencies=[Depends(RequirePermission("inventory", "edit"))],
-)
-async def empty_position(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    position_id: Annotated[uuid.UUID, Path()],
-    payload: EmptyPositionRequest,
-) -> PositionRead:
-    position = await inv_repo.get_storage_position(db, position_id)
-    if position is None:
-        raise NotFoundError(f"Position {position_id} not found")
-    if position.status == "empty":
-        return _position_to_read(position)  # idempotent
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    # Capture the occupant before we clear it so we can post the matching -1.
-    prev_lot_id = position.lot_id
-    prev_item_id = position.lot.item_id if position.lot is not None else None
-    location_id = await inv_repo.position_location_id(db, position)
-    await inv_repo.empty_storage_position(db, position=position, actor_id=current.id)
-    # Emptying a slot removes one vial — record a signed -1 dispense so
-    # inventory stays in sync with the grid.
-    if prev_lot_id is not None and prev_item_id is not None:
-        movement = await inv_repo.create_dispense_movement(
-            db,
-            item_id=prev_item_id,
-            lot_id=prev_lot_id,
-            from_location_id=location_id,
-            qty=Decimal(1),
-            performed_by_user_id=current.id,
-            reauth_evidence_id=evidence_uuid,
-            destination=payload.destination,
-        )
-        await consume_reauth_evidence(
-            db,
-            evidence_id=evidence_uuid,
-            user_id=current.id,
-            expected_action="movement.dispense",
-            target_table="app.stock_movements",
-            target_id=movement.id,
-        )
-    await db.commit()
-    fresh = await inv_repo.get_storage_position(db, position_id, refresh=True)
-    assert fresh is not None
-    return _position_to_read(fresh)
-
-
-@storage_router.post(
-    "/positions/{position_id}/move",
-    response_model=MovePositionResult,
-    summary="Move an occupant to another free position (any location)",
-    dependencies=[Depends(RequirePermission("inventory", "edit"))],
-)
-async def move_position(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    position_id: Annotated[uuid.UUID, Path()],
-    payload: MovePositionRequest,
-) -> MovePositionResult:
-    source = await inv_repo.get_storage_position(db, position_id)
-    if source is None:
-        raise NotFoundError(f"Position {position_id} not found")
-    if source.status != "occupied":
-        raise ConflictError("Source position is empty", code="source_empty")
-    try:
-        dest_uuid = uuid.UUID(payload.dest_position_id)
-    except ValueError as exc:
-        raise ValidationError(
-            "dest_position_id must be a UUID", code="invalid_dest_position_id"
-        ) from exc
-    if dest_uuid == position_id:
-        raise ValidationError(
-            "Source and destination are the same", code="same_position"
-        )
-    dest = await inv_repo.get_storage_position(db, dest_uuid)
-    if dest is None:
-        raise NotFoundError(f"Position {payload.dest_position_id} not found")
-    if dest.status != "empty":
-        raise ConflictError("Destination is occupied", code="dest_occupied")
-    # Capture source occupant + both locations before the move.
-    moved_lot_id = source.lot_id
-    moved_item_id = source.lot.item_id if source.lot is not None else None
-    src_loc = await inv_repo.position_location_id(db, source)
-    dst_loc = await inv_repo.position_location_id(db, dest)
-    await inv_repo.move_storage_position(
-        db, source=source, dest=dest, actor_id=current.id
-    )
-    # A cross-location move is a transfer in the ledger; a move within the same
-    # location is a pure slot relocation (no quantity change).
-    if src_loc != dst_loc and moved_lot_id is not None and moved_item_id is not None:
-        await inv_repo.create_transfer_pair(
-            db,
-            item_id=moved_item_id,
-            lot_id=moved_lot_id,
-            from_location_id=src_loc,
-            to_location_id=dst_loc,
-            qty=Decimal(1),
-            performed_by_user_id=current.id,
-        )
-    await db.commit()
-    fresh_source = await inv_repo.get_storage_position(db, position_id, refresh=True)
-    fresh_dest = await inv_repo.get_storage_position(db, dest_uuid, refresh=True)
-    assert fresh_source is not None and fresh_dest is not None
-    return MovePositionResult(
-        source=_position_to_read(fresh_source),
-        dest=_position_to_read(fresh_dest),
-    )
-
-
-@storage_router.get(
-    "/positions/{position_id}/history",
-    response_model=list[PositionEventRead],
-    summary="Event history for one position (unit in / out / move)",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def position_history(
-    db: DBSession,
-    position_id: Annotated[uuid.UUID, Path()],
-) -> list[PositionEventRead]:
-    if (await inv_repo.get_storage_position(db, position_id)) is None:
-        raise NotFoundError(f"Position {position_id} not found")
-    rows = await inv_repo.list_position_events(db, position_id)
-    return [PositionEventRead(**r) for r in rows]
 
 
 # ── Receipt Admin v2 ───────────────────────────────────────────────────
@@ -2509,30 +1194,6 @@ async def _ensure_item_vendor(
         created_by_user_id=user_id,
     )
     return True
-
-
-async def _compute_vendor_flags(
-    db: DBSession,
-    *,
-    item_id: uuid.UUID,
-    vendor_id: uuid.UUID,
-    has_approved: bool,
-) -> dict[str, bool]:
-    """The two non-status vendor flags for a lot (v2 §3 / §6).
-
-    Computed against the *prior* state — call before inserting any new
-    approved-vendor mapping for this receipt.
-    """
-    unverified = has_approved and not await inv_repo.is_vendor_approved_for_item(
-        db, item_id=item_id, vendor_id=vendor_id
-    )
-    not_assoc = not await inv_repo.vendor_used_on_item_before(
-        db, item_id=item_id, vendor_id=vendor_id
-    )
-    return {
-        "unverified_vendor_for_item": unverified,
-        "vendor_not_previously_associated_with_item": not_assoc,
-    }
 
 
 # ── Approved-vendor mapping (per item) ─────────────────────────────────
@@ -2731,8 +1392,6 @@ async def create_receipt_intake(
     if item is None:
         raise NotFoundError(f"Item {payload.item_id} not found")
 
-    has_approved = await inv_repo.item_has_approved_vendors(db, item_uuid)
-
     # Reject duplicate lot numbers within the same intake up-front.
     seen_numbers: set[str] = set()
     for line in payload.lots:
@@ -2756,10 +1415,6 @@ async def create_receipt_intake(
         vendor, created = await _resolve_vendor(
             db, vendor_id=line.vendor_id, vendor_name=line.vendor_name
         )
-        # Flags reflect prior state — compute BEFORE adding any mapping.
-        flags = await _compute_vendor_flags(
-            db, item_id=item_uuid, vendor_id=vendor.id, has_approved=has_approved
-        )
 
         # Lot-number uniqueness pre-check (clean 409; index is the guard).
         if (
@@ -2772,10 +1427,6 @@ async def create_receipt_intake(
                 code="lot_number_conflict",
             )
 
-        lot_metadata: dict[str, object] = {
-            "ordered_qty": str(line.quantity),
-            **flags,
-        }
         try:
             lot = await inv_repo.create_lot(
                 db,
@@ -2785,12 +1436,11 @@ async def create_receipt_intake(
                 vendor_id=vendor.id,
                 manufacture_date=line.manufacture_date,
                 expiration_date=line.expiration_date,
-                coa_url=line.coa_url,
                 status="on_order",
                 notes=line.notes,
                 unit_price_amount=line.unit_price,
                 po_reference=line.po_reference or payload.po_reference,
-                metadata=lot_metadata,
+                ordered_qty=line.quantity,
                 receipt_transaction_id=txn.id,
             )
         except IntegrityError as exc:
@@ -2829,7 +1479,6 @@ async def create_receipt_intake(
             context={
                 "receipt_transaction_id": str(txn.id),
                 "vendor_created": created,
-                **flags,
             },
         )
 
@@ -2869,8 +1518,9 @@ async def receive_transaction(
     """Step 5: confirm a physical receipt. Per ON_ORDER lot the operator
     submits one or more splits; the first receives into the original lot
     (flip → AVAILABLE), the rest create child lots (``parent_lot_id``).
-    Every split posts a ``+received_qty`` receipt movement; all share one
-    e-signature and commit atomically."""
+    No ledger movement and no placement are recorded — receive is lifecycle
+    only; quantity arrives later as a unit-IN (place) in the Location System.
+    One e-signature covers the whole receipt; commits atomically."""
     txn = await inv_repo.get_receipt_transaction(db, txn_id)
     if txn is None:
         raise NotFoundError(f"Receipt transaction {txn_id} not found")
@@ -2881,14 +1531,10 @@ async def receive_transaction(
         )
 
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    # Destination is optional now: when neither the request nor a split names
-    # a location, the receipt is recorded without placing the stock (the lot
-    # is mapped to a node later via the Location System).
-    default_location = (
-        await _get_active_location_or_4xx(db, payload.location_id)
-        if payload.location_id is not None
-        else None
-    )
+    # Receiving records NO quantity and NO placement — it only flips the lot
+    # lifecycle (on_order → available), adjusts details, and optionally splits
+    # the order into supplier lots. Quantity comes later as a unit-IN (place)
+    # in the Location System.
 
     # Index the transaction's still-ON_ORDER lots for line resolution.
     lots_by_id = {
@@ -2896,7 +1542,6 @@ async def receive_transaction(
         for lot in txn.lots
         if lot.deleted_at is None and lot.status == "on_order"
     }
-    has_approved = await inv_repo.item_has_approved_vendors(db, txn.item_id)
 
     for line in payload.lines:
         lot_uuid = _parse_uuid_or_422(line.lot_id, field="lot_id")
@@ -2909,11 +1554,6 @@ async def receive_transaction(
 
         child_numbers: set[str] = set()
         for idx, split in enumerate(line.splits):
-            dest = (
-                default_location
-                if split.location_id is None
-                else await _get_active_location_or_4xx(db, split.location_id)
-            )  # may be None → received but not placed
             # Vendor: explicit override, else inherit the on-order lot's vendor
             # (which intake guaranteed is set).
             if split.vendor_id is not None or split.vendor_name is not None:
@@ -2953,15 +1593,7 @@ async def receive_transaction(
                 target_lot = await inv_repo.apply_lot_patch(
                     db, lot=lot, patch=patch, updated_by_user_id=current.id
                 )
-                await _post_receipt_and_fill(
-                    db,
-                    item_id=txn.item_id,
-                    lot_id=target_lot.id,
-                    location=dest,
-                    qty=split.received_qty,
-                    actor_id=current.id,
-                    evidence_id=evidence_uuid,
-                )
+                # No ledger movement / placement — receive is lifecycle only.
                 await record_entity_change(
                     db,
                     actor_user_id=current.id,
@@ -2971,10 +1603,7 @@ async def receive_transaction(
                     subject_label=target_lot.lot_number,
                     before={"status": "on_order"},
                     after={"status": "available"},
-                    context={
-                        "received_qty": str(split.received_qty),
-                        "receipt_transaction_id": str(txn.id),
-                    },
+                    context={"receipt_transaction_id": str(txn.id)},
                     signature_id=evidence_uuid,
                 )
             else:
@@ -3000,12 +1629,6 @@ async def receive_transaction(
                         f"lot_number '{split.lot_number}' already exists for this item",
                         code="lot_number_conflict",
                     )
-                flags = await _compute_vendor_flags(
-                    db,
-                    item_id=txn.item_id,
-                    vendor_id=vendor_id,
-                    has_approved=has_approved,
-                )
                 child = await inv_repo.create_lot(
                     db,
                     item_id=txn.item_id,
@@ -3014,24 +1637,14 @@ async def receive_transaction(
                     vendor_id=vendor_id,
                     manufacture_date=split.manufacture_date or lot.manufacture_date,
                     expiration_date=split.expiration_date or lot.expiration_date,
-                    coa_url=split.coa_url,
                     status="available",
                     notes=split.notes,
                     unit_price_amount=split.unit_price,
                     po_reference=split.po_reference or lot.po_reference,
-                    metadata={"split_from": str(lot.lot_number), **flags},
                     receipt_transaction_id=txn.id,
                     parent_lot_id=lot.id,
                 )
-                await _post_receipt_and_fill(
-                    db,
-                    item_id=txn.item_id,
-                    lot_id=child.id,
-                    location=dest,
-                    qty=split.received_qty,
-                    actor_id=current.id,
-                    evidence_id=evidence_uuid,
-                )
+                # No ledger movement / placement — receive is lifecycle only.
                 await record_entity_change(
                     db,
                     actor_user_id=current.id,
@@ -3043,9 +1656,7 @@ async def receive_transaction(
                     after=inv_repo.lot_to_audit_snapshot(child),
                     context={
                         "split_from_lot_id": str(lot.id),
-                        "received_qty": str(split.received_qty),
                         "receipt_transaction_id": str(txn.id),
-                        **flags,
                     },
                     signature_id=evidence_uuid,
                 )
@@ -3078,55 +1689,3 @@ async def receive_transaction(
     response = _receipt_txn_to_read(updated)
     await db.commit()
     return response
-
-
-async def _get_active_location_or_4xx(db: DBSession, location_id: str) -> Location:
-    """Parse + load an active location, or raise a structured 4xx."""
-    loc_uuid = _parse_uuid_or_422(location_id, field="location_id")
-    location = await inv_repo.get_location(db, loc_uuid)
-    if location is None:
-        raise NotFoundError(f"Location {location_id} not found")
-    if not location.is_active:
-        raise ValidationError(
-            "Location is inactive; cannot receive stock here",
-            code="location_inactive",
-        )
-    return location
-
-
-async def _post_receipt_and_fill(
-    db: DBSession,
-    *,
-    item_id: uuid.UUID,
-    lot_id: uuid.UUID,
-    location: Location | None,
-    qty: Decimal,
-    actor_id: uuid.UUID,
-    evidence_id: uuid.UUID,
-) -> None:
-    """Post a ``+qty`` receipt movement and, for rack-mapped locations,
-    fill that many empty positions (one unit = one vial = one slot).
-
-    ``location`` may be ``None`` — the receipt is recorded without a
-    destination (stock received but not yet placed); no positions fill."""
-    await inv_repo.create_receipt_movement(
-        db,
-        item_id=item_id,
-        lot_id=lot_id,
-        to_location_id=location.id if location is not None else None,
-        qty=qty,
-        performed_by_user_id=actor_id,
-        reauth_evidence_id=evidence_id,
-    )
-    if location is not None and await inv_repo.location_has_racks(db, location.id):
-        units = _whole_units_or_422(qty)
-        empty = await inv_repo.count_empty_positions(db, location.id)
-        if empty < units:
-            raise ConflictError(
-                f"Location has only {empty} empty position(s); cannot place "
-                f"{units} unit(s). Add a rack or pick another location.",
-                code="not_enough_empty_positions",
-            )
-        await inv_repo.fill_positions_for_lot(
-            db, location_id=location.id, lot_id=lot_id, n=units, actor_id=actor_id
-        )

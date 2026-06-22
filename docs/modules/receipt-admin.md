@@ -15,6 +15,18 @@
 
 ---
 
+> **Amendment 2026-06-22 (lot table simplification, migration `b0c1d2e3f4a5`)**
+> The sections below predate these changes — read them with these overrides:
+> - **`app.lots.coa_url` removed** (no longer tracked).
+> - **`app.lots.metadata_` removed.** The two vendor flags it held
+>   (`unverified_vendor_for_item`, `vendor_not_previously_associated_with_item`)
+>   are **dropped entirely** — receipt no longer computes or surfaces them.
+> - **`ordered_qty` is now a real `NUMERIC(14,3)` column** on `app.lots`
+>   (promoted out of `metadata_`). Received / on-hand quantity is **still
+>   ledger-derived** — `ordered_qty` is planning data for ON_ORDER lots only.
+
+---
+
 ## 0. How v2 maps onto the existing flow
 
 The v2 requirements describe a vendor-aware, two-step inbound process. Most of

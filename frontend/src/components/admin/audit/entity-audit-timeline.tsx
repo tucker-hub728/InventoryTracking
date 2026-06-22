@@ -11,7 +11,6 @@ import {
   Plus,
   Scale,
   Trash2,
-  Undo2,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -105,12 +104,6 @@ const AUDIT_ACTION_ICON: Record<ApiAuditAction, IconStyle> = {
     tint: 'text-success',
     pill: 'border-success/30 bg-success/5 text-success',
   },
-};
-
-const REVERSAL_ICON: IconStyle = {
-  Icon: Undo2,
-  tint: 'text-text-2',
-  pill: 'border-border bg-bg-elev text-text-2',
 };
 
 // ── Unified timeline shape ──────────────────────────────────────────────
@@ -321,16 +314,11 @@ function MovementRow({
   index: number;
   onSelect: () => void;
 }) {
-  const isReversal = movement.reversal_of_id !== null;
-  const style = isReversal
-    ? REVERSAL_ICON
-    : MOVEMENT_ICON[movement.movement_type];
+  const style = MOVEMENT_ICON[movement.movement_type];
   const { Icon } = style;
-  const typeLabel = isReversal
-    ? `Reversal · ${MOVEMENT_TYPE_LABEL[movement.movement_type]}`
-    : MOVEMENT_TYPE_LABEL[movement.movement_type];
-  const fromCode = movement.from_location_code;
-  const toCode = movement.to_location_code;
+  const typeLabel = MOVEMENT_TYPE_LABEL[movement.movement_type];
+  const fromCode = movement.from_location_node_name;
+  const toCode = movement.to_location_node_name;
   const locText = (() => {
     if (fromCode && toCode) return `${fromCode} → ${toCode}`;
     if (toCode) return `into ${toCode}`;
@@ -370,21 +358,9 @@ function MovementRow({
               <span className="font-mono">{locText}</span>
             </>
           )}
-          {movement.reason_code && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{movement.reason_code.replace(/_/g, ' ')}</span>
-            </>
-          )}
         </div>
-        {(movement.notes || movement.reference) && (
+        {movement.notes && (
           <p className="mt-1 text-xs text-text-2">
-            {movement.reference && (
-              <span className="font-mono text-text-3">
-                {movement.reference}
-                {movement.notes ? ' · ' : ''}
-              </span>
-            )}
             {movement.notes}
           </p>
         )}

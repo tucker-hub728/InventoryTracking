@@ -38,7 +38,6 @@ export interface Lot {
   item_description: string | null;
   manufacture_date: string | null;
   expiration_date: string | null;
-  coa_url: string | null;
   status: LotStatus;
   notes: string | null;
   // ── Receipt Admin v2 ──────────────────────────────────────────────
@@ -50,12 +49,8 @@ export interface Lot {
   receipt_transaction_id: string | null;
   /** Split lineage — set on child lots produced by a split receipt. */
   parent_lot_id: string | null;
-  /** Vendor not in the item's approved list (flag, not a status). */
-  unverified_vendor_for_item: boolean;
-  /** Vendor never previously associated with this item (flag, not a status). */
-  vendor_not_previously_associated_with_item: boolean;
-  /** Ordered qty captured at intake (planning data; NUMERIC → string). */
-  ordered_qty: string | null;
+  /** Ordered qty captured at intake (planning data; whole units, integer). */
+  ordered_qty: number | null;
   created_at: string;
   updated_at: string;
   created_by_user_id: string;
@@ -67,7 +62,6 @@ export interface LotCreateInput {
   vendor_id?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;
-  coa_url?: string | null;
   status?: LotStatus;
   notes?: string | null;
 }
@@ -88,7 +82,6 @@ export interface LotUpdateInput {
   vendor_id?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;
-  coa_url?: string | null;
   status?: LotStatus;
   notes?: string | null;
   evidence_id: string;

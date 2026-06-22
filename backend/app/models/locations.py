@@ -1,27 +1,32 @@
 """Location system ORM — strict LN2 hierarchy + flat locations + allocations.
 
-Implements the client's Location System rules (Requirements v2 §5–§13):
+Implements the client's Location System rules (Requirements v2 §4.1):
 
-* ``meta.location_nodes`` — one tree for everything. LN2 is a strict
-  5-level hierarchy (tank_quadrant → rack → cassette_rack → box → sub_slot);
-  flat operational locations (Kanban / Lab / QC / Engineering / Materials)
-  are parent-less single nodes. Only ``sub_slot`` and ``flat`` nodes can
-  store inventory; the rest are navigation-only.
-* ``app.lot_allocations`` — a lot is *mapped* to a storage node (it does
-  not "live inside" it). A lot split across N locations = N allocation
-  rows. Sub-slots are single-occupancy (one vial).
-* ``app.allocation_movements`` — append-only place / transfer / consume
-  audit log, decoupled from the legacy ``stock_movements`` ledger.
+* ``meta.location_nodes`` — one tree for everything. LN2 is
+  ``tank_quadrant → rack → (cassette | cryo_box_rack) → box``; the **Box** is
+  the grid-bearing leaf (``grid_rows × grid_cols``). Cassette / Cryo Box Rack
+  are navigation containers. Flat operational locations (Kanban / Lab / QC /
+  Engineering / Materials) are parent-less single nodes. Only ``box`` and
+  ``flat`` nodes can store inventory. A ``tank_quadrant`` may be dedicated to a
+  customer XOR a product (advisory; descendants inherit it).
+* ``app.lot_allocations`` — a lot is *mapped* to a storage node (it does not
+  "live inside" it). For a Box it carries the ``(grid_row, grid_col)`` cell —
+  one active allocation per cell (single-occupancy, manual placement, gaps).
+  A lot split across N cells/locations = N allocation rows.
 
-Design principle (§12): Location = physical truth, Lot = inventory
-lifecycle, Transfer = audit history — decoupled, linked only by reference.
+Movement history is NOT kept here — quantity-changing operations (consume /
+transfer) are written to the GxP ledger ``app.stock_movements`` (via its
+``from_location_node_id`` / ``to_location_node_id`` columns); placement is
+audited in ``audit.audit_events``.
+
+Design principle: Location = physical truth, Lot = inventory lifecycle,
+Ledger = quantity + audit history — linked only by reference.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
@@ -29,7 +34,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    Numeric,
+    Integer,
+    SmallInteger,
     Text,
     UniqueConstraint,
     func,
@@ -43,29 +49,40 @@ from app.models.inventory import Lot
 
 # ── Node taxonomy ───────────────────────────────────────────────────────
 #
-# LN2 levels in strict top-down order. The parent of each level is the
-# level immediately above it; ``tank_quadrant`` and ``flat`` are roots.
+# LN2 levels (Requirements v2 §4.1). Below a Rack sits *either* a Cassette
+# (1×N column of boxes) *or* a Cryo Box Rack (R×C grid of boxes); both hold
+# Boxes. The **Box** is the grid-bearing leaf storage node — a lot is placed
+# into one of its ``(row, col)`` cells (the "sub-slot", a coordinate on the
+# allocation, not a node of its own). ``tank_quadrant`` and ``flat`` are roots.
 LN2_LEVELS: tuple[str, ...] = (
     "tank_quadrant",
     "rack",
-    "cassette_rack",
+    "cassette",
+    "cryo_box_rack",
     "box",
-    "sub_slot",
 )
-NODE_TYPES: tuple[str, ...] = (*LN2_LEVELS, "flat")
+# Retired in v2 but kept in the CHECK enum so any pre-existing rows still
+# validate (retire-not-drop). Not creatable: absent from ``PARENT_OF``.
+LEGACY_NODE_TYPES: tuple[str, ...] = ("cassette_rack", "sub_slot")
+NODE_TYPES: tuple[str, ...] = (*LN2_LEVELS, "flat", *LEGACY_NODE_TYPES)
 
-# node_type → required parent node_type (None = must be a root).
-PARENT_OF: dict[str, str | None] = {
+# node_type → allowed parent node_type(s) (None = must be a root). Only the
+# keys here are *creatable*; a Box may hang under either container type.
+PARENT_OF: dict[str, tuple[str, ...] | None] = {
     "tank_quadrant": None,
-    "rack": "tank_quadrant",
-    "cassette_rack": "rack",
-    "box": "cassette_rack",
-    "sub_slot": "box",
+    "rack": ("tank_quadrant",),
+    "cassette": ("rack",),
+    "cryo_box_rack": ("rack",),
+    "box": ("cassette", "cryo_box_rack"),
     "flat": None,
 }
 
-# Only these node types can hold a lot allocation (§7).
-STORAGE_NODE_TYPES: frozenset[str] = frozenset({"sub_slot", "flat"})
+# Only these node types can hold a lot allocation (§4.1). The Box is the LN2
+# leaf; flat operational locations store directly.
+STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "flat"})
+
+# Node types that carry a configurable rows×cols grid. Only the Box.
+GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
 
 # Flat operational location categories (§ location rules B).
 FLAT_CATEGORIES: tuple[str, ...] = (
@@ -76,13 +93,15 @@ FLAT_CATEGORIES: tuple[str, ...] = (
     "materials",
 )
 
-# Append-only movement kinds for the allocation audit log (§9).
-ALLOCATION_MOVEMENT_KINDS: tuple[str, ...] = ("place", "transfer", "consume")
-
 
 def can_store(node_type: str) -> bool:
     """True iff a node of this type may hold a lot allocation."""
     return node_type in STORAGE_NODE_TYPES
+
+
+def is_grid_node(node_type: str) -> bool:
+    """True iff a node of this type carries a rows×cols grid (the Box)."""
+    return node_type in GRID_NODE_TYPES
 
 
 class LocationNode(Base):
@@ -122,6 +141,40 @@ class LocationNode(Base):
             "(node_type IN ('tank_quadrant', 'flat')) = (parent_id IS NULL)",
             name="ck_location_nodes_root_parentage",
         ),
+        # Grid dimensions exist on (and only on) a Box. The Box-under-Cassette
+        # rule (grid_cols = 1) needs the parent's type, so it's enforced in the
+        # route, not here.
+        CheckConstraint(
+            "(node_type = 'box') = (grid_rows IS NOT NULL AND grid_cols IS NOT NULL)",
+            name="ck_location_nodes_grid_presence",
+        ),
+        CheckConstraint(
+            "(grid_rows IS NULL OR grid_rows >= 1) "
+            "AND (grid_cols IS NULL OR grid_cols >= 1)",
+            name="ck_location_nodes_grid_positive",
+        ),
+        # Quadrant dedication: at most one of customer / product, and only on a
+        # tank_quadrant. Advisory — placement is never blocked by it.
+        CheckConstraint(
+            "NOT (dedicated_customer_id IS NOT NULL "
+            "AND dedicated_product_id IS NOT NULL)",
+            name="ck_location_nodes_dedication_exclusive",
+        ),
+        CheckConstraint(
+            "(dedicated_customer_id IS NULL AND dedicated_product_id IS NULL) "
+            "OR node_type = 'tank_quadrant'",
+            name="ck_location_nodes_dedication_quadrant_only",
+        ),
+        Index(
+            "ix_location_nodes_dedicated_customer",
+            "dedicated_customer_id",
+            postgresql_where=text("dedicated_customer_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_location_nodes_dedicated_product",
+            "dedicated_product_id",
+            postgresql_where=text("dedicated_product_id IS NOT NULL"),
+        ),
         {"schema": "meta"},
     )
 
@@ -144,6 +197,22 @@ class LocationNode(Base):
         Boolean, nullable=False, server_default=text("TRUE")
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Grid dimensions — only a Box carries them (CHECK above). A Box under a
+    # Cassette is single-column (grid_cols = 1, enforced in the route).
+    grid_rows: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    grid_cols: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # Quadrant dedication (§4.1) — advisory link to a customer XOR a product;
+    # only on a tank_quadrant. Descendants inherit it (resolved in the route).
+    dedicated_customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.customers.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    dedicated_product_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.products.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     metadata_: Mapped[dict] = mapped_column(
         "metadata_",
         JSONB,
@@ -188,10 +257,27 @@ class LotAllocation(Base):
             "location_node_id",
             postgresql_where=text("is_active"),
         ),
+        # One active allocation per Box cell — gives single-occupancy, manual
+        # placement and intentional gaps for free (a gap is just an unfilled
+        # (row, col)). Flat allocations have NULL coordinates and are excluded.
+        Index(
+            "uq_lot_allocations_cell",
+            "location_node_id",
+            "grid_row",
+            "grid_col",
+            unique=True,
+            postgresql_where=text("is_active AND grid_row IS NOT NULL"),
+        ),
         # >= 0 (not > 0): a fully consumed/transferred allocation is kept as a
         # deactivated 0-qty record so the split history survives. Creation
         # enforces qty > 0 at the op layer.
         CheckConstraint("qty >= 0", name="ck_lot_allocations_qty_nonneg"),
+        # Cell coordinates are both-or-neither (grid nodes set them, flat
+        # nodes leave them NULL). Bounds + qty=1 are enforced at the op layer.
+        CheckConstraint(
+            "(grid_row IS NULL) = (grid_col IS NULL)",
+            name="ck_lot_allocations_cell_pairing",
+        ),
         {"schema": "app"},
     )
 
@@ -211,7 +297,11 @@ class LotAllocation(Base):
         ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    # Whole units only (integer). For a Box cell this is always 1.
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 1-based cell within the parent Box's grid. NULL for flat allocations.
+    grid_row: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    grid_col: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("TRUE")
     )
@@ -233,63 +323,3 @@ class LotAllocation(Base):
 
     lot: Mapped[Lot] = relationship(lazy="joined", viewonly=True)
     location_node: Mapped[LocationNode] = relationship(lazy="joined", viewonly=True)
-
-
-class AllocationMovement(Base):
-    """Append-only place / transfer / consume history (§9, §12).
-
-    Decoupled from the legacy ``app.stock_movements`` ledger — this is the
-    audit trail for the new location system. Transfers preserve lot
-    identity and only record movement (no structural change).
-    """
-
-    __tablename__ = "allocation_movements"
-    __table_args__ = (
-        Index("ix_allocation_movements_lot_id", "lot_id"),
-        Index("ix_allocation_movements_from_node", "from_node_id"),
-        Index("ix_allocation_movements_to_node", "to_node_id"),
-        Index("ix_allocation_movements_performed_at", text("performed_at DESC")),
-        CheckConstraint(
-            "movement_kind IN ("
-            + ", ".join(f"'{k}'" for k in ALLOCATION_MOVEMENT_KINDS)
-            + ")",
-            name="ck_allocation_movements_kind",
-        ),
-        CheckConstraint("qty > 0", name="ck_allocation_movements_qty_positive"),
-        {"schema": "app"},
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        server_default=text("gen_random_uuid()"),
-    )
-    lot_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.lots.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    movement_kind: Mapped[str] = mapped_column(Text, nullable=False)
-    from_node_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    to_node_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
-    qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    performed_by_user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.users.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    performed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-    lot: Mapped[Lot] = relationship(lazy="joined", viewonly=True)

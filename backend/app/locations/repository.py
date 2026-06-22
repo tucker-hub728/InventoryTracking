@@ -15,11 +15,12 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.inventory import StockMovement
 from app.models.locations import (
-    AllocationMovement,
     LocationNode,
     LotAllocation,
 )
+from app.models.products import Customer, Product
 
 # ── Nodes ───────────────────────────────────────────────────────────────
 
@@ -30,6 +31,31 @@ async def get_node(session: AsyncSession, node_id: uuid.UUID) -> LocationNode | 
             select(LocationNode).where(LocationNode.id == node_id)
         )
     ).scalar_one_or_none()
+
+
+async def node_label_map(
+    session: AsyncSession,
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """``id → (name, path)`` for every node — for the ledger Location column.
+
+    ``path`` is the human breadcrumb from the root to the node
+    (``"Q1 › R01 › C01 › Box 01"``). The location tree is small, so one query
+    + an in-memory parent walk is cheap and avoids per-row lookups.
+    """
+    nodes = list((await session.execute(select(LocationNode))).scalars().all())
+    by_id = {n.id: n for n in nodes}
+
+    def path_for(node: LocationNode) -> str:
+        parts: list[str] = []
+        cur: LocationNode | None = node
+        seen: set[uuid.UUID] = set()
+        while cur is not None and cur.id not in seen:
+            parts.append(cur.name)
+            seen.add(cur.id)
+            cur = by_id.get(cur.parent_id) if cur.parent_id else None
+        return " › ".join(reversed(parts))
+
+    return {n.id: (n.name, path_for(n)) for n in nodes}
 
 
 async def get_sibling_by_code(
@@ -58,6 +84,10 @@ async def create_node(
     created_by_user_id: uuid.UUID,
     parent_id: uuid.UUID | None = None,
     flat_category: str | None = None,
+    grid_rows: int | None = None,
+    grid_cols: int | None = None,
+    dedicated_customer_id: uuid.UUID | None = None,
+    dedicated_product_id: uuid.UUID | None = None,
     notes: str | None = None,
 ) -> LocationNode:
     """Insert a node. Caller has already validated the hierarchy. Commits."""
@@ -67,6 +97,10 @@ async def create_node(
         name=name.strip(),
         parent_id=parent_id,
         flat_category=flat_category,
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
+        dedicated_customer_id=dedicated_customer_id,
+        dedicated_product_id=dedicated_product_id,
         notes=notes,
         created_by_user_id=created_by_user_id,
     )
@@ -173,8 +207,89 @@ def node_to_audit_snapshot(node: LocationNode) -> dict[str, object | None]:
         "name": node.name,
         "parent_id": str(node.parent_id) if node.parent_id else None,
         "flat_category": node.flat_category,
+        "grid_rows": node.grid_rows,
+        "grid_cols": node.grid_cols,
+        "dedicated_customer_id": (
+            str(node.dedicated_customer_id) if node.dedicated_customer_id else None
+        ),
+        "dedicated_product_id": (
+            str(node.dedicated_product_id) if node.dedicated_product_id else None
+        ),
         "is_active": node.is_active,
     }
+
+
+async def update_node_grid(
+    session: AsyncSession, *, node: LocationNode, grid_rows: int, grid_cols: int
+) -> LocationNode:
+    """Set a Box's grid dimensions. Caller validates type / occupancy. Commits
+    handled by caller."""
+    node.grid_rows = grid_rows
+    node.grid_cols = grid_cols
+    await session.flush()
+    return node
+
+
+async def update_node_dedication(
+    session: AsyncSession,
+    *,
+    node: LocationNode,
+    customer_id: uuid.UUID | None,
+    product_id: uuid.UUID | None,
+) -> LocationNode:
+    """Set / clear a quadrant's dedication. Caller validates the quadrant +
+    exclusivity. Caller commits."""
+    node.dedicated_customer_id = customer_id
+    node.dedicated_product_id = product_id
+    await session.flush()
+    return node
+
+
+async def resolve_inherited_dedication(
+    session: AsyncSession, node: LocationNode
+) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    """Walk to the root quadrant and return its (customer_id, product_id).
+
+    Dedication lives only on a ``tank_quadrant``; descendants inherit it.
+    Returns the node's own values if it is the quadrant.
+    """
+    current: LocationNode | None = node
+    seen: set[uuid.UUID] = set()
+    while current is not None:
+        if current.dedicated_customer_id or current.dedicated_product_id:
+            return current.dedicated_customer_id, current.dedicated_product_id
+        if current.parent_id is None or current.id in seen:
+            break
+        seen.add(current.id)
+        current = await get_node(session, current.parent_id)
+    return None, None
+
+
+async def max_occupied_cell(
+    session: AsyncSession, node_id: uuid.UUID
+) -> tuple[int, int]:
+    """Highest occupied (row, col) among a Box's active allocations.
+
+    Returns ``(0, 0)`` when the Box is empty. Used to reject a resize that
+    would orphan a placed cell.
+    """
+    row = (
+        await session.execute(
+            select(func.coalesce(func.max(LotAllocation.grid_row), 0)).where(
+                LotAllocation.location_node_id == node_id,
+                LotAllocation.is_active.is_(True),
+            )
+        )
+    ).scalar_one()
+    col = (
+        await session.execute(
+            select(func.coalesce(func.max(LotAllocation.grid_col), 0)).where(
+                LotAllocation.location_node_id == node_id,
+                LotAllocation.is_active.is_(True),
+            )
+        )
+    ).scalar_one()
+    return int(row), int(col)
 
 
 # ── Allocations ─────────────────────────────────────────────────────────
@@ -215,17 +330,79 @@ async def node_has_any_allocations(session: AsyncSession, node_id: uuid.UUID) ->
 async def node_has_movement_history(
     session: AsyncSession, node_id: uuid.UUID
 ) -> bool:
+    """True iff the GxP ledger has a movement referencing this node.
+
+    Movement history now lives in ``app.stock_movements`` (the location
+    system no longer keeps a separate log); a node with ledger history can't
+    be deleted, so its name still resolves on historical rows.
+    """
     stmt = (
-        select(AllocationMovement.id)
+        select(StockMovement.id)
         .where(
             or_(
-                AllocationMovement.from_node_id == node_id,
-                AllocationMovement.to_node_id == node_id,
+                StockMovement.from_location_node_id == node_id,
+                StockMovement.to_location_node_id == node_id,
             )
         )
         .limit(1)
     )
     return (await session.execute(stmt)).first() is not None
+
+
+async def get_active_cell_occupant(
+    session: AsyncSession,
+    *,
+    node_id: uuid.UUID,
+    grid_row: int,
+    grid_col: int,
+) -> LotAllocation | None:
+    """The active allocation in a specific Box cell, if any (occupancy check)."""
+    stmt = select(LotAllocation).where(
+        LotAllocation.location_node_id == node_id,
+        LotAllocation.grid_row == grid_row,
+        LotAllocation.grid_col == grid_col,
+        LotAllocation.is_active.is_(True),
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def sum_active_alloc_qty_for_lot(
+    session: AsyncSession, lot_id: uuid.UUID
+) -> Decimal:
+    """Total currently-placed quantity of a lot across all nodes (capacity)."""
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(LotAllocation.qty), 0)).where(
+                LotAllocation.lot_id == lot_id,
+                LotAllocation.is_active.is_(True),
+            )
+        )
+    ).scalar_one()
+    return Decimal(total)
+
+
+async def lot_on_hand(session: AsyncSession, lot_id: uuid.UUID) -> Decimal:
+    """Ledger on-hand for a lot — SUM(qty_delta) over its stock movements."""
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(StockMovement.qty_delta), 0)).where(
+                StockMovement.lot_id == lot_id
+            )
+        )
+    ).scalar_one()
+    return Decimal(total)
+
+
+async def customer_exists(session: AsyncSession, customer_id: uuid.UUID) -> bool:
+    return (
+        await session.execute(select(Customer.id).where(Customer.id == customer_id))
+    ).first() is not None
+
+
+async def product_exists(session: AsyncSession, product_id: uuid.UUID) -> bool:
+    return (
+        await session.execute(select(Product.id).where(Product.id == product_id))
+    ).first() is not None
 
 
 async def list_lot_allocations(
@@ -245,12 +422,16 @@ async def create_allocation(
     location_node_id: uuid.UUID,
     qty: Decimal,
     created_by_user_id: uuid.UUID,
+    grid_row: int | None = None,
+    grid_col: int | None = None,
     notes: str | None = None,
 ) -> LotAllocation:
     alloc = LotAllocation(
         lot_id=lot_id,
         location_node_id=location_node_id,
         qty=qty,
+        grid_row=grid_row,
+        grid_col=grid_col,
         created_by_user_id=created_by_user_id,
         notes=notes,
     )
@@ -277,53 +458,141 @@ async def reduce_allocation(
     return allocation
 
 
-async def record_movement(
+# ── Ledger writers (consume / transfer go to app.stock_movements) ───────
+#
+# The location system no longer keeps its own movement log: quantity-changing
+# operations are written to the GxP ledger so on-hand reconciles. These build
+# node-referenced rows (the legacy ``meta.locations`` columns stay NULL) — the
+# widened ``ck_movements_locations`` accepts exactly one location kind per
+# occupied side. Caller commits.
+
+
+async def create_node_receipt_movement(
     session: AsyncSession,
     *,
+    item_id: uuid.UUID,
     lot_id: uuid.UUID,
-    movement_kind: str,
+    to_location_node_id: uuid.UUID,
     qty: Decimal,
     performed_by_user_id: uuid.UUID,
-    from_node_id: uuid.UUID | None = None,
-    to_node_id: uuid.UUID | None = None,
+    reauth_evidence_id: uuid.UUID | None = None,
     notes: str | None = None,
-) -> AllocationMovement:
-    """Append one immutable place/transfer/consume row. Caller commits."""
-    mv = AllocationMovement(
+) -> StockMovement:
+    """A unit-IN into a node cell/location: ``receipt`` row (+qty)."""
+    movement = StockMovement(
+        item_id=item_id,
         lot_id=lot_id,
-        movement_kind=movement_kind,
-        qty=qty,
-        from_node_id=from_node_id,
-        to_node_id=to_node_id,
+        from_location_node_id=None,
+        to_location_node_id=to_location_node_id,
+        movement_type="receipt",
+        qty_delta=qty,
+        qty_abs=qty,
         notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
-    session.add(mv)
+    session.add(movement)
     await session.flush()
-    return mv
+    return movement
 
 
-async def list_movements(
+async def create_node_dispense_movement(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    from_location_node_id: uuid.UUID,
+    to_location_node_id: uuid.UUID,
+    qty: int,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> StockMovement:
+    """Consume = unit-out: a ``dispense`` row from the source node, recording
+    the Flat location that consumed it as ``to_location_node_id``."""
+    movement = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_location_node_id,
+        to_location_node_id=to_location_node_id,
+        movement_type="dispense",
+        qty_delta=-qty,
+        qty_abs=qty,
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
+async def create_node_transfer_pair(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    from_location_node_id: uuid.UUID,
+    to_location_node_id: uuid.UUID,
+    qty: Decimal,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> tuple[StockMovement, StockMovement]:
+    """A node→node move: ``transfer_out`` + ``transfer_in`` pair (net-zero)."""
+    out_leg = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_location_node_id,
+        to_location_node_id=None,
+        movement_type="transfer_out",
+        qty_delta=-qty,
+        qty_abs=qty,
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    session.add(out_leg)
+    await session.flush()
+
+    in_leg = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=None,
+        to_location_node_id=to_location_node_id,
+        movement_type="transfer_in",
+        qty_delta=qty,
+        qty_abs=qty,
+        notes=notes,
+        paired_movement_id=out_leg.id,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    session.add(in_leg)
+    await session.flush()
+    return out_leg, in_leg
+
+
+async def list_node_ledger(
     session: AsyncSession,
     *,
     lot_id: uuid.UUID | None = None,
     node_id: uuid.UUID | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> list[AllocationMovement]:
-    stmt = select(AllocationMovement)
+) -> list[StockMovement]:
+    """Ledger movements touching a node (or lot) — the click-through history."""
+    stmt = select(StockMovement)
     if lot_id is not None:
-        stmt = stmt.where(AllocationMovement.lot_id == lot_id)
+        stmt = stmt.where(StockMovement.lot_id == lot_id)
     if node_id is not None:
         stmt = stmt.where(
             or_(
-                AllocationMovement.from_node_id == node_id,
-                AllocationMovement.to_node_id == node_id,
+                StockMovement.from_location_node_id == node_id,
+                StockMovement.to_location_node_id == node_id,
             )
         )
     stmt = (
-        stmt.order_by(AllocationMovement.performed_at.desc())
-        .limit(limit)
-        .offset(offset)
+        stmt.order_by(StockMovement.performed_at.desc()).limit(limit).offset(offset)
     )
     return list((await session.execute(stmt)).scalars().unique().all())

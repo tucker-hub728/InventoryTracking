@@ -45,7 +45,6 @@ const schema = z
     vendor_id: z.string().optional(),
     manufacture_date: z.string().optional(),
     expiration_date: z.string().min(1, 'Expiration date is required'),
-    coa_url: z.string().url('Must be a valid URL').optional().or(z.literal('')),
     status: z.enum(STATUS_CODES),
     notes: z.string().max(2048).optional(),
   })
@@ -87,7 +86,6 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
       vendor_id: '',
       manufacture_date: '',
       expiration_date: '',
-      coa_url: '',
       status: 'available',
       notes: '',
     },
@@ -137,7 +135,6 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
         values.vendor_id && values.vendor_id !== NO_VENDOR ? values.vendor_id : null,
       manufacture_date: values.manufacture_date || null,
       expiration_date: values.expiration_date || null,
-      coa_url: values.coa_url?.trim() || null,
       status: values.status,
       notes: values.notes?.trim() || null,
     };
@@ -297,22 +294,6 @@ export function LotCreateDialog({ open, onOpenChange, onCreated }: Props) {
                   </p>
                 )}
               </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="lot-coa">Certificate of Analysis URL</Label>
-              <Input
-                id="lot-coa"
-                type="url"
-                placeholder="https://..."
-                aria-invalid={Boolean(errors.coa_url)}
-                {...register('coa_url')}
-              />
-              {errors.coa_url && (
-                <p role="alert" className="text-xs text-danger">
-                  {errors.coa_url.message}
-                </p>
-              )}
             </div>
 
             <div className="space-y-1.5">

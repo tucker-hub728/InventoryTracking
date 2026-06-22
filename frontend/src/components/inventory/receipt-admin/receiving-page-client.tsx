@@ -267,17 +267,6 @@ function TransactionDetailSheet({
                       </>
                     )}
                   </dl>
-                  {(lot.unverified_vendor_for_item ||
-                    lot.vendor_not_previously_associated_with_item) && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {lot.unverified_vendor_for_item && (
-                        <Badge tone="warning">Unverified vendor</Badge>
-                      )}
-                      {lot.vendor_not_previously_associated_with_item && (
-                        <Badge tone="warning">New vendor for item</Badge>
-                      )}
-                    </div>
-                  )}
                 </div>
               ))}
             </SheetBody>

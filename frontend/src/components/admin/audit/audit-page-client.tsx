@@ -153,16 +153,13 @@ export function AuditPageClient() {
           if (filters.action !== 'all' && filters.action !== 'created')
             return false;
           if (filters.severity !== 'all') {
-            const sev =
-              m.reversal_of_id !== null || m.movement_type === 'discard'
-                ? 'warning'
-                : 'info';
+            const sev = m.movement_type === 'discard' ? 'warning' : 'info';
             if (sev !== filters.severity) return false;
           }
           if (q) {
             const hay = `${m.movement_type} ${m.item_number ?? ''} ${
               m.item_description ?? ''
-            } ${m.lot_number ?? ''} ${m.reason_code ?? ''}`.toLowerCase();
+            } ${m.lot_number ?? ''} ${m.notes ?? ''}`.toLowerCase();
             if (!hay.includes(q)) return false;
           }
           return true;
