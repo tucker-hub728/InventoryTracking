@@ -107,6 +107,8 @@ export interface LocationNode {
   can_store: boolean;
   child_count: number;
   active_allocation_count: number;
+  /** Full breadcrumb from the root (set on storage-targets; null elsewhere). */
+  path: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -204,6 +206,18 @@ export interface PlaceInput {
   notes: string;
 }
 
+export interface PlaceBatchInput {
+  lot_id: string;
+  node_id: string;
+  /** One unit is placed into each cell. */
+  cells: { grid_row: number; grid_col: number }[];
+  override?: boolean;
+  /** Unit-IN is e-signed once for the whole batch (action movement.receipt). */
+  evidence_id: string;
+  /** Required comment (§3). */
+  notes: string;
+}
+
 export interface TransferInput {
   allocation_id: string;
   to_node_id: string;
@@ -224,6 +238,37 @@ export interface ConsumeInput {
   evidence_id: string;
   /** Required comment (§3). */
   notes: string;
+}
+
+export interface ConsumeBatchInput {
+  /** Source allocations (one lot, one source node); each consumed in full. */
+  allocation_ids: string[];
+  /** The Flat location that consumed the units. */
+  to_node_id: string;
+  evidence_id: string;
+  notes: string;
+}
+
+export interface TransferBatchInput {
+  /** Source allocations (one lot, one source node) to draw units from. */
+  allocation_ids: string[];
+  to_node_id: string;
+  /** Box destination: one cell per unit (quantity = cells.length). */
+  to_cells?: { grid_row: number; grid_col: number }[];
+  /** Flat destination: the number of units to move. */
+  qty?: number;
+  override?: boolean;
+  evidence_id: string;
+  notes: string;
+}
+
+export interface LotAvailability {
+  lot_id: string;
+  ordered_qty: number | null;
+  /** Lifetime units placed (unit-in) for this lot. */
+  placed: number;
+  /** ordered_qty − placed; null when the lot has no ordered cap. */
+  remaining: number | null;
 }
 
 export const locationNodesApi = {
@@ -257,6 +302,9 @@ export const locationNodesApi = {
 
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 
+  rename: (id: string, name: string) =>
+    api.patch<LocationNode>(`/location-nodes/${id}`, { json: { name } }),
+
   updateGrid: (id: string, input: GridUpdateInput) =>
     api.put<LocationNode>(`/location-nodes/${id}/grid`, { json: input }),
 
@@ -265,11 +313,25 @@ export const locationNodesApi = {
 
   place: (input: PlaceInput) => api.post<Allocation>('/allocations/place', { json: input }),
 
+  placeBatch: (input: PlaceBatchInput) =>
+    api.post<Allocation[]>('/allocations/place-batch', { json: input }),
+
   transfer: (input: TransferInput) =>
     api.post<Allocation>('/allocations/transfer', { json: input }),
 
   consume: (input: ConsumeInput) =>
     api.post<Allocation>('/allocations/consume', { json: input }),
+
+  consumeBatch: (input: ConsumeBatchInput) =>
+    api.post<Allocation[]>('/allocations/consume-batch', { json: input }),
+
+  transferBatch: (input: TransferBatchInput) =>
+    api.post<Allocation[]>('/allocations/transfer-batch', { json: input }),
+
+  lotAvailability: (lotId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<LotAvailability>(`/allocations/lot-availability/${lotId}`, {
+      signal: opts?.signal,
+    }),
 
   lotAllocations: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<Allocation[]>(`/allocations/by-lot/${lotId}`, { signal: opts?.signal }),

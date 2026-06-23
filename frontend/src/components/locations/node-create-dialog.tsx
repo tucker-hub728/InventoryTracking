@@ -271,7 +271,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
             </Label>
             <Input
               autoFocus
-              placeholder="Human label"
+              placeholder="Name"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />

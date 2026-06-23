@@ -371,11 +371,14 @@ export function LedgerTable({
                   ? 'Already reversed'
                   : undefined;
               const expiry = expiryStatus(e.exp, nearExpiryThresholdDays);
+              const isTransfer =
+                e.movementType === 'transfer_out' || e.movementType === 'transfer_in';
               return (
                 <TableRow
                   key={e.movementId ?? `${group.lot}-${e.date}-${i}`}
                   className={cn(
                     'group',
+                    isTransfer && 'bg-accent-soft/60',
                     e.isReversal && 'bg-bg-elev/60',
                     e.isReversed && 'opacity-70',
                   )}
@@ -402,7 +405,16 @@ export function LedgerTable({
                   {/* Per-row balance lives on the lot Total row, like the workbook. */}
                   <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
                   <TableCell className="text-xs text-text-2">
-                    <span title={e.locationPath ?? undefined}>{e.location}</span>
+                    <span className="flex items-center gap-1.5">
+                      {isTransfer && (
+                        <span className="shrink-0 rounded bg-accent-soft px-1 py-px text-[9px] font-medium uppercase tracking-wide text-accent">
+                          Transfer
+                        </span>
+                      )}
+                      <span className="truncate" title={e.locationPath ?? undefined}>
+                        {e.location}
+                      </span>
+                    </span>
                   </TableCell>
                   <TableCell className="font-mono text-xs text-text-2">{e.lot}</TableCell>
                   <TableCell className="text-xs">

@@ -163,6 +163,43 @@ async def count_active_allocations(session: AsyncSession, node_id: uuid.UUID) ->
     return int(n)
 
 
+async def active_allocation_counts_by_node(
+    session: AsyncSession,
+) -> dict[uuid.UUID, int]:
+    """``node_id → active-allocation count`` for every storing node (one query).
+
+    Used to populate ``active_allocation_count`` across the LN2 tree in a
+    single pass — the per-node :func:`count_active_allocations` would be one
+    query per node.
+    """
+    rows = await session.execute(
+        select(LotAllocation.location_node_id, func.count())
+        .where(LotAllocation.is_active.is_(True))
+        .group_by(LotAllocation.location_node_id)
+    )
+    return {node_id: int(n) for node_id, n in rows.all()}
+
+
+async def active_allocation_units_by_node(
+    session: AsyncSession,
+) -> dict[uuid.UUID, int]:
+    """``node_id → total active units (SUM qty)`` for every storing node.
+
+    For flat bins, occupancy is the number of units held (one allocation may
+    carry many), not the row count — so this sums ``qty`` rather than counting
+    rows.
+    """
+    rows = await session.execute(
+        select(
+            LotAllocation.location_node_id,
+            func.coalesce(func.sum(LotAllocation.qty), 0),
+        )
+        .where(LotAllocation.is_active.is_(True))
+        .group_by(LotAllocation.location_node_id)
+    )
+    return {node_id: int(total) for node_id, total in rows.all()}
+
+
 async def list_children(
     session: AsyncSession, parent_id: uuid.UUID, *, active_only: bool = True
 ) -> list[LocationNode]:
@@ -217,6 +254,16 @@ def node_to_audit_snapshot(node: LocationNode) -> dict[str, object | None]:
         ),
         "is_active": node.is_active,
     }
+
+
+async def update_node_name(
+    session: AsyncSession, *, node: LocationNode, name: str
+) -> LocationNode:
+    """Rename a node (the user-facing label; ``code`` identity is unchanged).
+    Caller commits."""
+    node.name = name
+    await session.flush()
+    return node
 
 
 async def update_node_grid(
@@ -375,6 +422,27 @@ async def sum_active_alloc_qty_for_lot(
             select(func.coalesce(func.sum(LotAllocation.qty), 0)).where(
                 LotAllocation.lot_id == lot_id,
                 LotAllocation.is_active.is_(True),
+            )
+        )
+    ).scalar_one()
+    return Decimal(total)
+
+
+async def sum_received_qty_for_lot(
+    session: AsyncSession, lot_id: uuid.UUID
+) -> Decimal:
+    """Total quantity ever placed (unit-IN) for a lot — the lifetime cap base.
+
+    Sums the append-only ``receipt`` movements (the only source of unit-IN;
+    ``place`` is the sole writer). Unlike the active-allocation sum, this does
+    NOT shrink when a unit is consumed (the dispense is a separate row), so
+    consumed units keep counting against ``ordered_qty`` and can't be re-placed.
+    """
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(StockMovement.qty_delta), 0)).where(
+                StockMovement.lot_id == lot_id,
+                StockMovement.movement_type == "receipt",
             )
         )
     ).scalar_one()

@@ -27,14 +27,19 @@ from app.inventory import repository as inv_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import (
     AllocationRead,
+    ConsumeBatchRequest,
     ConsumeRequest,
     DedicationUpdateRequest,
     GridUpdateRequest,
+    LotAvailabilityRead,
     NodeCreate,
     NodeMovementRead,
     NodeRead,
     NodeTreeRead,
+    NodeUpdateRequest,
+    PlaceBatchRequest,
     PlaceRequest,
+    TransferBatchRequest,
     TransferRequest,
 )
 from app.models.inventory import StockMovement
@@ -70,6 +75,7 @@ def _node_to_read(
     alloc_count: int = 0,
     inherited_customer_id: uuid.UUID | None = None,
     inherited_product_id: uuid.UUID | None = None,
+    path: str | None = None,
 ) -> NodeRead:
     return NodeRead(
         id=str(node.id),
@@ -97,6 +103,7 @@ def _node_to_read(
         can_store=can_store(node.node_type),
         child_count=child_count,
         active_allocation_count=alloc_count,
+        path=path,
         created_at=node.created_at,
         updated_at=node.updated_at,
     )
@@ -139,12 +146,18 @@ def _ledger_to_read(m: StockMovement) -> NodeMovementRead:
     )
 
 
-def _build_tree(nodes: list[LocationNode]) -> list[NodeTreeRead]:
+def _build_tree(
+    nodes: list[LocationNode],
+    alloc_counts: dict[uuid.UUID, int] | None = None,
+) -> list[NodeTreeRead]:
     """Nest a flat node list into trees keyed by parent_id (roots returned).
 
     Dedication is resolved by walking each node up to its quadrant within the
-    same flat list (no extra queries).
+    same flat list (no extra queries). ``alloc_counts`` (node_id → active
+    allocation count) populates each node's ``active_allocation_count`` so the
+    UI can aggregate Occupied / Utilisation across the subtree.
     """
+    counts = alloc_counts or {}
     by_id: dict[uuid.UUID, LocationNode] = {n.id: n for n in nodes}
     by_parent: dict[uuid.UUID | None, list[LocationNode]] = {}
     for n in nodes:
@@ -166,6 +179,7 @@ def _build_tree(nodes: list[LocationNode]) -> list[NodeTreeRead]:
         base = _node_to_read(
             node,
             child_count=len(kids),
+            alloc_count=counts.get(node.id, 0),
             inherited_customer_id=cust,
             inherited_product_id=prod,
         )
@@ -191,7 +205,8 @@ async def get_ln2_tree(
     from app.models.locations import LN2_LEVELS
 
     nodes = await loc_repo.list_nodes_by_types(db, LN2_LEVELS, active_only=active_only)
-    return _build_tree(nodes)
+    alloc_counts = await loc_repo.active_allocation_counts_by_node(db)
+    return _build_tree(nodes, alloc_counts)
 
 
 @nodes_router.get(
@@ -208,7 +223,9 @@ async def list_flat_locations(
     rows = await loc_repo.list_flat(
         db, flat_category=flat_category, active_only=active_only
     )
-    return [_node_to_read(n) for n in rows]
+    # Flat occupancy = units held (SUM qty), since one allocation may carry many.
+    units = await loc_repo.active_allocation_units_by_node(db)
+    return [_node_to_read(n, alloc_count=units.get(n.id, 0)) for n in rows]
 
 
 @nodes_router.get(
@@ -219,7 +236,11 @@ async def list_flat_locations(
 )
 async def list_storage_targets(db: DBSession) -> list[NodeRead]:
     rows = await loc_repo.list_nodes_by_types(db, ("box", "flat"), active_only=True)
-    return [_node_to_read(n) for n in rows]
+    # Attach the full breadcrumb so the UI can disambiguate same-named boxes.
+    labels = await loc_repo.node_label_map(db)
+    return [
+        _node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows
+    ]
 
 
 @nodes_router.get(
@@ -444,6 +465,41 @@ async def _resolve_dedication_input(
     return None, prod_uuid
 
 
+@nodes_router.patch(
+    "/{node_id}",
+    response_model=NodeRead,
+    summary="Rename a node (the user-facing label; type/code are immutable)",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def update_node(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: NodeUpdateRequest,
+) -> NodeRead:
+    node = await loc_repo.get_node(db, node_id)
+    if node is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+    before = loc_repo.node_to_audit_snapshot(node)
+    updated = await loc_repo.update_node_name(db, node=node, name=payload.name)
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="meta.location_nodes",
+        subject_id=updated.id,
+        subject_label=f"{updated.node_type}:{updated.code}",
+        before=before,
+        after=loc_repo.node_to_audit_snapshot(updated),
+    )
+    # Reload server-side onupdate columns (updated_at) in the async context —
+    # accessing them lazily inside the sync serializer raises MissingGreenlet.
+    await db.refresh(updated)
+    response = _node_to_read(updated)
+    await db.commit()
+    return response
+
+
 @nodes_router.put(
     "/{node_id}/grid",
     response_model=NodeRead,
@@ -491,6 +547,9 @@ async def update_node_grid(
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
+    # Reload server-side onupdate columns (updated_at) in the async context —
+    # accessing them lazily inside the sync serializer raises MissingGreenlet.
+    await db.refresh(updated)
     response = _node_to_read(updated)
     await db.commit()
     return response
@@ -531,6 +590,9 @@ async def update_node_dedication(
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
+    # Reload server-side onupdate columns (updated_at) in the async context —
+    # accessing them lazily inside the sync serializer raises MissingGreenlet.
+    await db.refresh(updated)
     response = _node_to_read(updated)
     await db.commit()
     return response
@@ -579,6 +641,9 @@ async def delete_node(
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
+    # Reload server-side onupdate columns (updated_at) in the async context —
+    # accessing them lazily inside the sync serializer raises MissingGreenlet.
+    await db.refresh(updated)
     response = _node_to_read(updated)
     await db.commit()
     return response
@@ -689,10 +754,11 @@ async def place_lot(
         role=current.role,
     )
 
-    # Capacity: total placed for a lot may not exceed its ordered_qty (when set).
-    # Placing IS the unit-in, so on-hand is created here, not checked against.
+    # Capacity: total *ever* placed for a lot may not exceed its ordered_qty
+    # (when set). Placing IS the unit-in, so we measure against the append-only
+    # receipt ledger — consumed units stay counted and can't free up capacity.
     if lot.ordered_qty is not None:
-        already = await loc_repo.sum_active_alloc_qty_for_lot(db, lot_uuid)
+        already = await loc_repo.sum_received_qty_for_lot(db, lot_uuid)
         if already + payload.qty > lot.ordered_qty:
             raise ValidationError(
                 f"Placing {payload.qty} would exceed the lot's ordered "
@@ -732,6 +798,95 @@ async def place_lot(
     response = _alloc_to_read(alloc)
     await db.commit()
     return response
+
+
+@alloc_router.post(
+    "/place-batch",
+    response_model=list[AllocationRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="Place a lot into several box cells in one e-signed action (§3)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def place_lot_batch(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: PlaceBatchRequest,
+) -> list[AllocationRead]:
+    lot_uuid = _parse_uuid(payload.lot_id, field="lot_id")
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+    lot = await inv_repo.get_lot(db, lot_uuid)
+    if lot is None:
+        raise NotFoundError(f"Lot {payload.lot_id} not found")
+
+    node = await _resolve_storage_node(db, payload.node_id)
+    if not is_grid_node(node.node_type):
+        raise ValidationError(
+            "Batch placement targets a box grid; use /place for a flat location",
+            code="batch_target_not_box",
+        )
+
+    # Each cell takes exactly one unit — validate every target up front.
+    for cell in payload.cells:
+        await _validate_cell_target(
+            db,
+            node=node,
+            grid_row=cell.grid_row,
+            grid_col=cell.grid_col,
+            qty=Decimal("1"),
+            override=payload.override,
+            role=current.role,
+        )
+
+    # Lifetime cap: total placed for the lot (incl. consumed) may not exceed
+    # ordered_qty — measured against the append-only receipt ledger.
+    qty = len(payload.cells)
+    if lot.ordered_qty is not None:
+        already = await loc_repo.sum_received_qty_for_lot(db, lot_uuid)
+        if already + qty > lot.ordered_qty:
+            raise ValidationError(
+                f"Placing {qty} would exceed the lot's ordered "
+                f"{lot.ordered_qty} (already placed {already})",
+                code="place_exceeds_ordered",
+            )
+
+    # One allocation per cell (each cell holds one unit) ...
+    allocs: list[AllocationRead] = []
+    for cell in payload.cells:
+        alloc = await loc_repo.create_allocation(
+            db,
+            lot_id=lot_uuid,
+            location_node_id=node.id,
+            qty=Decimal("1"),
+            grid_row=cell.grid_row,
+            grid_col=cell.grid_col,
+            created_by_user_id=current.id,
+            notes=payload.notes,
+        )
+        allocs.append(_alloc_to_read(alloc))
+
+    # ... but a SINGLE +N receipt for the whole batch (the unit-in is one
+    # logical, singly-signed event — the ledger shows "units in N", not N×1).
+    movement = await loc_repo.create_node_receipt_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot_uuid,
+        to_location_node_id=node.id,
+        qty=Decimal(qty),
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=payload.notes,
+    )
+    # One signature authorises the whole batch — consume it once.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.receipt",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+    )
+    await db.commit()
+    return allocs
 
 
 @alloc_router.post(
@@ -871,6 +1026,230 @@ async def consume_allocation(
     response = _alloc_to_read(updated)
     await db.commit()
     return response
+
+
+async def _load_batch_sources(
+    db: DBSession, allocation_ids: list[str]
+) -> tuple[list[LotAllocation], uuid.UUID, uuid.UUID]:
+    """Fetch + validate the source allocations for a batch unit-out.
+
+    Returns ``(allocations, lot_id, source_node_id)``. A batch must be a
+    single lot and come from a single location (the box grid the user
+    multi-selected, or one flat allocation).
+    """
+    allocs: list[LotAllocation] = []
+    for raw in allocation_ids:
+        au = _parse_uuid(raw, field="allocation_id")
+        a = await loc_repo.get_allocation(db, au)
+        if a is None or not a.is_active:
+            raise NotFoundError(f"Active allocation {raw} not found")
+        allocs.append(a)
+    if len({a.lot_id for a in allocs}) != 1:
+        raise ValidationError("A batch must be a single lot", code="batch_multi_lot")
+    if len({a.location_node_id for a in allocs}) != 1:
+        raise ValidationError(
+            "A batch must come from a single location", code="batch_multi_node"
+        )
+    return allocs, allocs[0].lot_id, allocs[0].location_node_id
+
+
+@alloc_router.post(
+    "/consume-batch",
+    response_model=list[AllocationRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="Consume several cells of one lot in a single e-signed action (§3)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def consume_batch(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: ConsumeBatchRequest,
+) -> list[AllocationRead]:
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+    allocs, lot_id, from_node_id = await _load_batch_sources(db, payload.allocation_ids)
+
+    to_node = await _resolve_storage_node(db, payload.to_node_id)
+    if to_node.node_type != "flat":
+        raise ValidationError(
+            "Consume must target a flat location (lab / Kanban / Materials)",
+            code="consume_target_not_flat",
+        )
+
+    item_id = allocs[0].lot.item_id
+    total = sum((a.qty for a in allocs), Decimal(0))
+    results = [
+        _alloc_to_read(await loc_repo.reduce_allocation(db, allocation=a, qty=a.qty))
+        for a in allocs
+    ]
+    # One dispense for the whole batch — the ledger shows "units out N".
+    movement = await loc_repo.create_node_dispense_movement(
+        db,
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_node_id,
+        to_location_node_id=to_node.id,
+        qty=total,
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=payload.notes,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.dispense",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+    )
+    await db.commit()
+    return results
+
+
+@alloc_router.post(
+    "/transfer-batch",
+    response_model=list[AllocationRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="Transfer units of one lot to a flat or box, signed once (§3)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def transfer_batch(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: TransferBatchRequest,
+) -> list[AllocationRead]:
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+    allocs, lot_id, from_node_id = await _load_batch_sources(db, payload.allocation_ids)
+    item_id = allocs[0].lot.item_id
+    available = sum((a.qty for a in allocs), Decimal(0))
+
+    to_node = await _resolve_storage_node(db, payload.to_node_id)
+    dest_is_box = is_grid_node(to_node.node_type)
+    source_is_box = all(a.grid_row is not None for a in allocs)
+
+    if dest_is_box:
+        if not payload.to_cells:
+            raise ValidationError(
+                "A box destination needs target cells", code="dest_cells_required"
+            )
+        if payload.qty is not None:
+            raise ValidationError(
+                "Omit qty for a box destination (quantity = number of cells)",
+                code="qty_not_allowed",
+            )
+        # Box→box moves every selected source cell (no partial); flat→box may
+        # move fewer units than the flat holds.
+        if source_is_box and len(payload.to_cells) != len(allocs):
+            raise ValidationError(
+                f"Select exactly {len(allocs)} destination cell(s)",
+                code="dest_count_mismatch",
+            )
+        move_qty = Decimal(len(payload.to_cells))
+        for cell in payload.to_cells:
+            await _validate_cell_target(
+                db,
+                node=to_node,
+                grid_row=cell.grid_row,
+                grid_col=cell.grid_col,
+                qty=Decimal("1"),
+                override=payload.override,
+                role=current.role,
+            )
+    else:
+        if payload.to_cells:
+            raise ValidationError(
+                "A flat destination takes no cells", code="cells_not_allowed"
+            )
+        if payload.qty is None:
+            raise ValidationError(
+                "A flat destination needs qty", code="qty_required"
+            )
+        move_qty = Decimal(payload.qty)
+
+    if move_qty > available:
+        raise ValidationError(
+            f"Requested {move_qty} exceeds available {available}",
+            code="transfer_exceeds_available",
+        )
+
+    # Draw the moved quantity from the sources in order.
+    remaining = move_qty
+    for a in allocs:
+        if remaining <= 0:
+            break
+        take = a.qty if a.qty <= remaining else remaining
+        await loc_repo.reduce_allocation(db, allocation=a, qty=take)
+        remaining -= take
+
+    results: list[AllocationRead] = []
+    if dest_is_box:
+        for cell in payload.to_cells:
+            dest = await loc_repo.create_allocation(
+                db,
+                lot_id=lot_id,
+                location_node_id=to_node.id,
+                qty=Decimal("1"),
+                grid_row=cell.grid_row,
+                grid_col=cell.grid_col,
+                created_by_user_id=current.id,
+                notes=payload.notes,
+            )
+            results.append(_alloc_to_read(dest))
+    else:
+        dest = await loc_repo.create_allocation(
+            db,
+            lot_id=lot_id,
+            location_node_id=to_node.id,
+            qty=move_qty,
+            created_by_user_id=current.id,
+            notes=payload.notes,
+        )
+        results.append(_alloc_to_read(dest))
+
+    # One transfer pair for the whole batch.
+    out_leg, _in_leg = await loc_repo.create_node_transfer_pair(
+        db,
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_node_id,
+        to_location_node_id=to_node.id,
+        qty=move_qty,
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=payload.notes,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.transfer",
+        target_table="app.stock_movements",
+        target_id=out_leg.id,
+    )
+    await db.commit()
+    return results
+
+
+@alloc_router.get(
+    "/lot-availability/{lot_id}",
+    response_model=LotAvailabilityRead,
+    summary="How much of a lot may still be placed (ordered − lifetime placed)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def lot_availability(
+    db: DBSession,
+    lot_id: Annotated[uuid.UUID, Path()],
+) -> LotAvailabilityRead:
+    lot = await inv_repo.get_lot(db, lot_id)
+    if lot is None:
+        raise NotFoundError(f"Lot {lot_id} not found")
+    placed = int(await loc_repo.sum_received_qty_for_lot(db, lot_id))
+    remaining = None if lot.ordered_qty is None else lot.ordered_qty - placed
+    return LotAvailabilityRead(
+        lot_id=str(lot_id),
+        ordered_qty=lot.ordered_qty,
+        placed=placed,
+        remaining=remaining,
+    )
 
 
 @alloc_router.get(

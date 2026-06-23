@@ -83,6 +83,15 @@ class NodeCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=2048)
 
 
+class NodeUpdateRequest(BaseModel):
+    """Rename a node. Only the user-facing ``name`` is editable here; the
+    ``code`` identity, type, and parentage are immutable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+
+
 class GridUpdateRequest(BaseModel):
     """Resize a Box's grid. Rejected if it would orphan a placed cell."""
 
@@ -133,6 +142,10 @@ class NodeRead(BaseModel):
     can_store: bool = False
     child_count: int = 0
     active_allocation_count: int = 0
+    # Full breadcrumb from the root (e.g. "Q1 › R01 › Cassette 01 › Box 03").
+    # Populated where the UI needs to disambiguate a node by its ancestry
+    # (e.g. the transfer-destination picker); null elsewhere.
+    path: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -188,6 +201,104 @@ class PlaceRequest(BaseModel):
     override: bool = False
     evidence_id: str
     notes: RequiredComment
+
+
+class BatchCell(BaseModel):
+    """One target cell in a multi-cell box placement (one unit per cell)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grid_row: int = Field(ge=1, le=400)
+    grid_col: int = Field(ge=1, le=400)
+
+
+class PlaceBatchRequest(BaseModel):
+    """Place one lot into several Box cells in a single e-signed action (§3).
+
+    Each listed cell receives exactly one unit; the whole batch is authorised
+    by ONE re-authentication (``evidence_id``, action ``movement.receipt``) and
+    one comment. Cells must be distinct, within the Box grid, and empty unless
+    ``override`` is set. The lifetime cap (total placed ≤ ``ordered_qty``)
+    applies across the batch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    node_id: str
+    cells: list[BatchCell] = Field(min_length=1, max_length=400)
+    override: bool = False
+    evidence_id: str
+    notes: RequiredComment
+
+    @model_validator(mode="after")
+    def _distinct_cells(self) -> PlaceBatchRequest:
+        seen = {(c.grid_row, c.grid_col) for c in self.cells}
+        if len(seen) != len(self.cells):
+            raise ValueError("Cells must be distinct")
+        return self
+
+
+class ConsumeBatchRequest(BaseModel):
+    """Consume several box-cell allocations of ONE lot in a single e-signed
+    action (§3). All source allocations must share the same lot and source
+    node; the whole batch posts a single ``dispense`` of the summed quantity
+    (the ledger shows "units out N", not N×1). ``to_node_id`` is the Flat
+    location that used the units.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allocation_ids: list[str] = Field(min_length=1, max_length=400)
+    to_node_id: str
+    evidence_id: str
+    notes: RequiredComment
+
+
+class TransferBatchRequest(BaseModel):
+    """Move units of ONE lot to a destination, signed once (§3 Transfer).
+
+    Source = one or more allocations sharing a lot + source node. The
+    destination decides how quantity is expressed:
+
+    * **Box** (grid): ``to_cells`` lists the exact empty cells to fill, one
+      unit each — quantity = ``len(to_cells)``. ``qty`` must be null.
+    * **Flat**: ``qty`` is the number of units to move; ``to_cells`` must be
+      empty.
+
+    The whole batch posts a single ``transfer_out`` / ``transfer_in`` pair of
+    the moved quantity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allocation_ids: list[str] = Field(min_length=1, max_length=400)
+    to_node_id: str
+    to_cells: list[BatchCell] = Field(default_factory=list, max_length=400)
+    qty: int | None = Field(default=None, gt=0)
+    override: bool = False
+    evidence_id: str
+    notes: RequiredComment
+
+    @model_validator(mode="after")
+    def _distinct_cells(self) -> TransferBatchRequest:
+        seen = {(c.grid_row, c.grid_col) for c in self.to_cells}
+        if len(seen) != len(self.to_cells):
+            raise ValueError("Destination cells must be distinct")
+        return self
+
+
+class LotAvailabilityRead(BaseModel):
+    """How much of a lot may still be placed — for the unit-in lot picker.
+
+    ``remaining`` is ``ordered_qty - placed`` (lifetime unit-in), or null when
+    the lot has no ``ordered_qty`` cap (placement is unbounded).
+    """
+
+    lot_id: str
+    ordered_qty: int | None = None
+    placed: int = 0
+    remaining: int | None = None
 
 
 class TransferRequest(BaseModel):

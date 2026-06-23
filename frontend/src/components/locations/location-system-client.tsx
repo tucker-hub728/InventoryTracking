@@ -325,7 +325,10 @@ function TreeRow({
         )}
         <button
           type="button"
-          onClick={() => onSelect(node.id)}
+          onClick={() => {
+            onSelect(node.id);
+            if (hasChildren) setOpen((v) => !v);
+          }}
           className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
         >
           <Icon size={14} className="shrink-0 text-text-3" />

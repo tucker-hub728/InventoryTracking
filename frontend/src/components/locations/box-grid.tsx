@@ -33,6 +33,10 @@ export interface BoxGridProps {
   allocations: Allocation[];
   /** Currently highlighted cell, e.g. the one being placed/inspected. */
   selected?: { row: number; col: number } | null;
+  /** Multi-selected empty cells (``"row:col"`` keys) for batch placement. */
+  selectedCells?: Set<string>;
+  /** Multi-selected occupied cells (``"row:col"`` keys) for batch unit-out. */
+  selectedOccupied?: Set<string>;
   onSelectCell?: (cell: {
     row: number;
     col: number;
@@ -51,6 +55,8 @@ export function BoxGrid({
   cols,
   allocations,
   selected,
+  selectedCells,
+  selectedOccupied,
   onSelectCell,
 }: BoxGridProps) {
   const occupied = React.useMemo(() => {
@@ -92,6 +98,8 @@ export function BoxGrid({
                 const col = c + 1;
                 const occ = occupied.get(`${row}:${col}`) ?? null;
                 const isSel = selected?.row === row && selected?.col === col;
+                const isMulti = !occ && (selectedCells?.has(`${row}:${col}`) ?? false);
+                const isOccSel = !!occ && (selectedOccupied?.has(`${row}:${col}`) ?? false);
                 return (
                   <button
                     key={`${row}:${col}`}
@@ -106,8 +114,11 @@ export function BoxGrid({
                       'flex aspect-square min-h-[2.25rem] items-center justify-center rounded text-[11px] font-mono transition-colors',
                       occ
                         ? 'bg-accent text-white hover:brightness-110'
-                        : 'border border-dashed border-border text-text-3 hover:border-accent hover:text-accent',
-                      isSel && 'ring-2 ring-accent ring-offset-1 ring-offset-bg',
+                        : isMulti
+                          ? 'border border-accent bg-accent/15 text-accent'
+                          : 'border border-dashed border-border text-text-3 hover:border-accent hover:text-accent',
+                      (isSel || isMulti || isOccSel) && 'ring-2 ring-accent ring-offset-1 ring-offset-bg',
+                      isOccSel && 'ring-warning',
                     )}
                   >
                     {occ ? cellToken(occ) : ''}
