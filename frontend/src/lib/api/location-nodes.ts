@@ -65,8 +65,10 @@ export const FLAT_CATEGORY_LABEL: Record<FlatCategory, string> = {
   materials: 'Materials',
 };
 
-export const FLAT_CATEGORIES: FlatCategory[] = [
-  'kanban',
+// 'kanban' is intentionally omitted — the Kanban flow was retired, so it is no
+// longer offered when creating a flat location. The type/label are kept so any
+// pre-existing kanban flat locations still render.
+export const FLAT_CATEGORIES: [FlatCategory, ...FlatCategory[]] = [
   'lab',
   'qc',
   'engineering',

@@ -71,7 +71,9 @@ function autoCode(name: string): string {
  *  location. */
 export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props) {
   const [name, setName] = React.useState('');
-  const [flatCategory, setFlatCategory] = React.useState<FlatCategory>('kanban');
+  const [flatCategory, setFlatCategory] = React.useState<FlatCategory>(
+    FLAT_CATEGORIES[0],
+  );
   // For a rack child the user chooses cassette vs cryo_box_rack.
   const childOptions = mode.kind === 'child' ? CHILD_TYPES_OF[mode.parent.node_type] : [];
   const [childType, setChildType] = React.useState<CreatableNodeType>(
@@ -110,7 +112,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
   React.useEffect(() => {
     if (!open) {
       setName('');
-      setFlatCategory('kanban');
+      setFlatCategory(FLAT_CATEGORIES[0]);
       setChildType(childOptions[0] ?? 'box');
       setGridRows('10');
       setGridCols('10');
