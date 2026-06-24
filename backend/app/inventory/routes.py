@@ -20,12 +20,11 @@ from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
-    ApprovedVendorCreate,
-    ApprovedVendorRead,
     ItemCreate,
     ItemListResponse,
     ItemRead,
     ItemUpdate,
+    ItemVendorRead,
     LotCreate,
     LotRead,
     LotStatus,
@@ -37,7 +36,6 @@ from app.inventory.schemas import (
     ReceiptTransactionListResponse,
     ReceiptTransactionRead,
     ReceiveRequest,
-    UnitOfMeasureRead,
     VendorCreate,
     VendorRead,
     VendorUpdate,
@@ -45,28 +43,21 @@ from app.inventory.schemas import (
 from app.locations import repository as loc_repo
 from app.models.inventory import (
     Item,
-    ItemApprovedVendor,
     Lot,
     ReceiptTransaction,
     StockMovement,
-    UnitOfMeasure,
     Vendor,
 )
 from app.security.permissions import RequirePermission
 
 items_router = APIRouter(prefix="/items", tags=["items"])
 vendors_router = APIRouter(prefix="/vendors", tags=["vendors"])
-uoms_router = APIRouter(prefix="/uoms", tags=["uoms"])
 lots_router = APIRouter(prefix="/lots", tags=["lots"])
 movements_router = APIRouter(prefix="/movements", tags=["movements"])
 receiving_router = APIRouter(prefix="/receiving", tags=["receiving"])
 
 
 # ── Serialisers ────────────────────────────────────────────────────────
-
-
-def _uom_to_read(u: UnitOfMeasure) -> UnitOfMeasureRead:
-    return UnitOfMeasureRead(code=u.code, label=u.label, is_discrete=u.is_discrete)
 
 
 def _movement_to_read(
@@ -147,7 +138,10 @@ def _vendor_to_read(v: Vendor) -> VendorRead:
     )
 
 
-def _item_to_read(item: Item) -> ItemRead:
+def _item_to_read(
+    item: Item,
+    valuation: tuple[Decimal, Decimal, Decimal] | None = None,
+) -> ItemRead:
     # The eager ``Item.stock`` relationship joins ``app.v_item_stock``,
     # which is LEFT-joined on the items query so newly-created items
     # without movements still resolve (``qty_on_hand = 0``,
@@ -157,47 +151,72 @@ def _item_to_read(item: Item) -> ItemRead:
     qty_available = stock.qty_available if stock else Decimal("0")
     status_code = stock.status_code if stock else "out_of_stock"
     last_movement_at = stock.last_movement_at if stock else None
-    # ``inv_value_amount`` is qty × unit_price when both are known.
-    # Pricing module / FX / per-package math comes later; this is the
-    # straight-line cost projection for the inventory tile. Kept on
-    # *physical* on-hand — expired stock is still a held asset until it's
-    # scrapped, so it shouldn't vanish from the inventory value.
-    inv_value_amount = (
-        qty_on_hand * item.unit_price_amount
-        if item.unit_price_amount is not None
-        else Decimal("0")
+    # Valuation comes from the lots' unit prices (see
+    # ``inv_repo.compute_item_valuations``): inv_value from on-hand units ×
+    # their lot price, po_value / qty_on_order from ON_ORDER lots. Items not
+    # in the precomputed map default to zero.
+    inv_value_amount, po_value_amount, qty_on_order = valuation or (
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
     )
     return ItemRead(
         id=str(item.id),
         item_number=item.item_number,
         description=item.description,
-        category=item.category,
-        vendor_id=str(item.vendor_id) if item.vendor_id else None,
-        vendor_name=item.vendor.name if item.vendor else None,
+        vendors=[
+            ItemVendorRead(
+                vendor_id=str(iv.vendor_id),
+                vendor_name=iv.vendor.name if iv.vendor else "",
+            )
+            for iv in item.vendors
+        ],
         avg_lead_days=item.avg_lead_days,
         reorder_threshold=item.reorder_threshold,
         near_expiry_threshold_days=item.near_expiry_threshold_days,
-        unit_price_amount=item.unit_price_amount,
-        units_per_package=item.units_per_package,
-        price_per_package_amount=item.price_per_package_amount,
-        uom_code=item.uom_code,
-        po_note=item.po_note,
-        po_due_text=item.po_due_text,
         must_order_flag=item.must_order_flag,
         last_updated_on=item.last_updated_on,
-        notes=item.notes,
         created_at=item.created_at,
         updated_at=item.updated_at,
         created_by_user_id=str(item.created_by_user_id),
         updated_by_user_id=str(item.updated_by_user_id),
-        # Derived from the ledger view.
+        # Derived from the ledger view + lot valuations.
         qty_on_hand=qty_on_hand,
         qty_available=qty_available,
+        qty_on_order=qty_on_order,
         inv_value_amount=inv_value_amount,
+        po_value_amount=po_value_amount,
         status_code=status_code,  # type: ignore[arg-type]
         last_movement_at=last_movement_at,
-        # qty_on_order / po_value_amount stay at zero until the PO module ships.
     )
+
+
+async def _item_read_with_valuation(db: DBSession, item: Item) -> ItemRead:
+    """Serialise a single item, computing its lot-derived valuation."""
+    valuations = await inv_repo.compute_item_valuations(db, [item.id])
+    return _item_to_read(item, valuations.get(item.id))
+
+
+async def _resolve_item_vendor_ids(
+    db: DBSession, vendor_ids: list[str]
+) -> list[uuid.UUID]:
+    """Parse + validate an item's assigned-vendor id list.
+
+    Each entry must be a valid UUID referencing an existing vendor. Returns
+    the de-duplicated UUIDs in input order. 404s on an unknown vendor, 422s
+    on a malformed id.
+    """
+    resolved: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for raw in vendor_ids:
+        vendor_uuid = _parse_uuid_or_422(raw, field="vendor_id")
+        if vendor_uuid in seen:
+            continue
+        if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
+            raise NotFoundError(f"Vendor {raw} not found")
+        seen.add(vendor_uuid)
+        resolved.append(vendor_uuid)
+    return resolved
 
 
 # ── Vendors ────────────────────────────────────────────────────────────
@@ -436,8 +455,9 @@ async def list_items(
         limit=limit,
         offset=offset,
     )
+    valuations = await inv_repo.compute_item_valuations(db, [i.id for i in items])
     return ItemListResponse(
-        items=[_item_to_read(i) for i in items],
+        items=[_item_to_read(i, valuations.get(i.id)) for i in items],
         total=total,
         limit=limit,
         offset=offset,
@@ -461,7 +481,7 @@ async def get_item_by_number(
     item = await inv_repo.get_item_by_number(db, item_number)
     if item is None:
         raise NotFoundError(f"Item {item_number} not found")
-    return _item_to_read(item)
+    return await _item_read_with_valuation(db, item)
 
 
 @items_router.get(
@@ -477,7 +497,7 @@ async def get_item(
     item = await inv_repo.get_item(db, item_id)
     if item is None:
         raise NotFoundError(f"Item {item_id} not found")
-    return _item_to_read(item)
+    return await _item_read_with_valuation(db, item)
 
 
 @items_router.post(
@@ -501,17 +521,8 @@ async def create_item(
             code="item_number_conflict",
         )
 
-    vendor_uuid: uuid.UUID | None = None
-    if payload.vendor_id is not None:
-        try:
-            vendor_uuid = uuid.UUID(payload.vendor_id)
-        except ValueError as exc:
-            raise ValidationError(
-                "vendor_id is not a valid UUID",
-                code="invalid_vendor_id",
-            ) from exc
-        if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
-            raise NotFoundError(f"Vendor {payload.vendor_id} not found")
+    # Validate the assigned-vendor list (each must be an existing vendor).
+    vendor_uuids = await _resolve_item_vendor_ids(db, payload.vendor_ids)
 
     try:
         item = await inv_repo.create_item(
@@ -519,19 +530,12 @@ async def create_item(
             item_number=payload.item_number,
             description=payload.description,
             created_by_user_id=current.id,
-            category=payload.category,
-            vendor_id=vendor_uuid,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
-            unit_price_amount=payload.unit_price_amount,
-            units_per_package=payload.units_per_package,
-            uom_code=payload.uom_code,
-            po_note=payload.po_note,
-            notes=payload.notes,
         )
     except IntegrityError as exc:
-        # Race lost on the partial-unique index, or an unknown FK / CHECK.
+        # Race lost on the partial-unique index.
         await db.rollback()
         msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
         if "uq_items_item_number" in msg:
@@ -539,17 +543,18 @@ async def create_item(
                 f"item_number {payload.item_number} is already in use",
                 code="item_number_conflict",
             ) from exc
-        if "ck_items_item_number" in msg:
-            raise ValidationError(
-                "item_number violates prefix or format rules",
-                code="item_number_invalid",
-            ) from exc
-        if "fk_items_uom_code" in msg:
-            raise ValidationError(
-                f"unknown uom_code: {payload.uom_code}",
-                code="invalid_uom_code",
-            ) from exc
         raise
+
+    if vendor_uuids:
+        await inv_repo.replace_item_vendors(
+            db,
+            item_id=item.id,
+            vendor_ids=vendor_uuids,
+            created_by_user_id=current.id,
+        )
+        # ``item.vendors`` was loaded empty at create; reload it (awaited) so
+        # the response carries the just-assigned vendors.
+        await db.refresh(item, attribute_names=["vendors"])
 
     return _item_to_read(item)
 
@@ -568,9 +573,9 @@ async def update_item(
 ) -> ItemRead:
     """Partial item update + audit-log row.
 
-    ``vendor_id`` is FK-validated (404 on unknown). ``uom_code`` may
-    only be changed while the item has no ledger rows — switching
-    "vial" → "mL" mid-life would reinterpret historic balances.
+    ``vendor_ids``, when present, **replaces** the item's whole assigned-vendor
+    list (each id is FK-validated, 404 on unknown). Omit it to leave vendors
+    unchanged; send ``[]`` to clear them.
     """
     patch = payload.model_dump(exclude_unset=True)
     if not patch:
@@ -580,40 +585,45 @@ async def update_item(
     if item is None or item.deleted_at is not None:
         raise NotFoundError(f"Item {item_id} not found")
 
-    # Resolve vendor_id (may be UUID-string or None to clear).
-    if "vendor_id" in patch:
-        v = patch["vendor_id"]
-        if v is None:
-            patch["vendor_id"] = None
-        elif isinstance(v, str):
-            try:
-                vendor_uuid = uuid.UUID(v)
-            except ValueError as exc:
-                raise ValidationError(
-                    "vendor_id is not a valid UUID",
-                    code="invalid_vendor_id",
-                ) from exc
-            if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
-                raise NotFoundError(f"Vendor {v} not found")
-            patch["vendor_id"] = vendor_uuid
+    # Pull vendor_ids out of the scalar patch — it's a relationship, not a
+    # column. ``None`` (omitted) leaves the list untouched.
+    vendor_ids = patch.pop("vendor_ids", None)
+    vendor_uuids: list[uuid.UUID] | None = None
+    if vendor_ids is not None:
+        vendor_uuids = await _resolve_item_vendor_ids(db, vendor_ids)
 
-    # uom_code change only allowed while no movements exist.
-    if "uom_code" in patch:
-        # Quick check — the v_item_stock view has one row per item with
-        # ``last_movement_at`` set when any movement exists.
-        if item.stock is not None and item.stock.last_movement_at is not None:
-            raise ValidationError(
-                "uom_code cannot change after stock has moved against this item",
-                code="uom_change_after_movement",
-            )
+    if not patch and vendor_uuids is None:
+        raise ValidationError("No fields to update", code="empty_patch")
 
     before = inv_repo.item_to_audit_snapshot(item)
-    updated = await inv_repo.apply_item_patch(
-        db,
-        item=item,
-        patch=patch,
-        updated_by_user_id=current.id,
-    )
+
+    if vendor_uuids is not None:
+        await inv_repo.replace_item_vendors(
+            db,
+            item_id=item.id,
+            vendor_ids=vendor_uuids,
+            created_by_user_id=current.id,
+        )
+
+    if patch:
+        updated = await inv_repo.apply_item_patch(
+            db,
+            item=item,
+            patch=patch,
+            updated_by_user_id=current.id,
+        )
+    else:
+        # Vendors-only change — still bump the updater for the audit trail.
+        item.updated_by_user_id = current.id
+        await db.flush()
+        updated = item
+
+    if vendor_uuids is not None:
+        # The eager ``vendors`` collection was materialised for the
+        # before-snapshot; reload it (awaited) so the after-snapshot / read
+        # reflect the new list rather than the cached one.
+        await db.refresh(updated, attribute_names=["vendors"])
+
     after = inv_repo.item_to_audit_snapshot(updated)
 
     await record_entity_change(
@@ -627,8 +637,7 @@ async def update_item(
         after=after,
     )
 
-    await db.refresh(updated)
-    response = _item_to_read(updated)
+    response = await _item_read_with_valuation(db, updated)
     await db.commit()
     return response
 
@@ -655,7 +664,7 @@ async def delete_item(
     if item is None:
         raise NotFoundError(f"Item {item_id} not found")
     if item.deleted_at is not None:
-        return _item_to_read(item)
+        return await _item_read_with_valuation(db, item)
 
     if item.stock is not None and Decimal(str(item.stock.qty_on_hand)) > 0:
         raise ValidationError(
@@ -684,24 +693,9 @@ async def delete_item(
     )
 
     await db.refresh(deleted)
-    response = _item_to_read(deleted)
+    response = await _item_read_with_valuation(db, deleted)
     await db.commit()
     return response
-
-
-# ── Units of measure ───────────────────────────────────────────────────
-
-
-@uoms_router.get(
-    "",
-    response_model=list[UnitOfMeasureRead],
-    summary="List units of measure (read-only)",
-    # No POST/PATCH — new units land via migration. Items FK to ``code``,
-    # so ad-hoc creates would break referential design.
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
-)
-async def list_uoms(db: DBSession) -> list[UnitOfMeasureRead]:
-    return [_uom_to_read(u) for u in await inv_repo.list_uoms(db)]
 
 
 # ── Lots ───────────────────────────────────────────────────────────────
@@ -905,6 +899,14 @@ async def update_lot(
                 ) from exc
             if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
                 raise NotFoundError(f"Vendor {v} not found")
+            # A lot's vendor must be one of its item's assigned vendors —
+            # same rule as intake / receive (no off-list vendors).
+            if vendor_uuid not in await inv_repo.item_vendor_ids(db, lot.item_id):
+                raise ValidationError(
+                    "Vendor is not one of this item's assigned vendors; add it "
+                    "to the item first",
+                    code="vendor_not_assigned_to_item",
+                )
             patch["vendor_id"] = vendor_uuid
 
     before = inv_repo.lot_to_audit_snapshot(lot)
@@ -1102,18 +1104,9 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
 
 # ── Receipt Admin v2 ───────────────────────────────────────────────────
 #
-# Approved-vendor mapping + the two-step intake (ON_ORDER) → physical
-# receipt (AVAILABLE, with splitting). See docs/modules/receipt-admin.md.
-
-
-def _approved_vendor_to_read(m: ItemApprovedVendor) -> ApprovedVendorRead:
-    return ApprovedVendorRead(
-        item_id=str(m.item_id),
-        vendor_id=str(m.vendor_id),
-        vendor_name=m.vendor.name if m.vendor else "",
-        approval_status=m.approval_status,  # type: ignore[arg-type]
-        created_at=m.created_at,
-    )
+# The two-step intake (ON_ORDER) → physical receipt (AVAILABLE, with
+# splitting). Intake vendors are restricted to the item's assigned vendors
+# (``meta.item_vendors``). See docs/modules/receipt-admin.md.
 
 
 def _receipt_txn_to_read(txn: ReceiptTransaction) -> ReceiptTransactionRead:
@@ -1139,189 +1132,59 @@ def _receipt_txn_to_read(txn: ReceiptTransaction) -> ReceiptTransactionRead:
     )
 
 
-async def _resolve_vendor(
-    db: DBSession,
-    *,
-    vendor_id: str | None,
-    vendor_name: str | None,
-) -> tuple[Vendor, bool]:
-    """Resolve a (mandatory) vendor from an id or a free-text name.
-
-    Returns ``(vendor, created)``. An ``id`` must reference an existing
-    vendor (404 otherwise); a ``name`` reuses a case-insensitive match or
-    creates a new vendor (edge case 2). Exactly one of the two is set —
-    the schema validators already enforce the XOR.
-    """
-    if vendor_id is not None:
-        vendor_uuid = _parse_uuid_or_422(vendor_id, field="vendor_id")
-        vendor = await inv_repo.get_vendor(db, vendor_uuid)
-        if vendor is None:
-            raise NotFoundError(f"Vendor {vendor_id} not found")
-        if not vendor.is_active:
-            raise ValidationError(
-                "Vendor is inactive; pick an active vendor",
-                code="vendor_inactive",
-            )
-        return vendor, False
-    assert vendor_name is not None
-    return await inv_repo.get_or_create_vendor_by_name(db, name=vendor_name)
-
-
-async def _ensure_item_vendor(
+async def _resolve_item_vendor(
     db: DBSession,
     *,
     item_id: uuid.UUID,
-    vendor_id: uuid.UUID,
-    user_id: uuid.UUID,
-) -> bool:
-    """Idempotently attach a vendor to an item's vendor list.
+    vendor_id: str,
+) -> Vendor:
+    """Resolve a vendor that must be one of the item's assigned vendors.
 
-    The item's vendor list IS its approved-vendor list — using a vendor on
-    a receipt attaches it (approved). Returns True when a new mapping was
-    created. The pre-check (plus ``add_approved_vendor``'s flush) makes this
-    safe to call repeatedly within one request, including for two lot lines
-    that share a vendor.
+    Intake / receive can only use vendors already on the item's list
+    (``meta.item_vendors``) — there is no on-the-fly vendor creation. 422s
+    if the vendor isn't assigned to the item or is inactive.
     """
-    if (
-        await inv_repo.get_approved_vendor(db, item_id=item_id, vendor_id=vendor_id)
-    ) is not None:
-        return False
-    await inv_repo.add_approved_vendor(
-        db,
-        item_id=item_id,
-        vendor_id=vendor_id,
-        approval_status="approved",
-        created_by_user_id=user_id,
-    )
-    return True
+    vendor_uuid = _parse_uuid_or_422(vendor_id, field="vendor_id")
+    if vendor_uuid not in await inv_repo.item_vendor_ids(db, item_id):
+        raise ValidationError(
+            "Vendor is not one of this item's assigned vendors; add it to the "
+            "item first",
+            code="vendor_not_assigned_to_item",
+        )
+    vendor = await inv_repo.get_vendor(db, vendor_uuid)
+    if vendor is None:
+        raise NotFoundError(f"Vendor {vendor_id} not found")
+    if not vendor.is_active:
+        raise ValidationError(
+            "Vendor is inactive; pick an active vendor",
+            code="vendor_inactive",
+        )
+    return vendor
 
 
-# ── Approved-vendor mapping (per item) ─────────────────────────────────
+# ── Item vendors (per item) ────────────────────────────────────────────
 
 
 @items_router.get(
-    "/{item_id}/approved-vendors",
-    response_model=list[ApprovedVendorRead],
-    summary="List an item's approved/pending vendors",
+    "/{item_id}/vendors",
+    response_model=list[ItemVendorRead],
+    summary="List an item's assigned vendors",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def list_item_approved_vendors(
+async def list_item_vendors(
     db: DBSession,
     item_id: Annotated[uuid.UUID, Path()],
-) -> list[ApprovedVendorRead]:
+) -> list[ItemVendorRead]:
     if (await inv_repo.get_item(db, item_id)) is None:
         raise NotFoundError(f"Item {item_id} not found")
-    rows = await inv_repo.list_approved_vendors(db, item_id)
-    return [_approved_vendor_to_read(m) for m in rows]
-
-
-@items_router.post(
-    "/{item_id}/approved-vendors",
-    response_model=ApprovedVendorRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Add a vendor to an item's approved list",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def add_item_approved_vendor(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    item_id: Annotated[uuid.UUID, Path()],
-    payload: ApprovedVendorCreate,
-) -> ApprovedVendorRead:
-    item = await inv_repo.get_item(db, item_id)
-    if item is None:
-        raise NotFoundError(f"Item {item_id} not found")
-
-    vendor, created = await _resolve_vendor(
-        db, vendor_id=payload.vendor_id, vendor_name=payload.vendor_name
-    )
-
-    if (
-        await inv_repo.get_approved_vendor(
-            db, item_id=item_id, vendor_id=vendor.id
+    rows = await inv_repo.list_item_vendors(db, item_id)
+    return [
+        ItemVendorRead(
+            vendor_id=str(iv.vendor_id),
+            vendor_name=iv.vendor.name if iv.vendor else "",
         )
-    ) is not None:
-        raise ConflictError(
-            f"Vendor '{vendor.name}' is already mapped to this item",
-            code="approved_vendor_exists",
-        )
-
-    try:
-        mapping = await inv_repo.add_approved_vendor(
-            db,
-            item_id=item_id,
-            vendor_id=vendor.id,
-            approval_status=payload.approval_status,
-            created_by_user_id=current.id,
-        )
-    except IntegrityError as exc:
-        await db.rollback()
-        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-        if "uq_item_approved_vendors_item_vendor" in msg:
-            raise ConflictError(
-                f"Vendor '{vendor.name}' is already mapped to this item",
-                code="approved_vendor_exists",
-            ) from exc
-        raise
-
-    await record_entity_change(
-        db,
-        actor_user_id=current.id,
-        action="created",
-        subject_table="meta.item_approved_vendors",
-        subject_id=mapping.id,
-        subject_label=f"{item.item_number} → {vendor.name}",
-        before=None,
-        after={
-            "item_id": str(item_id),
-            "vendor_id": str(vendor.id),
-            "vendor_name": vendor.name,
-            "approval_status": mapping.approval_status,
-            "vendor_created": created,
-        },
-    )
-    response = _approved_vendor_to_read(mapping)
-    await db.commit()
-    return response
-
-
-@items_router.delete(
-    "/{item_id}/approved-vendors/{vendor_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Remove a vendor from an item's approved list",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
-)
-async def remove_item_approved_vendor(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    item_id: Annotated[uuid.UUID, Path()],
-    vendor_id: Annotated[uuid.UUID, Path()],
-) -> None:
-    mapping = await inv_repo.get_approved_vendor(
-        db, item_id=item_id, vendor_id=vendor_id
-    )
-    if mapping is None:
-        raise NotFoundError(
-            f"Vendor {vendor_id} is not mapped to item {item_id}"
-        )
-    label = f"{item_id} → {mapping.vendor.name if mapping.vendor else vendor_id}"
-    before = {
-        "item_id": str(item_id),
-        "vendor_id": str(vendor_id),
-        "approval_status": mapping.approval_status,
-    }
-    await inv_repo.remove_approved_vendor(db, mapping=mapping)
-    await record_entity_change(
-        db,
-        actor_user_id=current.id,
-        action="deleted",
-        subject_table="meta.item_approved_vendors",
-        subject_id=mapping.id,
-        subject_label=label,
-        before=before,
-        after=None,
-    )
-    await db.commit()
+        for iv in rows
+    ]
 
 
 # ── Receipt transactions (intake → receive) ────────────────────────────
@@ -1412,8 +1275,8 @@ async def create_receipt_intake(
     )
 
     for line in payload.lots:
-        vendor, created = await _resolve_vendor(
-            db, vendor_id=line.vendor_id, vendor_name=line.vendor_name
+        vendor = await _resolve_item_vendor(
+            db, item_id=item_uuid, vendor_id=line.vendor_id
         )
 
         # Lot-number uniqueness pre-check (clean 409; index is the guard).
@@ -1458,15 +1321,8 @@ async def create_receipt_intake(
                 ) from exc
             raise
 
-        # Attach the vendor to the item (idempotent). The item's vendor list
-        # IS its approved-vendor list, so any vendor used here becomes one of
-        # the item's vendors. ``created`` (a brand-new vendor record) is only
-        # used for the audit context below.
-        await _ensure_item_vendor(
-            db, item_id=item_uuid, vendor_id=vendor.id, user_id=current.id
-        )
-
-        # Audit the vendor assignment + lot creation (v2 §8).
+        # Audit the lot creation (v2 §8). The vendor is guaranteed to be one
+        # of the item's assigned vendors (validated above) — no auto-add.
         await record_entity_change(
             db,
             actor_user_id=current.id,
@@ -1476,10 +1332,7 @@ async def create_receipt_intake(
             subject_label=lot.lot_number,
             before=None,
             after=inv_repo.lot_to_audit_snapshot(lot),
-            context={
-                "receipt_transaction_id": str(txn.id),
-                "vendor_created": created,
-            },
+            context={"receipt_transaction_id": str(txn.id)},
         )
 
     await record_entity_change(
@@ -1554,11 +1407,12 @@ async def receive_transaction(
 
         child_numbers: set[str] = set()
         for idx, split in enumerate(line.splits):
-            # Vendor: explicit override, else inherit the on-order lot's vendor
-            # (which intake guaranteed is set).
-            if split.vendor_id is not None or split.vendor_name is not None:
-                vendor, _created = await _resolve_vendor(
-                    db, vendor_id=split.vendor_id, vendor_name=split.vendor_name
+            # Vendor: explicit override (must be one of the item's assigned
+            # vendors), else inherit the on-order lot's vendor (intake
+            # guaranteed it is set and assigned).
+            if split.vendor_id is not None:
+                vendor = await _resolve_item_vendor(
+                    db, item_id=txn.item_id, vendor_id=split.vendor_id
                 )
                 vendor_id = vendor.id
             else:
@@ -1568,12 +1422,6 @@ async def receive_transaction(
                         code="vendor_required",
                     )
                 vendor_id = lot.vendor_id
-
-            # Attach the (possibly overridden) vendor to the item — keeps the
-            # item's vendor list complete as supplier lots are split out.
-            await _ensure_item_vendor(
-                db, item_id=txn.item_id, vendor_id=vendor_id, user_id=current.id
-            )
 
             if idx == 0:
                 # Receive into the original lot.
@@ -1586,10 +1434,16 @@ async def receive_transaction(
                 patch: dict[str, object] = {"status": "available"}
                 if split.unit_price is not None:
                     patch["unit_price_amount"] = split.unit_price
+                if split.quantity is not None:
+                    patch["ordered_qty"] = split.quantity
                 if split.po_reference is not None:
                     patch["po_reference"] = split.po_reference
                 if vendor_id != lot.vendor_id:
                     patch["vendor_id"] = vendor_id
+                # Full snapshot before/after so the audit diff captures the
+                # qty / price / vendor edits made at receipt — not just the
+                # status flip.
+                before_snap = inv_repo.lot_to_audit_snapshot(lot)
                 target_lot = await inv_repo.apply_lot_patch(
                     db, lot=lot, patch=patch, updated_by_user_id=current.id
                 )
@@ -1601,8 +1455,8 @@ async def receive_transaction(
                     subject_table="app.lots",
                     subject_id=target_lot.id,
                     subject_label=target_lot.lot_number,
-                    before={"status": "on_order"},
-                    after={"status": "available"},
+                    before=before_snap,
+                    after=inv_repo.lot_to_audit_snapshot(target_lot),
                     context={"receipt_transaction_id": str(txn.id)},
                     signature_id=evidence_uuid,
                 )
@@ -1640,6 +1494,7 @@ async def receive_transaction(
                     status="available",
                     notes=split.notes,
                     unit_price_amount=split.unit_price,
+                    ordered_qty=split.quantity,
                     po_reference=split.po_reference or lot.po_reference,
                     receipt_transaction_id=txn.id,
                     parent_lot_id=lot.id,

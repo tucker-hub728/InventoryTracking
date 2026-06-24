@@ -22,8 +22,6 @@ export interface InventoryItem {
    *  reorder and forecasting; expired stock stays counted in ``qty``. */
   qtyAvailable: number;
   months: number | null;
-  poNote: string;
-  poDue: string;
   onOrder: number;
   mustOrder: number;
   /** Per-item near-expiry window (days) driving the ledger expiry colours. */

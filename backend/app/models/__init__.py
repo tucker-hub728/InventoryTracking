@@ -15,12 +15,11 @@ from app.models.forecast import ForecastEntry
 from app.models.identity import Role, User
 from app.models.inventory import (
     Item,
-    ItemApprovedVendor,
     ItemStock,
+    ItemVendor,
     Lot,
     ReceiptTransaction,
     StockMovement,
-    UnitOfMeasure,
     Vendor,
 )
 from app.models.locations import (
@@ -35,8 +34,8 @@ __all__ = [
     "CustomerProduct",
     "ForecastEntry",
     "Item",
-    "ItemApprovedVendor",
     "ItemStock",
+    "ItemVendor",
     "LocationNode",
     "Lot",
     "LotAllocation",
@@ -47,7 +46,6 @@ __all__ = [
     "ReceiptTransaction",
     "Role",
     "StockMovement",
-    "UnitOfMeasure",
     "User",
     "Vendor",
 ]

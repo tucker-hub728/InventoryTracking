@@ -21,34 +21,33 @@ import { api } from './client';
 
 export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
 
+/** One vendor assigned to an item (part of ``ApiItem.vendors``). */
+export interface ApiItemVendor {
+  vendor_id: string;
+  vendor_name: string;
+}
+
 /** Raw API row — numeric fields come back as strings (Postgres NUMERIC). */
 export interface ApiItem {
   id: string;
   item_number: string;
   description: string;
-  /** Free-form optional grouping label (Requirements v2). */
-  category: string | null;
-  vendor_id: string | null;
-  vendor_name: string | null;
+  /** Assigned vendors — the vendors this item can be received against. */
+  vendors: ApiItemVendor[];
   avg_lead_days: number | null;
   reorder_threshold: string;
   near_expiry_threshold_days: number;
-  unit_price_amount: string | null;
-  units_per_package: number | null;
-  price_per_package_amount: string | null;
-  uom_code: string;
-  po_note: string | null;
-  po_due_text: string | null;
   must_order_flag: boolean;
   last_updated_on: string | null;
-  notes: string | null;
   created_at: string;
   updated_at: string;
   created_by_user_id: string;
   updated_by_user_id: string;
   qty_on_hand: string;
   qty_on_order: string;
+  /** Inventory $ — Σ(on-hand units × their lot's unit price). Lot-derived. */
   inv_value_amount: string;
+  /** On-order $ — Σ(ordered qty × unit price) over ON_ORDER lots. Lot-derived. */
   po_value_amount: string;
   status_code: ApiItemStatus;
   last_movement_at: string | null;
@@ -83,59 +82,26 @@ export interface ListItemsParams {
 export interface ItemCreateInput {
   item_number: string;
   description: string;
-  category?: string | null;
-  vendor_id?: string | null;
+  /** Assigned vendors (zero-or-more). The only vendors the item can later
+   *  be received against. */
+  vendor_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
   near_expiry_threshold_days?: number;
-  unit_price_amount?: number | null;
-  units_per_package?: number | null;
-  uom_code?: string;
-  po_note?: string | null;
-  notes?: string | null;
 }
 
 /**
- * Partial item update. ``item_number`` is intentionally not editable
- * — it's the immutable human handle. ``uom_code`` can only change
- * while no movements exist (server returns 422 ``uom_change_after_movement``).
+ * Partial item update. ``item_number`` is intentionally not editable —
+ * it's the immutable human handle. ``vendor_ids``, when present, REPLACES
+ * the whole assigned-vendor list (omit to leave unchanged; ``[]`` clears).
  */
 export interface ItemUpdateInput {
   description?: string;
-  category?: string | null;
-  vendor_id?: string | null;
+  vendor_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
   near_expiry_threshold_days?: number;
-  unit_price_amount?: number | null;
-  units_per_package?: number | null;
-  uom_code?: string;
-  po_note?: string | null;
-  notes?: string | null;
   must_order_flag?: boolean;
-}
-
-// ── Approved vendors (Requirements v2 §3) ──────────────────────────────
-
-export type VendorApprovalStatus = 'approved' | 'pending';
-
-export interface ApprovedVendor {
-  item_id: string;
-  vendor_id: string;
-  vendor_name: string;
-  approval_status: VendorApprovalStatus;
-  created_at: string;
-}
-
-/**
- * Add a vendor to an item's approved list. Provide an existing
- * ``vendor_id`` OR a free-text ``vendor_name`` (a matching active vendor
- * is reused, otherwise created) — exactly one of the two.
- */
-export interface ApprovedVendorCreateInput {
-  vendor_id?: string | null;
-  vendor_name?: string | null;
-  approval_status?: VendorApprovalStatus;
 }
 
 // ── Client ─────────────────────────────────────────────────────────────
@@ -183,15 +149,11 @@ export const itemsApi = {
    */
   remove: (id: string) => api.delete<ApiItem>(`/items/${id}`),
 
-  // ── Approved-vendor mapping ──────────────────────────────────────────
-  listApprovedVendors: (itemId: string, opts?: { signal?: AbortSignal }) =>
-    api.get<ApprovedVendor[]>(`/items/${itemId}/approved-vendors`, {
+  // ── Assigned vendors ─────────────────────────────────────────────────
+  /** List an item's assigned vendors (the only ones it can be received
+   *  against). To change the list, PATCH the item with ``vendor_ids``. */
+  listVendors: (itemId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiItemVendor[]>(`/items/${itemId}/vendors`, {
       signal: opts?.signal,
     }),
-
-  addApprovedVendor: (itemId: string, input: ApprovedVendorCreateInput) =>
-    api.post<ApprovedVendor>(`/items/${itemId}/approved-vendors`, { json: input }),
-
-  removeApprovedVendor: (itemId: string, vendorId: string) =>
-    api.delete<void>(`/items/${itemId}/approved-vendors/${vendorId}`),
 };

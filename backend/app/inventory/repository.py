@@ -17,23 +17,17 @@ from sqlalchemy.orm import selectinload
 
 from app.models.inventory import (
     Item,
-    ItemApprovedVendor,
     ItemStock,
+    ItemVendor,
     Lot,
     ReceiptTransaction,
     StockMovement,
-    UnitOfMeasure,
     Vendor,
 )
 
 # Whitelist for the ``status`` query filter. Aligned with the
 # ``status_code`` values produced by ``app.v_item_stock``.
 ITEM_STATUS_CODES: tuple[str, ...] = ("available", "low_stock", "out_of_stock")
-
-
-async def list_uoms(session: AsyncSession) -> list[UnitOfMeasure]:
-    stmt = select(UnitOfMeasure).order_by(UnitOfMeasure.code)
-    return list((await session.execute(stmt)).scalars().all())
 
 
 # ── Vendors ────────────────────────────────────────────────────────────
@@ -135,7 +129,15 @@ def _apply_filters(
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
     if vendor_id is not None:
-        stmt = stmt.where(Item.vendor_id == vendor_id)
+        # Vendors live in ``meta.item_vendors`` now — filter items that have
+        # the requested vendor in their assigned list.
+        stmt = stmt.where(
+            Item.id.in_(
+                select(ItemVendor.item_id).where(
+                    ItemVendor.vendor_id == vendor_id
+                )
+            )
+        )
     if q:
         like = f"%{q.lower()}%"
         stmt = stmt.where(
@@ -217,49 +219,28 @@ async def create_item(
     item_number: str,
     description: str,
     created_by_user_id: uuid.UUID,
-    category: str | None = None,
-    vendor_id: uuid.UUID | None = None,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
     near_expiry_threshold_days: int = 30,
-    unit_price_amount: Decimal | None = None,
-    units_per_package: int | None = None,
-    uom_code: str = "unit",
-    po_note: str | None = None,
-    notes: str | None = None,
 ) -> Item:
-    """Insert an item row. Caller commits.
+    """Insert an item row (no vendors yet). Caller commits.
 
-    ``price_per_package_amount`` is computed at the API layer when both
-    inputs are present — the doc's invariant trigger (§6.1) will be
-    added when ``items`` writes go through the price-aware UI.
+    Assigned vendors are written separately via ``replace_item_vendors`` so
+    the FK validation / audit happen at the route layer.
     """
-    price_per_package = (
-        unit_price_amount * units_per_package
-        if unit_price_amount is not None and units_per_package is not None
-        else None
-    )
     item = Item(
         item_number=item_number,
         description=description,
-        category=category,
-        vendor_id=vendor_id,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
         near_expiry_threshold_days=near_expiry_threshold_days,
-        unit_price_amount=unit_price_amount,
-        units_per_package=units_per_package,
-        price_per_package_amount=price_per_package,
-        uom_code=uom_code,
-        po_note=po_note,
-        notes=notes,
         created_by_user_id=created_by_user_id,
         updated_by_user_id=created_by_user_id,
     )
     session.add(item)
     await session.flush()
-    # Re-read so joined-loaded relationships (vendor, uom) populate. The
-    # naive ORM returns a half-hydrated instance after flush.
+    # Re-read so eager relationships (vendors, stock) populate. The naive
+    # ORM returns a half-hydrated instance after flush.
     refreshed = await get_item(session, item.id)
     assert refreshed is not None
     return refreshed
@@ -273,28 +254,12 @@ async def apply_item_patch(
     updated_by_user_id: uuid.UUID,
 ) -> Item:
     """Apply an item PATCH dict and bump ``updated_by_user_id``. Caller
-    commits.
-
-    ``price_per_package_amount`` is **derived** from
-    ``unit_price_amount × units_per_package`` whenever either input is
-    touched (or both, or one of them is cleared). Kept in sync here so
-    every read past this point reflects the relationship the long-spec
-    will eventually enforce by trigger.
+    commits. ``patch`` carries scalar item columns only — vendor changes go
+    through ``replace_item_vendors``.
     """
     for col, value in patch.items():
         setattr(item, col, value)
     item.updated_by_user_id = updated_by_user_id
-    # Recompute price_per_package if either input was in the patch.
-    if "unit_price_amount" in patch or "units_per_package" in patch:
-        if (
-            item.unit_price_amount is not None
-            and item.units_per_package is not None
-        ):
-            item.price_per_package_amount = (
-                item.unit_price_amount * item.units_per_package
-            )
-        else:
-            item.price_per_package_amount = None
     await session.flush()
     refreshed = await get_item(session, item.id)
     assert refreshed is not None
@@ -327,21 +292,81 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     return {
         "item_number": item.item_number,
         "description": item.description,
-        "category": item.category,
-        "vendor_id": str(item.vendor_id) if item.vendor_id else None,
+        "vendor_ids": sorted(str(iv.vendor_id) for iv in item.vendors),
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
         "near_expiry_threshold_days": item.near_expiry_threshold_days,
-        "unit_price_amount": (
-            str(item.unit_price_amount) if item.unit_price_amount is not None else None
-        ),
-        "units_per_package": item.units_per_package,
-        "uom_code": item.uom_code,
-        "po_note": item.po_note,
-        "notes": item.notes,
         "must_order_flag": item.must_order_flag,
         "deleted_at": item.deleted_at.isoformat() if item.deleted_at else None,
     }
+
+
+async def compute_item_valuations(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, tuple[Decimal, Decimal, Decimal]]:
+    """Return ``{item_id: (inv_value, po_value, qty_on_order)}`` for the given
+    items, all derived from the lots' unit prices (the item no longer carries
+    a price).
+
+      * ``inv_value``   — Σ over the item's on-hand units of (unit × its lot's
+        ``unit_price_amount``). Computed as Σ(``movement.qty_delta`` ×
+        ``lot.unit_price_amount``), which is algebraically Σ(per-lot on-hand ×
+        per-lot price) since price is constant per lot. Tracks ``v_item_stock``'s
+        *physical* on-hand (expired stock still counts as a held asset).
+      * ``po_value``    — Σ over the item's ON_ORDER lots of
+        (``ordered_qty`` × ``unit_price_amount``).
+      * ``qty_on_order``— Σ ``ordered_qty`` over the item's ON_ORDER lots.
+
+    Items with no priced stock and no on-order lots are absent from the dict;
+    callers default the missing entries to zero.
+    """
+    if not item_ids:
+        return {}
+
+    rows: dict[uuid.UUID, list[Decimal]] = {}
+
+    def _row(item_id: uuid.UUID) -> list[Decimal]:
+        return rows.setdefault(
+            item_id, [Decimal("0"), Decimal("0"), Decimal("0")]
+        )
+
+    inv_stmt = (
+        select(
+            StockMovement.item_id,
+            func.coalesce(
+                func.sum(StockMovement.qty_delta * Lot.unit_price_amount),
+                0,
+            ),
+        )
+        .join(Lot, Lot.id == StockMovement.lot_id)
+        .where(
+            StockMovement.item_id.in_(item_ids),
+            Lot.unit_price_amount.is_not(None),
+        )
+        .group_by(StockMovement.item_id)
+    )
+    for item_id, inv_value in (await session.execute(inv_stmt)).all():
+        _row(item_id)[0] = Decimal(inv_value)
+
+    po_stmt = (
+        select(
+            Lot.item_id,
+            func.coalesce(func.sum(Lot.ordered_qty * Lot.unit_price_amount), 0),
+            func.coalesce(func.sum(Lot.ordered_qty), 0),
+        )
+        .where(
+            Lot.item_id.in_(item_ids),
+            Lot.status == "on_order",
+            Lot.deleted_at.is_(None),
+        )
+        .group_by(Lot.item_id)
+    )
+    for item_id, po_value, qty_on_order in (await session.execute(po_stmt)).all():
+        row = _row(item_id)
+        row[1] = Decimal(po_value)
+        row[2] = Decimal(qty_on_order)
+
+    return {k: (v[0], v[1], v[2]) for k, v in rows.items()}
 
 
 # ── Lots ───────────────────────────────────────────────────────────────
@@ -604,151 +629,64 @@ async def get_movement(
     ).scalar_one_or_none()
 
 
-# ── Receipt Admin v2 ───────────────────────────────────────────────────
+# ── Item vendors ───────────────────────────────────────────────────────
 #
-# Approved-vendor mapping, dynamic vendor resolution, and the receipt
-# transaction header. See docs/modules/receipt-admin.md.
+# An item's assigned-vendor list (``meta.item_vendors``). These are the only
+# vendors an item can be received against.
 
 
-async def get_or_create_vendor_by_name(
-    session: AsyncSession, *, name: str
-) -> tuple[Vendor, bool]:
-    """Resolve a vendor by case-insensitive name, creating it if absent.
-
-    Returns ``(vendor, created)``. Mirrors the dynamic-vendor edge case
-    (v2 §6 case 2): an unknown vendor typed during a receipt is created
-    on the fly. Caller commits.
-    """
-    existing = await get_vendor_by_name(session, name)
-    if existing is not None:
-        return existing, False
-    vendor = await create_vendor(session, name=name)
-    return vendor, True
-
-
-async def item_has_approved_vendors(
+async def list_item_vendors(
     session: AsyncSession, item_id: uuid.UUID
-) -> bool:
-    """True iff the item has at least one ``approved`` vendor mapping.
-
-    Drives the "suggest only approved vendors" behaviour and the
-    ``unverified_vendor_for_item`` flag (only meaningful when a list exists).
-    """
+) -> list[ItemVendor]:
+    """Assigned vendors for an item (oldest first), vendor joined."""
     stmt = (
-        select(ItemApprovedVendor.id)
-        .where(
-            ItemApprovedVendor.item_id == item_id,
-            ItemApprovedVendor.approval_status == "approved",
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).first() is not None
-
-
-async def is_vendor_approved_for_item(
-    session: AsyncSession, *, item_id: uuid.UUID, vendor_id: uuid.UUID
-) -> bool:
-    """True iff there's an ``approved`` mapping for this (item, vendor)."""
-    stmt = (
-        select(ItemApprovedVendor.id)
-        .where(
-            ItemApprovedVendor.item_id == item_id,
-            ItemApprovedVendor.vendor_id == vendor_id,
-            ItemApprovedVendor.approval_status == "approved",
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).first() is not None
-
-
-async def vendor_used_on_item_before(
-    session: AsyncSession, *, item_id: uuid.UUID, vendor_id: uuid.UUID
-) -> bool:
-    """True iff a (non-deleted) lot for this item already used this vendor.
-
-    Used to compute ``vendor_not_previously_associated_with_item`` — a lot
-    is "not previously associated" when neither a prior lot nor any
-    approved/pending mapping links the vendor to the item.
-    """
-    lot_stmt = (
-        select(Lot.id)
-        .where(
-            Lot.item_id == item_id,
-            Lot.vendor_id == vendor_id,
-            Lot.deleted_at.is_(None),
-        )
-        .limit(1)
-    )
-    if (await session.execute(lot_stmt)).first() is not None:
-        return True
-    map_stmt = (
-        select(ItemApprovedVendor.id)
-        .where(
-            ItemApprovedVendor.item_id == item_id,
-            ItemApprovedVendor.vendor_id == vendor_id,
-        )
-        .limit(1)
-    )
-    return (await session.execute(map_stmt)).first() is not None
-
-
-async def list_approved_vendors(
-    session: AsyncSession, item_id: uuid.UUID
-) -> list[ItemApprovedVendor]:
-    """Approved + pending vendor mappings for an item (approved first)."""
-    stmt = (
-        select(ItemApprovedVendor)
-        .where(ItemApprovedVendor.item_id == item_id)
-        .order_by(
-            # 'approved' sorts before 'pending' alphabetically — good enough.
-            ItemApprovedVendor.approval_status,
-            ItemApprovedVendor.created_at,
-        )
+        select(ItemVendor)
+        .where(ItemVendor.item_id == item_id)
+        .order_by(ItemVendor.created_at)
     )
     return list((await session.execute(stmt)).scalars().unique().all())
 
 
-async def get_approved_vendor(
-    session: AsyncSession, *, item_id: uuid.UUID, vendor_id: uuid.UUID
-) -> ItemApprovedVendor | None:
-    stmt = select(ItemApprovedVendor).where(
-        ItemApprovedVendor.item_id == item_id,
-        ItemApprovedVendor.vendor_id == vendor_id,
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
+async def item_vendor_ids(
+    session: AsyncSession, item_id: uuid.UUID
+) -> set[uuid.UUID]:
+    """The set of vendor ids assigned to an item — used to validate that an
+    intake / receive vendor is one of the item's vendors.
+    """
+    stmt = select(ItemVendor.vendor_id).where(ItemVendor.item_id == item_id)
+    return {row for row in (await session.execute(stmt)).scalars().all()}
 
 
-async def add_approved_vendor(
+async def replace_item_vendors(
     session: AsyncSession,
     *,
     item_id: uuid.UUID,
-    vendor_id: uuid.UUID,
-    approval_status: str,
+    vendor_ids: list[uuid.UUID],
     created_by_user_id: uuid.UUID,
-) -> ItemApprovedVendor:
-    """Insert an item↔vendor mapping. Caller handles the unique-violation
-    path (already-mapped) and commits.
-    """
-    mapping = ItemApprovedVendor(
-        item_id=item_id,
-        vendor_id=vendor_id,
-        approval_status=approval_status,
-        created_by_user_id=created_by_user_id,
-    )
-    session.add(mapping)
-    await session.flush()
-    refreshed = await get_approved_vendor(
-        session, item_id=item_id, vendor_id=vendor_id
-    )
-    assert refreshed is not None
-    return refreshed
-
-
-async def remove_approved_vendor(
-    session: AsyncSession, *, mapping: ItemApprovedVendor
 ) -> None:
-    """Hard-delete a mapping row (it carries no history). Caller commits."""
-    await session.delete(mapping)
+    """Make the item's assigned-vendor list exactly ``vendor_ids``.
+
+    Adds the missing ones, removes the extras, leaves unchanged rows alone
+    (so ``created_at`` / ``created_by`` are preserved for kept vendors).
+    Caller commits. Vendor FKs are assumed validated by the caller.
+    """
+    target = list(dict.fromkeys(vendor_ids))  # de-dup, keep order
+    existing = {iv.vendor_id: iv for iv in await list_item_vendors(session, item_id)}
+
+    for vid in target:
+        if vid not in existing:
+            session.add(
+                ItemVendor(
+                    item_id=item_id,
+                    vendor_id=vid,
+                    created_by_user_id=created_by_user_id,
+                )
+            )
+    target_set = set(target)
+    for vid, iv in existing.items():
+        if vid not in target_set:
+            await session.delete(iv)
+
     await session.flush()
 
 

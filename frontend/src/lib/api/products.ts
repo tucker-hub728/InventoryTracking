@@ -54,7 +54,6 @@ export interface ProductMaterial {
   item_id: string;
   item_number: string;
   item_name: string;
-  uom_code: string;
   qty_per_run: string;
   qty_on_hand: string;
   /** Available = on-hand minus date-expired lots. What "Available" and the

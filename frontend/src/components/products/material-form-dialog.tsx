@@ -119,11 +119,6 @@ export function MaterialFormDialog({
     [items, excludeItemIds],
   );
 
-  // Unit label for the qty suffix (from the edited material or the picked item).
-  const uom = isEdit
-    ? material?.uom_code
-    : items.find((i) => i.id === itemId)?.uom_code;
-
   const onSubmit = async (values: FormValues): Promise<void> => {
     setSubmitError(null);
     try {
@@ -185,8 +180,7 @@ export function MaterialFormDialog({
                     Available:{' '}
                     <span className="font-mono text-text-2">
                       {formatNumber(Number(material.qty_available))}
-                    </span>{' '}
-                    {material.uom_code}
+                    </span>
                   </span>
                   {statusMeta && (
                     <Badge tone={statusMeta.tone} dot>
@@ -253,7 +247,7 @@ export function MaterialFormDialog({
                   aria-invalid={Boolean(errors.qty_per_run)}
                   {...register('qty_per_run')}
                 />
-                {uom && <span className="shrink-0 text-sm text-text-3">{uom} / run</span>}
+                <span className="shrink-0 text-sm text-text-3">/ run</span>
               </div>
               {errors.qty_per_run && (
                 <p role="alert" className="text-xs text-danger">

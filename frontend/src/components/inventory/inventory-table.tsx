@@ -38,7 +38,7 @@ const COLUMNS: Column[] = [
   { key: 'id', label: 'Item ID', sortKey: 'id', className: 'w-[110px]' },
   { key: 'desc', label: 'Name', sortKey: 'desc' },
   { key: 'vendor', label: 'Vendor', className: 'w-[160px]' },
-  { key: 'qty', label: 'Units', align: 'right', className: 'w-[80px]' },
+  { key: 'qty', label: 'Units', align: 'right', className: 'w-[96px]' },
   { key: 'onOrder', label: 'On PO', align: 'right', className: 'w-[80px]' },
   { key: 'threshold', label: 'Reorder', align: 'right', className: 'w-[90px]' },
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter
@@ -111,10 +111,13 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
       <TableBody>
         {rows.map((item) => {
           const lowQty = item.qtyAvailable > 0 && item.qtyAvailable <= item.threshold;
-          // Units shown = available (excludes date-expired lots). Any
-          // expired remainder is still physically on hand — surface it
-          // as a hint so it stays visible from the list, not just detail.
-          const expired = item.qty - item.qtyAvailable;
+          // Units shown = available (excludes date-expired lots), clamped at 0
+          // so a data artifact (expired-lot units exceeding on-hand) never
+          // renders a confusing negative. Any expired remainder is still
+          // physically on hand — surfaced as a hint so it's visible from the
+          // list, not just detail.
+          const availableShown = Math.max(0, item.qtyAvailable);
+          const expired = Math.max(0, item.qty - item.qtyAvailable);
           return (
             <TableRow key={item.id} className="group">
               <TableCell className="font-mono text-xs">
@@ -139,20 +142,22 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
               </TableCell>
               <TableCell
                 className={cn(
-                  'text-right font-mono text-xs font-semibold',
-                  item.qtyAvailable === 0 && 'text-danger',
+                  'text-right font-mono text-xs',
+                  item.qtyAvailable <= 0 && 'text-danger',
                   lowQty && 'text-warning',
                 )}
               >
-                {formatNumber(item.qtyAvailable)}
-                {expired > 0 && (
-                  <span
-                    className="ml-1 font-normal text-text-3"
-                    title={`${formatNumber(expired)} expired unit(s) on hand (excluded from available)`}
-                  >
-                    (+{formatNumber(expired)} exp)
-                  </span>
-                )}
+                <div className="flex flex-col items-end leading-tight">
+                  <span className="font-semibold">{formatNumber(availableShown)}</span>
+                  {expired > 0 && (
+                    <span
+                      className="text-[10px] font-normal text-text-3"
+                      title={`${formatNumber(expired)} expired unit(s) on hand (excluded from available)`}
+                    >
+                      +{formatNumber(expired)} exp
+                    </span>
+                  )}
+                </div>
               </TableCell>
               <TableCell className="text-right font-mono text-xs text-text-2">
                 {item.onOrder > 0 ? formatNumber(item.onOrder) : '—'}

@@ -26,7 +26,7 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { itemsApi, type ApiItemVendor } from '@/lib/api/items';
 import {
   receivingApi,
   type ReceiptTransaction,
@@ -35,7 +35,6 @@ import {
   type ReceiveSplitInput,
 } from '@/lib/api/receiving';
 
-const NEW_VENDOR = '__new__';
 // Radix <Select.Item> forbids an empty-string value, so the "same as the
 // lot's vendor" choice uses a sentinel (not '').
 const SAME_VENDOR = '__same__';
@@ -44,9 +43,9 @@ interface SplitDraft {
   key: string;
   isChild: boolean;
   lot_number: string;
-  vendorChoice: string; // SAME_VENDOR | vendor id | NEW_VENDOR
-  vendor_name: string;
+  vendorChoice: string; // SAME_VENDOR | vendor id
   unit_price: string;
+  quantity: string;
 }
 
 let _seq = 0;
@@ -57,8 +56,8 @@ function newSplit(child: boolean): SplitDraft {
     isChild: child,
     lot_number: '',
     vendorChoice: SAME_VENDOR,
-    vendor_name: '',
     unit_price: '',
+    quantity: '',
   };
 }
 
@@ -78,7 +77,8 @@ interface Props {
  * (action ``receipt.confirm``).
  */
 export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: Props) {
-  const [vendors, setVendors] = React.useState<Vendor[]>([]);
+  // The item's assigned vendors — the only allowed split-vendor overrides.
+  const [vendors, setVendors] = React.useState<ApiItemVendor[]>([]);
   const [splitsByLot, setSplitsByLot] = React.useState<Record<string, SplitDraft[]>>(
     {},
   );
@@ -102,7 +102,9 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
     const ctrl = new AbortController();
     setLoadingTxn(true);
     Promise.all([
-      vendorsApi.list({ activeOnly: true, signal: ctrl.signal }),
+      transaction
+        ? itemsApi.listVendors(transaction.item_id, { signal: ctrl.signal })
+        : Promise.resolve([]),
       transaction
         ? receivingApi.getTransaction(transaction.id, { signal: ctrl.signal })
         : Promise.resolve(null),
@@ -124,7 +126,16 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
     if (!open) return;
     const seed: Record<string, SplitDraft[]> = {};
     for (const lot of onOrderLots) {
-      seed[lot.id] = [newSplit(false)];
+      // Prefill the "into original lot" split's qty + unit price with the
+      // lot's values so they show as editable values (not grey placeholders)
+      // and carry through unless the operator corrects them.
+      seed[lot.id] = [
+        {
+          ...newSplit(false),
+          quantity: lot.ordered_qty != null ? String(lot.ordered_qty) : '',
+          unit_price: lot.unit_price_amount ?? '',
+        },
+      ];
     }
     setSplitsByLot(seed);
   }, [open, onOrderLots]);
@@ -147,11 +158,18 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
       ),
     }));
 
-  const addSplit = (lotId: string) =>
+  const addSplit = (lotId: string) => {
+    // Seed a new supplier-lot split's unit price from the parent lot so the
+    // field shows a value to start from.
+    const parent = onOrderLots.find((l) => l.id === lotId);
     setSplitsByLot((prev) => ({
       ...prev,
-      [lotId]: [...(prev[lotId] ?? []), newSplit(true)],
+      [lotId]: [
+        ...(prev[lotId] ?? []),
+        { ...newSplit(true), unit_price: parent?.unit_price_amount ?? '' },
+      ],
     }));
+  };
 
   const removeSplit = (lotId: string, key: string) =>
     setSplitsByLot((prev) => ({
@@ -170,7 +188,6 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
       const seenChild = new Set<string>();
       const splits: ReceiveSplitInput[] = [];
       drafts.forEach((d, idx) => {
-        const usingNew = d.vendorChoice === NEW_VENDOR;
         const split: ReceiveSplitInput = {};
         if (idx > 0) {
           const childNo = d.lot_number.trim();
@@ -186,16 +203,18 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
           split.lot_number = childNo;
         }
         if (d.vendorChoice && d.vendorChoice !== SAME_VENDOR) {
-          if (usingNew) {
-            if (!d.vendor_name.trim()) {
-              throw new SplitError(`Enter the new vendor name for a split.`);
-            }
-            split.vendor_name = d.vendor_name.trim();
-          } else {
-            split.vendor_id = d.vendorChoice;
-          }
+          split.vendor_id = d.vendorChoice;
         }
         if (d.unit_price) split.unit_price = Number(d.unit_price);
+        if (d.quantity) {
+          const q = Number(d.quantity);
+          if (!Number.isInteger(q) || q <= 0) {
+            throw new SplitError(
+              `Lot ${lot.lot_number}: quantity must be a whole number greater than 0.`,
+            );
+          }
+          split.quantity = q;
+        }
         splits.push(split);
       });
       lines.push({ lot_id: lot.id, splits });
@@ -272,12 +291,17 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
             <DialogDescription>
               Confirm what arrived and split a lot into multiple supplier lots if
               needed. On confirmation the lots become available under your
-              e-signature. Quantity is added later by placing vials in Locations.
+              e-signature. Quantity is added later by placing units in Locations.
             </DialogDescription>
           </DialogHeader>
 
           <DialogBody className="space-y-4">
-            {loadingTxn && onOrderLots.length === 0 && (
+            {/* Render the editable split form only once the authoritative
+                transaction has loaded. The dialog opens against the (lot-bearing)
+                list row, then re-fetches; gating on ``loadingTxn`` keeps the
+                fields hidden until the fresh data lands, so the seed effect's
+                re-run on fresh lots can't clobber values the operator typed. */}
+            {loadingTxn && (
               <p className="text-sm text-text-3">Loading lots…</p>
             )}
             {!loadingTxn && onOrderLots.length === 0 && (
@@ -286,7 +310,8 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
               </p>
             )}
 
-            {onOrderLots.map((lot) => {
+            {!loadingTxn &&
+              onOrderLots.map((lot) => {
               const drafts = splitsByLot[lot.id] ?? [];
               return (
                 <div
@@ -333,7 +358,7 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
                             </Button>
                           )}
                         </div>
-                        <div className="grid grid-cols-2 gap-2.5">
+                        <div className="grid grid-cols-3 gap-2.5">
                           {idx > 0 ? (
                             <div className="space-y-1">
                               <Label className="text-xs">Lot number</Label>
@@ -358,6 +383,25 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
                               />
                             </div>
                           )}
+                          <div className="space-y-1">
+                            <Label className="text-xs">Qty</Label>
+                            <Input
+                              type="number"
+                              min={1}
+                              step="1"
+                              placeholder={
+                                lot.ordered_qty != null
+                                  ? String(lot.ordered_qty)
+                                  : '0'
+                              }
+                              value={d.quantity}
+                              onChange={(e) =>
+                                patchSplit(lot.id, d.key, {
+                                  quantity: e.target.value,
+                                })
+                              }
+                            />
+                          </div>
                           <div className="space-y-1">
                             <Label className="text-xs">Unit price</Label>
                             <Input
@@ -390,26 +434,13 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
                               <SelectItem value={SAME_VENDOR}>
                                 Same as lot ({lot.vendor_name ?? 'none'})
                               </SelectItem>
-                              <SelectItem value={NEW_VENDOR}>+ New vendor…</SelectItem>
                               {vendors.map((v) => (
-                                <SelectItem key={v.id} value={v.id}>
-                                  {v.name}
+                                <SelectItem key={v.vendor_id} value={v.vendor_id}>
+                                  {v.vendor_name}
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
-                          {d.vendorChoice === NEW_VENDOR && (
-                            <Input
-                              className="mt-1.5"
-                              placeholder="New vendor name"
-                              value={d.vendor_name}
-                              onChange={(e) =>
-                                patchSplit(lot.id, d.key, {
-                                  vendor_name: e.target.value,
-                                })
-                              }
-                            />
-                          )}
                         </div>
                       </div>
                     ))}

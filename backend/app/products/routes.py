@@ -97,7 +97,6 @@ def _material_to_read(m: ProductMaterial) -> ProductMaterialRead:
         item_id=str(m.item_id),
         item_number=item.item_number if item else "",
         item_name=item.description if item else "",
-        uom_code=item.uom_code if item else "unit",
         qty_per_run=m.qty_per_run,
         qty_on_hand=qty_on_hand,
         qty_available=qty_available,

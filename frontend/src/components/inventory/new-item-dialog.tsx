@@ -15,19 +15,13 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
 import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+
+import { VendorMultiSelect } from './vendor-multi-select';
 
 // ── Form schema ────────────────────────────────────────────────────────
 
@@ -42,26 +36,19 @@ const schema = z.object({
     .min(1, 'Item # is required')
     .max(64, 'Item # must be at most 64 characters'),
   desc: z.string().min(3, 'Description is required'),
-  // Vendor is optional — backend accepts null. UI requires a selection
-  // unless the user explicitly chooses "No vendor" so we treat empty as
-  // a soft "skipped" rather than an error.
-  vendorId: z.string().optional(),
+  // Assigned vendors — zero-or-more. The only vendors this item can later be
+  // received against. Optional: an item may start with none and add later.
+  vendorIds: z.array(z.string()).default([]),
   leadDays: z.coerce.number().int().nonnegative('Must be ≥ 0'),
-  unitPrice: z.coerce.number().nonnegative('Must be ≥ 0'),
-  unitsPerPackage: z.coerce.number().int().positive('Must be ≥ 1'),
   threshold: z.coerce.number().int().nonnegative('Must be ≥ 0'),
   nearExpiryThresholdDays: z.coerce
     .number()
     .int()
     .nonnegative('Must be ≥ 0')
     .max(3650, 'Must be ≤ 3650'),
-  poNote: z.string().optional(),
-  notes: z.string().optional(),
 });
 
 type Values = z.infer<typeof schema>;
-
-const NO_VENDOR_VALUE = '__none__';
 
 interface Props {
   open: boolean;
@@ -98,18 +85,14 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
     defaultValues: {
       itemId: '',
       desc: '',
-      vendorId: '',
+      vendorIds: [],
       leadDays: 0,
-      unitPrice: 0,
-      unitsPerPackage: 1,
       threshold: 0,
       nearExpiryThresholdDays: 30,
-      poNote: '',
-      notes: '',
     },
   });
 
-  const vendorId = watch('vendorId');
+  const vendorIds = watch('vendorIds');
 
   // ── Side effects ─────────────────────────────────────────────────────
 
@@ -138,13 +121,10 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       reset({
         itemId: '',
         desc: '',
-        vendorId: '',
+        vendorIds: [],
         leadDays: 0,
-        unitPrice: 0,
-        unitsPerPackage: 1,
         threshold: 0,
-        poNote: '',
-        notes: '',
+        nearExpiryThresholdDays: 30,
       });
       setSubmitError(null);
     }
@@ -158,15 +138,10 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       const created = await createItem({
         item_number: data.itemId,
         description: data.desc,
-        vendor_id:
-          data.vendorId && data.vendorId !== NO_VENDOR_VALUE ? data.vendorId : null,
+        vendor_ids: data.vendorIds,
         avg_lead_days: data.leadDays,
-        unit_price_amount: data.unitPrice,
-        units_per_package: data.unitsPerPackage,
         reorder_threshold: data.threshold,
         near_expiry_threshold_days: data.nearExpiryThresholdDays,
-        po_note: data.poNote ? data.poNote : null,
-        notes: data.notes ? data.notes : null,
       });
       toast.success('Item created', {
         description: `${created.id} · ${created.desc}`,
@@ -224,34 +199,28 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
               </Field>
             </div>
 
+            <Field
+              id="ni-vendors"
+              label="Vendors"
+              error={errors.vendorIds?.message}
+            >
+              <VendorMultiSelect
+                id="ni-vendors"
+                vendors={vendors}
+                value={vendorIds}
+                onChange={(next) =>
+                  setValue('vendorIds', next, { shouldValidate: true })
+                }
+                loading={vendorsLoading}
+                error={vendorsError}
+              />
+              <p className="text-xs text-text-3">
+                Only these vendors can be selected when receiving stock for this
+                item.
+              </p>
+            </Field>
+
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-vendor" label="Vendor" error={errors.vendorId?.message}>
-                <Select
-                  value={vendorId || ''}
-                  onValueChange={(v) => setValue('vendorId', v, { shouldValidate: true })}
-                  disabled={vendorsLoading || vendors.length === 0}
-                >
-                  <SelectTrigger id="ni-vendor" aria-invalid={Boolean(errors.vendorId)}>
-                    <SelectValue
-                      placeholder={
-                        vendorsLoading
-                          ? 'Loading vendors…'
-                          : vendorsError
-                            ? 'Could not load vendors'
-                            : 'Select vendor'
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-72">
-                    <SelectItem value={NO_VENDOR_VALUE}>— No vendor —</SelectItem>
-                    {vendors.map((v) => (
-                      <SelectItem key={v.id} value={v.id}>
-                        {v.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
               <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
                 <Input
                   id="ni-lead"
@@ -261,38 +230,6 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
                   {...register('leadDays')}
                 />
               </Field>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-price" label="Unit price" error={errors.unitPrice?.message}>
-                <Input
-                  id="ni-price"
-                  type="number"
-                  inputMode="decimal"
-                  step="0.01"
-                  min={0}
-                  placeholder="0.00"
-                  {...register('unitPrice')}
-                />
-              </Field>
-              <Field
-                id="ni-uperpkg"
-                label="Units / package"
-                error={errors.unitsPerPackage?.message}
-              >
-                <Input
-                  id="ni-uperpkg"
-                  type="number"
-                  inputMode="numeric"
-                  step="1"
-                  min={1}
-                  placeholder="e.g. 50"
-                  {...register('unitsPerPackage')}
-                />
-              </Field>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
               <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
                 <Input
                   id="ni-thr"
@@ -303,9 +240,12 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
                   {...register('threshold')}
                 />
               </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
               <Field
                 id="ni-near-expiry"
-                label="Near-expiry threshold (days)"
+                label="Near expiry threshold (days)"
                 error={errors.nearExpiryThresholdDays?.message}
               >
                 <Input
@@ -320,20 +260,6 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
                 />
               </Field>
             </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-po-note" label="PO note" error={errors.poNote?.message}>
-                <Input
-                  id="ni-po-note"
-                  placeholder="e.g. Quote ref #1234"
-                  {...register('poNote')}
-                />
-              </Field>
-            </div>
-
-            <Field id="ni-notes" label="Notes" error={errors.notes?.message}>
-              <Textarea id="ni-notes" rows={3} {...register('notes')} />
-            </Field>
 
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
               After creating, you’ll be able to record the first unit in to bring the

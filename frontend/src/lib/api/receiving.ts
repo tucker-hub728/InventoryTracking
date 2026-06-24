@@ -52,12 +52,10 @@ export interface ReceiptIntakeLotInput {
   lot_number: string;
   quantity: number;
   /**
-   * Vendor is mandatory — exactly one of id / name. Whichever vendor is
-   * used is automatically attached to the item's vendor list (the item's
-   * vendors ARE its approved vendors); there is no separate approval step.
+   * Vendor is mandatory and must be one of the item's assigned vendors
+   * (``meta.item_vendors``). There is no on-the-fly vendor creation.
    */
-  vendor_id?: string | null;
-  vendor_name?: string | null;
+  vendor_id: string;
   unit_price?: number | null;
   po_reference?: string | null;
   manufacture_date?: string | null;
@@ -75,10 +73,13 @@ export interface ReceiptIntakeInput {
 // ── Receive (step 5) ─────────────────────────────────────────────────────
 
 export interface ReceiveSplitInput {
-  /** Optional vendor override; defaults to the on-order lot's vendor. */
+  /** Optional vendor override; defaults to the on-order lot's vendor. Must be
+   *  one of the item's assigned vendors. */
   vendor_id?: string | null;
-  vendor_name?: string | null;
   unit_price?: number | null;
+  /** Ordered (planning) qty — whole units. First split updates the original
+   *  lot's ordered_qty; later splits set the child lot's. */
+  quantity?: number | null;
   po_reference?: string | null;
   /** Set on splits after the first to create a child supplier lot. */
   lot_number?: string | null;

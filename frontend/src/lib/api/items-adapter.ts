@@ -36,15 +36,15 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     id: api.item_number,
     uuid: api.id,
     desc: api.description,
-    vendor: api.vendor_name ?? '',
+    // Items can have multiple assigned vendors — show them joined. Empty
+    // when the item has no vendors yet.
+    vendor: api.vendors.map((v) => v.vendor_name).join(', '),
     lead: api.avg_lead_days ?? 0,
     invValue: num(api.inv_value_amount),
     poValue: num(api.po_value_amount),
     qty: num(api.qty_on_hand),
     qtyAvailable: num(api.qty_available),
     months: null, // forecast module
-    poNote: api.po_note ?? '',
-    poDue: api.po_due_text ?? '',
     onOrder: num(api.qty_on_order),
     mustOrder: api.must_order_flag ? 1 : 0,
     nearExpiryThresholdDays: api.near_expiry_threshold_days ?? 30,

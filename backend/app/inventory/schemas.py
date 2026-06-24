@@ -16,7 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 # ``item_number`` is free-form and user-supplied. Per
 # docs/modules/inventory.md §3.1 / §4.1 / §9.2 the *only* backend rule is
@@ -84,22 +84,6 @@ class VendorRead(BaseModel):
         return cls.model_validate(vendor, from_attributes=True)
 
 
-class UnitOfMeasureRead(BaseModel):
-    """Read-only unit-of-measure lookup row.
-
-    There's no CREATE endpoint for these — units are added by migration
-    only, since downstream item rows reference them by ``code`` and
-    arbitrary new codes break that contract. If a new unit is needed,
-    write a migration.
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    code: str
-    label: str
-    is_discrete: bool
-
-
 class VendorCreate(BaseModel):
     """Payload for ``POST /v1/vendors`` — admin master-data write.
 
@@ -138,30 +122,35 @@ class VendorUpdate(BaseModel):
 # ── Items ──────────────────────────────────────────────────────────────
 
 
+class ItemVendorRead(BaseModel):
+    """One vendor assigned to an item (part of ``ItemRead.vendors``)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    vendor_id: str
+    vendor_name: str
+
+
 class ItemCreate(BaseModel):
     """Payload for ``POST /v1/items``.
 
     ``item_number`` is a single free-form field supplied by the client.
     The only server-side rule is uniqueness — there is no prefix /
     category constraint on what can be created.
+
+    ``vendor_ids`` is the item's assigned-vendor list (zero-or-more). These
+    are the only vendors the item can later be received against. Optional —
+    an item may start with no vendors and have them added later.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     item_number: ItemNumber
     description: str = Field(min_length=1, max_length=512)
-    # Free-form, optional grouping label (Requirements v2). No lookup table,
-    # no format rule — mirrors the free-form ``item_number`` decision.
-    category: str | None = Field(default=None, max_length=128)
-    vendor_id: str | None = None
+    vendor_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     near_expiry_threshold_days: int = Field(default=30, ge=0, le=3650)
-    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
-    units_per_package: int | None = Field(default=None, ge=1)
-    uom_code: str = Field(default="unit", min_length=1, max_length=16)
-    po_note: str | None = Field(default=None, max_length=1024)
-    notes: str | None = Field(default=None, max_length=2048)
 
 
 class ItemUpdate(BaseModel):
@@ -170,40 +159,32 @@ class ItemUpdate(BaseModel):
     Notable omissions:
 
     * ``item_number`` is **not editable**. Items can be soft-deleted
-      and re-created with a new prefix, but the human-readable handle
+      and re-created with a new number, but the human-readable handle
       is immutable so the audit trail and lot relationships stay
       coherent.
     * ``created_by_user_id`` / ``created_at`` are never editable —
       they're audit columns.
-    * ``uom_code`` is technically a FK but changing it after stock has
-      moved would corrupt qty interpretation. Patching it through this
-      endpoint is allowed only while the item has zero ledger rows;
-      the route enforces this.
+
+    ``vendor_ids``, when provided, **replaces** the item's whole assigned-vendor
+    list. Omit it to leave the vendors unchanged; send ``[]`` to clear them.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     description: str | None = Field(default=None, min_length=1, max_length=512)
-    category: str | None = Field(default=None, max_length=128)
-    vendor_id: str | None = None
+    vendor_ids: list[str] | None = Field(default=None, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
     near_expiry_threshold_days: int | None = Field(default=None, ge=0, le=3650)
-    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
-    units_per_package: int | None = Field(default=None, ge=1)
-    uom_code: str | None = Field(default=None, min_length=1, max_length=16)
-    po_note: str | None = Field(default=None, max_length=1024)
-    notes: str | None = Field(default=None, max_length=2048)
     must_order_flag: bool | None = None
 
 
 class ItemRead(BaseModel):
     """Full item detail. Used by the detail page + list rows.
 
-    Derived fields (``qty_on_hand``, ``status_code``, ``last_movement_at``)
-    are present on the response even before the ledger ships — they
-    default to safe zero / out-of-stock values so the UI doesn't need
-    two shapes.
+    Derived fields (``qty_on_hand``, ``status_code``, ``last_movement_at``,
+    ``inv_value_amount``, ``po_value_amount``) are computed — valuation now
+    comes from the lots' unit prices, not the item.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -211,21 +192,13 @@ class ItemRead(BaseModel):
     id: str
     item_number: str
     description: str
-    category: str | None = None
-    vendor_id: str | None
-    vendor_name: str | None
+    # Assigned vendors (the list an item can be received against).
+    vendors: list[ItemVendorRead] = Field(default_factory=list)
     avg_lead_days: int | None
     reorder_threshold: Decimal
     near_expiry_threshold_days: int
-    unit_price_amount: Decimal | None
-    units_per_package: int | None
-    price_per_package_amount: Decimal | None
-    uom_code: str
-    po_note: str | None
-    po_due_text: str | None
     must_order_flag: bool
     last_updated_on: date | None
-    notes: str | None
     created_at: datetime
     updated_at: datetime
     created_by_user_id: str
@@ -294,6 +267,11 @@ class LotUpdate(BaseModel):
     expiration_date: date | None = None
     status: LotStatus | None = None
     notes: str | None = Field(default=None, max_length=2048)
+    # Price paid — editable post-entry under the same e-signature (e.g.
+    # correcting what was keyed at receipt). Ordered quantity is deliberately
+    # NOT editable here: qty is set/adjusted only during receipt (intake +
+    # the receive splits), never via a plain lot edit.
+    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
     # ── E-signature (21 CFR Part 11) ──────────────────────────────────
     # Required on every edit — there is no un-signed lot-update path.
     evidence_id: str = Field(
@@ -411,53 +389,15 @@ class MovementListResponse(BaseModel):
     offset: int
 
 
-VendorApprovalStatus = Literal["approved", "pending"]
-
-
-class ApprovedVendorRead(BaseModel):
-    """One approved/pending vendor mapping for an item."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    item_id: str
-    vendor_id: str
-    vendor_name: str
-    approval_status: VendorApprovalStatus
-    created_at: datetime
-
-
-class ApprovedVendorCreate(BaseModel):
-    """Add a vendor to an item's approved list.
-
-    Provide an existing ``vendor_id`` OR a free-text ``vendor_name`` (a
-    matching active vendor is reused; otherwise one is created). Exactly
-    one of the two must be set.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    vendor_id: str | None = None
-    vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
-        default=None, max_length=128
-    )
-    approval_status: VendorApprovalStatus = "approved"
-
-    @model_validator(mode="after")
-    def _check_vendor_xor(self) -> ApprovedVendorCreate:
-        if (self.vendor_id is None) == (self.vendor_name is None):
-            raise ValueError(
-                "exactly one of 'vendor_id' or 'vendor_name' must be provided"
-            )
-        return self
-
-
 class ReceiptIntakeLotInput(BaseModel):
     """One lot line in a receipt intake (Requirements v2 §4).
 
-    Resolves a **mandatory** vendor — by id or free-text name. ``quantity``
-    is the *ordered* quantity (planning data); it is stored in the lot's
-    ``ordered_qty`` column and does NOT post a ledger movement. The received
-    quantity is recorded at physical receipt (§5).
+    The vendor is **mandatory** and must be one of the item's assigned
+    vendors (``meta.item_vendors``) — referenced by ``vendor_id``. There is
+    no on-the-fly vendor creation: vendors are assigned on the item first.
+    ``quantity`` is the *ordered* quantity (planning data); it is stored in
+    the lot's ``ordered_qty`` column and does NOT post a ledger movement. The
+    received quantity is recorded at physical receipt (§5).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -466,29 +406,14 @@ class ReceiptIntakeLotInput(BaseModel):
     # Ordered quantity — whole units only (stored on the lot as ordered_qty).
     quantity: int = Field(gt=0)
 
-    # Vendor resolution — exactly one of id / name (vendor is mandatory).
-    # Any vendor used here is automatically attached to the item's vendor
-    # list (the item's vendors ARE its approved vendors). No separate
-    # approval step.
-    vendor_id: str | None = None
-    vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
-        default=None, max_length=128
-    )
+    # Mandatory vendor — must be one of the item's assigned vendors.
+    vendor_id: str
 
     unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
     po_reference: str | None = Field(default=None, max_length=128)
     manufacture_date: date | None = None
     expiration_date: date | None = None
     notes: str | None = Field(default=None, max_length=2048)
-
-    @model_validator(mode="after")
-    def _check_vendor_xor(self) -> ReceiptIntakeLotInput:
-        if (self.vendor_id is None) == (self.vendor_name is None):
-            raise ValueError(
-                "exactly one of 'vendor_id' or 'vendor_name' must be provided "
-                "(vendor is mandatory for every lot)"
-            )
-        return self
 
 
 class ReceiptIntakeRequest(BaseModel):
@@ -520,12 +445,14 @@ class ReceiveSplitInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Optional vendor override; defaults to the original lot's vendor.
+    # Optional vendor override; defaults to the original lot's vendor. When
+    # set, it must be one of the item's assigned vendors (no new vendors at
+    # receive).
     vendor_id: str | None = None
-    vendor_name: Annotated[str | None, _trimmed_non_blank("vendor_name")] = Field(
-        default=None, max_length=128
-    )
     unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
+    # Ordered (planning) quantity for this split — whole units. First split
+    # updates the original lot's ordered_qty; later splits set the child's.
+    quantity: int | None = Field(default=None, gt=0)
     po_reference: str | None = Field(default=None, max_length=128)
     # New lot identity for a child split. Omit to receive into the original.
     lot_number: Annotated[str | None, _trimmed_non_blank("lot_number")] = Field(

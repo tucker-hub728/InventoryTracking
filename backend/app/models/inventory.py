@@ -34,21 +34,6 @@ from app.db.base import Base
 from app.models.identity import User
 
 
-class UnitOfMeasure(Base):
-    """Small lookup of measurement units. Seeded by the migration."""
-
-    __tablename__ = "units_of_measure"
-    __table_args__ = {"schema": "meta"}
-
-    code: Mapped[str] = mapped_column(Text, primary_key=True)
-    label: Mapped[str] = mapped_column(Text, nullable=False)
-    is_discrete: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("TRUE"),
-    )
-
-
 class Vendor(Base):
     """Sourcing partner. Items optionally reference one."""
 
@@ -117,7 +102,6 @@ class Item(Base):
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
-        Index("ix_items_vendor_id", "vendor_id"),
         Index("ix_items_updated_at_desc", text("updated_at DESC")),
         {"schema": "app"},
     )
@@ -132,19 +116,9 @@ class Item(Base):
     item_number: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Free-form, optional grouping label. Reintroduced for Requirements v2
-    # (Receipt Admin) — no lookup table and no CHECK, mirroring the
-    # free-form ``item_number`` decision. See docs/modules/receipt-admin.md §1.1.
-    category: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Optional *default* vendor. NOT the source of truth for what a lot was
-    # sourced from (the lot is). The full approved-vendor set lives in
-    # ``meta.item_approved_vendors`` (Requirements v2). See receipt-admin.md §1.3.
-    vendor_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
-        nullable=True,
-    )
+    # An item's assigned vendors live in ``meta.item_vendors`` (the ``vendors``
+    # relationship below). There is no single default-vendor column — the list
+    # is the source of truth for which vendors an item can be received against.
     avg_lead_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reorder_threshold: Mapped[Decimal] = mapped_column(
         Numeric(14, 3),
@@ -160,39 +134,12 @@ class Item(Base):
         nullable=False,
         server_default=text("30"),
     )
-    unit_price_amount: Mapped[Decimal | None] = mapped_column(
-        Numeric(14, 2),
-        nullable=True,
-    )
-    units_per_package: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    price_per_package_amount: Mapped[Decimal | None] = mapped_column(
-        Numeric(14, 2),
-        nullable=True,
-    )
-    uom_code: Mapped[str] = mapped_column(
-        Text,
-        ForeignKey("meta.units_of_measure.code", ondelete="RESTRICT"),
-        nullable=False,
-        server_default=text("'unit'"),
-    )
-    po_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    po_due_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     must_order_flag: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         server_default=text("FALSE"),
     )
     last_updated_on: Mapped[date | None] = mapped_column(Date, nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Stored as ``metadata_`` in Python because ``metadata`` collides with
-    # SQLAlchemy's ``DeclarativeBase.metadata`` attribute. DB column name
-    # is ``metadata_`` to match (consistent in both directions).
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata_",
-        JSONB,
-        nullable=False,
-        server_default=text("'{}'::jsonb"),
-    )
     row_version: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -227,8 +174,8 @@ class Item(Base):
     )
 
     # ── Relationships (read-only views) ───────────────────────────────
-    vendor: Mapped[Vendor | None] = relationship(lazy="joined", viewonly=True)
-    uom: Mapped[UnitOfMeasure] = relationship(lazy="joined", viewonly=True)
+    # ``vendors`` (the assigned-vendor list) is defined after ItemVendor
+    # below, mirroring the ``stock`` relationship pattern.
     creator: Mapped[User] = relationship(
         foreign_keys=[created_by_user_id],
         viewonly=True,
@@ -570,38 +517,27 @@ Item.stock = relationship(  # type: ignore[assignment]
 )
 
 
-# ── Receipt Admin v2 ───────────────────────────────────────────────────
+# ── Item vendors ───────────────────────────────────────────────────────
 #
-# Item→Vendor approved mapping + the inbound receipt-transaction header.
-# See docs/modules/receipt-admin.md.
-
-# Approval state for an item↔vendor mapping. ``pending`` = added during a
-# receipt for a previously-unknown vendor (edge case 2). Keep in lock-step
-# with the DB CHECK and the Pydantic enum.
-VENDOR_APPROVAL_STATUSES: tuple[str, ...] = ("approved", "pending")
+# An item's assigned vendors — a plain many-to-many list. These ARE the
+# vendors an item can be received against (no separate approval concept).
 
 
-class ItemApprovedVendor(Base):
-    """Zero-or-more approved vendors per item (Requirements v2 §3).
+class ItemVendor(Base):
+    """One vendor assigned to an item (zero-or-more per item).
 
-    Receipt is never *blocked* by this list — it only drives which vendors
-    are suggested and whether a created lot is flagged
-    ``unverified_vendor_for_item``.
+    The set of these rows is an item's complete vendor list. Receipt intake
+    only offers vendors from this list — there is no on-the-fly vendor
+    creation and no ``approval_status``.
     """
 
-    __tablename__ = "item_approved_vendors"
+    __tablename__ = "item_vendors"
     __table_args__ = (
         UniqueConstraint(
-            "item_id", "vendor_id", name="uq_item_approved_vendors_item_vendor"
+            "item_id", "vendor_id", name="uq_item_vendors_item_vendor"
         ),
-        Index("ix_item_approved_vendors_item_id", "item_id"),
-        Index("ix_item_approved_vendors_vendor_id", "vendor_id"),
-        CheckConstraint(
-            "approval_status IN ("
-            + ", ".join(f"'{s}'" for s in VENDOR_APPROVAL_STATUSES)
-            + ")",
-            name="ck_item_approved_vendors_status",
-        ),
+        Index("ix_item_vendors_item_id", "item_id"),
+        Index("ix_item_vendors_vendor_id", "vendor_id"),
         {"schema": "meta"},
     )
 
@@ -621,11 +557,6 @@ class ItemApprovedVendor(Base):
         ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    approval_status: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        server_default=text("'approved'"),
-    )
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.users.id", ondelete="RESTRICT"),
@@ -638,6 +569,19 @@ class ItemApprovedVendor(Base):
     )
 
     vendor: Mapped[Vendor] = relationship(lazy="joined", viewonly=True)
+
+
+# Eager-loaded ``Item.vendors`` — the assigned-vendor list, vendor joined.
+# Defined here (not on Item) so the forward reference to ItemVendor resolves
+# without a string lookup, mirroring ``Item.stock``.
+Item.vendors = relationship(  # type: ignore[assignment]
+    ItemVendor,
+    primaryjoin=Item.id == ItemVendor.item_id,
+    foreign_keys=[ItemVendor.item_id],
+    order_by=ItemVendor.created_at,
+    lazy="selectin",
+    viewonly=True,
+)
 
 
 # Lifecycle of an inbound receipt transaction. ``open`` = lots created

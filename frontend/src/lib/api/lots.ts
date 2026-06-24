@@ -84,6 +84,9 @@ export interface LotUpdateInput {
   expiration_date?: string | null;
   status?: LotStatus;
   notes?: string | null;
+  /** Price paid for this lot. (Ordered qty is NOT editable here — it's set
+   *  only during receipt: intake + receive splits.) */
+  unit_price_amount?: number | null;
   evidence_id: string;
   reason: string;
 }

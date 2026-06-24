@@ -17,14 +17,16 @@ export function rowLabel(row1Based: number): string {
   return out;
 }
 
-/** Short token for a cell — the item number's trailing segment, else lot. */
+/** Cell label — the lot number's trailing identifier, kept long enough that
+ *  sibling lots (e.g. ``PO-AA-001`` vs ``PO-BB-001``) stay distinguishable.
+ *  Falls back to the item number. The full lot is on the cell's hover tooltip
+ *  and the Contents list; the cell is too small to fit the whole name. */
 function cellToken(a: Allocation): string {
-  if (a.item_number) {
-    const tail = a.item_number.split(/[-_\s]/).pop() ?? a.item_number;
-    return tail.slice(-4);
-  }
-  if (a.lot_number) return a.lot_number.slice(-4);
-  return '•';
+  const src = a.lot_number ?? a.item_number ?? '';
+  if (!src) return '•';
+  if (src.length <= 6) return src;
+  // Last 6 chars, minus any leading separator so it doesn't read like "-B-011".
+  return src.slice(-6).replace(/^[-_\s]+/, '');
 }
 
 export interface BoxGridProps {
@@ -45,7 +47,7 @@ export interface BoxGridProps {
 }
 
 /**
- * A Box's grid (the "vial map", Requirements v2 §4.1). Occupied cells show the
+ * A Box's grid (the unit map; "vial map" in Requirements v2 §4.1). Occupied cells show the
  * item/lot token; empty cells are click targets for manual placement. Clicking
  * any cell calls ``onSelectCell`` with the (row, col) and its occupant (if any)
  * — the lowest level of the hierarchy with click-through to detail.
@@ -111,7 +113,7 @@ export function BoxGrid({
                         : `${rowLabel(row)}${col} · empty`
                     }
                     className={cn(
-                      'flex aspect-square min-h-[2.25rem] items-center justify-center rounded text-[11px] font-mono transition-colors',
+                      'flex aspect-square min-h-[2.25rem] items-center justify-center overflow-hidden rounded px-px font-mono text-[10px] leading-none tracking-tight transition-colors',
                       occ
                         ? 'bg-accent text-white hover:brightness-110'
                         : isMulti

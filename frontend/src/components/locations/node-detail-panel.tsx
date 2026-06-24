@@ -173,7 +173,8 @@ export function NodeDetailPanel({
     try {
       const [allocs, lotList, tgts] = await Promise.all([
         locationNodesApi.nodeAllocations(node.id),
-        lotsApi.list({ limit: 500 }),
+        // Only available lots can be placed — on-order lots aren't received yet.
+        lotsApi.list({ limit: 500, status: 'available' }),
         locationNodesApi.storageTargets(),
       ]);
       setAllocations(allocs);
@@ -531,16 +532,16 @@ export function NodeDetailPanel({
         </div>
       )}
 
-      {/* ── Box: vial map + contents ─────────────────────────────────── */}
+      {/* ── Box: unit map + contents ─────────────────────────────────── */}
       {isBox && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <div className="rounded-lg border border-border bg-bg-elev p-4">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-sm font-medium text-text-2">
-                Vial map · {gridRows}×{gridCols}
+                Unit map · {gridRows}×{gridCols}
               </p>
               <span className="text-xs text-text-3">
-                Click empty cells to select · click a vial to move/consume
+                Click empty cells to select · click a unit to move/consume
               </span>
             </div>
             <BoxGrid
@@ -551,7 +552,7 @@ export function NodeDetailPanel({
               selectedOccupied={selectedOccupied}
               onSelectCell={handleSelectCell}
             />
-            {/* Batch unit-out (transfer / consume) for the selected vials. */}
+            {/* Batch unit-out (transfer / consume) for the selected units. */}
             {canWrite && selectedOutAllocs.length > 0 && (
               <div className="mt-3">
                 <BatchOutPanel
@@ -600,7 +601,7 @@ export function NodeDetailPanel({
                 </p>
                 <div className="space-y-2">
                   <div className="space-y-1">
-                    <Label className="text-xs">Lot (one vial per cell)</Label>
+                    <Label className="text-xs">Lot (one unit per cell)</Label>
                     <LotSelect lots={lots} value={placeLot} onChange={setPlaceLot} />
                     <RemainingHint avail={placeAvail} selecting={selectedCells.size} />
                   </div>
@@ -1483,7 +1484,7 @@ function BatchOutPanel({
     <div className="rounded-md border border-border bg-surface p-3">
       <div className="mb-2 flex items-center justify-between">
         <p className="text-xs font-medium text-text-2">
-          {count} {count === 1 ? 'vial' : 'vials'} of lot{' '}
+          {count} {count === 1 ? 'unit' : 'units'} of lot{' '}
           <span className="font-mono text-accent">{lotLabel}</span> selected
         </p>
         <button type="button" className="text-xs text-text-3 hover:text-accent" onClick={onClear}>

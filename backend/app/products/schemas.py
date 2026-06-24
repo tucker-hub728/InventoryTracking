@@ -103,7 +103,6 @@ class ProductMaterialRead(BaseModel):
     item_id: str
     item_number: str
     item_name: str
-    uom_code: str
     qty_per_run: Decimal
     qty_on_hand: Decimal
     # Available = on-hand minus date-expired lots — what "Available" and the

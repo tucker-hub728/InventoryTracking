@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { Plus, Truck } from 'lucide-react';
+import { Pencil, Plus, Truck } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
@@ -33,9 +33,12 @@ import {
   type ReceiptTransactionStatus,
 } from '@/lib/api/receiving';
 
+import type { Lot } from '@/lib/api/lots';
+
 import { ReceiptTransactionsTable } from './receipt-transactions-table';
 import { ReceiptIntakeDialog } from './receipt-intake-dialog';
 import { ReceiveDialog } from './receive-dialog';
+import { LotEditDialog } from './lot-edit-dialog';
 
 const STATUS_ALL = '__all__';
 
@@ -192,6 +195,8 @@ export function ReceivingPageClient() {
 
       <TransactionDetailSheet
         transaction={detail}
+        canEdit={canReceive}
+        onUpdated={upsert}
         onOpenChange={(o) => !o && setDetail(null)}
       />
     </>
@@ -202,77 +207,122 @@ export function ReceivingPageClient() {
 
 function TransactionDetailSheet({
   transaction,
+  canEdit,
+  onUpdated,
   onOpenChange,
 }: {
   transaction: ReceiptTransaction | null;
+  canEdit: boolean;
+  onUpdated: (txn: ReceiptTransaction) => void;
   onOpenChange: (open: boolean) => void;
 }) {
+  // Local copy so a lot edit can refresh the sheet in place without waiting
+  // for the parent to re-fetch.
+  const [txn, setTxn] = React.useState<ReceiptTransaction | null>(transaction);
+  const [editLot, setEditLot] = React.useState<Lot | null>(null);
+
+  React.useEffect(() => setTxn(transaction), [transaction]);
+
+  const refresh = React.useCallback(async () => {
+    if (!txn) return;
+    try {
+      const fresh = await receivingApi.getTransaction(txn.id);
+      setTxn(fresh);
+      onUpdated(fresh);
+    } catch {
+      /* keep the stale view; the edit toast already confirmed success */
+    }
+  }, [txn, onUpdated]);
+
   return (
-    <Sheet open={transaction !== null} onOpenChange={onOpenChange}>
-      <SheetContent className="w-[480px] sm:max-w-[480px]">
-        {transaction && (
-          <>
-            <SheetHeader>
-              <SheetTitle>
-                <span className="font-mono text-sm text-accent">
-                  {transaction.item_number}
-                </span>{' '}
-                <Badge
-                  tone={
-                    transaction.status === 'received'
-                      ? 'success'
-                      : transaction.status === 'open'
-                        ? 'accent'
-                        : 'neutral'
-                  }
-                  dot
-                  className="ml-1 align-middle"
-                >
-                  {RECEIPT_STATUS_LABEL[transaction.status]}
-                </Badge>
-              </SheetTitle>
-              <SheetDescription>
-                {transaction.item_description ?? ''}
-                {transaction.po_reference ? ` · PO ${transaction.po_reference}` : ''}
-              </SheetDescription>
-            </SheetHeader>
-            <SheetBody className="space-y-3">
-              {transaction.lots.length === 0 && (
-                <p className="text-sm text-text-3">No lots on this transaction.</p>
-              )}
-              {transaction.lots.map((lot) => (
-                <div
-                  key={lot.id}
-                  className="rounded-md border border-border bg-surface p-3 text-sm"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs text-accent">
-                      {lot.lot_number}
-                    </span>
-                    <Badge tone={lot.status === 'available' ? 'success' : 'accent'}>
-                      {lot.status === 'available' ? 'Available' : 'On order'}
-                    </Badge>
+    <>
+      <Sheet open={transaction !== null} onOpenChange={onOpenChange}>
+        <SheetContent className="w-[480px] sm:max-w-[480px]">
+          {txn && (
+            <>
+              <SheetHeader>
+                <SheetTitle>
+                  <span className="font-mono text-sm text-accent">
+                    {txn.item_number}
+                  </span>{' '}
+                  <Badge
+                    tone={
+                      txn.status === 'received'
+                        ? 'success'
+                        : txn.status === 'open'
+                          ? 'accent'
+                          : 'neutral'
+                    }
+                    dot
+                    className="ml-1 align-middle"
+                  >
+                    {RECEIPT_STATUS_LABEL[txn.status]}
+                  </Badge>
+                </SheetTitle>
+                <SheetDescription>
+                  {txn.item_description ?? ''}
+                  {txn.po_reference ? ` · PO ${txn.po_reference}` : ''}
+                </SheetDescription>
+              </SheetHeader>
+              <SheetBody className="space-y-3">
+                {txn.lots.length === 0 && (
+                  <p className="text-sm text-text-3">No lots on this transaction.</p>
+                )}
+                {txn.lots.map((lot) => (
+                  <div
+                    key={lot.id}
+                    className="rounded-md border border-border bg-surface p-3 text-sm"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs text-accent">
+                        {lot.lot_number}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <Badge tone={lot.status === 'available' ? 'success' : 'accent'}>
+                          {lot.status === 'available' ? 'Available' : 'On order'}
+                        </Badge>
+                        {canEdit && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setEditLot(lot)}
+                            aria-label={`Edit lot ${lot.lot_number}`}
+                          >
+                            <Pencil size={13} />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <dl className="mt-2 grid grid-cols-[110px_1fr] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-text-3">Vendor</dt>
+                      <dd>{lot.vendor_name ?? '—'}</dd>
+                      <dt className="text-text-3">Ordered</dt>
+                      <dd className="font-mono">{lot.ordered_qty ?? '—'}</dd>
+                      <dt className="text-text-3">Unit price</dt>
+                      <dd className="font-mono">{lot.unit_price_amount ?? '—'}</dd>
+                      {lot.parent_lot_id && (
+                        <>
+                          <dt className="text-text-3">Split from</dt>
+                          <dd className="font-mono">{lot.parent_lot_id.slice(0, 8)}…</dd>
+                        </>
+                      )}
+                    </dl>
                   </div>
-                  <dl className="mt-2 grid grid-cols-[110px_1fr] gap-x-3 gap-y-1 text-xs">
-                    <dt className="text-text-3">Vendor</dt>
-                    <dd>{lot.vendor_name ?? '—'}</dd>
-                    <dt className="text-text-3">Ordered</dt>
-                    <dd className="font-mono">{lot.ordered_qty ?? '—'}</dd>
-                    <dt className="text-text-3">Unit price</dt>
-                    <dd className="font-mono">{lot.unit_price_amount ?? '—'}</dd>
-                    {lot.parent_lot_id && (
-                      <>
-                        <dt className="text-text-3">Split from</dt>
-                        <dd className="font-mono">{lot.parent_lot_id.slice(0, 8)}…</dd>
-                      </>
-                    )}
-                  </dl>
-                </div>
-              ))}
-            </SheetBody>
-          </>
-        )}
-      </SheetContent>
-    </Sheet>
+                ))}
+              </SheetBody>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      <LotEditDialog
+        lot={editLot}
+        onOpenChange={(o) => !o && setEditLot(null)}
+        onSaved={() => {
+          setEditLot(null);
+          void refresh();
+        }}
+      />
+    </>
   );
 }

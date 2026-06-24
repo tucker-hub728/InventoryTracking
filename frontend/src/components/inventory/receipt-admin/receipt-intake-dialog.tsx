@@ -21,15 +21,12 @@ import {
   Select,
   SelectContent,
   SelectItem,
-  SelectGroup,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
-import { itemsApi, type ApiItem, type ApprovedVendor } from '@/lib/api/items';
-import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { itemsApi, type ApiItem, type ApiItemVendor } from '@/lib/api/items';
 import {
   receivingApi,
   type ReceiptIntakeInput,
@@ -37,16 +34,12 @@ import {
   type ReceiptTransaction,
 } from '@/lib/api/receiving';
 
-const NEW_VENDOR = '__new__';
-
 interface LineDraft {
   key: string;
   lot_number: string;
   quantity: string;
-  vendorChoice: string; // vendor id | NEW_VENDOR | ''
-  vendor_name: string;
+  vendorChoice: string; // vendor id | ''
   unit_price: string;
-  po_reference: string;
   manufacture_date: string;
   expiration_date: string;
 }
@@ -59,9 +52,7 @@ function emptyLine(): LineDraft {
     lot_number: '',
     quantity: '',
     vendorChoice: '',
-    vendor_name: '',
     unit_price: '',
-    po_reference: '',
     manufacture_date: '',
     expiration_date: '',
   };
@@ -76,13 +67,13 @@ interface Props {
 /**
  * Receipt Admin intake (Requirements v2 §4). Creates ON_ORDER lots under
  * a new receipt-transaction header. No stock moves yet, so it is not
- * e-signed. Vendor is mandatory per lot; an unknown vendor can be typed
- * (created on the fly) and optionally added to the item's vendor list.
+ * e-signed. Vendor is mandatory per lot and must be one of the item's
+ * assigned vendors — there is no on-the-fly vendor creation here.
  */
 export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
   const [items, setItems] = React.useState<ApiItem[]>([]);
-  const [vendors, setVendors] = React.useState<Vendor[]>([]);
-  const [approved, setApproved] = React.useState<ApprovedVendor[]>([]);
+  // The selected item's assigned vendors — the only choices for each lot.
+  const [itemVendors, setItemVendors] = React.useState<ApiItemVendor[]>([]);
   const [loading, setLoading] = React.useState(false);
 
   const [itemId, setItemId] = React.useState('');
@@ -92,22 +83,17 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
 
-  // Load items + vendors when the dialog opens.
+  // Load items when the dialog opens.
   React.useEffect(() => {
     if (!open) return;
     const ctrl = new AbortController();
     setLoading(true);
-    Promise.all([
-      itemsApi.list(
+    itemsApi
+      .list(
         { limit: 200, sort: 'item_number', direction: 'asc' },
         { signal: ctrl.signal },
-      ),
-      vendorsApi.list({ activeOnly: true, signal: ctrl.signal }),
-    ])
-      .then(([itemList, vendorList]) => {
-        setItems(itemList.items);
-        setVendors(vendorList);
-      })
+      )
+      .then((itemList) => setItems(itemList.items))
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
         setFormError(err instanceof ApiError ? err.message : 'Failed to load data.');
@@ -116,17 +102,20 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
     return () => ctrl.abort();
   }, [open]);
 
-  // Load the item's approved vendors so the picker can suggest them first.
+  // Load the selected item's assigned vendors — the only allowed choices.
+  // Clear any per-lot vendor selection when the item changes (the prior
+  // vendors may not belong to the new item).
   React.useEffect(() => {
     if (!open || !itemId) {
-      setApproved([]);
+      setItemVendors([]);
       return;
     }
     const ctrl = new AbortController();
     itemsApi
-      .listApprovedVendors(itemId, { signal: ctrl.signal })
-      .then(setApproved)
-      .catch(() => setApproved([]));
+      .listVendors(itemId, { signal: ctrl.signal })
+      .then(setItemVendors)
+      .catch(() => setItemVendors([]));
+    setLines((prev) => prev.map((l) => ({ ...l, vendorChoice: '' })));
     return () => ctrl.abort();
   }, [open, itemId]);
 
@@ -145,14 +134,21 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
   const patchLine = (key: string, patch: Partial<LineDraft>) =>
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
 
-  const approvedIds = React.useMemo(
-    () => new Set(approved.map((a) => a.vendor_id)),
-    [approved],
-  );
+  const hasVendors = itemVendors.length > 0;
 
   const validate = (): ReceiptIntakeInput | null => {
     if (!itemId) {
       setFormError('Pick an item.');
+      return null;
+    }
+    if (!poRef.trim()) {
+      setFormError('PO # is required.');
+      return null;
+    }
+    if (!hasVendors) {
+      setFormError(
+        'This item has no assigned vendors. Add a vendor to the item before receiving.',
+      );
       return null;
     }
     if (lines.length === 0) {
@@ -177,13 +173,8 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
         setFormError(`Lot "${lotNo}" needs a whole quantity greater than 0.`);
         return null;
       }
-      const usingNew = l.vendorChoice === NEW_VENDOR;
       if (!l.vendorChoice) {
         setFormError(`Pick a vendor for lot "${lotNo}" (vendor is mandatory).`);
-        return null;
-      }
-      if (usingNew && !l.vendor_name.trim()) {
-        setFormError(`Enter the new vendor name for lot "${lotNo}".`);
         return null;
       }
       if (
@@ -197,17 +188,15 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
       outLots.push({
         lot_number: lotNo,
         quantity: qty,
-        vendor_id: usingNew ? undefined : l.vendorChoice,
-        vendor_name: usingNew ? l.vendor_name.trim() : undefined,
+        vendor_id: l.vendorChoice,
         unit_price: l.unit_price ? Number(l.unit_price) : undefined,
-        po_reference: l.po_reference.trim() || undefined,
         manufacture_date: l.manufacture_date || undefined,
         expiration_date: l.expiration_date || undefined,
       });
     }
     return {
       item_id: itemId,
-      po_reference: poRef.trim() || undefined,
+      po_reference: poRef.trim(),
       notes: notes.trim() || undefined,
       lots: outLots,
     };
@@ -243,7 +232,8 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
           <DialogTitle>New receipt intake</DialogTitle>
           <DialogDescription>
             Place an order — creates on-order lots. Stock is recorded later at
-            physical receipt. Vendor is required for every lot.
+            physical receipt. Each lot&apos;s vendor must be one of the item&apos;s
+            assigned vendors.
           </DialogDescription>
         </DialogHeader>
 
@@ -272,7 +262,9 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="intake-po">PO # (optional)</Label>
+              <Label htmlFor="intake-po">
+                PO # <span className="text-danger">*</span>
+              </Label>
               <Input
                 id="intake-po"
                 placeholder="PO-2026-0042"
@@ -358,67 +350,36 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
                   <Select
                     value={line.vendorChoice}
                     onValueChange={(v) => patchLine(line.key, { vendorChoice: v })}
-                    disabled={loading}
+                    disabled={loading || !itemId || !hasVendors}
                   >
-                    <SelectTrigger
-                      aria-label="Vendor"
-                    >
-                      <SelectValue placeholder="Select or add vendor" />
+                    <SelectTrigger aria-label="Vendor">
+                      <SelectValue
+                        placeholder={
+                          !itemId
+                            ? 'Pick an item first'
+                            : hasVendors
+                              ? 'Select vendor'
+                              : 'Item has no vendors'
+                        }
+                      />
                     </SelectTrigger>
                     <SelectContent className="max-h-72">
-                      <SelectItem value={NEW_VENDOR}>+ New vendor…</SelectItem>
-                      {approved.length > 0 && (
-                        <SelectGroup>
-                          <SelectLabel>This item&apos;s vendors</SelectLabel>
-                          {approved.map((a) => (
-                            <SelectItem key={a.vendor_id} value={a.vendor_id}>
-                              {a.vendor_name}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      )}
-                      <SelectGroup>
-                        <SelectLabel>All vendors</SelectLabel>
-                        {vendors
-                          .filter((v) => !approvedIds.has(v.id))
-                          .map((v) => (
-                            <SelectItem key={v.id} value={v.id}>
-                              {v.name}
-                            </SelectItem>
-                          ))}
-                      </SelectGroup>
+                      {itemVendors.map((v) => (
+                        <SelectItem key={v.vendor_id} value={v.vendor_id}>
+                          {v.vendor_name}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
-                  {approved.length > 0 &&
-                    line.vendorChoice &&
-                    line.vendorChoice !== NEW_VENDOR &&
-                    !approvedIds.has(line.vendorChoice) && (
-                      <p className="text-xs text-warning">
-                        Not currently one of this item&apos;s vendors — it will be
-                        added, and the lot flagged as a new vendor for this item.
-                      </p>
-                    )}
+                  {itemId && !hasVendors && (
+                    <p className="text-xs text-warning">
+                      This item has no assigned vendors. Add one on the item before
+                      receiving against it.
+                    </p>
+                  )}
                 </div>
 
-                {line.vendorChoice === NEW_VENDOR && (
-                  <div className="mt-3 space-y-1.5 rounded-md border border-dashed border-border p-2.5">
-                    <Label>
-                      New vendor name <span className="text-danger">*</span>
-                    </Label>
-                    <Input
-                      placeholder="Acme Biologicals"
-                      value={line.vendor_name}
-                      onChange={(e) =>
-                        patchLine(line.key, { vendor_name: e.target.value })
-                      }
-                    />
-                    <p className="text-xs text-text-3">
-                      Added to this item&apos;s vendors automatically.
-                    </p>
-                  </div>
-                )}
-
-                <div className="mt-3 grid grid-cols-3 gap-3">
+                <div className="mt-3 grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <Label>Manufacture date</Label>
                     <Input
@@ -436,16 +397,6 @@ export function ReceiptIntakeDialog({ open, onOpenChange, onCreated }: Props) {
                       value={line.expiration_date}
                       onChange={(e) =>
                         patchLine(line.key, { expiration_date: e.target.value })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Lot PO # (optional)</Label>
-                    <Input
-                      placeholder="overrides header"
-                      value={line.po_reference}
-                      onChange={(e) =>
-                        patchLine(line.key, { po_reference: e.target.value })
                       }
                     />
                   </div>

@@ -27,7 +27,7 @@ function severityFor(m: ApiMovement): ApiAuditSeverity {
   return 'info';
 }
 
-/** ``CM-0001 · CryoStor 100 mL · -8 vials · lot L-…`` — built once and
+/** ``CM-0001 · CryoStor 100 mL · -8 units · lot L-…`` — built once and
  *  rendered in the "Subject" column. Mirrors the format used by
  *  ``MovementRow`` in the per-entity timeline. */
 function subjectLabel(m: ApiMovement): string {

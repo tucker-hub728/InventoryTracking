@@ -17,24 +17,16 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem, type ItemUpdateInput } from '@/lib/api/items';
 import { vendorsApi, type Vendor } from '@/lib/api/vendors';
 
-const NULL_VENDOR = '__none__';
+import { VendorMultiSelect } from './vendor-multi-select';
 
 const schema = z.object({
   description: z.string().min(1, 'Description is required').max(512),
-  vendor_id: z.string(),
+  vendor_ids: z.array(z.string()).default([]),
   avg_lead_days: z
     .string()
     .optional()
@@ -49,20 +41,6 @@ const schema = z.object({
       (v) => !v || (/^\d+$/.test(v) && Number(v) >= 0),
       'Threshold must be a non-negative whole number',
     ),
-  unit_price_amount: z
-    .string()
-    .optional()
-    .refine(
-      (v) => !v || (/^\d+(\.\d+)?$/.test(v) && Number(v) >= 0),
-      'Unit price must be a non-negative number',
-    ),
-  units_per_package: z
-    .string()
-    .optional()
-    .refine(
-      (v) => !v || (/^\d+$/.test(v) && Number(v) >= 1),
-      'Units per package must be a positive integer',
-    ),
   near_expiry_threshold_days: z
     .string()
     .optional()
@@ -70,8 +48,6 @@ const schema = z.object({
       (v) => !v || (/^\d+$/.test(v) && Number(v) >= 0 && Number(v) <= 3650),
       'Near-expiry threshold must be a whole number of days (0–3650)',
     ),
-  po_note: z.string().max(1024).optional(),
-  notes: z.string().max(2048).optional(),
   must_order_flag: z.boolean(),
 });
 
@@ -89,19 +65,30 @@ interface Props {
   onUpdated?: () => void;
 }
 
+/** Sorted-equal check for two vendor-id lists (order-insensitive). */
+function sameVendorSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((v, i) => v === sb[i]);
+}
+
 /**
  * Edit dialog for the inventory item detail page. Captures the
- * commonly-edited fields: description, vendor, threshold, pricing,
- * notes. ``item_number`` and ``uom_code`` are NOT here — the former
- * is immutable, the latter only editable while the item has zero
- * stock (a path the operator can request via an admin escalation).
+ * commonly-edited fields: description, assigned vendors, lead time,
+ * thresholds, must-order flag. ``item_number`` is NOT here — it's the
+ * immutable human handle. Pricing lives on the lot, not the item.
  *
- * Submit uses dirtyFields to send only what changed so the audit
- * diff shows the operator's actual intent.
+ * Submit sends only what changed so the audit diff shows the operator's
+ * actual intent. The vendor list is sent whole (replace semantics) when it
+ * differs from what loaded.
  */
 export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props) {
   const [vendors, setVendors] = React.useState<Vendor[]>([]);
+  const [vendorsError, setVendorsError] = React.useState<string | null>(null);
   const [item, setItem] = React.useState<ApiItem | null>(null);
+  // The vendor list as it was when the dialog loaded — submit diffs against it.
+  const [loadedVendorIds, setLoadedVendorIds] = React.useState<string[]>([]);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -116,24 +103,20 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     resolver: zodResolver(schema),
     defaultValues: {
       description: '',
-      vendor_id: NULL_VENDOR,
+      vendor_ids: [],
       avg_lead_days: '',
       reorder_threshold: '',
-      unit_price_amount: '',
-      units_per_package: '',
       near_expiry_threshold_days: '',
-      po_note: '',
-      notes: '',
       must_order_flag: false,
     },
   });
 
-  const vendorId = watch('vendor_id');
+  const vendorIds = watch('vendor_ids');
   const mustOrder = watch('must_order_flag');
 
   // Load vendors + the fresh item state every time the dialog opens.
-  // ``activeOnly: false`` so a vendor that's since been deactivated
-  // still resolves on the dropdown (and gets a label).
+  // ``activeOnly: false`` so a vendor that's since been deactivated still
+  // appears in the list (and can be unchecked).
   React.useEffect(() => {
     if (!open || !itemId) {
       setItem(null);
@@ -141,6 +124,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       return;
     }
     const ctrl = new AbortController();
+    setVendorsError(null);
     Promise.all([
       vendorsApi.list({ activeOnly: false, signal: ctrl.signal }),
       itemsApi.get(itemId, { signal: ctrl.signal }),
@@ -148,9 +132,11 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       .then(([vendorList, freshItem]) => {
         setVendors(vendorList);
         setItem(freshItem);
+        const ids = freshItem.vendors.map((v) => v.vendor_id);
+        setLoadedVendorIds(ids);
         reset({
           description: freshItem.description,
-          vendor_id: freshItem.vendor_id ?? NULL_VENDOR,
+          vendor_ids: ids,
           avg_lead_days:
             freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
           // Reorder threshold is a whole count of units — never decimal. The
@@ -160,20 +146,10 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
             freshItem.reorder_threshold != null
               ? String(Math.round(Number(freshItem.reorder_threshold)))
               : '',
-          unit_price_amount:
-            freshItem.unit_price_amount != null
-              ? String(freshItem.unit_price_amount)
-              : '',
-          units_per_package:
-            freshItem.units_per_package != null
-              ? String(freshItem.units_per_package)
-              : '',
           near_expiry_threshold_days:
             freshItem.near_expiry_threshold_days != null
               ? String(freshItem.near_expiry_threshold_days)
               : '',
-          po_note: freshItem.po_note ?? '',
-          notes: freshItem.notes ?? '',
           must_order_flag: freshItem.must_order_flag,
         });
         setSubmitError(null);
@@ -193,9 +169,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
     const patch: ItemUpdateInput = {};
     if (dirtyFields.description) patch.description = values.description.trim();
-    if (dirtyFields.vendor_id) {
-      patch.vendor_id =
-        values.vendor_id === NULL_VENDOR ? null : values.vendor_id;
+    if (!sameVendorSet(values.vendor_ids, loadedVendorIds)) {
+      patch.vendor_ids = values.vendor_ids;
     }
     if (dirtyFields.avg_lead_days) {
       patch.avg_lead_days = values.avg_lead_days
@@ -207,16 +182,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
         ? Number(values.reorder_threshold)
         : 0;
     }
-    if (dirtyFields.unit_price_amount) {
-      patch.unit_price_amount = values.unit_price_amount
-        ? Number(values.unit_price_amount)
-        : null;
-    }
-    if (dirtyFields.units_per_package) {
-      patch.units_per_package = values.units_per_package
-        ? Number(values.units_per_package)
-        : null;
-    }
     if (dirtyFields.near_expiry_threshold_days) {
       // Non-nullable column (default 30): a cleared field falls back to 0,
       // mirroring how reorder_threshold treats an empty value here.
@@ -224,8 +189,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
         ? Number(values.near_expiry_threshold_days)
         : 0;
     }
-    if (dirtyFields.po_note) patch.po_note = values.po_note?.trim() || null;
-    if (dirtyFields.notes) patch.notes = values.notes?.trim() || null;
     if (dirtyFields.must_order_flag) patch.must_order_flag = values.must_order_flag;
 
     if (Object.keys(patch).length === 0) {
@@ -253,8 +216,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               {item ? (
                 <>
                   <span className="font-mono text-accent">{item.item_number}</span> ·
-                  Every change is recorded to the audit log with a
-                  before/after diff. ``item_number`` is immutable.
+                  Every change is recorded to the audit log with a before/after
+                  diff. The item number is immutable.
                 </>
               ) : (
                 'Loading item…'
@@ -287,42 +250,24 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="it-vendor">Vendor</Label>
-                {/*
-                  Remount once the item + vendor list have loaded. Radix Select
-                  resolves a controlled value's label from the items present at
-                  mount; the vendor list is fetched async, so without this key
-                  the pre-selected vendor renders as the "No vendor" placeholder
-                  until the dropdown is opened once.
-                */}
-                <Select
-                  key={item?.id ?? 'loading'}
-                  value={vendorId}
-                  onValueChange={(v) =>
-                    setValue('vendor_id', v, {
-                      shouldValidate: true,
-                      shouldDirty: true,
-                    })
-                  }
-                >
-                  <SelectTrigger id="it-vendor">
-                    <SelectValue placeholder="No vendor" />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-72">
-                    <SelectItem value={NULL_VENDOR}>— None —</SelectItem>
-                    {vendors.map((v) => (
-                      <SelectItem key={v.id} value={v.id}>
-                        {v.name}
-                        {!v.is_active && (
-                          <span className="ml-2 text-xs text-text-3">(inactive)</span>
-                        )}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="it-vendors">Vendors</Label>
+              <VendorMultiSelect
+                id="it-vendors"
+                vendors={vendors}
+                value={vendorIds}
+                onChange={(next) =>
+                  setValue('vendor_ids', next, { shouldDirty: true })
+                }
+                error={vendorsError}
+              />
+              <p className="text-xs text-text-3">
+                Only these vendors can be selected when receiving stock for this
+                item.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1.5">
                 <Label htmlFor="it-lead">Lead time (days)</Label>
                 <Input
@@ -340,9 +285,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   </p>
                 )}
               </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1.5">
                 <Label htmlFor="it-threshold">Reorder threshold</Label>
                 <Input
@@ -361,44 +303,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                 )}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="it-price">Unit price</Label>
-                <Input
-                  id="it-price"
-                  type="number"
-                  inputMode="decimal"
-                  step="0.01"
-                  min={0}
-                  aria-invalid={Boolean(errors.unit_price_amount)}
-                  {...register('unit_price_amount')}
-                />
-                {errors.unit_price_amount && (
-                  <p role="alert" className="text-xs text-danger">
-                    {errors.unit_price_amount.message}
-                  </p>
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="it-uperpkg">Units / package</Label>
-                <Input
-                  id="it-uperpkg"
-                  type="number"
-                  inputMode="numeric"
-                  step="1"
-                  min={1}
-                  aria-invalid={Boolean(errors.units_per_package)}
-                  {...register('units_per_package')}
-                />
-                {errors.units_per_package && (
-                  <p role="alert" className="text-xs text-danger">
-                    {errors.units_per_package.message}
-                  </p>
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="it-near-expiry">Near-expiry threshold (days)</Label>
+                <Label htmlFor="it-near-expiry">Near expiry (days)</Label>
                 <Input
                   id="it-near-expiry"
                   type="number"
@@ -415,19 +320,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   </p>
                 )}
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="it-po-note">PO note</Label>
-                <Input
-                  id="it-po-note"
-                  placeholder="e.g. Quote ref #1234"
-                  {...register('po_note')}
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="it-notes">Notes</Label>
-              <Textarea id="it-notes" rows={3} {...register('notes')} />
             </div>
 
             <label className="flex cursor-pointer items-center gap-2 text-sm">
