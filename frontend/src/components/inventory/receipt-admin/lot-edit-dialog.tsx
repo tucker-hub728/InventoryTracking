@@ -15,7 +15,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -50,7 +49,6 @@ export function LotEditDialog({ lot, onOpenChange, onSaved }: Props) {
   const [unitPrice, setUnitPrice] = React.useState('');
   const [mfgDate, setMfgDate] = React.useState('');
   const [expDate, setExpDate] = React.useState('');
-  const [reason, setReason] = React.useState('');
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
@@ -62,7 +60,6 @@ export function LotEditDialog({ lot, onOpenChange, onSaved }: Props) {
     setUnitPrice(lot.unit_price_amount ?? '');
     setMfgDate(lot.manufacture_date ?? '');
     setExpDate(lot.expiration_date ?? '');
-    setReason('');
     setFormError(null);
     setShowReauth(false);
     setSubmitting(false);
@@ -126,10 +123,6 @@ export function LotEditDialog({ lot, onOpenChange, onSaved }: Props) {
       setFormError('Expiration date must be on or after the manufacture date.');
       return null;
     }
-    if (!reason.trim()) {
-      setFormError('A reason is required for an e-signed lot edit.');
-      return null;
-    }
     return patch;
   };
 
@@ -149,7 +142,9 @@ export function LotEditDialog({ lot, onOpenChange, onSaved }: Props) {
       const updated = await lotsApi.update(lot.id, {
         ...patch,
         evidence_id: evidence.evidence_id,
-        reason: reason.trim(),
+        // The mandatory rationale now comes from the e-sign dialog and is
+        // recorded both on the audit row's signature and the lot's reason.
+        reason: evidence.comment ?? '',
       });
       toast.success('Lot updated', { description: lot.lot_number });
       onSaved(updated);
@@ -257,19 +252,6 @@ export function LotEditDialog({ lot, onOpenChange, onSaved }: Props) {
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="lot-edit-reason">
-                Reason for change <span className="text-danger">*</span>
-              </Label>
-              <Textarea
-                id="lot-edit-reason"
-                rows={2}
-                placeholder="e.g. Corrected expiration date from the CoA"
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-              />
-            </div>
-
             {formError && (
               <p
                 role="alert"
@@ -305,6 +287,7 @@ export function LotEditDialog({ lot, onOpenChange, onSaved }: Props) {
         onOpenChange={setShowReauth}
         action="lot.update"
         meaning={meaning}
+        commentPlaceholder="e.g. Corrected expiration date from the CoA"
         onConfirmed={submit}
         title="Sign this lot edit"
         submitLabel="Sign & save"

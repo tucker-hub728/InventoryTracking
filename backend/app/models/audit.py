@@ -144,6 +144,11 @@ class ReauthEvent(Base):
     )
     action: Mapped[str] = mapped_column(Text, nullable=False)
     meaning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Operator's free-text rationale for the action ("correcting an
+    # erroneous transfer", …). Required by the API for every e-signature
+    # (21 CFR Part 11 — the *why* alongside the *who*), but the column is
+    # nullable so historical rows and failure rows without one stay valid.
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)

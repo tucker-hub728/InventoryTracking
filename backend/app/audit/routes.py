@@ -64,6 +64,7 @@ def _row_to_read(row: dict) -> AuditEventRead:
         diff=event.diff,
         context=event.context,
         signature_id=str(event.signature_id) if event.signature_id else None,
+        signature_comment=row.get("signature_comment"),
     )
 
 

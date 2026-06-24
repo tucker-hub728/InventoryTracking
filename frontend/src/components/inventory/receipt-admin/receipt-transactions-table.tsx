@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 import { Eye, PackageCheck } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -50,7 +51,7 @@ export function ReceiptTransactionsTable({
           <TableHead>Item</TableHead>
           <TableHead>PO #</TableHead>
           <TableHead className="text-right">Lots</TableHead>
-          <TableHead>Status</TableHead>
+          <TableHead>Supplier Status</TableHead>
           <TableHead>Created</TableHead>
           <TableHead className="text-right">Actions</TableHead>
         </TableRow>
@@ -62,9 +63,16 @@ export function ReceiptTransactionsTable({
           return (
             <TableRow key={txn.id}>
               <TableCell>
-                <span className="font-mono text-xs text-accent">
-                  {txn.item_number ?? '—'}
-                </span>
+                {txn.item_number ? (
+                  <Link
+                    href={`/inventory/${encodeURIComponent(txn.item_number)}/ledger`}
+                    className="font-mono text-xs text-accent transition-opacity hover:opacity-80"
+                  >
+                    {txn.item_number}
+                  </Link>
+                ) : (
+                  <span className="font-mono text-xs text-text-3">—</span>
+                )}
                 {txn.item_description && (
                   <span className="ml-2 text-text-2">{txn.item_description}</span>
                 )}

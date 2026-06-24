@@ -22,7 +22,6 @@ import {
   type ApiAuditSubjectTable,
 } from '@/lib/api/audit';
 import { ApiError } from '@/lib/api/client';
-import { signatureImageUrl } from '@/lib/api/uploads';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -41,8 +40,8 @@ const SEVERITY_STYLE: Record<ApiAuditSeverity, string> = {
 
 /**
  * Side-sheet detail view for one audit row. Shows the per-field diff,
- * before/after snapshots, the actor + timing, and (when the original
- * write was signed) the canvas signature image.
+ * before/after snapshots, the actor + timing, and (when the write was
+ * electronically signed) the reason recorded with the signature.
  *
  * Re-fetches on open instead of trusting the list-row payload — saves
  * having to thread state through paginated tables.
@@ -80,8 +79,8 @@ export function AuditDetailSheet({ open, onOpenChange, eventId }: Props) {
         <SheetHeader>
           <SheetTitle>Audit event</SheetTitle>
           <SheetDescription>
-            Field-level diff, signed-by, and the e-signature image when the
-            originating action was an electronic signature.
+            Field-level diff, the signer and timestamp, and the reason recorded
+            with the electronic signature.
           </SheetDescription>
         </SheetHeader>
 
@@ -137,6 +136,18 @@ export function AuditDetailSheet({ open, onOpenChange, eventId }: Props) {
               </p>
             </div>
 
+            {/* ── Reason / comment (signed actions) ──────────────── */}
+            {event.signature_comment && (
+              <div className="rounded-md border border-border bg-surface px-3 py-2.5">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-text-3">
+                  Reason / comment
+                </p>
+                <p className="mt-1 whitespace-pre-wrap text-sm text-text-1">
+                  {event.signature_comment}
+                </p>
+              </div>
+            )}
+
             {/* ── Subject ───────────────────────────────────────── */}
             <KvGrid>
               <KV
@@ -180,37 +191,6 @@ export function AuditDetailSheet({ open, onOpenChange, eventId }: Props) {
                 <div className="grid gap-3 sm:grid-cols-2">
                   <JsonBlock label="Before" data={event.before_state} />
                   <JsonBlock label="After" data={event.after_state} />
-                </div>
-              </div>
-            )}
-
-            {/* ── Signature image (if signed) ───────────────────── */}
-            {event.signature_id && (
-              <div className="space-y-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-text-3">
-                  Hand-drawn signature
-                </h3>
-                {/* Mid-gray inner surface contrasts with both dark-mode
-                    (white) and light-mode (near-black) ink strokes. */}
-                <div className="rounded-md border border-border bg-bg-elev p-3">
-                  <div className="rounded-sm bg-[#9ca3af] p-2">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={signatureImageUrl(event.signature_id)}
-                      alt="Hand-drawn e-signature"
-                      className="mx-auto block max-h-48"
-                      onError={(e) => {
-                        // No image stored (headless reauth, or v2 audit
-                        // without a signature). Replace with a placeholder.
-                        e.currentTarget.replaceWith(
-                          Object.assign(document.createElement('p'), {
-                            className: 'text-xs text-text-3 text-center py-6',
-                            textContent: 'No signature image on file.',
-                          }),
-                        );
-                      }}
-                    />
-                  </div>
                 </div>
               </div>
             )}

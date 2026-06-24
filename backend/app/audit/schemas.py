@@ -47,6 +47,10 @@ class AuditEventRead(BaseModel):
     diff: dict | None
     context: dict
     signature_id: str | None
+    # The operator's mandatory rationale captured at signing time, joined
+    # from ``audit.reauth_events`` via ``signature_id``. NULL for unsigned
+    # events.
+    signature_comment: str | None = None
 
 
 class AuditEventListResponse(BaseModel):

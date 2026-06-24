@@ -29,7 +29,6 @@ import {
   type ApiMovement,
   type MovementType,
 } from '@/lib/api/movements';
-import { signatureImageUrl } from '@/lib/api/uploads';
 import { cn } from '@/lib/utils';
 
 import { AuditDetailSheet } from './audit-detail-sheet';
@@ -149,9 +148,9 @@ function formatTime(iso: string): string {
  *
  * Each row carries the appropriate icon + colour tint. When the row
  * has an associated e-signature (movements via ``reauth_evidence_id``,
- * audit events via ``signature_id``), the canvas image is rendered
- * inline as a thumbnail. Clicking an audit row opens the side-sheet
- * with the field-level diff and forensic snapshots.
+ * audit events via ``signature_id``), an "e-signed" badge marks it.
+ * Clicking an audit row opens the side-sheet with the field-level diff,
+ * the recorded reason, and forensic snapshots.
  */
 export function EntityAuditTimeline({
   subjectTable,
@@ -365,9 +364,7 @@ function MovementRow({
           </p>
         )}
       </div>
-      {movement.reauth_evidence_id && (
-        <SignatureThumb evidenceId={movement.reauth_evidence_id} />
-      )}
+      {movement.reauth_evidence_id && <ESignedBadge />}
       <span className="font-mono text-[10px] text-text-3">#{index}</span>
     </li>
   );
@@ -416,7 +413,7 @@ function AuditRow({
           )}
         </div>
       </div>
-      {event.signature_id && <SignatureThumb evidenceId={event.signature_id} />}
+      {event.signature_id && <ESignedBadge />}
       <span className="font-mono text-[10px] text-text-3">#{index}</span>
     </li>
   );
@@ -442,38 +439,16 @@ function RowIcon({
   );
 }
 
-function SignatureThumb({ evidenceId }: { evidenceId: string }) {
-  // ``onError`` swaps the broken-image fallback in place so headless
-  // reauth rows (no canvas captured) render as a tiny placeholder
-  // rather than the browser's default broken-image icon.
-  //
-  // Background note: signatures are drawn with whatever ``--ink`` was at
-  // capture time — white strokes in dark mode, near-black in light mode.
-  // A mid-gray container background keeps both stroke colours legible.
-  const [errored, setErrored] = React.useState(false);
-  if (errored) {
-    return (
-      <span
-        className="ml-2 mt-0.5 shrink-0 self-start rounded-sm border border-border bg-bg-elev px-1.5 py-0.5 text-[10px] text-text-3"
-        title="Signed action — no canvas image captured"
-      >
-        e-signed
-      </span>
-    );
-  }
+/** Marks a timeline row as electronically signed. The signature is the
+ *  system-recorded re-auth (signer + timestamp + reason on the audit row);
+ *  there is no hand-drawn image. */
+function ESignedBadge() {
   return (
     <span
-      aria-hidden
-      className="ml-2 mt-0.5 block shrink-0 self-start overflow-hidden rounded-md border border-border bg-[#9ca3af] p-1 shadow-sm transition-shadow group-hover:shadow-elev-sm"
-      title="Click the row to view full details"
+      className="ml-2 mt-0.5 shrink-0 self-start rounded-sm border border-border bg-bg-elev px-1.5 py-0.5 text-[10px] text-text-3"
+      title="Electronically signed"
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={signatureImageUrl(evidenceId)}
-        alt=""
-        className="h-14 w-32 object-contain"
-        onError={() => setErrored(true)}
-      />
+      e-signed
     </span>
   );
 }

@@ -2,7 +2,15 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-import { Bell, LogOut, Moon, Shield, Sun } from 'lucide-react';
+import {
+  Bell,
+  LogOut,
+  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Shield,
+  Sun,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -19,6 +27,8 @@ export function Topbar() {
   const router = useRouter();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
+  const sidebarCollapsed = useUIStore((s) => s.sidebar === 'icon');
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const user = useAuthStore((s) => s.user);
   const clearSession = useAuthStore((s) => s.clear);
   const unread = useNotificationsStore(selectUnreadCount);
@@ -37,9 +47,31 @@ export function Topbar() {
 
   return (
     <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between gap-4 border-b border-border bg-bg-elev px-6 sm:px-8">
-      <div className="flex min-w-0 items-center gap-1.5 text-xs text-text-3">
-        <Shield size={13} aria-hidden />
-        <span className="truncate">{env.ENV_LABEL}</span>
+      <div className="flex min-w-0 items-center gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="icon"
+              variant="default"
+              onClick={toggleSidebar}
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-pressed={sidebarCollapsed}
+            >
+              {sidebarCollapsed ? (
+                <PanelLeftOpen size={15} />
+              ) : (
+                <PanelLeftClose size={15} />
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          </TooltipContent>
+        </Tooltip>
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-text-3">
+          <Shield size={13} aria-hidden />
+          <span className="truncate">{env.ENV_LABEL}</span>
+        </span>
       </div>
 
       <div className="flex items-center gap-1.5">

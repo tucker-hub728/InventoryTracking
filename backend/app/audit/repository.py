@@ -13,7 +13,7 @@ from datetime import datetime
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.audit import AuditEvent
+from app.models.audit import AuditEvent, ReauthEvent
 from app.models.identity import User
 
 # Shape returned by the listing query — flat dicts so the route can
@@ -24,23 +24,27 @@ AuditEventRow = dict
 
 
 def _select_with_actor() -> tuple:
-    """Build the canonical SELECT that LEFT-JOINs actor user data.
+    """Build the canonical SELECT that LEFT-JOINs actor + signature data.
 
-    Returns a tuple of (AuditEvent, User.email, User.display_name) so
-    callers can ``await session.execute(select(*_select_with_actor()))``
-    and project the user denorm without an extra fetch.
+    Returns (AuditEvent, User.email, User.full_name, ReauthEvent.comment)
+    so callers can ``await session.execute(select(*_select_with_actor()))``
+    and project the user denorm + the e-signature rationale without an
+    extra fetch. ``signature_comment`` is NULL for unsigned events.
     """
     return (
         AuditEvent,
         User.email.label("actor_user_email"),
         User.full_name.label("actor_user_name"),
+        ReauthEvent.comment.label("signature_comment"),
     )
 
 
 def _base_stmt():
-    """SELECT with the actor LEFT JOIN. Filters / ordering layer on top."""
-    return select(*_select_with_actor()).outerjoin(
-        User, User.id == AuditEvent.actor_user_id
+    """SELECT with the actor + signature LEFT JOINs. Filters layer on top."""
+    return (
+        select(*_select_with_actor())
+        .outerjoin(User, User.id == AuditEvent.actor_user_id)
+        .outerjoin(ReauthEvent, ReauthEvent.id == AuditEvent.signature_id)
     )
 
 
@@ -118,6 +122,7 @@ async def list_audit_events(
                 "event": event,
                 "actor_user_email": mapping.get("actor_user_email"),
                 "actor_user_name": mapping.get("actor_user_name"),
+                "signature_comment": mapping.get("signature_comment"),
             }
         )
     return rows, total
@@ -137,4 +142,5 @@ async def get_audit_event(
         "event": event,
         "actor_user_email": mapping.get("actor_user_email"),
         "actor_user_name": mapping.get("actor_user_name"),
+        "signature_comment": mapping.get("signature_comment"),
     }

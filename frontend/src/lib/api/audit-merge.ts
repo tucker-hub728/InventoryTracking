@@ -78,6 +78,9 @@ export function movementToAuditEvent(m: ApiMovement): ApiAuditEvent {
     diff: null,
     context: {},
     signature_id: m.reauth_evidence_id,
+    // The signing rationale rides on the movement as its note; surface it
+    // under the same field the audit-event rows use.
+    signature_comment: m.notes ?? null,
   };
 }
 

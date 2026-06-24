@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Loader2, Plus } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { usePermission } from '@/hooks/use-permission';
 import { ApiError } from '@/lib/api/client';
 import { cn } from '@/lib/utils';
@@ -207,7 +208,7 @@ export function LocationSystemClient() {
                           : 'text-text-2 hover:bg-bg-elev',
                       )}
                     >
-                      <span className="truncate">{n.name}</span>
+                      <OverflowTooltip label={n.name} />
                       <span className="ml-auto font-mono text-xs text-text-3">
                         {n.active_allocation_count}
                       </span>
@@ -332,14 +333,13 @@ function TreeRow({
           className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
         >
           <Icon size={14} className="shrink-0 text-text-3" />
-          <span
+          <OverflowTooltip
+            label={node.name}
             className={cn(
-              'truncate text-sm',
+              'text-sm',
               selected ? 'font-medium text-text-1' : 'text-text-2',
             )}
-          >
-            {node.name}
-          </span>
+          />
           <span className="ml-auto shrink-0 font-mono text-[11px] text-text-3">
             {stats.occupied}/{stats.capacity}
           </span>
@@ -357,5 +357,70 @@ function TreeRow({
           />
         ))}
     </div>
+  );
+}
+
+// ── Overflow-aware label ───────────────────────────────────────────────
+
+/**
+ * A truncating label that reveals its full text in a tooltip on hover, but
+ * only when the text is actually clipped. Names that fit show no tooltip, so
+ * we don't add hover noise to the common (short-name) case.
+ */
+function OverflowTooltip({
+  label,
+  className,
+}: {
+  label: string;
+  className?: string;
+}) {
+  const ref = React.useRef<HTMLSpanElement>(null);
+  const [truncated, setTruncated] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => setTruncated(el.scrollWidth > el.clientWidth);
+    check();
+    // Re-measure once layout settles and once the web font swaps in: a font
+    // swap changes the text's intrinsic width without resizing the flex-sized
+    // box, so the ResizeObserver alone would miss it and a clipped name would
+    // wrongly show no tooltip.
+    const raf = requestAnimationFrame(check);
+    let cancelled = false;
+    document.fonts?.ready.then(() => {
+      if (!cancelled) check();
+    });
+    let ro: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(check);
+      ro.observe(el);
+    }
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      ro?.disconnect();
+    };
+  }, [label]);
+
+  // If truncation is lost while the tooltip is open (e.g. the row widens under
+  // the pointer), drop the controlled-open state so re-showing needs a fresh
+  // hover rather than popping back instantly.
+  React.useEffect(() => {
+    if (!truncated) setOpen(false);
+  }, [truncated]);
+
+  return (
+    <Tooltip open={open && truncated} onOpenChange={setOpen}>
+      <TooltipTrigger asChild>
+        <span ref={ref} className={cn('min-w-0 flex-1 truncate', className)}>
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="right" align="start" className="max-w-[260px] break-words">
+        {label}
+      </TooltipContent>
+    </Tooltip>
   );
 }

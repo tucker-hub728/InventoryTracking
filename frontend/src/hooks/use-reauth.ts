@@ -19,6 +19,8 @@ export interface UseReauthResult {
   reauth: (input: {
     password: string;
     meaning?: string;
+    /** Mandatory rationale recorded on the audit row. */
+    comment: string;
     signatureImageS3Key?: string;
   }) => Promise<ReauthResponse | null>;
   pending: boolean;
@@ -46,10 +48,12 @@ export function useReauth(action: string): UseReauthResult {
     async ({
       password,
       meaning,
+      comment,
       signatureImageS3Key,
     }: {
       password: string;
       meaning?: string;
+      comment: string;
       signatureImageS3Key?: string;
     }) => {
       setPending(true);
@@ -60,6 +64,7 @@ export function useReauth(action: string): UseReauthResult {
           action,
           password,
           meaning,
+          comment,
           signature_image_s3_key: signatureImageS3Key,
         });
       } catch (err) {

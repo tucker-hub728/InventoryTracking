@@ -67,6 +67,9 @@ export interface ApiAuditEvent {
   diff: Record<string, { before: unknown; after: unknown }> | null;
   context: Record<string, unknown>;
   signature_id: string | null;
+  /** The operator's mandatory rationale captured at signing time, joined
+   *  from the e-signature record. Null for unsigned events. */
+  signature_comment: string | null;
 }
 
 export interface ApiAuditEventListResponse {

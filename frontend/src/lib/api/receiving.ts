@@ -19,7 +19,7 @@ export type ReceiptTransactionStatus = 'open' | 'received' | 'cancelled';
 
 export const RECEIPT_STATUS_LABEL: Record<ReceiptTransactionStatus, string> = {
   open: 'On order',
-  received: 'Received',
+  received: 'Available',
   cancelled: 'Cancelled',
 };
 

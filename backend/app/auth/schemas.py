@@ -33,6 +33,21 @@ def _normalise_email(v: str) -> str:
 Email = Annotated[str, BeforeValidator(_normalise_email)]
 
 
+def _trim_non_blank(v: str) -> str:
+    """Strip surrounding whitespace and reject an all-blank value."""
+    if not isinstance(v, str):
+        raise ValueError("must be a string")
+    v = v.strip()
+    if not v:
+        raise ValueError("must not be blank")
+    return v
+
+
+# Required free-text rationale on an e-signature. Trimmed; non-blank;
+# capped to mirror the ``meaning`` column width.
+Comment = Annotated[str, BeforeValidator(_trim_non_blank), Field(max_length=512)]
+
+
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: Email
@@ -75,6 +90,11 @@ class ReauthRequest(BaseModel):
     # ("I attest the dispense quantity is accurate") so the audit row
     # carries the same text the user saw.
     meaning: str | None = Field(default=None, max_length=512)
+    # Mandatory free-text rationale for the action (21 CFR Part 11 — the
+    # *why* recorded alongside the *who*). Required for every e-signature;
+    # stored on the audit row and surfaced on the audit log. Trimmed and
+    # must be non-blank.
+    comment: Comment
     # Optional S3 key returned by ``POST /v1/uploads/signature`` —
     # the canvas image the operator drew. Stored on the audit row
     # alongside the textual evidence; never returned by the reauth
@@ -90,6 +110,10 @@ class ReauthResponse(BaseModel):
     expires_at: datetime
     # Echoed so the frontend can confirm the image landed on the row.
     signature_image_s3_key: str | None = None
+    # Echoed so the caller can also thread the rationale into the domain
+    # record's notes/reason (e.g. the movement ledger), keeping the audit
+    # log and the per-domain view in sync.
+    comment: str | None = None
 
 
 class MeResponse(BaseModel):

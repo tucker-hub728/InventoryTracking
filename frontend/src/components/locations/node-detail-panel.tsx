@@ -93,9 +93,12 @@ function childUnit(nodeType: NodeType, n: number): string {
   return `${label}${n === 1 ? '' : 's'}`;
 }
 
+// NOTE: the action's rationale ("notes") is no longer collected here — it is
+// captured once, as a required comment, inside the e-sign dialog and read back
+// from the signature evidence (``evidence.comment``) at submit time.
 type Pending =
-  | { kind: 'place'; lotId: string; nodeId: string; gridRow: number | null; gridCol: number | null; qty: number; notes: string }
-  | { kind: 'place-batch'; lotId: string; nodeId: string; cells: { row: number; col: number }[]; notes: string }
+  | { kind: 'place'; lotId: string; nodeId: string; gridRow: number | null; gridCol: number | null; qty: number }
+  | { kind: 'place-batch'; lotId: string; nodeId: string; cells: { row: number; col: number }[] }
   | {
       kind: 'transfer-batch';
       allocationIds: string[];
@@ -103,10 +106,9 @@ type Pending =
       toCells: { grid_row: number; grid_col: number }[] | null;
       qty: number | null;
       count: number;
-      notes: string;
     }
-  | { kind: 'consume-batch'; allocationIds: string[]; toNodeId: string; count: number; notes: string }
-  | { kind: 'consume'; allocationId: string; toNodeId: string; qty: number; notes: string }
+  | { kind: 'consume-batch'; allocationIds: string[]; toNodeId: string; count: number }
+  | { kind: 'consume'; allocationId: string; toNodeId: string; qty: number }
   | null;
 
 interface Props {
@@ -155,7 +157,6 @@ export function NodeDetailPanel({
   const [placeLot, setPlaceLot] = React.useState('');
   const [placeAvail, setPlaceAvail] = React.useState<LotAvailability | null>(null);
   const [placeQty, setPlaceQty] = React.useState(isBox ? '1' : '');
-  const [placeNotes, setPlaceNotes] = React.useState('');
   const [showResize, setShowResize] = React.useState(false);
   const [showEdit, setShowEdit] = React.useState(false);
   // Bumped after each successful action so open inline forms remount shut.
@@ -207,7 +208,6 @@ export function NodeDetailPanel({
     setDetailAlloc(null);
     setPlaceLot('');
     setPlaceQty(isBox ? '1' : '');
-    setPlaceNotes('');
     setShowResize(false);
     setShowEdit(false);
     void reload();
@@ -251,10 +251,6 @@ export function NodeDetailPanel({
   // Batch place = one lot into N selected box cells (1 unit each), signed once.
   const openBatchPlaceSign = () => {
     if (!placeLot || selectedCells.size === 0) return;
-    if (!placeNotes.trim()) {
-      toast.error('A comment is required.');
-      return;
-    }
     const cells = [...selectedCells].map((k) => {
       const [r, c] = k.split(':');
       return { row: Number(r), col: Number(c) };
@@ -264,7 +260,6 @@ export function NodeDetailPanel({
       lotId: placeLot,
       nodeId: node.id,
       cells,
-      notes: placeNotes.trim(),
     });
     setShowReauth(true);
   };
@@ -337,22 +332,20 @@ export function NodeDetailPanel({
           grid_row: pending.gridRow,
           grid_col: pending.gridCol,
           evidence_id: evidence.evidence_id,
-          notes: pending.notes,
+          notes: evidence.comment ?? '',
         });
         toast.success('Placed');
         setPlaceLot('');
-        setPlaceNotes('');
       } else if (pending.kind === 'place-batch') {
         await locationNodesApi.placeBatch({
           lot_id: pending.lotId,
           node_id: pending.nodeId,
           cells: pending.cells.map((c) => ({ grid_row: c.row, grid_col: c.col })),
           evidence_id: evidence.evidence_id,
-          notes: pending.notes,
+          notes: evidence.comment ?? '',
         });
         toast.success(`Placed ${pending.cells.length} unit(s)`);
         setPlaceLot('');
-        setPlaceNotes('');
         setSelectedCells(new Set());
       } else if (pending.kind === 'transfer-batch') {
         await locationNodesApi.transferBatch({
@@ -361,7 +354,7 @@ export function NodeDetailPanel({
           to_cells: pending.toCells ?? undefined,
           qty: pending.qty ?? undefined,
           evidence_id: evidence.evidence_id,
-          notes: pending.notes,
+          notes: evidence.comment ?? '',
         });
         toast.success(`Transferred ${pending.count} unit(s)`);
         setSelectedOccupied(new Set());
@@ -371,7 +364,7 @@ export function NodeDetailPanel({
           allocation_ids: pending.allocationIds,
           to_node_id: pending.toNodeId,
           evidence_id: evidence.evidence_id,
-          notes: pending.notes,
+          notes: evidence.comment ?? '',
         });
         toast.success(`Consumed ${pending.count} unit(s)`);
         setSelectedOccupied(new Set());
@@ -383,7 +376,7 @@ export function NodeDetailPanel({
           to_node_id: pending.toNodeId,
           qty: pending.qty,
           evidence_id: evidence.evidence_id,
-          notes: pending.notes,
+          notes: evidence.comment ?? '',
         });
         toast.success(`Consumed ${pending.qty} unit(s)`);
       }
@@ -602,18 +595,8 @@ export function NodeDetailPanel({
                 <div className="space-y-2">
                   <div className="space-y-1">
                     <Label className="text-xs">Lot (one unit per cell)</Label>
-                    <LotSelect lots={lots} value={placeLot} onChange={setPlaceLot} />
+                    <LotCombobox lots={lots} value={placeLot} onChange={setPlaceLot} />
                     <RemainingHint avail={placeAvail} selecting={selectedCells.size} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">
-                      Comment <span className="text-danger">*</span>
-                    </Label>
-                    <Input
-                      placeholder="Reason for this placement"
-                      value={placeNotes}
-                      onChange={(e) => setPlaceNotes(e.target.value)}
-                    />
                   </div>
                   <Button
                     variant="primary"
@@ -770,7 +753,13 @@ export function NodeDetailPanel({
         }}
         action={reauthAction}
         meaning={attestation}
-        signatureRequired={false}
+        commentPlaceholder={
+          pending?.kind === 'transfer-batch'
+            ? 'Reason for this transfer'
+            : pending?.kind === 'place' || pending?.kind === 'place-batch'
+              ? 'Reason for this placement'
+              : 'Reason for this removal'
+        }
         onConfirmed={(evidence) => {
           setShowReauth(false);
           void runSigned(evidence);
@@ -887,7 +876,9 @@ function ChildCard({ child, onClick }: { child: NodeTree; onClick: () => void })
 
 // ── Lot select ──────────────────────────────────────────────────────────
 
-function LotSelect({
+/** Searchable lot picker — filters by lot number or item number. Mirrors the
+ *  destination ``TargetCombobox`` so both pickers feel the same. */
+function LotCombobox({
   lots,
   value,
   onChange,
@@ -896,20 +887,89 @@ function LotSelect({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState('');
+  const selected = lots.find((l) => l.id === value) ?? null;
+
+  const filtered = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return lots;
+    return lots.filter((l) =>
+      `${l.lot_number} ${l.item_number ?? ''}`.toLowerCase().includes(q),
+    );
+  }, [lots, query]);
+
   return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger>
-        <SelectValue placeholder="Select lot" />
-      </SelectTrigger>
-      <SelectContent className="max-h-72">
-        {lots.map((l) => (
-          <SelectItem key={l.id} value={l.id}>
-            <span className="font-mono text-xs">{l.lot_number}</span>
-            {l.item_number && <span className="ml-2 text-text-3">{l.item_number}</span>}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (!o) setQuery('');
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-surface px-3 text-sm"
+        >
+          <span className={cn('truncate', !selected && 'text-text-3')}>
+            {selected ? (
+              <>
+                <span className="font-mono text-xs">{selected.lot_number}</span>
+                {selected.item_number && (
+                  <span className="ml-2 text-text-3">{selected.item_number}</span>
+                )}
+              </>
+            ) : (
+              'Select lot'
+            )}
+          </span>
+          <ChevronDown size={14} className="shrink-0 text-text-3" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[var(--radix-popover-trigger-width)] min-w-[18rem]"
+      >
+        <div className="border-b border-border p-2">
+          <Input
+            autoFocus
+            icon={Search}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search lots…"
+          />
+        </div>
+        <div className="max-h-64 overflow-y-auto p-1">
+          {filtered.length === 0 ? (
+            <p className="px-2 py-6 text-center text-xs text-text-3">No matches.</p>
+          ) : (
+            filtered.map((l) => (
+              <button
+                key={l.id}
+                type="button"
+                onClick={() => {
+                  onChange(l.id);
+                  setOpen(false);
+                  setQuery('');
+                }}
+                className={cn(
+                  'flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-surface',
+                  l.id === value && 'bg-surface',
+                )}
+              >
+                <span className="truncate font-mono text-xs text-text-1">
+                  {l.lot_number}
+                </span>
+                {l.item_number && (
+                  <span className="ml-2 shrink-0 text-text-3">{l.item_number}</span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -921,20 +981,17 @@ interface TransferOutPayload {
   toCells: { grid_row: number; grid_col: number }[] | null;
   qty: number | null;
   count: number;
-  notes: string;
 }
 interface ConsumeOutPayload {
   allocationIds: string[];
   toNodeId: string;
   count: number;
-  notes: string;
 }
 /** Single-allocation partial consume (flat location, chosen qty). */
 interface SingleConsumePayload {
   allocationId: string;
   toNodeId: string;
   qty: number;
-  notes: string;
 }
 
 /** ``"row:col"`` keys → cell objects for the transfer-batch payload. */
@@ -1215,7 +1272,6 @@ function AllocationActions({
   const [toNode, setToNode] = React.useState('');
   const [qty, setQty] = React.useState('1');
   const [destCells, setDestCells] = React.useState<Set<string>>(new Set());
-  const [notes, setNotes] = React.useState('');
 
   const available = Number(allocation.qty) || 0;
   const destNode = targets.find((t) => t.id === toNode) ?? null;
@@ -1226,7 +1282,6 @@ function AllocationActions({
     setToNode('');
     setQty('1');
     setDestCells(new Set());
-    setNotes('');
   };
 
   if (!canWrite) {
@@ -1270,10 +1325,6 @@ function AllocationActions({
   }
 
   const submit = () => {
-    if (!notes.trim()) {
-      toast.error('A comment is required.');
-      return;
-    }
     if (mode === 'transfer') {
       if (!toNode) {
         toast.error('Pick a destination.');
@@ -1294,7 +1345,6 @@ function AllocationActions({
           toCells: cellsFromSet(destCells),
           qty: null,
           count: destCells.size,
-          notes: notes.trim(),
         });
       } else {
         const k = Number(qty);
@@ -1308,7 +1358,6 @@ function AllocationActions({
           toCells: null,
           qty: k,
           count: k,
-          notes: notes.trim(),
         });
       }
     } else {
@@ -1322,7 +1371,6 @@ function AllocationActions({
         allocationId: allocation.id,
         toNodeId: consumeAtNodeId,
         qty: k,
-        notes: notes.trim(),
       });
     }
   };
@@ -1382,13 +1430,6 @@ function AllocationActions({
         </div>
       )}
 
-      <div className="space-y-1">
-        <Label className="text-xs">
-          Comment <span className="text-danger">*</span>
-        </Label>
-        <Input placeholder="Reason for this action" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      </div>
-
       <div className="flex gap-2">
         <Button size="sm" variant="primary" onClick={submit}>
           <ShieldCheck size={13} /> {mode === 'transfer' ? 'Sign & move' : 'Sign & remove'}
@@ -1425,7 +1466,6 @@ function BatchOutPanel({
   const [mode, setMode] = React.useState<'none' | 'transfer' | 'consume'>('none');
   const [toNode, setToNode] = React.useState('');
   const [destCells, setDestCells] = React.useState<Set<string>>(new Set());
-  const [notes, setNotes] = React.useState('');
 
   const destNode = targets.find((t) => t.id === toNode) ?? null;
   const destIsBox = destNode?.node_type === 'box';
@@ -1435,14 +1475,9 @@ function BatchOutPanel({
     setMode('none');
     setToNode('');
     setDestCells(new Set());
-    setNotes('');
   };
 
   const submit = () => {
-    if (!notes.trim()) {
-      toast.error('A comment is required.');
-      return;
-    }
     if (mode === 'transfer') {
       if (!toNode) {
         toast.error('Pick a destination.');
@@ -1459,7 +1494,6 @@ function BatchOutPanel({
           toCells: cellsFromSet(destCells),
           qty: null,
           count,
-          notes: notes.trim(),
         });
       } else {
         onTransfer({
@@ -1468,7 +1502,6 @@ function BatchOutPanel({
           toCells: null,
           qty: count,
           count,
-          notes: notes.trim(),
         });
       }
     } else {
@@ -1476,7 +1509,7 @@ function BatchOutPanel({
         toast.error('Pick the Flat location that consumed it.');
         return;
       }
-      onConsume({ allocationIds: ids, toNodeId: toNode, count, notes: notes.trim() });
+      onConsume({ allocationIds: ids, toNodeId: toNode, count });
     }
   };
 
@@ -1548,13 +1581,6 @@ function BatchOutPanel({
               </Select>
             </div>
           )}
-
-          <div className="space-y-1">
-            <Label className="text-xs">
-              Comment <span className="text-danger">*</span>
-            </Label>
-            <Input placeholder="Reason for this action" value={notes} onChange={(e) => setNotes(e.target.value)} />
-          </div>
 
           <div className="flex gap-2">
             <Button size="sm" variant="primary" disabled={busy} onClick={submit}>

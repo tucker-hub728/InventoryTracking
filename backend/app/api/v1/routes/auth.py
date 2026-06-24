@@ -102,6 +102,7 @@ async def reauth_endpoint(
         password=payload.password,
         action=payload.action,
         meaning=payload.meaning,
+        comment=payload.comment,
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
         signature_image_s3_key=payload.signature_image_s3_key,
@@ -111,6 +112,7 @@ async def reauth_endpoint(
         action=evt.action,
         expires_at=evt.expires_at,
         signature_image_s3_key=evt.signature_image_s3_key,
+        comment=evt.comment,
     )
 
 

@@ -32,15 +32,16 @@ interface Column {
 // Widths drive a ``table-fixed`` layout so long names / vendors get
 // ellipsised rather than blowing out the column. The wrapper has
 // ``overflow-auto`` so the total width below acts as a min-width on
-// narrow viewports — under ~1100 px the table scrolls horizontally
+// narrow viewports — under ~930 px the table scrolls horizontally
 // rather than crushing each column.
+//
+// On-PO and Reorder were dropped from this main list (they pushed the
+// table into horizontal scroll); both remain on the item detail screen.
 const COLUMNS: Column[] = [
   { key: 'id', label: 'Item ID', sortKey: 'id', className: 'w-[110px]' },
   { key: 'desc', label: 'Name', sortKey: 'desc' },
   { key: 'vendor', label: 'Vendor', className: 'w-[160px]' },
   { key: 'qty', label: 'Units', align: 'right', className: 'w-[96px]' },
-  { key: 'onOrder', label: 'On PO', align: 'right', className: 'w-[80px]' },
-  { key: 'threshold', label: 'Reorder', align: 'right', className: 'w-[90px]' },
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter
   // doesn't populate yet (per-item lot expiry isn't rolled up at item
   // level). Column re-lands once ``v_item_lot_summary`` ships.
@@ -76,7 +77,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
   }
 
   return (
-    <Table className="min-w-[1100px] table-fixed">
+    <Table className="min-w-[930px] table-fixed">
       <TableHeader>
         <TableRow>
           {COLUMNS.map((c) => {
@@ -95,7 +96,10 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                   <button
                     type="button"
                     onClick={() => toggleSort(c.sortKey!)}
-                    className="inline-flex items-center gap-1 text-inherit transition-colors hover:text-text"
+                    // ``uppercase`` here because a <button> doesn't inherit the
+                    // header's text-transform (UA default), which otherwise left
+                    // sortable headers Title-cased while the rest were UPPERCASE.
+                    className="inline-flex items-center gap-1 uppercase text-inherit transition-colors hover:text-text"
                   >
                     {c.label}
                     <Arrow size={11} className={cn(!isActive && 'opacity-60')} aria-hidden />
@@ -158,12 +162,6 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                     </span>
                   )}
                 </div>
-              </TableCell>
-              <TableCell className="text-right font-mono text-xs text-text-2">
-                {item.onOrder > 0 ? formatNumber(item.onOrder) : '—'}
-              </TableCell>
-              <TableCell className="text-right font-mono text-xs text-text-2">
-                {item.threshold > 0 ? formatNumber(item.threshold) : '—'}
               </TableCell>
               <TableCell>
                 <StatusBadge status={item.status} />

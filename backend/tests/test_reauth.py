@@ -64,6 +64,19 @@ def _auth_headers(token: str, *, ua: str = "pytest/1.0") -> dict[str, str]:
     }
 
 
+def _body(action: str, password: str, **extra: Any) -> dict[str, Any]:
+    """Reauth request body. ``comment`` is required on the wire, so every
+    body carries one by default; pass ``comment=...`` (or other keys) via
+    ``extra`` to override or add fields."""
+    body: dict[str, Any] = {
+        "action": action,
+        "password": password,
+        "comment": "Routine action — test rationale.",
+    }
+    body.update(extra)
+    return body
+
+
 # ── Tests ──────────────────────────────────────────────────────────────
 
 
@@ -74,11 +87,12 @@ async def test_reauth_happy_path_returns_evidence_id(client: AsyncClient) -> Non
     resp = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
-        json={
-            "action": "movement.receipt",
-            "password": user["password"],
-            "meaning": "I attest the receipt is accurate.",
-        },
+        json=_body(
+            "movement.receipt",
+            user["password"],
+            meaning="I attest the receipt is accurate.",
+            comment="Correcting an erroneous transfer.",
+        ),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -86,6 +100,9 @@ async def test_reauth_happy_path_returns_evidence_id(client: AsyncClient) -> Non
     # Evidence id should be a UUID; cheap check on shape rather than parse.
     assert len(body["evidence_id"]) == 36
     assert "expires_at" in body
+    # The mandatory rationale is echoed back so the caller can mirror it
+    # into the domain record's notes/reason.
+    assert body["comment"] == "Correcting an erroneous transfer."
 
 
 async def test_reauth_wrong_password_returns_401_and_records_failure(
@@ -98,7 +115,7 @@ async def test_reauth_wrong_password_returns_401_and_records_failure(
     bad = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
-        json={"action": "movement.receipt", "password": "Definitely!Wrong1A"},
+        json=_body("movement.receipt", "Definitely!Wrong1A"),
     )
     assert bad.status_code == 401, bad.text
     body = bad.json()
@@ -107,7 +124,7 @@ async def test_reauth_wrong_password_returns_401_and_records_failure(
     ok = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
-        json={"action": "movement.receipt", "password": user["password"]},
+        json=_body("movement.receipt", user["password"]),
     )
     assert ok.status_code == 200, ok.text
 
@@ -120,7 +137,7 @@ async def test_reauth_rate_limit_after_five_failures(client: AsyncClient) -> Non
         resp = await client.post(
             "/v1/auth/reauth",
             headers=_auth_headers(user["access_token"]),
-            json={"action": "movement.receipt", "password": f"Wrong{i}!1A"},
+            json=_body("movement.receipt", f"Wrong{i}!1A"),
         )
         assert resp.status_code == 401, f"attempt {i}: {resp.text}"
 
@@ -128,7 +145,7 @@ async def test_reauth_rate_limit_after_five_failures(client: AsyncClient) -> Non
     blocked = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
-        json={"action": "movement.receipt", "password": "Wrong5!1A"},
+        json=_body("movement.receipt", "Wrong5!1A"),
     )
     assert blocked.status_code == 429, blocked.text
     body = blocked.json()
@@ -139,7 +156,7 @@ async def test_reauth_rate_limit_after_five_failures(client: AsyncClient) -> Non
     locked = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
-        json={"action": "movement.receipt", "password": user["password"]},
+        json=_body("movement.receipt", user["password"]),
     )
     assert locked.status_code == 429, locked.text
 
@@ -148,7 +165,7 @@ async def test_reauth_requires_session(client: AsyncClient) -> None:
     """Missing bearer token → 401 (we never hit Cognito)."""
     resp = await client.post(
         "/v1/auth/reauth",
-        json={"action": "movement.receipt", "password": "anything"},
+        json=_body("movement.receipt", "anything"),
     )
     assert resp.status_code == 401, resp.text
     # The exact code lives in the dependency, not our route.
@@ -161,11 +178,34 @@ async def test_reauth_rejects_bad_action_pattern(client: AsyncClient) -> None:
     resp = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
-        json={"action": "MOVEMENT RECEIPT", "password": user["password"]},
+        json=_body("MOVEMENT RECEIPT", user["password"]),
     )
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["code"] == "request_invalid"
+
+
+async def test_reauth_requires_comment(client: AsyncClient) -> None:
+    """A mandatory rationale: a missing or blank ``comment`` is a 422."""
+    user = await _bootstrap_user(client)
+
+    # Missing entirely.
+    missing = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json={"action": "movement.receipt", "password": user["password"]},
+    )
+    assert missing.status_code == 422, missing.text
+    assert missing.json()["code"] == "request_invalid"
+
+    # Present but whitespace-only — rejected by the trim validator.
+    blank = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body("movement.receipt", user["password"], comment="   "),
+    )
+    assert blank.status_code == 422, blank.text
+    assert blank.json()["code"] == "request_invalid"
 
 
 async def test_reauth_isolated_per_user(client: AsyncClient) -> None:
@@ -178,12 +218,12 @@ async def test_reauth_isolated_per_user(client: AsyncClient) -> None:
         await client.post(
             "/v1/auth/reauth",
             headers=_auth_headers(user_a["access_token"]),
-            json={"action": "movement.receipt", "password": f"Wrong{i}!1A"},
+            json=_body("movement.receipt", f"Wrong{i}!1A"),
         )
     locked_a = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user_a["access_token"]),
-        json={"action": "movement.receipt", "password": user_a["password"]},
+        json=_body("movement.receipt", user_a["password"]),
     )
     assert locked_a.status_code == 429
 
@@ -191,6 +231,6 @@ async def test_reauth_isolated_per_user(client: AsyncClient) -> None:
     ok_b = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user_b["access_token"]),
-        json={"action": "movement.receipt", "password": user_b["password"]},
+        json=_body("movement.receipt", user_b["password"]),
     )
     assert ok_b.status_code == 200, ok_b.text

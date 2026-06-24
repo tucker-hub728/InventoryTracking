@@ -15,7 +15,6 @@ import {
   type ApiMovement,
   type MovementType,
 } from '@/lib/api/movements';
-import { signatureImageUrl } from '@/lib/api/uploads';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -38,8 +37,8 @@ const TYPE_STYLE: Record<MovementType, string> = {
 
 /**
  * Side-sheet detail view for a single stock movement. Mirrors the
- * ``AuditDetailSheet`` layout (header strip, KV grid, signature image)
- * so the ledger and audit-timeline rows feel like the same product.
+ * ``AuditDetailSheet`` layout (header strip, KV grid) so the ledger and
+ * audit-timeline rows feel like the same product.
  *
  * No re-fetch — the timeline already holds the joined row, so this is
  * purely a presentational view. If we later need fresh data (e.g. for
@@ -53,8 +52,8 @@ export function MovementDetailSheet({ open, onOpenChange, movement }: Props) {
         <SheetHeader>
           <SheetTitle>Stock movement</SheetTitle>
           <SheetDescription>
-            Quantities, lot, locations, and the e-signature image captured
-            at the time of the action.
+            Quantities, lot, locations, and the reason recorded with the
+            electronic signature.
           </SheetDescription>
         </SheetHeader>
 
@@ -190,35 +189,6 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           />
         )}
       </KvGrid>
-
-      {/* ── Signature image ──────────────────────────────────── */}
-      {movement.reauth_evidence_id && (
-        <div className="space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-3">
-            Hand-drawn signature
-          </h3>
-          {/* Mid-gray inner surface keeps both dark-mode (white) and
-              light-mode (near-black) ink strokes legible. */}
-          <div className="rounded-md border border-border bg-bg-elev p-3">
-            <div className="rounded-sm bg-[#9ca3af] p-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={signatureImageUrl(movement.reauth_evidence_id)}
-                alt="Hand-drawn e-signature"
-                className="mx-auto block max-h-48"
-                onError={(e) => {
-                  e.currentTarget.replaceWith(
-                    Object.assign(document.createElement('p'), {
-                      className: 'text-xs text-text-3 text-center py-6',
-                      textContent: 'No signature image on file.',
-                    }),
-                  );
-                }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

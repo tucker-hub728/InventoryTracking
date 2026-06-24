@@ -15,14 +15,9 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { useReauth } from '@/hooks/use-reauth';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { ApiError } from '@/lib/api/client';
-import { uploadSignature } from '@/lib/api/uploads';
-import {
-  SignaturePad,
-  type SignaturePadHandle,
-} from '@/components/shared/signature-pad';
 
 interface Props {
   open: boolean;
@@ -38,21 +33,24 @@ interface Props {
   /** Submit-button label. Defaults to "Sign". */
   submitLabel?: string;
   /**
-   * Whether a hand-drawn signature is required. ``true`` blocks submit
-   * until the canvas has a stroke; ``false`` shows the pad as optional
-   * (omitted from the upload if untouched). Defaults to ``true``
-   * — the standard Part 11 ceremony.
+   * Placeholder for the mandatory comment/reason field, so each flow can
+   * prompt for the right kind of rationale (e.g. "Reason for this
+   * placement"). The field itself is always required.
    */
-  signatureRequired?: boolean;
+  commentPlaceholder?: string;
 }
 
 /**
- * Reusable e-signature dialog. The user types their password to mint
- * a single-use evidence id that the caller passes to the write
- * endpoint. Every GxP-significant write flow (receipts, dispenses,
- * adjustments, transfers, discards) uses this exact dialog so the
- * user experience is identical across the system — that's also a
- * 21 CFR Part 11 expectation (consistent identity-verification UX).
+ * Reusable e-signature dialog. The user types their password to mint a
+ * single-use evidence id that the caller passes to the write endpoint, and
+ * a mandatory reason/comment recorded with it. Every GxP-significant write
+ * flow (receipts, dispenses, adjustments, transfers, lot edits, forecast
+ * saves) uses this exact dialog so the experience is identical across the
+ * system — a 21 CFR Part 11 expectation (consistent identity-verification UX).
+ *
+ * The signature is the *electronic* signature: the password re-auth plus the
+ * recorded rationale, attributed in the audit trail to the signed-in user with
+ * a timestamp. There is no hand-drawn signature step.
  */
 export function PasswordReauthDialog({
   open,
@@ -62,28 +60,19 @@ export function PasswordReauthDialog({
   onConfirmed,
   title = 'Confirm your password',
   submitLabel = 'Sign',
-  signatureRequired = true,
+  commentPlaceholder = 'e.g. correcting an erroneous transfer',
 }: Props) {
   const { reauth, pending, error, rateLimited, reset } = useReauth(action);
   const [password, setPassword] = React.useState('');
-  const padRef = React.useRef<SignaturePadHandle | null>(null);
-  // Local "first stroke recorded" flag — Pad's ``isEmpty()`` is a ref
-  // so it doesn't trigger a re-render. We mirror it in state to drive
-  // the submit-disabled gate without polling.
-  const [hasSigned, setHasSigned] = React.useState(false);
-  // Surfaced separately from the password error so we can colour each
-  // field appropriately when both fail at once.
-  const [uploadError, setUploadError] = React.useState<string | null>(null);
-  const [uploading, setUploading] = React.useState(false);
+  // Mandatory rationale for the action — recorded on the e-signature row
+  // and surfaced on the audit log (21 CFR Part 11).
+  const [comment, setComment] = React.useState('');
 
   // Wipe state every time the dialog closes so a re-open starts clean.
   React.useEffect(() => {
     if (!open) {
       setPassword('');
-      setHasSigned(false);
-      setUploadError(null);
-      setUploading(false);
-      padRef.current?.clear();
+      setComment('');
       reset();
     }
   }, [open, reset]);
@@ -91,37 +80,12 @@ export function PasswordReauthDialog({
   const submit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (!password) return;
-    if (signatureRequired && !hasSigned) return;
+    if (!comment.trim()) return;
 
-    // 1) If the canvas has a drawing, upload it first to get the S3
-    //    key. Done before the reauth call so a single failure path
-    //    (upload | password) keeps the audit row consistent.
-    let signatureKey: string | undefined;
-    setUploadError(null);
-    const blob = await padRef.current?.toBlob();
-    if (blob) {
-      setUploading(true);
-      try {
-        const uploaded = await uploadSignature(blob);
-        signatureKey = uploaded.key;
-      } catch (err) {
-        const msg =
-          err instanceof ApiError
-            ? err.message
-            : 'Could not upload signature image.';
-        setUploadError(msg);
-        setUploading(false);
-        return;
-      } finally {
-        setUploading(false);
-      }
-    }
-
-    // 2) Reauth with (optional) signature key attached to the audit row.
     const evidence = await reauth({
       password,
       meaning,
-      signatureImageS3Key: signatureKey,
+      comment: comment.trim(),
     });
     if (evidence) {
       onConfirmed(evidence);
@@ -130,11 +94,7 @@ export function PasswordReauthDialog({
   };
 
   const submitDisabled =
-    pending ||
-    uploading ||
-    rateLimited ||
-    !password ||
-    (signatureRequired && !hasSigned);
+    pending || rateLimited || !password || !comment.trim();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -164,19 +124,21 @@ export function PasswordReauthDialog({
             </blockquote>
 
             <div className="space-y-1.5">
-              <Label>
-                Hand-drawn signature{' '}
-                {signatureRequired && <span className="text-danger">*</span>}
+              <Label htmlFor="reauth-comment">
+                Reason / comment <span className="text-danger">*</span>
               </Label>
-              <SignaturePad
-                ref={padRef}
-                onFirstStroke={() => setHasSigned(true)}
-                onChange={(d) => {
-                  // ``onChange('')`` fires on clear — sync state back.
-                  if (!d) setHasSigned(false);
-                }}
-                height={140}
+              <Textarea
+                id="reauth-comment"
+                rows={2}
+                autoFocus
+                placeholder={commentPlaceholder}
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                disabled={pending || rateLimited}
               />
+              <p className="text-[11px] text-text-3">
+                Recorded with your signature on the audit log.
+              </p>
             </div>
 
             <div className="space-y-1.5">
@@ -187,21 +149,13 @@ export function PasswordReauthDialog({
                 id="reauth-password"
                 type="password"
                 autoComplete="current-password"
-                disabled={pending || uploading || rateLimited}
+                disabled={pending || rateLimited}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 aria-invalid={Boolean(error)}
               />
             </div>
 
-            {uploadError && (
-              <p
-                role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
-              >
-                {uploadError}
-              </p>
-            )}
             {error && (
               <p
                 role="alert"
@@ -215,16 +169,12 @@ export function PasswordReauthDialog({
             <Button
               type="button"
               onClick={() => onOpenChange(false)}
-              disabled={pending || uploading}
+              disabled={pending}
             >
               Cancel
             </Button>
             <Button type="submit" variant="primary" disabled={submitDisabled}>
-              {uploading
-                ? 'Uploading…'
-                : pending
-                  ? 'Verifying…'
-                  : submitLabel}
+              {pending ? 'Verifying…' : submitLabel}
             </Button>
           </DialogFooter>
         </form>

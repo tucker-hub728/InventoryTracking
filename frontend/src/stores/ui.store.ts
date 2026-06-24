@@ -26,6 +26,7 @@ interface UIState {
   setAccent: (accent: string) => void;
   setDensity: (density: Density) => void;
   setSidebar: (sidebar: SidebarVariant) => void;
+  toggleSidebar: () => void;
   setLogin: (login: LoginVariant) => void;
   reset: () => void;
   _setHydrated: () => void;
@@ -48,6 +49,8 @@ export const useUIStore = create<UIState>()(
       setAccent: (accent) => set({ accent }),
       setDensity: (density) => set({ density }),
       setSidebar: (sidebar) => set({ sidebar }),
+      toggleSidebar: () =>
+        set({ sidebar: get().sidebar === 'icon' ? 'labeled' : 'icon' }),
       setLogin: (login) => set({ login }),
       reset: () => set({ ...DEFAULT_TWEAKS }),
       _setHydrated: () => set({ hydrated: true }),
