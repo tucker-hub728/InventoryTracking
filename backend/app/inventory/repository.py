@@ -654,7 +654,7 @@ async def item_vendor_ids(
     intake / receive vendor is one of the item's vendors.
     """
     stmt = select(ItemVendor.vendor_id).where(ItemVendor.item_id == item_id)
-    return {row for row in (await session.execute(stmt)).scalars().all()}
+    return set((await session.execute(stmt)).scalars().all())
 
 
 async def replace_item_vendors(
