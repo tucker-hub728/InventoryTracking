@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/sonner';
+import { useConfirm } from '@/components/ui/confirm-dialog';
 import { EmptyState } from '@/components/shared/empty-state';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { usePermission } from '@/hooks/use-permission';
@@ -28,6 +29,7 @@ export function VendorsPageClient() {
   const [creating, setCreating] = React.useState(false);
   const [editing, setEditing] = React.useState<Vendor | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
+  const { confirm, confirmDialog } = useConfirm();
 
   const debounced = useDebouncedValue(query, 150);
 
@@ -90,9 +92,13 @@ export function VendorsPageClient() {
   // side optimism honest by always re-reading the server response.
   const handleDeactivate = async (v: Vendor): Promise<void> => {
     if (!canCreate) return;
-    if (!window.confirm(`Deactivate ${v.name}? It will be hidden from new item/lot pickers.`)) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Deactivate ${v.name}?`,
+      description: 'It will be hidden from new item / lot pickers. You can reactivate it later.',
+      confirmLabel: 'Deactivate',
+      destructive: true,
+    });
+    if (!ok) return;
     setBusyId(v.id);
     try {
       const updated = await vendorsApi.deactivate(v.id);
@@ -204,6 +210,8 @@ export function VendorsPageClient() {
         vendor={editing}
         onUpdated={handleUpdated}
       />
+
+      {confirmDialog}
     </>
   );
 }

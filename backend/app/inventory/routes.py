@@ -32,10 +32,15 @@ from app.inventory.schemas import (
     MovementListResponse,
     MovementRead,
     MovementType,
-    ReceiptIntakeRequest,
+    OrderActionRequest,
+    OrderCreateRequest,
+    OrderLineRead,
+    OrderUpdateRequest,
+    ReceiptEventLineRead,
+    ReceiptEventRead,
     ReceiptTransactionListResponse,
     ReceiptTransactionRead,
-    ReceiveRequest,
+    ReceiveEventRequest,
     VendorCreate,
     VendorRead,
     VendorUpdate,
@@ -885,6 +890,20 @@ async def update_lot(
     if lot is None or lot.deleted_at is not None:
         raise NotFoundError(f"Lot {lot_id} not found")
 
+    # Quantity may be corrected post-receipt, but never below what is already
+    # physically placed in locations — the operator must unplace first.
+    new_qty: int | None = None
+    if "ordered_qty" in patch:
+        new_qty = patch["ordered_qty"]
+        placed = int(await loc_repo.sum_active_alloc_qty_for_lot(db, lot.id))
+        if new_qty < placed:
+            raise ConflictError(
+                f"This lot has {placed} unit(s) placed in location(s). Please "
+                f"remove it from its location(s) first, or set the quantity to "
+                f"at least {placed}.",
+                code="qty_below_placed",
+            )
+
     if "vendor_id" in patch:
         v = patch["vendor_id"]
         if v is None:
@@ -929,6 +948,31 @@ async def update_lot(
             ) from exc
         raise
     after = inv_repo.lot_to_audit_snapshot(updated)
+
+    # A qty correction re-syncs the Order line's received total (the lot maps
+    # one-to-one to a receive-event draw) and re-derives the Order status
+    # (e.g. dropping below ordered flips received → partially_received).
+    if new_qty is not None:
+        event_line = await inv_repo.get_event_line_by_lot(db, updated.id)
+        if event_line is not None:
+            event_line.qty_received = new_qty
+            await db.flush()
+            if updated.receipt_transaction_id is not None:
+                order = await inv_repo.get_order(db, updated.receipt_transaction_id)
+                if order is not None:
+                    recd = await inv_repo.received_qty_by_line(
+                        db, [ln.id for ln in order.lines]
+                    )
+                    new_status = inv_repo.derive_order_status(
+                        list(order.lines), recd
+                    )
+                    if new_status != order.status:
+                        await inv_repo.set_order_status(
+                            db,
+                            txn=order,
+                            status=new_status,
+                            received_by_user_id=current.id,
+                        )
 
     await record_entity_change(
         db,
@@ -1109,17 +1153,69 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
 # (``meta.item_vendors``). See docs/modules/receipt-admin.md.
 
 
-def _receipt_txn_to_read(txn: ReceiptTransaction) -> ReceiptTransactionRead:
-    # ``txn.lots`` is the eager (selectinload) relationship — newest last.
-    # Soft-deleted lots are filtered here (the relationship has no WHERE).
-    lots = [_lot_to_read(lot) for lot in txn.lots if lot.deleted_at is None]
+def _order_to_read(
+    txn: ReceiptTransaction, received: dict[uuid.UUID, int]
+) -> ReceiptTransactionRead:
+    """Serialise an Order (header + lines + events) with derived quantities.
+
+    ``received`` maps each line id → its Σ received qty (from
+    ``received_qty_by_line``).
+    """
+    lines_read: list[OrderLineRead] = []
+    total_ordered = 0
+    total_received = 0
+    for line in txn.lines:
+        recd = received.get(line.id, 0)
+        outstanding = max(0, line.ordered_qty - recd)
+        total_ordered += line.ordered_qty
+        total_received += recd
+        lines_read.append(
+            OrderLineRead(
+                id=str(line.id),
+                line_no=line.line_no,
+                item_id=str(line.item_id),
+                item_number=line.item.item_number if line.item else None,
+                item_description=line.item.description if line.item else None,
+                vendor_id=str(line.vendor_id),
+                vendor_name=line.vendor.name if line.vendor else None,
+                ordered_qty=line.ordered_qty,
+                unit_price_amount=line.unit_price_amount,
+                received_qty=recd,
+                outstanding_qty=outstanding,
+            )
+        )
+
+    events_read: list[ReceiptEventRead] = []
+    for ev in txn.events:
+        ev_lines = [
+            ReceiptEventLineRead(
+                id=str(el.id),
+                line_id=str(el.receipt_transaction_line_id),
+                qty_received=el.qty_received,
+                over_receipt_reason=el.over_receipt_reason,
+                lot_id=str(el.lot_id),
+                lot_number=el.lot.lot_number if el.lot else None,
+            )
+            for el in ev.lines
+        ]
+        events_read.append(
+            ReceiptEventRead(
+                id=str(ev.id),
+                received_at=ev.received_at,
+                received_by_user_id=str(ev.received_by_user_id),
+                notes=ev.notes,
+                created_at=ev.created_at,
+                lines=ev_lines,
+            )
+        )
+
     return ReceiptTransactionRead(
         id=str(txn.id),
-        item_id=str(txn.item_id),
-        item_number=txn.item.item_number if txn.item else None,
-        item_description=txn.item.description if txn.item else None,
-        status=txn.status,  # type: ignore[arg-type]
         po_reference=txn.po_reference,
+        status=txn.status,  # type: ignore[arg-type]
+        is_blanket=txn.is_blanket,
+        valid_from=txn.valid_from,
+        valid_to=txn.valid_to,
         notes=txn.notes,
         created_by_user_id=str(txn.created_by_user_id),
         received_by_user_id=(
@@ -1128,8 +1224,30 @@ def _receipt_txn_to_read(txn: ReceiptTransaction) -> ReceiptTransactionRead:
         received_at=txn.received_at,
         created_at=txn.created_at,
         updated_at=txn.updated_at,
-        lots=lots,
+        lines=lines_read,
+        events=events_read,
+        total_ordered_qty=total_ordered,
+        total_received_qty=total_received,
     )
+
+
+async def _order_read(
+    db: DBSession, txn: ReceiptTransaction
+) -> ReceiptTransactionRead:
+    """Compute received-by-line then serialise one Order."""
+    received = await inv_repo.received_qty_by_line(
+        db, [line.id for line in txn.lines]
+    )
+    return _order_to_read(txn, received)
+
+
+async def _orders_read(
+    db: DBSession, txns: list[ReceiptTransaction]
+) -> list[ReceiptTransactionRead]:
+    """Batch the received-by-line lookup across all listed Orders."""
+    all_line_ids = [line.id for txn in txns for line in txn.lines]
+    received = await inv_repo.received_qty_by_line(db, all_line_ids)
+    return [_order_to_read(txn, received) for txn in txns]
 
 
 async def _resolve_item_vendor(
@@ -1187,30 +1305,77 @@ async def list_item_vendors(
     ]
 
 
-# ── Receipt transactions (intake → receive) ────────────────────────────
+# ── Orders (Receipt Admin v3 — intake / edit / receive / delete) ───────
+#
+# An "Order" (``app.receipt_transactions``) has one-or-more item lines and
+# zero-or-more dated receive events. Lots are created at receive (one lot per
+# line × event), never at intake. Vendors per line are restricted to the
+# item's assigned vendors. See docs/modules/receipt-admin.md (v3).
+
+
+async def _build_order_lines(
+    db: DBSession,
+    *,
+    txn_id: uuid.UUID,
+    lines_input: list,
+    actor_user_id: uuid.UUID,
+) -> list:
+    """Resolve item + per-line vendor and insert the Order's lines (1-based
+    ``line_no`` in payload order). Used by create + edit.
+    """
+    created = []
+    for idx, line in enumerate(lines_input, start=1):
+        item_uuid = _parse_uuid_or_422(line.item_id, field="item_id")
+        item = await inv_repo.get_item(db, item_uuid)
+        if item is None:
+            raise NotFoundError(f"Item {line.item_id} not found")
+        vendor = await _resolve_item_vendor(
+            db, item_id=item_uuid, vendor_id=line.vendor_id
+        )
+        row = await inv_repo.add_order_line(
+            db,
+            txn_id=txn_id,
+            line_no=idx,
+            item_id=item_uuid,
+            vendor_id=vendor.id,
+            ordered_qty=line.ordered_qty,
+            unit_price_amount=line.unit_price,
+        )
+        await record_entity_change(
+            db,
+            actor_user_id=actor_user_id,
+            action="created",
+            subject_table="app.receipt_transaction_lines",
+            subject_id=row.id,
+            subject_label=f"{item.item_number} × {line.ordered_qty}",
+            before=None,
+            after=inv_repo.order_line_to_audit_snapshot(row),
+            context={"receipt_transaction_id": str(txn_id)},
+        )
+        created.append(row)
+    return created
 
 
 @receiving_router.get(
     "/transactions",
     response_model=ReceiptTransactionListResponse,
-    summary="List receipt transactions (newest first)",
+    summary="List Orders (newest first)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def list_receipt_transactions(
+async def list_orders(
     db: DBSession,
-    item_id: Annotated[uuid.UUID | None, Query()] = None,
     status_filter: Annotated[
-        Literal["open", "received", "cancelled"] | None,
-        Query(alias="status", description="Filter by transaction status"),
+        Literal["open", "partially_received", "received", "cancelled"] | None,
+        Query(alias="status", description="Filter by Order status"),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ReceiptTransactionListResponse:
-    rows, total = await inv_repo.list_receipt_transactions(
-        db, item_id=item_id, status=status_filter, limit=limit, offset=offset
+    rows, total = await inv_repo.list_orders(
+        db, status=status_filter, limit=limit, offset=offset
     )
     return ReceiptTransactionListResponse(
-        items=[_receipt_txn_to_read(t) for t in rows],
+        items=await _orders_read(db, rows),
         total=total,
         limit=limit,
         offset=offset,
@@ -1220,98 +1385,387 @@ async def list_receipt_transactions(
 @receiving_router.get(
     "/transactions/{txn_id}",
     response_model=ReceiptTransactionRead,
-    summary="Get one receipt transaction + its lots",
+    summary="Get one Order (lines + receive events)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def get_receipt_transaction(
+async def get_order(
     db: DBSession,
     txn_id: Annotated[uuid.UUID, Path()],
 ) -> ReceiptTransactionRead:
-    txn = await inv_repo.get_receipt_transaction(db, txn_id)
+    txn = await inv_repo.get_order(db, txn_id)
     if txn is None:
-        raise NotFoundError(f"Receipt transaction {txn_id} not found")
-    return _receipt_txn_to_read(txn)
+        raise NotFoundError(f"Order {txn_id} not found")
+    return await _order_read(db, txn)
 
 
 @receiving_router.post(
     "/transactions",
     response_model=ReceiptTransactionRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a receipt intake — ON_ORDER lots (Receipt Admin §4)",
+    summary="Create an Order — multi-item, no lots yet (Receipt Admin v3)",
     # Intake places an order; no stock moves yet, so it's the routine
-    # ``create`` gate (not the e-signed ``sign`` path the physical receipt uses).
+    # ``create`` gate (the e-signed ``sign`` path is the physical receive).
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
-async def create_receipt_intake(
+async def create_order(
     db: DBSession,
     current: CurrentDbUserDep,
-    payload: ReceiptIntakeRequest,
+    payload: OrderCreateRequest,
 ) -> ReceiptTransactionRead:
-    """Step 1–4: resolve item + vendors, create ON_ORDER lots under a new
-    receipt-transaction header. Atomic — any failure rolls the whole
-    intake back. No ledger movement is posted (goods aren't in yet)."""
-    item_uuid = _parse_uuid_or_422(payload.item_id, field="item_id")
-    item = await inv_repo.get_item(db, item_uuid)
-    if item is None:
-        raise NotFoundError(f"Item {payload.item_id} not found")
+    """Create an Order header + its item lines. Atomic; no ledger movement
+    (goods aren't in yet). The same item may appear on multiple lines."""
+    if (
+        payload.valid_from is not None
+        and payload.valid_to is not None
+        and payload.valid_to < payload.valid_from
+    ):
+        raise ValidationError(
+            "valid_to must be on or after valid_from",
+            code="invalid_valid_window",
+        )
+    try:
+        txn = await inv_repo.create_order(
+            db,
+            created_by_user_id=current.id,
+            po_reference=payload.po_reference,
+            is_blanket=payload.is_blanket,
+            valid_from=payload.valid_from,
+            valid_to=payload.valid_to,
+            notes=payload.notes,
+        )
+        await _build_order_lines(
+            db,
+            txn_id=txn.id,
+            lines_input=payload.lines,
+            actor_user_id=current.id,
+        )
+    except IntegrityError as exc:
+        await db.rollback()
+        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
+        if "uq_receipt_transactions_po_reference" in msg:
+            raise ConflictError(
+                f"Order number '{payload.po_reference}' is already in use",
+                code="po_reference_conflict",
+            ) from exc
+        raise
 
-    # Reject duplicate lot numbers within the same intake up-front.
-    seen_numbers: set[str] = set()
-    for line in payload.lots:
-        key = line.lot_number.strip().lower()
-        if key in seen_numbers:
-            raise ValidationError(
-                f"Duplicate lot_number '{line.lot_number}' in this intake",
-                code="duplicate_lot_number_in_request",
-            )
-        seen_numbers.add(key)
-
-    txn = await inv_repo.create_receipt_transaction(
+    await record_entity_change(
         db,
-        item_id=item_uuid,
-        created_by_user_id=current.id,
-        po_reference=payload.po_reference,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="app.receipt_transactions",
+        subject_id=txn.id,
+        subject_label=f"{payload.po_reference} ({len(payload.lines)} item(s))",
+        before=None,
+        after=inv_repo.order_to_audit_snapshot(txn),
+    )
+
+    refreshed = await inv_repo.get_order(db, txn.id)
+    assert refreshed is not None
+    response = await _order_read(db, refreshed)
+    await db.commit()
+    return response
+
+
+@receiving_router.patch(
+    "/transactions/{txn_id}",
+    response_model=ReceiptTransactionRead,
+    summary="Edit an un-received Order (header + lines). Not e-signed.",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def update_order(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    txn_id: Annotated[uuid.UUID, Path()],
+    payload: OrderUpdateRequest,
+) -> ReceiptTransactionRead:
+    """Edit an Order while it is still ``open`` (no receive events). Header
+    fields patch in place; ``lines``, when supplied, replaces the whole set."""
+    txn = await inv_repo.get_order(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Order {txn_id} not found")
+    if txn.status != "open":
+        raise ValidationError(
+            f"Order is '{txn.status}'; only un-received (open) Orders can be edited",
+            code="order_not_editable",
+        )
+
+    before = inv_repo.order_to_audit_snapshot(txn)
+    fields_set = payload.model_fields_set
+
+    if "po_reference" in fields_set and payload.po_reference is not None:
+        txn.po_reference = payload.po_reference
+    if "is_blanket" in fields_set and payload.is_blanket is not None:
+        txn.is_blanket = payload.is_blanket
+    if "valid_from" in fields_set:
+        txn.valid_from = payload.valid_from
+    if "valid_to" in fields_set:
+        txn.valid_to = payload.valid_to
+    if "notes" in fields_set:
+        txn.notes = payload.notes
+
+    if (
+        txn.valid_from is not None
+        and txn.valid_to is not None
+        and txn.valid_to < txn.valid_from
+    ):
+        raise ValidationError(
+            "valid_to must be on or after valid_from",
+            code="invalid_valid_window",
+        )
+
+    try:
+        await db.flush()
+        if "lines" in fields_set and payload.lines is not None:
+            if len(payload.lines) == 0:
+                raise ValidationError(
+                    "An Order must have at least one line",
+                    code="order_no_lines",
+                )
+            await inv_repo.delete_order_lines(db, txn_id=txn.id)
+            await _build_order_lines(
+                db,
+                txn_id=txn.id,
+                lines_input=payload.lines,
+                actor_user_id=current.id,
+            )
+    except IntegrityError as exc:
+        await db.rollback()
+        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
+        if "uq_receipt_transactions_po_reference" in msg:
+            raise ConflictError(
+                f"Order number '{txn.po_reference}' is already in use",
+                code="po_reference_conflict",
+            ) from exc
+        raise
+
+    refreshed = await inv_repo.get_order(db, txn.id)
+    assert refreshed is not None
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.receipt_transactions",
+        subject_id=txn.id,
+        subject_label=refreshed.po_reference,
+        before=before,
+        after=inv_repo.order_to_audit_snapshot(refreshed),
+    )
+    response = await _order_read(db, refreshed)
+    await db.commit()
+    return response
+
+
+@receiving_router.post(
+    "/transactions/{txn_id}/delete",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Soft-delete an un-received Order (e-signed)",
+    # E-signed: a fresh reauth ticket for action='order.delete', consumed once.
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def delete_order(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    txn_id: Annotated[uuid.UUID, Path()],
+    payload: OrderActionRequest,
+) -> None:
+    """Soft-delete an Order — only while it has no receive events (preserves
+    the GxP ledger; received stock can never be orphaned). E-signed."""
+    txn = await inv_repo.get_order(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Order {txn_id} not found")
+    if txn.events:
+        raise ValidationError(
+            "Cannot delete an Order that has receive events",
+            code="order_has_receipts",
+        )
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    before = inv_repo.order_to_audit_snapshot(txn)
+    await inv_repo.soft_delete_order(db, txn=txn, deleted_by_user_id=current.id)
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="order.delete",
+        target_table="app.receipt_transactions",
+        target_id=txn.id,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="deleted",
+        subject_table="app.receipt_transactions",
+        subject_id=txn.id,
+        subject_label=txn.po_reference,
+        before=before,
+        after=inv_repo.order_to_audit_snapshot(txn),
+        signature_id=evidence_uuid,
+    )
+    await db.commit()
+
+
+@receiving_router.post(
+    "/transactions/{txn_id}/cancel",
+    response_model=ReceiptTransactionRead,
+    summary="Cancel an un-received Order (keeps the record). E-signed.",
+    # E-signed: a fresh reauth ticket for action='order.cancel', consumed once.
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def cancel_order(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    txn_id: Annotated[uuid.UUID, Path()],
+    payload: OrderActionRequest,
+) -> ReceiptTransactionRead:
+    txn = await inv_repo.get_order(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Order {txn_id} not found")
+    if txn.events:
+        raise ValidationError(
+            "Cannot cancel an Order that has receive events",
+            code="order_has_receipts",
+        )
+    if txn.status == "cancelled":
+        raise ValidationError("Order is already cancelled", code="order_cancelled")
+
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    before = inv_repo.order_to_audit_snapshot(txn)
+    await inv_repo.set_order_status(db, txn=txn, status="cancelled")
+    refreshed = await inv_repo.get_order(db, txn.id)
+    assert refreshed is not None
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="order.cancel",
+        target_table="app.receipt_transactions",
+        target_id=txn.id,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.receipt_transactions",
+        subject_id=txn.id,
+        subject_label=f"{txn.po_reference} cancelled",
+        before=before,
+        after=inv_repo.order_to_audit_snapshot(refreshed),
+        signature_id=evidence_uuid,
+    )
+    response = await _order_read(db, refreshed)
+    await db.commit()
+    return response
+
+
+@receiving_router.post(
+    "/transactions/{txn_id}/receive",
+    response_model=ReceiptTransactionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record a dated receive event (partial / blanket). E-signed.",
+    # Creates lots, so it's GxP-significant: ``sign`` permission + a fresh
+    # reauth ticket for action='receipt.confirm' (consumed once vs the Order).
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def receive_order(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    txn_id: Annotated[uuid.UUID, Path()],
+    payload: ReceiveEventRequest,
+) -> ReceiptTransactionRead:
+    """One dated receive event: per submitted line, create one ``available``
+    lot (lot number + dates entered now) and a ``receipt_event_lines`` draw.
+    No ledger movement — quantity flows through the Location System ``place``
+    (unit-IN). One e-signature covers the whole event; commits atomically.
+    Recomputes the Order status (open → partially_received → received)."""
+    txn = await inv_repo.get_order(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Order {txn_id} not found")
+    if txn.status not in ("open", "partially_received"):
+        raise ValidationError(
+            f"Order is '{txn.status}'; only open / partially_received Orders "
+            "can be received",
+            code="order_not_receivable",
+        )
+
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+
+    lines_by_id = {line.id: line for line in txn.lines}
+
+    event = await inv_repo.create_receipt_event(
+        db,
+        txn_id=txn.id,
+        received_at=payload.received_at,
+        received_by_user_id=current.id,
+        reauth_event_id=evidence_uuid,
         notes=payload.notes,
     )
 
-    for line in payload.lots:
-        vendor = await _resolve_item_vendor(
-            db, item_id=item_uuid, vendor_id=line.vendor_id
-        )
+    seen_lines: set[uuid.UUID] = set()
+    seen_lot_numbers: set[tuple[uuid.UUID, str]] = set()
 
-        # Lot-number uniqueness pre-check (clean 409; index is the guard).
+    for line_in in payload.lines:
+        line_uuid = _parse_uuid_or_422(line_in.line_id, field="line_id")
+        line = lines_by_id.get(line_uuid)
+        if line is None:
+            raise ValidationError(
+                f"Line {line_in.line_id} is not part of this Order",
+                code="line_not_in_order",
+            )
+        if line_uuid in seen_lines:
+            raise ValidationError(
+                f"Line {line_in.line_id} appears more than once in this receive",
+                code="duplicate_line_in_receive",
+            )
+        seen_lines.add(line_uuid)
+
+        # Over-receipt (qty > the line's outstanding) is allowed with no reason.
+
+        # Lot number is unique per item (within this request + against the DB).
+        lot_key = (line.item_id, line_in.lot_number.strip().lower())
+        if lot_key in seen_lot_numbers:
+            raise ValidationError(
+                f"Duplicate lot_number '{line_in.lot_number}' for the same item "
+                "in this receive",
+                code="duplicate_lot_number_in_request",
+            )
+        seen_lot_numbers.add(lot_key)
         if (
             await inv_repo.get_lot_by_item_and_number(
-                db, item_id=item_uuid, lot_number=line.lot_number
+                db, item_id=line.item_id, lot_number=line_in.lot_number
             )
         ) is not None:
             raise ConflictError(
-                f"lot_number '{line.lot_number}' already exists for this item",
+                f"lot_number '{line_in.lot_number}' already exists for this item",
                 code="lot_number_conflict",
             )
 
         try:
             lot = await inv_repo.create_lot(
                 db,
-                item_id=item_uuid,
-                lot_number=line.lot_number,
+                item_id=line.item_id,
+                lot_number=line_in.lot_number,
                 created_by_user_id=current.id,
-                vendor_id=vendor.id,
-                manufacture_date=line.manufacture_date,
-                expiration_date=line.expiration_date,
-                status="on_order",
-                notes=line.notes,
-                unit_price_amount=line.unit_price,
-                po_reference=line.po_reference or payload.po_reference,
-                ordered_qty=line.quantity,
+                vendor_id=line.vendor_id,
+                manufacture_date=line_in.manufacture_date,
+                expiration_date=line_in.expiration_date,
+                status="available",
+                unit_price_amount=(
+                    line_in.unit_price_amount
+                    if line_in.unit_price_amount is not None
+                    else line.unit_price_amount
+                ),
+                po_reference=txn.po_reference,
+                # Lot holds the units that arrived in this draw (caps placement).
+                ordered_qty=line_in.qty_received,
                 receipt_transaction_id=txn.id,
+                receipt_transaction_line_id=line.id,
             )
         except IntegrityError as exc:
             await db.rollback()
             msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
             if "uq_lots_item_lot_number" in msg:
                 raise ConflictError(
-                    f"lot_number '{line.lot_number}' already exists for this item",
+                    f"lot_number '{line_in.lot_number}' already exists for this item",
                     code="lot_number_conflict",
                 ) from exc
             if "ck_lots_dates_ordered" in msg:
@@ -1321,8 +1775,14 @@ async def create_receipt_intake(
                 ) from exc
             raise
 
-        # Audit the lot creation (v2 §8). The vendor is guaranteed to be one
-        # of the item's assigned vendors (validated above) — no auto-add.
+        await inv_repo.add_receipt_event_line(
+            db,
+            event_id=event.id,
+            line_id=line.id,
+            qty_received=line_in.qty_received,
+            lot_id=lot.id,
+            over_receipt_reason=None,
+        )
         await record_entity_change(
             db,
             actor_user_id=current.id,
@@ -1332,191 +1792,15 @@ async def create_receipt_intake(
             subject_label=lot.lot_number,
             before=None,
             after=inv_repo.lot_to_audit_snapshot(lot),
-            context={"receipt_transaction_id": str(txn.id)},
+            context={
+                "receipt_event_id": str(event.id),
+                "receipt_transaction_id": str(txn.id),
+                "receipt_transaction_line_id": str(line.id),
+            },
+            signature_id=evidence_uuid,
         )
 
-    await record_entity_change(
-        db,
-        actor_user_id=current.id,
-        action="created",
-        subject_table="app.receipt_transactions",
-        subject_id=txn.id,
-        subject_label=f"{item.item_number} intake ({len(payload.lots)} lot(s))",
-        before=None,
-        after=inv_repo.receipt_transaction_to_audit_snapshot(txn),
-    )
-
-    refreshed = await inv_repo.get_receipt_transaction(db, txn.id)
-    assert refreshed is not None
-    response = _receipt_txn_to_read(refreshed)
-    await db.commit()
-    return response
-
-
-@receiving_router.post(
-    "/transactions/{txn_id}/receive",
-    response_model=ReceiptTransactionRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Physical receipt — ON_ORDER → AVAILABLE (+split). E-signed.",
-    # Posts ledger movements, so it's GxP-significant: ``sign`` permission +
-    # a fresh reauth ticket for action='receipt.confirm' (consumed once).
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
-)
-async def receive_transaction(
-    db: DBSession,
-    current: CurrentDbUserDep,
-    txn_id: Annotated[uuid.UUID, Path()],
-    payload: ReceiveRequest,
-) -> ReceiptTransactionRead:
-    """Step 5: confirm a physical receipt. Per ON_ORDER lot the operator
-    submits one or more splits; the first receives into the original lot
-    (flip → AVAILABLE), the rest create child lots (``parent_lot_id``).
-    No ledger movement and no placement are recorded — receive is lifecycle
-    only; quantity arrives later as a unit-IN (place) in the Location System.
-    One e-signature covers the whole receipt; commits atomically."""
-    txn = await inv_repo.get_receipt_transaction(db, txn_id)
-    if txn is None:
-        raise NotFoundError(f"Receipt transaction {txn_id} not found")
-    if txn.status != "open":
-        raise ValidationError(
-            f"Transaction is '{txn.status}'; only open transactions can be received",
-            code="receipt_not_open",
-        )
-
-    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    # Receiving records NO quantity and NO placement — it only flips the lot
-    # lifecycle (on_order → available), adjusts details, and optionally splits
-    # the order into supplier lots. Quantity comes later as a unit-IN (place)
-    # in the Location System.
-
-    # Index the transaction's still-ON_ORDER lots for line resolution.
-    lots_by_id = {
-        lot.id: lot
-        for lot in txn.lots
-        if lot.deleted_at is None and lot.status == "on_order"
-    }
-
-    for line in payload.lines:
-        lot_uuid = _parse_uuid_or_422(line.lot_id, field="lot_id")
-        lot = lots_by_id.get(lot_uuid)
-        if lot is None:
-            raise ValidationError(
-                f"Lot {line.lot_id} is not an open ON_ORDER lot in this transaction",
-                code="lot_not_in_transaction",
-            )
-
-        child_numbers: set[str] = set()
-        for idx, split in enumerate(line.splits):
-            # Vendor: explicit override (must be one of the item's assigned
-            # vendors), else inherit the on-order lot's vendor (intake
-            # guaranteed it is set and assigned).
-            if split.vendor_id is not None:
-                vendor = await _resolve_item_vendor(
-                    db, item_id=txn.item_id, vendor_id=split.vendor_id
-                )
-                vendor_id = vendor.id
-            else:
-                if lot.vendor_id is None:  # pragma: no cover — intake guarantees it
-                    raise ValidationError(
-                        "Lot has no vendor; supply a vendor for this split",
-                        code="vendor_required",
-                    )
-                vendor_id = lot.vendor_id
-
-            if idx == 0:
-                # Receive into the original lot.
-                if split.lot_number is not None:
-                    raise ValidationError(
-                        "The first split receives into the original lot and "
-                        "must not set lot_number",
-                        code="first_split_lot_number",
-                    )
-                patch: dict[str, object] = {"status": "available"}
-                if split.unit_price is not None:
-                    patch["unit_price_amount"] = split.unit_price
-                if split.quantity is not None:
-                    patch["ordered_qty"] = split.quantity
-                if split.po_reference is not None:
-                    patch["po_reference"] = split.po_reference
-                if vendor_id != lot.vendor_id:
-                    patch["vendor_id"] = vendor_id
-                # Full snapshot before/after so the audit diff captures the
-                # qty / price / vendor edits made at receipt — not just the
-                # status flip.
-                before_snap = inv_repo.lot_to_audit_snapshot(lot)
-                target_lot = await inv_repo.apply_lot_patch(
-                    db, lot=lot, patch=patch, updated_by_user_id=current.id
-                )
-                # No ledger movement / placement — receive is lifecycle only.
-                await record_entity_change(
-                    db,
-                    actor_user_id=current.id,
-                    action="updated",
-                    subject_table="app.lots",
-                    subject_id=target_lot.id,
-                    subject_label=target_lot.lot_number,
-                    before=before_snap,
-                    after=inv_repo.lot_to_audit_snapshot(target_lot),
-                    context={"receipt_transaction_id": str(txn.id)},
-                    signature_id=evidence_uuid,
-                )
-            else:
-                # Child lot (split). lot_number is required + unique.
-                if split.lot_number is None:
-                    raise ValidationError(
-                        "Splits after the first must each set a distinct lot_number",
-                        code="split_lot_number_required",
-                    )
-                ckey = split.lot_number.strip().lower()
-                if ckey in child_numbers:
-                    raise ValidationError(
-                        f"Duplicate split lot_number '{split.lot_number}'",
-                        code="duplicate_split_lot_number",
-                    )
-                child_numbers.add(ckey)
-                if (
-                    await inv_repo.get_lot_by_item_and_number(
-                        db, item_id=txn.item_id, lot_number=split.lot_number
-                    )
-                ) is not None:
-                    raise ConflictError(
-                        f"lot_number '{split.lot_number}' already exists for this item",
-                        code="lot_number_conflict",
-                    )
-                child = await inv_repo.create_lot(
-                    db,
-                    item_id=txn.item_id,
-                    lot_number=split.lot_number,
-                    created_by_user_id=current.id,
-                    vendor_id=vendor_id,
-                    manufacture_date=split.manufacture_date or lot.manufacture_date,
-                    expiration_date=split.expiration_date or lot.expiration_date,
-                    status="available",
-                    notes=split.notes,
-                    unit_price_amount=split.unit_price,
-                    ordered_qty=split.quantity,
-                    po_reference=split.po_reference or lot.po_reference,
-                    receipt_transaction_id=txn.id,
-                    parent_lot_id=lot.id,
-                )
-                # No ledger movement / placement — receive is lifecycle only.
-                await record_entity_change(
-                    db,
-                    actor_user_id=current.id,
-                    action="created",
-                    subject_table="app.lots",
-                    subject_id=child.id,
-                    subject_label=child.lot_number,
-                    before=None,
-                    after=inv_repo.lot_to_audit_snapshot(child),
-                    context={
-                        "split_from_lot_id": str(lot.id),
-                        "receipt_transaction_id": str(txn.id),
-                    },
-                    signature_id=evidence_uuid,
-                )
-
-    # One e-signature for the whole receipt, consumed against the txn.
+    # One e-signature for the whole event, consumed against the Order.
     await consume_reauth_evidence(
         db,
         evidence_id=evidence_uuid,
@@ -1526,21 +1810,31 @@ async def receive_transaction(
         target_id=txn.id,
     )
 
-    updated = await inv_repo.set_receipt_transaction_status(
-        db, txn=txn, status="received", received_by_user_id=current.id
+    # Recompute the Order status from the new fulfilment picture.
+    received_after = await inv_repo.received_qty_by_line(db, list(lines_by_id))
+    new_status = inv_repo.derive_order_status(list(txn.lines), received_after)
+    status_before = txn.status
+    await inv_repo.set_order_status(
+        db, txn=txn, status=new_status, received_by_user_id=current.id
     )
     await record_entity_change(
         db,
         actor_user_id=current.id,
-        action="updated",
-        subject_table="app.receipt_transactions",
-        subject_id=updated.id,
-        subject_label="receipt confirmed",
-        before={"status": "open"},
-        after=inv_repo.receipt_transaction_to_audit_snapshot(updated),
+        action="created",
+        subject_table="app.receipt_events",
+        subject_id=event.id,
+        subject_label=f"receive {payload.received_at.isoformat()}",
+        before={"status": status_before},
+        after={
+            "received_at": payload.received_at.isoformat(),
+            "status": new_status,
+            "lines_received": len(payload.lines),
+        },
         signature_id=evidence_uuid,
     )
 
-    response = _receipt_txn_to_read(updated)
+    refreshed = await inv_repo.get_order(db, txn.id)
+    assert refreshed is not None
+    response = await _order_read(db, refreshed)
     await db.commit()
     return response

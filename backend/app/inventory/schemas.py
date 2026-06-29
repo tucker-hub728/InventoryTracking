@@ -268,10 +268,14 @@ class LotUpdate(BaseModel):
     status: LotStatus | None = None
     notes: str | None = Field(default=None, max_length=2048)
     # Price paid — editable post-entry under the same e-signature (e.g.
-    # correcting what was keyed at receipt). Ordered quantity is deliberately
-    # NOT editable here: qty is set/adjusted only during receipt (intake +
-    # the receive splits), never via a plain lot edit.
+    # correcting what was keyed at receipt).
     unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
+    # Received quantity for this lot (whole units). Editable post-receipt as a
+    # correction, but never below what is already physically placed in
+    # locations — the route returns ``qty_below_placed`` and asks the operator
+    # to unplace first. Editing it re-syncs the Order line's received /
+    # outstanding totals and re-derives the Order status.
+    ordered_qty: int | None = Field(default=None, gt=0)
     # ── E-signature (21 CFR Part 11) ──────────────────────────────────
     # Required on every edit — there is no un-signed lot-update path.
     evidence_id: str = Field(
@@ -302,6 +306,7 @@ class LotRead(BaseModel):
     unit_price_amount: Decimal | None = None
     po_reference: str | None = None
     receipt_transaction_id: str | None = None
+    receipt_transaction_line_id: str | None = None
     parent_lot_id: str | None = None
     # Ordered quantity captured at intake (planning data; the received
     # quantity stays ledger-derived, not this). Whole units only.
@@ -389,124 +394,189 @@ class MovementListResponse(BaseModel):
     offset: int
 
 
-class ReceiptIntakeLotInput(BaseModel):
-    """One lot line in a receipt intake (Requirements v2 §4).
+# ── Orders (Receipt Admin v3 — multi-item / partial / blanket) ─────────
+#
+# An "Order" is the ``app.receipt_transactions`` header with one-or-more item
+# lines and zero-or-more dated receive events. Lots are created at receive,
+# never at intake. See docs/modules/receipt-admin.md (v3).
 
-    The vendor is **mandatory** and must be one of the item's assigned
-    vendors (``meta.item_vendors``) — referenced by ``vendor_id``. There is
-    no on-the-fly vendor creation: vendors are assigned on the item first.
-    ``quantity`` is the *ordered* quantity (planning data); it is stored in
-    the lot's ``ordered_qty`` column and does NOT post a ledger movement. The
-    received quantity is recorded at physical receipt (§5).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
-    # Ordered quantity — whole units only (stored on the lot as ordered_qty).
-    quantity: int = Field(gt=0)
-
-    # Mandatory vendor — must be one of the item's assigned vendors.
-    vendor_id: str
-
-    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
-    po_reference: str | None = Field(default=None, max_length=128)
-    manufacture_date: date | None = None
-    expiration_date: date | None = None
-    notes: str | None = Field(default=None, max_length=2048)
+OrderStatus = Literal["open", "partially_received", "received", "cancelled"]
 
 
-class ReceiptIntakeRequest(BaseModel):
-    """Body for ``POST /v1/receiving/transactions`` — create ON_ORDER lots.
+class OrderLineInput(BaseModel):
+    """One item line on an Order (intake / edit).
 
-    Not e-signed: no stock moves yet. One item per transaction; multiple
-    vendors / lots allowed (edge case 3).
+    Vendor is **mandatory** and must be one of the item's assigned vendors
+    (``meta.item_vendors``). No lot / manufacture / expiry here — those are
+    captured at receive. ``ordered_qty`` is planning data (whole units).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     item_id: str
-    po_reference: str | None = Field(default=None, max_length=128)
-    notes: str | None = Field(default=None, max_length=2048)
-    lots: list[ReceiptIntakeLotInput] = Field(min_length=1, max_length=50)
+    vendor_id: str
+    ordered_qty: int = Field(gt=0)
+    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
 
 
-class ReceiveSplitInput(BaseModel):
-    """One portion of an ON_ORDER lot being received (§5).
+class OrderCreateRequest(BaseModel):
+    """Body for ``POST /v1/receiving/transactions`` — create an Order.
 
-    The first split with no ``lot_number`` is received into the original lot
-    (flip → AVAILABLE); any split carrying a ``lot_number`` (and/or a different
-    vendor) creates a child supplier lot linked via ``parent_lot_id``.
-
-    Receive captures **no quantity and no placement** — it only adjusts lot
-    details and lifecycle. Quantity arrives later as a unit-IN (place) in the
-    Location System.
+    Not e-signed: no stock moves yet. Multiple items allowed; the same item
+    may appear on several lines (split sourcing).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # Optional vendor override; defaults to the original lot's vendor. When
-    # set, it must be one of the item's assigned vendors (no new vendors at
-    # receive).
-    vendor_id: str | None = None
-    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
-    # Ordered (planning) quantity for this split — whole units. First split
-    # updates the original lot's ordered_qty; later splits set the child's.
-    quantity: int | None = Field(default=None, gt=0)
-    po_reference: str | None = Field(default=None, max_length=128)
-    # New lot identity for a child split. Omit to receive into the original.
-    lot_number: Annotated[str | None, _trimmed_non_blank("lot_number")] = Field(
-        default=None, max_length=64
+    po_reference: Annotated[str, _trimmed_non_blank("po_reference")] = Field(
+        max_length=128
     )
+    is_blanket: bool = False
+    valid_from: date | None = None
+    valid_to: date | None = None
+    notes: str | None = Field(default=None, max_length=2048)
+    lines: list[OrderLineInput] = Field(min_length=1, max_length=100)
+
+
+class OrderUpdateRequest(BaseModel):
+    """Body for ``PATCH /v1/receiving/transactions/{id}`` — edit an Order.
+
+    Only allowed while the Order is un-received (``open``); not e-signed.
+    Header fields are partial; ``lines``, when provided, **replaces** the
+    whole line set.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    po_reference: Annotated[str | None, _trimmed_non_blank("po_reference")] = Field(
+        default=None, max_length=128
+    )
+    is_blanket: bool | None = None
+    valid_from: date | None = None
+    valid_to: date | None = None
+    notes: str | None = Field(default=None, max_length=2048)
+    lines: list[OrderLineInput] | None = Field(default=None, max_length=100)
+
+
+class OrderActionRequest(BaseModel):
+    """Body for an e-signed Order action (cancel / delete).
+
+    Carries one ``evidence_id`` minted for the action (``order.cancel`` /
+    ``order.delete``) and consumed once against the Order. The mandatory reason
+    rides on the reauth ticket's comment.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+
+
+class ReceiveEventLineInput(BaseModel):
+    """The quantity received for one Order line in a receive event.
+
+    Creates one lot — ``lot_number`` is required and unique per item. Dates /
+    price are captured here (at receive). Over-receipt (``qty_received`` beyond
+    the line's outstanding quantity) is allowed and needs no reason.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: str
+    qty_received: int = Field(gt=0)
+    lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
     manufacture_date: date | None = None
     expiration_date: date | None = None
-    notes: str | None = Field(default=None, max_length=2048)
+    # Optional override of the line's unit price for this lot.
+    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
 
 
-class ReceiveLineInput(BaseModel):
-    """Receive instructions for one ON_ORDER lot in the transaction."""
+class ReceiveEventRequest(BaseModel):
+    """Body for ``POST /v1/receiving/transactions/{id}/receive`` — one dated,
+    e-signed receive event (partial / blanket).
 
-    model_config = ConfigDict(extra="forbid")
-
-    lot_id: str
-    splits: list[ReceiveSplitInput] = Field(min_length=1, max_length=20)
-
-
-class ReceiveRequest(BaseModel):
-    """Body for ``POST /v1/receiving/transactions/{id}/receive`` (§5).
-
-    E-signed: one ``evidence_id`` minted for ``action='receipt.confirm'``
-    covers the whole receipt (consumed once against the transaction).
+    One ``evidence_id`` minted for ``action='receipt.confirm'`` covers the
+    whole event (consumed once against the Order).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    lines: list[ReceiveLineInput] = Field(min_length=1, max_length=50)
+    received_at: date
+    lines: list[ReceiveEventLineInput] = Field(min_length=1, max_length=100)
+    notes: str | None = Field(default=None, max_length=2048)
     evidence_id: str  # UUID from /v1/auth/reauth (action=receipt.confirm)
 
 
-class ReceiptTransactionRead(BaseModel):
-    """A receipt transaction header plus the lots it created."""
+class OrderLineRead(BaseModel):
+    """One item line with its derived received / outstanding quantities."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    line_no: int
     item_id: str
     item_number: str | None = None
     item_description: str | None = None
-    status: Literal["open", "received", "cancelled"]
-    po_reference: str | None = None
+    vendor_id: str
+    vendor_name: str | None = None
+    ordered_qty: int
+    unit_price_amount: Decimal | None = None
+    # Derived (summed from receipt_event_lines) — never stored on the line.
+    received_qty: int = 0
+    outstanding_qty: int = 0
+
+
+class ReceiptEventLineRead(BaseModel):
+    """One per-line draw within a receive event."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    line_id: str
+    qty_received: int
+    over_receipt_reason: str | None = None
+    lot_id: str
+    lot_number: str | None = None
+
+
+class ReceiptEventRead(BaseModel):
+    """One dated receive event plus its per-line draws."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    received_at: date
+    received_by_user_id: str
+    notes: str | None = None
+    created_at: datetime
+    lines: list[ReceiptEventLineRead] = Field(default_factory=list)
+
+
+class ReceiptTransactionRead(BaseModel):
+    """An Order: header + item lines + dated receive events."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    po_reference: str
+    status: OrderStatus
+    is_blanket: bool = False
+    valid_from: date | None = None
+    valid_to: date | None = None
     notes: str | None = None
     created_by_user_id: str
     received_by_user_id: str | None = None
     received_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
-    lots: list[LotRead] = Field(default_factory=list)
+    lines: list[OrderLineRead] = Field(default_factory=list)
+    events: list[ReceiptEventRead] = Field(default_factory=list)
+    # Derived rollups across lines.
+    total_ordered_qty: int = 0
+    total_received_qty: int = 0
 
 
 class ReceiptTransactionListResponse(BaseModel):
-    """Paged receipt-transaction list."""
+    """Paged Order list."""
 
     items: list[ReceiptTransactionRead]
     total: int

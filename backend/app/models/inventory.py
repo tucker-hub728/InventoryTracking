@@ -232,6 +232,11 @@ class Lot(Base):
             postgresql_where=text("parent_lot_id IS NOT NULL"),
         ),
         Index(
+            "ix_lots_receipt_transaction_line_id",
+            "receipt_transaction_line_id",
+            postgresql_where=text("receipt_transaction_line_id IS NOT NULL"),
+        ),
+        Index(
             "ix_lots_expiration_date",
             "expiration_date",
             postgresql_where=text("status IN ('available', 'on_order')"),
@@ -305,6 +310,14 @@ class Lot(Base):
     parent_lot_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.lots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The Order line this lot was received against (Requirements v3). Lots are
+    # created at receive, each tied to exactly one line (one lot per
+    # line × receive-event).
+    receipt_transaction_line_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.receipt_transaction_lines.id", ondelete="SET NULL"),
         nullable=True,
     )
 
@@ -584,30 +597,47 @@ Item.vendors = relationship(  # type: ignore[assignment]
 )
 
 
-# Lifecycle of an inbound receipt transaction. ``open`` = lots created
-# ON_ORDER; ``received`` = physical receipt confirmed; ``cancelled`` =
-# abandoned before receipt. Keep in lock-step with the DB CHECK + enum.
-RECEIPT_TRANSACTION_STATUSES: tuple[str, ...] = ("open", "received", "cancelled")
+# Lifecycle of an Order (receipt transaction). Derived, never hand-set:
+# ``open`` = no receive events yet; ``partially_received`` = some received,
+# some still outstanding; ``received`` = every line fully received;
+# ``cancelled`` = abandoned. Keep in lock-step with the DB CHECK + enum.
+# (Requirements v3 — multi-item / partial / blanket Orders.)
+RECEIPT_TRANSACTION_STATUSES: tuple[str, ...] = (
+    "open",
+    "partially_received",
+    "received",
+    "cancelled",
+)
 
 
 class ReceiptTransaction(Base):
-    """Header for one inbound processing event (Requirements v2 §4–§5).
+    """Header for one **Order** (Requirements v3, multi-item / blanket).
 
-    Groups the lots created by a single intake and records the physical
-    receipt confirmation. One item per transaction; multiple vendors / lots
-    are allowed within it (edge case 3).
+    Groups one-or-more item ``lines`` and the dated ``events`` that receive
+    them. Item now lives on the lines (the header carries no ``item_id``).
+    Blanket Orders carry ``is_blanket`` + a ``valid_from``/``valid_to`` window
+    and are drawn down by many receive events until fully received.
     """
 
     __tablename__ = "receipt_transactions"
     __table_args__ = (
-        Index("ix_receipt_transactions_item_id", "item_id"),
         Index("ix_receipt_transactions_status", "status"),
         Index("ix_receipt_transactions_created_at_desc", text("created_at DESC")),
+        Index(
+            "uq_receipt_transactions_po_reference",
+            "po_reference",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         CheckConstraint(
             "status IN ("
             + ", ".join(f"'{s}'" for s in RECEIPT_TRANSACTION_STATUSES)
             + ")",
             name="ck_receipt_transactions_status",
+        ),
+        CheckConstraint(
+            "valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from",
+            name="ck_receipt_transactions_valid_window",
         ),
         {"schema": "app"},
     )
@@ -618,29 +648,36 @@ class ReceiptTransaction(Base):
         default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
-    item_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.items.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         server_default=text("'open'"),
     )
-    po_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    po_reference: Mapped[str] = mapped_column(Text, nullable=False)
+    is_blanket: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.users.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    # Stamped on the final receive that completes the Order.
     received_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.users.id", ondelete="RESTRICT"),
         nullable=True,
     )
     received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
@@ -656,11 +693,204 @@ class ReceiptTransaction(Base):
         onupdate=func.now(),
     )
 
-    item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
-    # The lots created by this intake (newest-first), read-only.
+    # The Order's item lines (oldest-first), read-only.
+    lines: Mapped[list[ReceiptTransactionLine]] = relationship(
+        "ReceiptTransactionLine",
+        primaryjoin=(
+            "ReceiptTransaction.id == "
+            "foreign(ReceiptTransactionLine.receipt_transaction_id)"
+        ),
+        order_by="ReceiptTransactionLine.line_no",
+        viewonly=True,
+    )
+    # The dated receive events (newest-first), read-only.
+    events: Mapped[list[ReceiptEvent]] = relationship(
+        "ReceiptEvent",
+        primaryjoin=(
+            "ReceiptTransaction.id == foreign(ReceiptEvent.receipt_transaction_id)"
+        ),
+        order_by="ReceiptEvent.received_at",
+        viewonly=True,
+    )
+    # The lots received under this Order (via its lines), read-only.
     lots: Mapped[list[Lot]] = relationship(
         "Lot",
         primaryjoin="ReceiptTransaction.id == foreign(Lot.receipt_transaction_id)",
         order_by="Lot.created_at",
         viewonly=True,
     )
+
+
+class ReceiptTransactionLine(Base):
+    """One item ordered on an Order (Requirements v3).
+
+    Carries the item, the per-line vendor (∈ the item's ``meta.item_vendors``),
+    the ordered quantity and the agreed unit price. The *same* item may appear
+    on several lines (split sourcing) — there is intentionally no
+    ``UNIQUE(receipt_transaction_id, item_id)``. Received quantity is derived
+    (summed from ``receipt_event_lines``), never stored here.
+    """
+
+    __tablename__ = "receipt_transaction_lines"
+    __table_args__ = (
+        Index("ix_receipt_transaction_lines_txn_id", "receipt_transaction_id"),
+        Index("ix_receipt_transaction_lines_item_id", "item_id"),
+        CheckConstraint(
+            "ordered_qty > 0",
+            name="ck_receipt_transaction_lines_ordered_qty_pos",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    receipt_transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.receipt_transactions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    vendor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    ordered_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
+    vendor: Mapped[Vendor] = relationship(lazy="joined", viewonly=True)
+    # The event-lines (draws) against this line — drives received/outstanding.
+    event_lines: Mapped[list[ReceiptEventLine]] = relationship(
+        "ReceiptEventLine",
+        primaryjoin=(
+            "ReceiptTransactionLine.id == "
+            "foreign(ReceiptEventLine.receipt_transaction_line_id)"
+        ),
+        viewonly=True,
+    )
+
+
+class ReceiptEvent(Base):
+    """One dated, e-signed receive event against an Order (Requirements v3).
+
+    Many per Order (the blanket / partial draws). Each carries the delivery
+    date and the reauth event that authorised it.
+    """
+
+    __tablename__ = "receipt_events"
+    __table_args__ = (
+        Index("ix_receipt_events_txn_id", "receipt_transaction_id"),
+        Index("ix_receipt_events_received_at_desc", text("received_at DESC")),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    receipt_transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.receipt_transactions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    received_at: Mapped[date] = mapped_column(Date, nullable=False)
+    received_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reauth_event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("audit.reauth_events.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    # The per-line draws made in this event (read-only).
+    lines: Mapped[list[ReceiptEventLine]] = relationship(
+        "ReceiptEventLine",
+        primaryjoin="ReceiptEvent.id == foreign(ReceiptEventLine.receipt_event_id)",
+        viewonly=True,
+    )
+
+
+class ReceiptEventLine(Base):
+    """The quantity received for one Order line in one receive event.
+
+    Creates exactly one lot (``lot_id``). ``over_receipt_reason`` is set only
+    when this draw pushes the line past its ordered quantity.
+    """
+
+    __tablename__ = "receipt_event_lines"
+    __table_args__ = (
+        Index("ix_receipt_event_lines_event_id", "receipt_event_id"),
+        Index("ix_receipt_event_lines_line_id", "receipt_transaction_line_id"),
+        Index("ix_receipt_event_lines_lot_id", "lot_id"),
+        UniqueConstraint(
+            "receipt_event_id",
+            "receipt_transaction_line_id",
+            name="uq_receipt_event_lines_event_line",
+        ),
+        CheckConstraint(
+            "qty_received > 0",
+            name="ck_receipt_event_lines_qty_pos",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    receipt_event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.receipt_events.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    receipt_transaction_line_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.receipt_transaction_lines.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    qty_received: Mapped[int] = mapped_column(Integer, nullable=False)
+    over_receipt_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.lots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    lot: Mapped[Lot] = relationship(lazy="joined", viewonly=True)

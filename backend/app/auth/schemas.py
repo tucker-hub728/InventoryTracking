@@ -90,11 +90,12 @@ class ReauthRequest(BaseModel):
     # ("I attest the dispense quantity is accurate") so the audit row
     # carries the same text the user saw.
     meaning: str | None = Field(default=None, max_length=512)
-    # Mandatory free-text rationale for the action (21 CFR Part 11 — the
-    # *why* recorded alongside the *who*). Required for every e-signature;
-    # stored on the audit row and surfaced on the audit log. Trimmed and
-    # must be non-blank.
-    comment: Comment
+    # Optional free-text rationale (the *why* recorded alongside the *who*).
+    # The mandatory-comment rule was relaxed 2026-06-29 (client request) — the
+    # e-signature's identity + timestamp + attestation (``meaning``) remain the
+    # Part 11 manifestation; the reason is now optional. A few domain endpoints
+    # may still require their own reason (enforced there / in the dialog).
+    comment: str | None = Field(default=None, max_length=512)
     # Optional S3 key returned by ``POST /v1/uploads/signature`` —
     # the canvas image the operator drew. Stored on the audit row
     # alongside the textual evidence; never returned by the reauth

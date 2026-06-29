@@ -84,9 +84,12 @@ export interface LotUpdateInput {
   expiration_date?: string | null;
   status?: LotStatus;
   notes?: string | null;
-  /** Price paid for this lot. (Ordered qty is NOT editable here — it's set
-   *  only during receipt: intake + receive splits.) */
+  /** Price paid for this lot. */
   unit_price_amount?: number | null;
+  /** Received quantity for this lot (whole units). Editable as a correction,
+   *  but the backend rejects (code ``qty_below_placed``) any value below what
+   *  is already physically placed in locations — unplace first. */
+  ordered_qty?: number | null;
   evidence_id: string;
   reason: string;
 }

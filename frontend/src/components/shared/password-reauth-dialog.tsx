@@ -33,11 +33,17 @@ interface Props {
   /** Submit-button label. Defaults to "Sign". */
   submitLabel?: string;
   /**
-   * Placeholder for the mandatory comment/reason field, so each flow can
-   * prompt for the right kind of rationale (e.g. "Reason for this
-   * placement"). The field itself is always required.
+   * Placeholder for the comment/reason field, so each flow can prompt for the
+   * right kind of rationale (e.g. "Reason for this placement").
    */
   commentPlaceholder?: string;
+  /**
+   * Whether the reason/comment is required. Defaults to **false** (optional) —
+   * the mandatory-comment rule was relaxed 2026-06-29. Flows whose write
+   * endpoint still demands a reason (lot edits, location movements) pass
+   * ``true`` so the dialog enforces it.
+   */
+  commentRequired?: boolean;
 }
 
 /**
@@ -61,11 +67,12 @@ export function PasswordReauthDialog({
   title = 'Confirm your password',
   submitLabel = 'Sign',
   commentPlaceholder = 'e.g. correcting an erroneous transfer',
+  commentRequired = false,
 }: Props) {
   const { reauth, pending, error, rateLimited, reset } = useReauth(action);
   const [password, setPassword] = React.useState('');
-  // Mandatory rationale for the action — recorded on the e-signature row
-  // and surfaced on the audit log (21 CFR Part 11).
+  // Optional rationale for the action — recorded on the e-signature row and
+  // surfaced on the audit log. Required only when ``commentRequired``.
   const [comment, setComment] = React.useState('');
 
   // Wipe state every time the dialog closes so a re-open starts clean.
@@ -80,12 +87,12 @@ export function PasswordReauthDialog({
   const submit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (!password) return;
-    if (!comment.trim()) return;
+    if (commentRequired && !comment.trim()) return;
 
     const evidence = await reauth({
       password,
       meaning,
-      comment: comment.trim(),
+      comment: comment.trim() || undefined,
     });
     if (evidence) {
       onConfirmed(evidence);
@@ -94,7 +101,7 @@ export function PasswordReauthDialog({
   };
 
   const submitDisabled =
-    pending || rateLimited || !password || !comment.trim();
+    pending || rateLimited || !password || (commentRequired && !comment.trim());
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -125,7 +132,12 @@ export function PasswordReauthDialog({
 
             <div className="space-y-1.5">
               <Label htmlFor="reauth-comment">
-                Reason / comment <span className="text-danger">*</span>
+                Reason / comment{' '}
+                {commentRequired ? (
+                  <span className="text-danger">*</span>
+                ) : (
+                  <span className="font-normal text-text-3">(optional)</span>
+                )}
               </Label>
               <Textarea
                 id="reauth-comment"

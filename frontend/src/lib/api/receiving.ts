@@ -1,120 +1,154 @@
 /**
- * Receipt Admin API — wraps ``/api/v1/receiving`` (Requirements v2).
+ * Orders API (Receipt Admin v3) — wraps ``/api/v1/receiving``.
  *
- * Two-step inbound flow:
- *   1. ``createIntake`` — places an order: creates ON_ORDER lots under a
- *      receipt-transaction header. No stock moves yet, so it is NOT
- *      e-signed.
- *   2. ``receive`` — physical receipt: flips lots to AVAILABLE, posts the
- *      ledger movement(s), and supports splitting one ON_ORDER lot into
- *      multiple supplier lots. E-signed (action ``receipt.confirm``).
+ * An "Order" is the receipt-transaction header with one-or-more **item lines**
+ * and zero-or-more dated **receive events**. Lots are created at receive (one
+ * lot per line × event), never at intake. Partial / blanket receiving is
+ * supported: an Order is drawn down by many dated events until every line is
+ * fully received.
  *
- * See docs/modules/receipt-admin.md.
+ *   1. ``createOrder``  — place an Order (multi-item). NOT e-signed.
+ *   2. ``updateOrder``  — edit an un-received Order. NOT e-signed.
+ *   3. ``receive``      — one dated receive event (partial). E-signed
+ *      (action ``receipt.confirm``).
+ *   4. ``cancelOrder`` / ``deleteOrder`` — abandon / soft-remove un-received.
+ *
+ * See docs/modules/receipt-admin.md (v3).
  */
 
 import { api } from './client';
-import type { Lot } from './lots';
 
-export type ReceiptTransactionStatus = 'open' | 'received' | 'cancelled';
+export type OrderStatus =
+  | 'open'
+  | 'partially_received'
+  | 'received'
+  | 'cancelled';
 
-export const RECEIPT_STATUS_LABEL: Record<ReceiptTransactionStatus, string> = {
-  open: 'On order',
-  received: 'Available',
+export const ORDER_STATUS_LABEL: Record<OrderStatus, string> = {
+  open: 'Open',
+  partially_received: 'Partially received',
+  received: 'Received',
   cancelled: 'Cancelled',
 };
 
-export interface ReceiptTransaction {
+// ── Read models ──────────────────────────────────────────────────────────
+
+export interface OrderLine {
   id: string;
+  line_no: number;
   item_id: string;
   item_number: string | null;
   item_description: string | null;
-  status: ReceiptTransactionStatus;
-  po_reference: string | null;
+  vendor_id: string;
+  vendor_name: string | null;
+  ordered_qty: number;
+  /** Decimal serialised as a string (or null). */
+  unit_price_amount: string | null;
+  /** Derived — Σ received across all events. */
+  received_qty: number;
+  /** Derived — max(0, ordered − received). */
+  outstanding_qty: number;
+}
+
+export interface ReceiptEventLine {
+  id: string;
+  line_id: string;
+  qty_received: number;
+  over_receipt_reason: string | null;
+  lot_id: string;
+  lot_number: string | null;
+}
+
+export interface ReceiptEvent {
+  id: string;
+  received_at: string; // date (YYYY-MM-DD)
+  received_by_user_id: string;
+  notes: string | null;
+  created_at: string;
+  lines: ReceiptEventLine[];
+}
+
+export interface Order {
+  id: string;
+  po_reference: string;
+  status: OrderStatus;
+  is_blanket: boolean;
+  valid_from: string | null;
+  valid_to: string | null;
   notes: string | null;
   created_by_user_id: string;
   received_by_user_id: string | null;
   received_at: string | null;
   created_at: string;
   updated_at: string;
-  lots: Lot[];
+  lines: OrderLine[];
+  events: ReceiptEvent[];
+  total_ordered_qty: number;
+  total_received_qty: number;
 }
 
-export interface ReceiptTransactionListResponse {
-  items: ReceiptTransaction[];
+export interface OrderListResponse {
+  items: Order[];
   total: number;
   limit: number;
   offset: number;
 }
 
-// ── Intake (step 1–4) ───────────────────────────────────────────────────
+// ── Write models ─────────────────────────────────────────────────────────
 
-export interface ReceiptIntakeLotInput {
-  lot_number: string;
-  quantity: number;
-  /**
-   * Vendor is mandatory and must be one of the item's assigned vendors
-   * (``meta.item_vendors``). There is no on-the-fly vendor creation.
-   */
-  vendor_id: string;
-  unit_price?: number | null;
-  po_reference?: string | null;
-  manufacture_date?: string | null;
-  expiration_date?: string | null;
-  notes?: string | null;
-}
-
-export interface ReceiptIntakeInput {
+export interface OrderLineInput {
   item_id: string;
-  po_reference?: string | null;
-  notes?: string | null;
-  lots: ReceiptIntakeLotInput[];
+  /** Must be one of the item's assigned vendors (``meta.item_vendors``). */
+  vendor_id: string;
+  ordered_qty: number;
+  unit_price?: number | null;
 }
 
-// ── Receive (step 5) ─────────────────────────────────────────────────────
+export interface OrderCreateInput {
+  po_reference: string;
+  is_blanket?: boolean;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  notes?: string | null;
+  lines: OrderLineInput[];
+}
 
-export interface ReceiveSplitInput {
-  /** Optional vendor override; defaults to the on-order lot's vendor. Must be
-   *  one of the item's assigned vendors. */
-  vendor_id?: string | null;
-  unit_price?: number | null;
-  /** Ordered (planning) qty — whole units. First split updates the original
-   *  lot's ordered_qty; later splits set the child lot's. */
-  quantity?: number | null;
-  po_reference?: string | null;
-  /** Set on splits after the first to create a child supplier lot. */
-  lot_number?: string | null;
+export interface OrderUpdateInput {
+  po_reference?: string;
+  is_blanket?: boolean;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  notes?: string | null;
+  /** When provided, replaces the whole line set (un-received Orders only). */
+  lines?: OrderLineInput[];
+}
+
+export interface ReceiveEventLineInput {
+  line_id: string;
+  qty_received: number;
+  lot_number: string;
   manufacture_date?: string | null;
   expiration_date?: string | null;
+  unit_price_amount?: number | null;
+}
+
+export interface ReceiveEventInput {
+  received_at: string; // date
+  lines: ReceiveEventLineInput[];
   notes?: string | null;
-}
-
-export interface ReceiveLineInput {
-  lot_id: string;
-  splits: ReceiveSplitInput[];
-}
-
-export interface ReceiveInput {
-  /**
-   * Receive captures no quantity and no placement — it only flips the lot to
-   * available (+ optional split into supplier lots). Quantity arrives later as
-   * a unit-IN (place) in the Location System.
-   */
-  lines: ReceiveLineInput[];
   /** Fresh reauth evidence id (action ``receipt.confirm``). */
   evidence_id: string;
 }
 
 export const receivingApi = {
-  listTransactions: (opts?: {
-    itemId?: string;
-    status?: ReceiptTransactionStatus;
+  listOrders: (opts?: {
+    status?: OrderStatus;
     limit?: number;
     offset?: number;
     signal?: AbortSignal;
   }) =>
-    api.get<ReceiptTransactionListResponse>('/receiving/transactions', {
+    api.get<OrderListResponse>('/receiving/transactions', {
       query: {
-        item_id: opts?.itemId,
         status: opts?.status,
         limit: opts?.limit,
         offset: opts?.offset,
@@ -122,17 +156,28 @@ export const receivingApi = {
       signal: opts?.signal,
     }),
 
-  getTransaction: (id: string, opts?: { signal?: AbortSignal }) =>
-    api.get<ReceiptTransaction>(`/receiving/transactions/${id}`, {
-      signal: opts?.signal,
+  getOrder: (id: string, opts?: { signal?: AbortSignal }) =>
+    api.get<Order>(`/receiving/transactions/${id}`, { signal: opts?.signal }),
+
+  createOrder: (input: OrderCreateInput) =>
+    api.post<Order>('/receiving/transactions', { json: input }),
+
+  updateOrder: (id: string, input: OrderUpdateInput) =>
+    api.patch<Order>(`/receiving/transactions/${id}`, { json: input }),
+
+  /** E-signed soft-delete. ``evidenceId`` (action ``order.delete``) consumed once. */
+  deleteOrder: (id: string, evidenceId: string) =>
+    api.post<void>(`/receiving/transactions/${id}/delete`, {
+      json: { evidence_id: evidenceId },
     }),
 
-  createIntake: (input: ReceiptIntakeInput) =>
-    api.post<ReceiptTransaction>('/receiving/transactions', { json: input }),
-
-  /** E-signed physical receipt. ``input.evidence_id`` is consumed once. */
-  receive: (id: string, input: ReceiveInput) =>
-    api.post<ReceiptTransaction>(`/receiving/transactions/${id}/receive`, {
-      json: input,
+  /** E-signed cancel. ``evidenceId`` (action ``order.cancel``) consumed once. */
+  cancelOrder: (id: string, evidenceId: string) =>
+    api.post<Order>(`/receiving/transactions/${id}/cancel`, {
+      json: { evidence_id: evidenceId },
     }),
+
+  /** E-signed dated receive event. ``input.evidence_id`` is consumed once. */
+  receive: (id: string, input: ReceiveEventInput) =>
+    api.post<Order>(`/receiving/transactions/${id}/receive`, { json: input }),
 };

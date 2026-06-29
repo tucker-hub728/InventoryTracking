@@ -760,6 +760,7 @@ export function NodeDetailPanel({
               ? 'Reason for this placement'
               : 'Reason for this removal'
         }
+        commentRequired
         onConfirmed={(evidence) => {
           setShowReauth(false);
           void runSigned(evidence);
