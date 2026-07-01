@@ -21,10 +21,10 @@ import { api } from './client';
 
 export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
 
-/** One vendor assigned to an item (part of ``ApiItem.vendors``). */
-export interface ApiItemVendor {
-  vendor_id: string;
-  vendor_name: string;
+/** One supplier assigned to an item (part of ``ApiItem.suppliers``). */
+export interface ApiItemSupplier {
+  supplier_id: string;
+  supplier_name: string;
 }
 
 /** Raw API row — numeric fields come back as strings (Postgres NUMERIC). */
@@ -40,8 +40,8 @@ export interface ApiItem {
   category_name: string;
   category_kind: ApiCategoryKind;
   category_tone: string;
-  /** Assigned vendors — the vendors this item can be received against. */
-  vendors: ApiItemVendor[];
+  /** Assigned suppliers — the suppliers this item can be received against. */
+  suppliers: ApiItemSupplier[];
   avg_lead_days: number | null;
   reorder_threshold: string;
   near_expiry_threshold_days: number;
@@ -78,7 +78,7 @@ export type ApiSortDirection = 'asc' | 'desc';
 
 export interface ListItemsParams {
   q?: string | null;
-  vendor_id?: string | null;
+  supplier_id?: string | null;
   /** Filter by item category (server-side). */
   category_id?: string | null;
   /** Filter by ``v_item_stock.status_code`` (server-side). */
@@ -94,9 +94,9 @@ export interface ItemCreateInput {
   description: string;
   /** Required — the item's category (governs BOM eligibility). */
   category_id: string;
-  /** Assigned vendors (zero-or-more). The only vendors the item can later
+  /** Assigned suppliers (zero-or-more). The only suppliers the item can later
    *  be received against. */
-  vendor_ids?: string[];
+  supplier_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
   near_expiry_threshold_days?: number;
@@ -104,15 +104,15 @@ export interface ItemCreateInput {
 
 /**
  * Partial item update. ``item_number`` is intentionally not editable —
- * it's the immutable human handle. ``vendor_ids``, when present, REPLACES
- * the whole assigned-vendor list (omit to leave unchanged; ``[]`` clears).
+ * it's the immutable human handle. ``supplier_ids``, when present, REPLACES
+ * the whole assigned-supplier list (omit to leave unchanged; ``[]`` clears).
  */
 export interface ItemUpdateInput {
   description?: string;
   /** Re-categorise the item. Blocked server-side if moving a BOM-bearing
    *  item to a purchased category. */
   category_id?: string;
-  vendor_ids?: string[];
+  supplier_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
   near_expiry_threshold_days?: number;
@@ -126,7 +126,7 @@ export const itemsApi = {
     api.get<ApiItemListResponse>('/items', {
       query: {
         q: params.q ?? undefined,
-        vendor_id: params.vendor_id ?? undefined,
+        supplier_id: params.supplier_id ?? undefined,
         category_id: params.category_id ?? undefined,
         status: params.status ?? undefined,
         sort: params.sort,
@@ -165,11 +165,11 @@ export const itemsApi = {
    */
   remove: (id: string) => api.delete<ApiItem>(`/items/${id}`),
 
-  // ── Assigned vendors ─────────────────────────────────────────────────
-  /** List an item's assigned vendors (the only ones it can be received
-   *  against). To change the list, PATCH the item with ``vendor_ids``. */
-  listVendors: (itemId: string, opts?: { signal?: AbortSignal }) =>
-    api.get<ApiItemVendor[]>(`/items/${itemId}/vendors`, {
+  // ── Assigned suppliers ─────────────────────────────────────────────────
+  /** List an item's assigned suppliers (the only ones it can be received
+   *  against). To change the list, PATCH the item with ``supplier_ids``. */
+  listSuppliers: (itemId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiItemSupplier[]>(`/items/${itemId}/suppliers`, {
       signal: opts?.signal,
     }),
 };

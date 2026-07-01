@@ -6,7 +6,7 @@ with a before / after snapshot of the entity (already trimmed to the
 business-relevant fields) and the recorder takes care of:
 
   * Computing the per-field diff so the audit viewer doesn't have to.
-  * Emitting a structured ``event_type`` (``inventory.vendor.updated``,
+  * Emitting a structured ``event_type`` (``inventory.supplier.updated``,
     ``inventory.item.deleted``) so dashboards and alert rules can
     filter with ``event_type LIKE 'inventory.%'``.
   * Picking a sane severity per action (``info`` for create/update,
@@ -73,12 +73,12 @@ def _compute_diff(
 def _event_type(subject_table: str, action: AuditAction) -> str:
     """Dotted event_type matching the long-spec namespace.
 
-    ``meta.vendors`` → ``inventory.vendor.updated``. The first segment
+    ``meta.suppliers`` → ``inventory.supplier.updated``. The first segment
     is hard-coded to ``inventory`` because every entity this module
     audits belongs to that domain; identity / auth events get their
     own recorder later (Chunk A2).
     """
-    # ``meta.vendors`` → ``vendor``; ``app.items`` → ``item``; etc.
+    # ``meta.suppliers`` → ``supplier``; ``app.items`` → ``item``; etc.
     bare = subject_table.split(".")[-1]
     singular = bare.rstrip("s") if bare.endswith("s") else bare
     return f"inventory.{singular}.{action}"

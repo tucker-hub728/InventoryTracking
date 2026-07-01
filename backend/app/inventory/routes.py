@@ -1,4 +1,4 @@
-"""``/v1/items`` and ``/v1/vendors`` routes.
+"""``/v1/items`` and ``/v1/suppliers`` routes.
 
 Read endpoints require ``inventory:view`` (every role); create requires
 ``inventory:create`` (admin + editor). No update / delete in this slice —
@@ -24,7 +24,7 @@ from app.inventory.schemas import (
     ItemListResponse,
     ItemRead,
     ItemUpdate,
-    ItemVendorRead,
+    ItemSupplierRead,
     LotCreate,
     LotRead,
     LotStatus,
@@ -41,9 +41,9 @@ from app.inventory.schemas import (
     ReceiptTransactionListResponse,
     ReceiptTransactionRead,
     ReceiveEventRequest,
-    VendorCreate,
-    VendorRead,
-    VendorUpdate,
+    SupplierCreate,
+    SupplierRead,
+    SupplierUpdate,
 )
 from app.locations import repository as loc_repo
 from app.models.inventory import (
@@ -51,12 +51,12 @@ from app.models.inventory import (
     Lot,
     ReceiptTransaction,
     StockMovement,
-    Vendor,
+    Supplier,
 )
 from app.security.permissions import RequirePermission
 
 items_router = APIRouter(prefix="/items", tags=["items"])
-vendors_router = APIRouter(prefix="/vendors", tags=["vendors"])
+suppliers_router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 lots_router = APIRouter(prefix="/lots", tags=["lots"])
 movements_router = APIRouter(prefix="/movements", tags=["movements"])
 receiving_router = APIRouter(prefix="/receiving", tags=["receiving"])
@@ -108,8 +108,8 @@ def _lot_to_read(lot: Lot) -> LotRead:
         id=str(lot.id),
         item_id=str(lot.item_id),
         lot_number=lot.lot_number,
-        vendor_id=str(lot.vendor_id) if lot.vendor_id else None,
-        vendor_name=lot.vendor.name if lot.vendor else None,
+        supplier_id=str(lot.supplier_id) if lot.supplier_id else None,
+        supplier_name=lot.supplier.name if lot.supplier else None,
         item_number=lot.item.item_number if lot.item else None,
         item_description=lot.item.description if lot.item else None,
         manufacture_date=lot.manufacture_date,
@@ -130,8 +130,8 @@ def _lot_to_read(lot: Lot) -> LotRead:
     )
 
 
-def _vendor_to_read(v: Vendor) -> VendorRead:
-    return VendorRead(
+def _supplier_to_read(v: Supplier) -> SupplierRead:
+    return SupplierRead(
         id=str(v.id),
         name=v.name,
         contact_email=v.contact_email,
@@ -174,12 +174,12 @@ def _item_to_read(
         category_name=category.name if category else "",
         category_kind=category.kind if category else "purchased",  # type: ignore[arg-type]
         category_tone=category.tone if category else "neutral",
-        vendors=[
-            ItemVendorRead(
-                vendor_id=str(iv.vendor_id),
-                vendor_name=iv.vendor.name if iv.vendor else "",
+        suppliers=[
+            ItemSupplierRead(
+                supplier_id=str(iv.supplier_id),
+                supplier_name=iv.supplier.name if iv.supplier else "",
             )
-            for iv in item.vendors
+            for iv in item.suppliers
         ],
         avg_lead_days=item.avg_lead_days,
         reorder_threshold=item.reorder_threshold,
@@ -207,84 +207,84 @@ async def _item_read_with_valuation(db: DBSession, item: Item) -> ItemRead:
     return _item_to_read(item, valuations.get(item.id))
 
 
-async def _resolve_item_vendor_ids(
-    db: DBSession, vendor_ids: list[str]
+async def _resolve_item_supplier_ids(
+    db: DBSession, supplier_ids: list[str]
 ) -> list[uuid.UUID]:
-    """Parse + validate an item's assigned-vendor id list.
+    """Parse + validate an item's assigned-supplier id list.
 
-    Each entry must be a valid UUID referencing an existing vendor. Returns
-    the de-duplicated UUIDs in input order. 404s on an unknown vendor, 422s
+    Each entry must be a valid UUID referencing an existing supplier. Returns
+    the de-duplicated UUIDs in input order. 404s on an unknown supplier, 422s
     on a malformed id.
     """
     resolved: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
-    for raw in vendor_ids:
-        vendor_uuid = _parse_uuid_or_422(raw, field="vendor_id")
-        if vendor_uuid in seen:
+    for raw in supplier_ids:
+        supplier_uuid = _parse_uuid_or_422(raw, field="supplier_id")
+        if supplier_uuid in seen:
             continue
-        if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
-            raise NotFoundError(f"Vendor {raw} not found")
-        seen.add(vendor_uuid)
-        resolved.append(vendor_uuid)
+        if (await inv_repo.get_supplier(db, supplier_uuid)) is None:
+            raise NotFoundError(f"Supplier {raw} not found")
+        seen.add(supplier_uuid)
+        resolved.append(supplier_uuid)
     return resolved
 
 
-# ── Vendors ────────────────────────────────────────────────────────────
+# ── Suppliers ────────────────────────────────────────────────────────────
 
 
-@vendors_router.get(
+@suppliers_router.get(
     "",
-    response_model=list[VendorRead],
-    summary="List vendors",
+    response_model=list[SupplierRead],
+    summary="List suppliers",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def list_vendors(
+async def list_suppliers(
     db: DBSession,
-    active_only: bool = Query(default=True, description="Hide vendors with is_active=false"),
-) -> list[VendorRead]:
-    vendors = await inv_repo.list_vendors(db, active_only=active_only)
-    return [_vendor_to_read(v) for v in vendors]
+    active_only: bool = Query(default=True, description="Hide suppliers with is_active=false"),
+) -> list[SupplierRead]:
+    suppliers = await inv_repo.list_suppliers(db, active_only=active_only)
+    return [_supplier_to_read(v) for v in suppliers]
 
 
-@vendors_router.get(
-    "/{vendor_id}",
-    response_model=VendorRead,
-    summary="Get one vendor",
+@suppliers_router.get(
+    "/{supplier_id}",
+    response_model=SupplierRead,
+    summary="Get one supplier",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def get_vendor(
+async def get_supplier(
     db: DBSession,
-    vendor_id: Annotated[uuid.UUID, Path()],
-) -> VendorRead:
-    vendor = await inv_repo.get_vendor(db, vendor_id)
-    if vendor is None:
-        raise NotFoundError(f"Vendor {vendor_id} not found")
-    return _vendor_to_read(vendor)
+    supplier_id: Annotated[uuid.UUID, Path()],
+) -> SupplierRead:
+    supplier = await inv_repo.get_supplier(db, supplier_id)
+    if supplier is None:
+        raise NotFoundError(f"Supplier {supplier_id} not found")
+    return _supplier_to_read(supplier)
 
 
-@vendors_router.post(
+@suppliers_router.post(
     "",
-    response_model=VendorRead,
+    response_model=SupplierRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a vendor (admin master-data write)",
-    # Vendors are master data — same gate as item create. PATCH / DELETE
+    summary="Create a supplier (admin master-data write)",
+    # Suppliers are master data — same gate as item create. PATCH / DELETE
     # now ship (Chunk A); every edit + soft-delete writes to
     # ``audit.audit_events`` via the recorder helper.
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
-async def create_vendor(
+async def create_supplier(
     db: DBSession,
-    payload: VendorCreate,
-) -> VendorRead:
+    payload: SupplierCreate,
+) -> SupplierRead:
     # Pre-check for a clean 409. The partial-unique index on lower(name)
     # is the authoritative guard (handled in the except).
-    if (await inv_repo.get_vendor_by_name(db, payload.name)) is not None:
+    if (await inv_repo.get_supplier_by_name(db, payload.name)) is not None:
         raise ConflictError(
-            f"Vendor with name '{payload.name}' already exists",
-            code="vendor_name_conflict",
+            f"Supplier with name '{payload.name}' already exists",
+            code="supplier_name_conflict",
         )
     try:
-        vendor = await inv_repo.create_vendor(
+        supplier = await inv_repo.create_supplier(
             db,
             name=payload.name,
             contact_email=payload.contact_email,
@@ -295,27 +295,27 @@ async def create_vendor(
     except IntegrityError as exc:
         await db.rollback()
         msg = (str(exc.orig).lower() if exc.orig else str(exc).lower())
-        if "uq_vendors_name" in msg:
+        if "uq_suppliers_name" in msg:
             raise ConflictError(
-                f"Vendor with name '{payload.name}' already exists",
-                code="vendor_name_conflict",
+                f"Supplier with name '{payload.name}' already exists",
+                code="supplier_name_conflict",
             ) from exc
         raise
-    return _vendor_to_read(vendor)
+    return _supplier_to_read(supplier)
 
 
-@vendors_router.patch(
-    "/{vendor_id}",
-    response_model=VendorRead,
-    summary="Update a vendor (admin master-data write)",
+@suppliers_router.patch(
+    "/{supplier_id}",
+    response_model=SupplierRead,
+    summary="Update a supplier (admin master-data write)",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
-async def update_vendor(
+async def update_supplier(
     db: DBSession,
     current: CurrentDbUserDep,
-    vendor_id: Annotated[uuid.UUID, Path()],
-    payload: VendorUpdate,
-) -> VendorRead:
+    supplier_id: Annotated[uuid.UUID, Path()],
+    payload: SupplierUpdate,
+) -> SupplierRead:
     """Partial update + audit-log row.
 
     Empty patches (no fields set) return 422 — there's no work to do
@@ -329,39 +329,39 @@ async def update_vendor(
             code="empty_patch",
         )
 
-    vendor = await inv_repo.get_vendor(db, vendor_id)
-    if vendor is None:
-        raise NotFoundError(f"Vendor {vendor_id} not found")
+    supplier = await inv_repo.get_supplier(db, supplier_id)
+    if supplier is None:
+        raise NotFoundError(f"Supplier {supplier_id} not found")
 
     # Name-collision pre-check when renaming.
     if "name" in patch and isinstance(patch["name"], str):
-        if patch["name"].strip().lower() != vendor.name.lower():
-            existing = await inv_repo.get_vendor_by_name(db, patch["name"])
-            if existing is not None and existing.id != vendor.id:
+        if patch["name"].strip().lower() != supplier.name.lower():
+            existing = await inv_repo.get_supplier_by_name(db, patch["name"])
+            if existing is not None and existing.id != supplier.id:
                 raise ConflictError(
-                    f"Vendor with name '{patch['name']}' already exists",
-                    code="vendor_name_conflict",
+                    f"Supplier with name '{patch['name']}' already exists",
+                    code="supplier_name_conflict",
                 )
 
-    before = inv_repo.vendor_to_audit_snapshot(vendor)
+    before = inv_repo.supplier_to_audit_snapshot(supplier)
     try:
-        updated = await inv_repo.apply_vendor_patch(db, vendor=vendor, patch=patch)
+        updated = await inv_repo.apply_supplier_patch(db, supplier=supplier, patch=patch)
     except IntegrityError as exc:
         await db.rollback()
         msg = (str(exc.orig).lower() if exc.orig else str(exc).lower())
-        if "uq_vendors_name" in msg:
+        if "uq_suppliers_name" in msg:
             raise ConflictError(
-                "Vendor name conflict",
-                code="vendor_name_conflict",
+                "Supplier name conflict",
+                code="supplier_name_conflict",
             ) from exc
         raise
-    after = inv_repo.vendor_to_audit_snapshot(updated)
+    after = inv_repo.supplier_to_audit_snapshot(updated)
 
     await record_entity_change(
         db,
         actor_user_id=current.id,
         action="updated",
-        subject_table="meta.vendors",
+        subject_table="meta.suppliers",
         subject_id=updated.id,
         subject_label=updated.name,
         before=before,
@@ -373,48 +373,48 @@ async def update_vendor(
     # serializer touches it. Without this, the read triggers a lazy
     # SELECT outside the request scope → MissingGreenlet.
     await db.refresh(updated)
-    response = _vendor_to_read(updated)
+    response = _supplier_to_read(updated)
     await db.commit()
     return response
 
 
-@vendors_router.delete(
-    "/{vendor_id}",
-    response_model=VendorRead,
-    summary="Deactivate a vendor (soft delete via is_active=false)",
+@suppliers_router.delete(
+    "/{supplier_id}",
+    response_model=SupplierRead,
+    summary="Deactivate a supplier (soft delete via is_active=false)",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
-async def delete_vendor(
+async def delete_supplier(
     db: DBSession,
     current: CurrentDbUserDep,
-    vendor_id: Annotated[uuid.UUID, Path()],
-) -> VendorRead:
-    """Soft-delete a vendor by flipping ``is_active=false``.
+    supplier_id: Annotated[uuid.UUID, Path()],
+) -> SupplierRead:
+    """Soft-delete a supplier by flipping ``is_active=false``.
 
-    Hard deletion is forbidden — items and lots FK to this vendor and
-    the audit trail wants to keep resolving the vendor name historic.
-    A deactivated vendor stops appearing in pickers but stays visible
+    Hard deletion is forbidden — items and lots FK to this supplier and
+    the audit trail wants to keep resolving the supplier name historic.
+    A deactivated supplier stops appearing in pickers but stays visible
     on past records.
     """
-    vendor = await inv_repo.get_vendor(db, vendor_id)
-    if vendor is None:
-        raise NotFoundError(f"Vendor {vendor_id} not found")
-    if not vendor.is_active:
-        # Idempotent — second DELETE on an already-deactivated vendor
+    supplier = await inv_repo.get_supplier(db, supplier_id)
+    if supplier is None:
+        raise NotFoundError(f"Supplier {supplier_id} not found")
+    if not supplier.is_active:
+        # Idempotent — second DELETE on an already-deactivated supplier
         # returns the current state without an extra audit row.
-        return _vendor_to_read(vendor)
+        return _supplier_to_read(supplier)
 
-    before = inv_repo.vendor_to_audit_snapshot(vendor)
-    updated = await inv_repo.apply_vendor_patch(
-        db, vendor=vendor, patch={"is_active": False}
+    before = inv_repo.supplier_to_audit_snapshot(supplier)
+    updated = await inv_repo.apply_supplier_patch(
+        db, supplier=supplier, patch={"is_active": False}
     )
-    after = inv_repo.vendor_to_audit_snapshot(updated)
+    after = inv_repo.supplier_to_audit_snapshot(updated)
 
     await record_entity_change(
         db,
         actor_user_id=current.id,
         action="deleted",
-        subject_table="meta.vendors",
+        subject_table="meta.suppliers",
         subject_id=updated.id,
         subject_label=updated.name,
         before=before,
@@ -422,7 +422,7 @@ async def delete_vendor(
     )
 
     await db.refresh(updated)
-    response = _vendor_to_read(updated)
+    response = _supplier_to_read(updated)
     await db.commit()
     return response
 
@@ -439,7 +439,7 @@ async def delete_vendor(
 async def list_items(
     db: DBSession,
     q: Annotated[str | None, Query(description="Search description + item_number")] = None,
-    vendor_id: Annotated[uuid.UUID | None, Query()] = None,
+    supplier_id: Annotated[uuid.UUID | None, Query()] = None,
     category_id: Annotated[
         uuid.UUID | None, Query(description="Filter by item category")
     ] = None,
@@ -461,7 +461,7 @@ async def list_items(
     items, total = await inv_repo.list_items(
         db,
         q=q,
-        vendor_id=vendor_id,
+        supplier_id=supplier_id,
         status=status_filter,
         category_id=category_id,
         sort=sort,
@@ -536,8 +536,8 @@ async def create_item(
             code="item_number_conflict",
         )
 
-    # Validate the assigned-vendor list (each must be an existing vendor).
-    vendor_uuids = await _resolve_item_vendor_ids(db, payload.vendor_ids)
+    # Validate the assigned-supplier list (each must be an existing supplier).
+    supplier_uuids = await _resolve_item_supplier_ids(db, payload.supplier_ids)
 
     # Validate the category exists.
     category_uuid = _parse_uuid_or_422(payload.category_id, field="category_id")
@@ -566,16 +566,16 @@ async def create_item(
             ) from exc
         raise
 
-    if vendor_uuids:
-        await inv_repo.replace_item_vendors(
+    if supplier_uuids:
+        await inv_repo.replace_item_suppliers(
             db,
             item_id=item.id,
-            vendor_ids=vendor_uuids,
+            supplier_ids=supplier_uuids,
             created_by_user_id=current.id,
         )
-        # ``item.vendors`` was loaded empty at create; reload it (awaited) so
-        # the response carries the just-assigned vendors.
-        await db.refresh(item, attribute_names=["vendors"])
+        # ``item.suppliers`` was loaded empty at create; reload it (awaited) so
+        # the response carries the just-assigned suppliers.
+        await db.refresh(item, attribute_names=["suppliers"])
 
     return _item_to_read(item)
 
@@ -594,8 +594,8 @@ async def update_item(
 ) -> ItemRead:
     """Partial item update + audit-log row.
 
-    ``vendor_ids``, when present, **replaces** the item's whole assigned-vendor
-    list (each id is FK-validated, 404 on unknown). Omit it to leave vendors
+    ``supplier_ids``, when present, **replaces** the item's whole assigned-supplier
+    list (each id is FK-validated, 404 on unknown). Omit it to leave suppliers
     unchanged; send ``[]`` to clear them.
     """
     patch = payload.model_dump(exclude_unset=True)
@@ -606,12 +606,12 @@ async def update_item(
     if item is None or item.deleted_at is not None:
         raise NotFoundError(f"Item {item_id} not found")
 
-    # Pull vendor_ids out of the scalar patch — it's a relationship, not a
+    # Pull supplier_ids out of the scalar patch — it's a relationship, not a
     # column. ``None`` (omitted) leaves the list untouched.
-    vendor_ids = patch.pop("vendor_ids", None)
-    vendor_uuids: list[uuid.UUID] | None = None
-    if vendor_ids is not None:
-        vendor_uuids = await _resolve_item_vendor_ids(db, vendor_ids)
+    supplier_ids = patch.pop("supplier_ids", None)
+    supplier_uuids: list[uuid.UUID] | None = None
+    if supplier_ids is not None:
+        supplier_uuids = await _resolve_item_supplier_ids(db, supplier_ids)
 
     # Re-categorise: validate the target category, and block moving a
     # BOM-bearing item into a purchased category (that would orphan its BOM).
@@ -641,16 +641,16 @@ async def update_item(
                 )
         patch["category_id"] = category_uuid
 
-    if not patch and vendor_uuids is None:
+    if not patch and supplier_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")
 
     before = inv_repo.item_to_audit_snapshot(item)
 
-    if vendor_uuids is not None:
-        await inv_repo.replace_item_vendors(
+    if supplier_uuids is not None:
+        await inv_repo.replace_item_suppliers(
             db,
             item_id=item.id,
-            vendor_ids=vendor_uuids,
+            supplier_ids=supplier_uuids,
             created_by_user_id=current.id,
         )
 
@@ -662,16 +662,16 @@ async def update_item(
             updated_by_user_id=current.id,
         )
     else:
-        # Vendors-only change — still bump the updater for the audit trail.
+        # Suppliers-only change — still bump the updater for the audit trail.
         item.updated_by_user_id = current.id
         await db.flush()
         updated = item
 
-    if vendor_uuids is not None:
-        # The eager ``vendors`` collection was materialised for the
+    if supplier_uuids is not None:
+        # The eager ``suppliers`` collection was materialised for the
         # before-snapshot; reload it (awaited) so the after-snapshot / read
         # reflect the new list rather than the cached one.
-        await db.refresh(updated, attribute_names=["vendors"])
+        await db.refresh(updated, attribute_names=["suppliers"])
 
     after = inv_repo.item_to_audit_snapshot(updated)
 
@@ -835,19 +835,19 @@ async def create_lot(
     if (await inv_repo.get_item(db, item_id)) is None:
         raise NotFoundError(f"Item {item_id} not found")
 
-    # Optional vendor — validate the UUID + existence ourselves so the
+    # Optional supplier — validate the UUID + existence ourselves so the
     # caller gets a clean 4xx instead of an FK violation.
-    vendor_uuid: uuid.UUID | None = None
-    if payload.vendor_id is not None:
+    supplier_uuid: uuid.UUID | None = None
+    if payload.supplier_id is not None:
         try:
-            vendor_uuid = uuid.UUID(payload.vendor_id)
+            supplier_uuid = uuid.UUID(payload.supplier_id)
         except ValueError as exc:
             raise ValidationError(
-                "vendor_id is not a valid UUID",
-                code="invalid_vendor_id",
+                "supplier_id is not a valid UUID",
+                code="invalid_supplier_id",
             ) from exc
-        if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
-            raise NotFoundError(f"Vendor {payload.vendor_id} not found")
+        if (await inv_repo.get_supplier(db, supplier_uuid)) is None:
+            raise NotFoundError(f"Supplier {payload.supplier_id} not found")
 
     # Pre-check for a clean 409. The partial-unique index is authoritative.
     existing = await inv_repo.get_lot_by_item_and_number(
@@ -865,7 +865,7 @@ async def create_lot(
             item_id=item_id,
             lot_number=payload.lot_number,
             created_by_user_id=current.id,
-            vendor_id=vendor_uuid,
+            supplier_id=supplier_uuid,
             manufacture_date=payload.manufacture_date,
             expiration_date=payload.expiration_date,
             status=payload.status,
@@ -911,7 +911,7 @@ async def update_lot(
 ) -> LotRead:
     """Partial lot update under an electronic signature.
 
-    Editable: status, dates, vendor, CoA URL, notes (``lot_number`` and
+    Editable: status, dates, supplier, CoA URL, notes (``lot_number`` and
     the parent item are immutable identity). Every edit consumes a fresh
     reauth ticket minted for action='lot.update' and writes an audit row
     that links the signature (``signature_id``) and records the
@@ -921,10 +921,12 @@ async def update_lot(
     """
     patch = payload.model_dump(exclude_unset=True)
     # The signing fields ride on the same body but aren't lot columns —
-    # pull them out before the patch touches the ORM row. Both are
-    # required by the schema, so they're always present here.
+    # pull them out before the patch touches the ORM row. ``evidence_id`` is
+    # always present (required by the schema); ``reason`` is optional.
     evidence_str = patch.pop("evidence_id")
-    reason = patch.pop("reason")
+    # ``reason`` is optional (no e-sign requires a comment); default to None
+    # when the operator signed without one.
+    reason = patch.pop("reason", None)
     if not patch:
         raise ValidationError("No fields to update", code="empty_patch")
 
@@ -948,29 +950,29 @@ async def update_lot(
                 code="qty_below_placed",
             )
 
-    if "vendor_id" in patch:
-        v = patch["vendor_id"]
+    if "supplier_id" in patch:
+        v = patch["supplier_id"]
         if v is None:
-            patch["vendor_id"] = None
+            patch["supplier_id"] = None
         elif isinstance(v, str):
             try:
-                vendor_uuid = uuid.UUID(v)
+                supplier_uuid = uuid.UUID(v)
             except ValueError as exc:
                 raise ValidationError(
-                    "vendor_id is not a valid UUID",
-                    code="invalid_vendor_id",
+                    "supplier_id is not a valid UUID",
+                    code="invalid_supplier_id",
                 ) from exc
-            if (await inv_repo.get_vendor(db, vendor_uuid)) is None:
-                raise NotFoundError(f"Vendor {v} not found")
-            # A lot's vendor must be one of its item's assigned vendors —
-            # same rule as intake / receive (no off-list vendors).
-            if vendor_uuid not in await inv_repo.item_vendor_ids(db, lot.item_id):
+            if (await inv_repo.get_supplier(db, supplier_uuid)) is None:
+                raise NotFoundError(f"Supplier {v} not found")
+            # A lot's supplier must be one of its item's assigned suppliers —
+            # same rule as intake / receive (no off-list suppliers).
+            if supplier_uuid not in await inv_repo.item_supplier_ids(db, lot.item_id):
                 raise ValidationError(
-                    "Vendor is not one of this item's assigned vendors; add it "
+                    "Supplier is not one of this item's assigned suppliers; add it "
                     "to the item first",
-                    code="vendor_not_assigned_to_item",
+                    code="supplier_not_assigned_to_item",
                 )
-            patch["vendor_id"] = vendor_uuid
+            patch["supplier_id"] = supplier_uuid
 
     before = inv_repo.lot_to_audit_snapshot(lot)
     try:
@@ -1193,8 +1195,8 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
 # ── Receipt Admin v2 ───────────────────────────────────────────────────
 #
 # The two-step intake (ON_ORDER) → physical receipt (AVAILABLE, with
-# splitting). Intake vendors are restricted to the item's assigned vendors
-# (``meta.item_vendors``). See docs/modules/receipt-admin.md.
+# splitting). Intake suppliers are restricted to the item's assigned suppliers
+# (``meta.item_suppliers``). See docs/modules/receipt-admin.md.
 
 
 def _order_to_read(
@@ -1220,8 +1222,8 @@ def _order_to_read(
                 item_id=str(line.item_id),
                 item_number=line.item.item_number if line.item else None,
                 item_description=line.item.description if line.item else None,
-                vendor_id=str(line.vendor_id),
-                vendor_name=line.vendor.name if line.vendor else None,
+                supplier_id=str(line.supplier_id),
+                supplier_name=line.supplier.name if line.supplier else None,
                 ordered_qty=line.ordered_qty,
                 unit_price_amount=line.unit_price_amount,
                 received_qty=recd,
@@ -1294,56 +1296,56 @@ async def _orders_read(
     return [_order_to_read(txn, received) for txn in txns]
 
 
-async def _resolve_item_vendor(
+async def _resolve_item_supplier(
     db: DBSession,
     *,
     item_id: uuid.UUID,
-    vendor_id: str,
-) -> Vendor:
-    """Resolve a vendor that must be one of the item's assigned vendors.
+    supplier_id: str,
+) -> Supplier:
+    """Resolve a supplier that must be one of the item's assigned suppliers.
 
-    Intake / receive can only use vendors already on the item's list
-    (``meta.item_vendors``) — there is no on-the-fly vendor creation. 422s
-    if the vendor isn't assigned to the item or is inactive.
+    Intake / receive can only use suppliers already on the item's list
+    (``meta.item_suppliers``) — there is no on-the-fly supplier creation. 422s
+    if the supplier isn't assigned to the item or is inactive.
     """
-    vendor_uuid = _parse_uuid_or_422(vendor_id, field="vendor_id")
-    if vendor_uuid not in await inv_repo.item_vendor_ids(db, item_id):
+    supplier_uuid = _parse_uuid_or_422(supplier_id, field="supplier_id")
+    if supplier_uuid not in await inv_repo.item_supplier_ids(db, item_id):
         raise ValidationError(
-            "Vendor is not one of this item's assigned vendors; add it to the "
+            "Supplier is not one of this item's assigned suppliers; add it to the "
             "item first",
-            code="vendor_not_assigned_to_item",
+            code="supplier_not_assigned_to_item",
         )
-    vendor = await inv_repo.get_vendor(db, vendor_uuid)
-    if vendor is None:
-        raise NotFoundError(f"Vendor {vendor_id} not found")
-    if not vendor.is_active:
+    supplier = await inv_repo.get_supplier(db, supplier_uuid)
+    if supplier is None:
+        raise NotFoundError(f"Supplier {supplier_id} not found")
+    if not supplier.is_active:
         raise ValidationError(
-            "Vendor is inactive; pick an active vendor",
-            code="vendor_inactive",
+            "Supplier is inactive; pick an active supplier",
+            code="supplier_inactive",
         )
-    return vendor
+    return supplier
 
 
-# ── Item vendors (per item) ────────────────────────────────────────────
+# ── Item suppliers (per item) ────────────────────────────────────────────
 
 
 @items_router.get(
-    "/{item_id}/vendors",
-    response_model=list[ItemVendorRead],
-    summary="List an item's assigned vendors",
+    "/{item_id}/suppliers",
+    response_model=list[ItemSupplierRead],
+    summary="List an item's assigned suppliers",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def list_item_vendors(
+async def list_item_suppliers(
     db: DBSession,
     item_id: Annotated[uuid.UUID, Path()],
-) -> list[ItemVendorRead]:
+) -> list[ItemSupplierRead]:
     if (await inv_repo.get_item(db, item_id)) is None:
         raise NotFoundError(f"Item {item_id} not found")
-    rows = await inv_repo.list_item_vendors(db, item_id)
+    rows = await inv_repo.list_item_suppliers(db, item_id)
     return [
-        ItemVendorRead(
-            vendor_id=str(iv.vendor_id),
-            vendor_name=iv.vendor.name if iv.vendor else "",
+        ItemSupplierRead(
+            supplier_id=str(iv.supplier_id),
+            supplier_name=iv.supplier.name if iv.supplier else "",
         )
         for iv in rows
     ]
@@ -1353,8 +1355,8 @@ async def list_item_vendors(
 #
 # An "Order" (``app.receipt_transactions``) has one-or-more item lines and
 # zero-or-more dated receive events. Lots are created at receive (one lot per
-# line × event), never at intake. Vendors per line are restricted to the
-# item's assigned vendors. See docs/modules/receipt-admin.md (v3).
+# line × event), never at intake. Suppliers per line are restricted to the
+# item's assigned suppliers. See docs/modules/receipt-admin.md (v3).
 
 
 async def _build_order_lines(
@@ -1364,7 +1366,7 @@ async def _build_order_lines(
     lines_input: list,
     actor_user_id: uuid.UUID,
 ) -> list:
-    """Resolve item + per-line vendor and insert the Order's lines (1-based
+    """Resolve item + per-line supplier and insert the Order's lines (1-based
     ``line_no`` in payload order). Used by create + edit.
     """
     created = []
@@ -1373,15 +1375,15 @@ async def _build_order_lines(
         item = await inv_repo.get_item(db, item_uuid)
         if item is None:
             raise NotFoundError(f"Item {line.item_id} not found")
-        vendor = await _resolve_item_vendor(
-            db, item_id=item_uuid, vendor_id=line.vendor_id
+        supplier = await _resolve_item_supplier(
+            db, item_id=item_uuid, supplier_id=line.supplier_id
         )
         row = await inv_repo.add_order_line(
             db,
             txn_id=txn_id,
             line_no=idx,
             item_id=item_uuid,
-            vendor_id=vendor.id,
+            supplier_id=supplier.id,
             ordered_qty=line.ordered_qty,
             unit_price_amount=line.unit_price,
         )
@@ -1789,7 +1791,7 @@ async def receive_order(
                 item_id=line.item_id,
                 lot_number=line_in.lot_number,
                 created_by_user_id=current.id,
-                vendor_id=line.vendor_id,
+                supplier_id=line.supplier_id,
                 manufacture_date=line_in.manufacture_date,
                 expiration_date=line_in.expiration_date,
                 status="available",

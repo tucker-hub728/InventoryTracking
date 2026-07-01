@@ -65,7 +65,7 @@ export function InventoryFilters({ onExport }: InventoryFiltersProps) {
     <div className="mb-3 flex flex-wrap items-center gap-2">
       <Input
         icon={Search}
-        placeholder="Search by name, ID, vendor, or lot…"
+        placeholder="Search by name, ID, supplier, or lot…"
         value={local}
         onChange={(e) => setLocal(e.target.value)}
         wrapperClassName="min-w-[260px] flex-1 max-w-[560px]"

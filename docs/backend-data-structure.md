@@ -76,7 +76,7 @@ These are the rules every table below obeys. They are non-negotiable for a
 
 ```
    ┌──────────┐ ┌───────────┐  ┌────────────┐      ┌─────────────┐
-   │ users    │ │ vendors   │  │ programs   │      │  locations  │
+   │ users    │ │ suppliers   │  │ programs   │      │  locations  │
    │ roles    │ │           │  │ (IDP-023…) │      │ (tree)      │
    │ permissions             └────────────┘      └─────┬────────┘
    └────┬─────┘                                          │
@@ -204,12 +204,12 @@ Indexes: `GIST(path)`, `(parent_id)`, `(kind)`.
 Why `ltree` over closure: smaller; common ancestor lookups via `<@` and `@>`
 are O(log n); fits 99% of "show all positions under this rack" queries.
 
-### 4.5 `meta.vendors`
+### 4.5 `meta.suppliers`
 
 `id`, `name UNIQUE`, `contact_email`, `phone`, `address JSONB`,
 `is_active`, `notes`.
 
-Seeded from the 74 distinct vendors in the workbook.
+Seeded from the 74 distinct suppliers in the workbook.
 
 ### 4.6 `meta.programs`
 
@@ -320,7 +320,7 @@ under "Fields explicitly NOT stored on `items`".
 | `id` | `UUID PK` | — | internal |
 | `item_number` | `TEXT NOT NULL` | col B `Item # (MIN)` | e.g. `NM-0237`. `UNIQUE (item_number) WHERE deleted_at IS NULL`. Prefix CHECK enforces `CM-/NM-/CR-/AY-` (§4.1). |
 | `description` | `TEXT NOT NULL` | col A `Item Description` | |
-| `vendor_id` | `UUID FK → meta.vendors` | col C `Vendor` | nullable for unsourced items |
+| `supplier_id` | `UUID FK → meta.suppliers` | col C `Supplier` | nullable for unsourced items |
 | `avg_lead_days` | `INT NULL` | col D `Average Lead Times (Days)` | |
 | `reorder_threshold` | `NUMERIC(14,3) NOT NULL DEFAULT 0` | col M `MUST HAVE INVENTORY LEVEL` | |
 | ~~`unit_price_amount`~~ | — | col AC `Unit Price` | **REMOVED (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** Unit price now lives on the **lot** (`app.lots.unit_price_amount`) and order lines; item inv $ / PO $ are derived (Σ qty × lot unit price). |
@@ -339,7 +339,7 @@ under "Fields explicitly NOT stored on `items`".
 
 Indexes:
 - `UNIQUE (item_number) WHERE deleted_at IS NULL`
-- `(vendor_id)`
+- `(supplier_id)`
 - `(substring(item_number FROM 1 FOR 2))` — for the prefix-group filter in the list view (or use a generated column `item_prefix` if the planner needs it)
 - `GIN (to_tsvector('english', description))` — for the search bar
 - `(updated_at DESC)`, `(last_updated_on DESC)` — recently-changed list
@@ -528,7 +528,7 @@ Indexes: `(subject_table, subject_id)`, `(signer_user_id, signed_at DESC)`.
 
 ### 6.8 Purchase orders
 
-`app.purchase_orders` — `id`, `vendor_id`, `po_number UNIQUE`,
+`app.purchase_orders` — `id`, `supplier_id`, `po_number UNIQUE`,
 `status` (`draft`/`sent`/`partial`/`received`/`closed`/`cancelled`),
 `ordered_at`, `expected_at`, `closed_at`, `total_amount`, `currency`,
 `approval_signature_id NULL`, audit cols.
@@ -894,8 +894,8 @@ A single command, e.g. `python -m app.seed --source xlsx --file "Demo Inventory 
    `meta.locations`, and `meta.programs` (one row per program header on
    the master sheet). No `meta.categories` — prefix is constrained on the
    item row itself (§4.1).
-2. Upsert `meta.vendors` (74 rows; skip blank vendors, do not create a
-   `''` vendor — this also fixes the empty-string `Select.Item` issue in
+2. Upsert `meta.suppliers` (74 rows; skip blank suppliers, do not create a
+   `''` supplier — this also fixes the empty-string `Select.Item` issue in
    the current frontend).
 3. Upsert `app.items` (≈300 rows). Map columns by the §6.1 table; reject
    rows whose `item_number` doesn't match the prefix CHECK rather than
@@ -962,7 +962,7 @@ SELECT i.id,
        i.item_number,
        substring(i.item_number FROM 1 FOR 2) AS prefix,  -- CM/NM/CR/AY
        i.description,
-       v.name AS vendor,
+       v.name AS supplier,
        i.avg_lead_days,
        i.reorder_threshold,
        -- unit_price_amount / units_per_package REMOVED (v2 §8) — valuation
@@ -975,7 +975,7 @@ SELECT i.id,
        b.status_code,
        b.last_movement_at
 FROM   app.items        i
-LEFT   JOIN meta.vendors v ON v.id = i.vendor_id
+LEFT   JOIN meta.suppliers v ON v.id = i.supplier_id
 LEFT   JOIN app.item_balances b ON b.item_id = i.id
 WHERE  i.deleted_at IS NULL
   AND  ($1::text IS NULL OR b.status_code = $1)

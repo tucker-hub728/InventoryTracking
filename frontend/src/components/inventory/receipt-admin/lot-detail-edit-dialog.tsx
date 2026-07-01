@@ -26,7 +26,7 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { itemsApi, type ApiItemVendor } from '@/lib/api/items';
+import { itemsApi, type ApiItemSupplier } from '@/lib/api/items';
 import { lotsApi, type Lot, type LotUpdateInput } from '@/lib/api/lots';
 
 interface Props {
@@ -37,10 +37,10 @@ interface Props {
 }
 
 /**
- * E-signed edit of a lot's correctable attributes — vendor, manufacture /
+ * E-signed edit of a lot's correctable attributes — supplier, manufacture /
  * expiration dates, unit price and the received quantity (``ordered_qty``).
- * ``lot_number`` and the parent item stay immutable identity. Vendor choices
- * are restricted to the item's assigned vendors. Every save consumes a fresh
+ * ``lot_number`` and the parent item stay immutable identity. Supplier choices
+ * are restricted to the item's assigned suppliers. Every save consumes a fresh
  * reauth ticket minted for ``lot.update`` and records the mandatory reason
  * (the e-signature comment).
  *
@@ -53,8 +53,8 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
 
   const [lot, setLot] = React.useState<Lot | null>(null);
   const [loading, setLoading] = React.useState(false);
-  const [itemVendors, setItemVendors] = React.useState<ApiItemVendor[]>([]);
-  const [vendorId, setVendorId] = React.useState('');
+  const [itemSuppliers, setItemSuppliers] = React.useState<ApiItemSupplier[]>([]);
+  const [supplierId, setSupplierId] = React.useState('');
   const [unitPrice, setUnitPrice] = React.useState('');
   const [qtyReceived, setQtyReceived] = React.useState('');
   const [mfgDate, setMfgDate] = React.useState('');
@@ -63,7 +63,7 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
 
-  // Fetch the lot (+ its item's vendors) whenever a lot id is opened.
+  // Fetch the lot (+ its item's suppliers) whenever a lot id is opened.
   React.useEffect(() => {
     if (!lotId) {
       setLot(null);
@@ -74,13 +74,13 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
     setFormError(null);
     setShowReauth(false);
     setSubmitting(false);
-    setItemVendors([]);
+    setItemSuppliers([]);
 
     lotsApi
       .get(lotId, { signal: ctrl.signal })
       .then((fetched) => {
         setLot(fetched);
-        setVendorId(fetched.vendor_id ?? '');
+        setSupplierId(fetched.supplier_id ?? '');
         setUnitPrice(fetched.unit_price_amount ?? '');
         setQtyReceived(
           fetched.ordered_qty != null ? String(fetched.ordered_qty) : '',
@@ -88,9 +88,9 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
         setMfgDate(fetched.manufacture_date ?? '');
         setExpDate(fetched.expiration_date ?? '');
         return itemsApi
-          .listVendors(fetched.item_id, { signal: ctrl.signal })
-          .then(setItemVendors)
-          .catch(() => setItemVendors([]));
+          .listSuppliers(fetched.item_id, { signal: ctrl.signal })
+          .then(setItemSuppliers)
+          .catch(() => setItemSuppliers([]));
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
@@ -103,21 +103,21 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
     return () => ctrl.abort();
   }, [lotId]);
 
-  // The vendor dropdown is the item's assigned vendors. If the lot's current
-  // vendor somehow isn't in that list, surface it so it still shows / can be
+  // The supplier dropdown is the item's assigned suppliers. If the lot's current
+  // supplier somehow isn't in that list, surface it so it still shows / can be
   // kept (only off-list *changes* are rejected by the backend).
-  const vendorOptions = React.useMemo<ApiItemVendor[]>(() => {
+  const supplierOptions = React.useMemo<ApiItemSupplier[]>(() => {
     if (
-      lot?.vendor_id &&
-      !itemVendors.some((v) => v.vendor_id === lot.vendor_id)
+      lot?.supplier_id &&
+      !itemSuppliers.some((v) => v.supplier_id === lot.supplier_id)
     ) {
       return [
-        { vendor_id: lot.vendor_id, vendor_name: lot.vendor_name ?? '(current)' },
-        ...itemVendors,
+        { supplier_id: lot.supplier_id, supplier_name: lot.supplier_name ?? '(current)' },
+        ...itemSuppliers,
       ];
     }
-    return itemVendors;
-  }, [itemVendors, lot]);
+    return itemSuppliers;
+  }, [itemSuppliers, lot]);
 
   // Resolve only the changed fields into a patch (excluding evidence/reason).
   // Returns null (and sets an error) when invalid or empty.
@@ -128,8 +128,8 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
     if (!lot) return null;
     const patch: Omit<LotUpdateInput, 'evidence_id' | 'reason'> = {};
 
-    if (vendorId && vendorId !== (lot.vendor_id ?? '')) {
-      patch.vendor_id = vendorId;
+    if (supplierId && supplierId !== (lot.supplier_id ?? '')) {
+      patch.supplier_id = supplierId;
     }
     const mfg = mfgDate || null;
     if (mfg !== (lot.manufacture_date ?? null)) patch.manufacture_date = mfg;
@@ -186,7 +186,7 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
       const updated = await lotsApi.update(lot.id, {
         ...patch,
         evidence_id: evidence.evidence_id,
-        reason: evidence.comment ?? '',
+        reason: evidence.comment ?? undefined,
       });
       toast.success('Lot updated', { description: updated.lot_number });
       onSaved();
@@ -227,7 +227,7 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
               {lot ? (
                 <>
                   <span className="font-mono text-accent">{lot.lot_number}</span> ·
-                  Vendor, dates, unit price and received quantity. The lot number
+                  Supplier, dates, unit price and received quantity. The lot number
                   is immutable. Recorded under your e-signature.
                 </>
               ) : (
@@ -249,19 +249,19 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="lot-detail-edit-vendor">Vendor</Label>
+              <Label htmlFor="lot-detail-edit-supplier">Supplier</Label>
               <Select
-                value={vendorId}
-                onValueChange={setVendorId}
+                value={supplierId}
+                onValueChange={setSupplierId}
                 disabled={!lot || loading}
               >
-                <SelectTrigger id="lot-detail-edit-vendor">
-                  <SelectValue placeholder="Select vendor" />
+                <SelectTrigger id="lot-detail-edit-supplier">
+                  <SelectValue placeholder="Select supplier" />
                 </SelectTrigger>
                 <SelectContent className="max-h-72">
-                  {vendorOptions.map((v) => (
-                    <SelectItem key={v.vendor_id} value={v.vendor_id}>
-                      {v.vendor_name}
+                  {supplierOptions.map((v) => (
+                    <SelectItem key={v.supplier_id} value={v.supplier_id}>
+                      {v.supplier_name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -356,7 +356,6 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
         action="lot.update"
         meaning={meaning}
         commentPlaceholder="e.g. Corrected expiration date from the CoA"
-        commentRequired
         onConfirmed={submit}
         title="Sign this lot edit"
         submitLabel="Sign & save"

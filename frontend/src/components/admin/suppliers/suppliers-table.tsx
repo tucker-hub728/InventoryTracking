@@ -5,15 +5,15 @@ import { Pencil, RotateCcw, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import type { Vendor } from '@/lib/api/vendors';
+import type { Supplier } from '@/lib/api/suppliers';
 
-interface VendorsTableProps {
-  vendors: Vendor[];
+interface SuppliersTableProps {
+  suppliers: Supplier[];
   loading: boolean;
   /** Row actions — when omitted the action column is hidden. */
-  onEdit?: (v: Vendor) => void;
-  onDeactivate?: (v: Vendor) => void;
-  onReactivate?: (v: Vendor) => void;
+  onEdit?: (v: Supplier) => void;
+  onDeactivate?: (v: Supplier) => void;
+  onReactivate?: (v: Supplier) => void;
   /** IDs whose row-level action is in flight; used to disable the button. */
   busyId?: string | null;
 }
@@ -30,18 +30,18 @@ function formatDate(iso: string): string {
   }
 }
 
-export function VendorsTable({
-  vendors,
+export function SuppliersTable({
+  suppliers,
   loading,
   onEdit,
   onDeactivate,
   onReactivate,
   busyId,
-}: VendorsTableProps) {
+}: SuppliersTableProps) {
   if (loading) {
     return (
       <div className="py-10 text-center text-sm text-text-3" role="status">
-        Loading vendors…
+        Loading suppliers…
       </div>
     );
   }
@@ -61,7 +61,7 @@ export function VendorsTable({
           </tr>
         </thead>
         <tbody>
-          {vendors.map((v) => (
+          {suppliers.map((v) => (
             <tr
               key={v.id}
               className={cn(
@@ -120,7 +120,7 @@ export function VendorsTable({
                         className="h-7 px-2"
                         onClick={() => onEdit(v)}
                         disabled={busyId === v.id}
-                        title="Edit vendor"
+                        title="Edit supplier"
                       >
                         <Pencil size={12} aria-hidden /> Edit
                       </Button>
@@ -132,7 +132,7 @@ export function VendorsTable({
                         className="h-7 px-2 text-warning hover:bg-warning/10"
                         onClick={() => onDeactivate(v)}
                         disabled={busyId === v.id}
-                        title="Deactivate vendor"
+                        title="Deactivate supplier"
                       >
                         <Trash2 size={12} aria-hidden /> Deactivate
                       </Button>
@@ -144,7 +144,7 @@ export function VendorsTable({
                         className="h-7 px-2 text-success hover:bg-success/10"
                         onClick={() => onReactivate(v)}
                         disabled={busyId === v.id}
-                        title="Reactivate vendor"
+                        title="Reactivate supplier"
                       >
                         <RotateCcw size={12} aria-hidden /> Reactivate
                       </Button>

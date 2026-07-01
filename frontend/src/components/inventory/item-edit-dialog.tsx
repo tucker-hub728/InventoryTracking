@@ -28,15 +28,15 @@ import { Badge } from '@/components/ui/badge';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem, type ItemUpdateInput } from '@/lib/api/items';
-import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
 import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
 
-import { VendorMultiSelect } from './vendor-multi-select';
+import { SupplierMultiSelect } from './supplier-multi-select';
 
 const schema = z.object({
   description: z.string().min(1, 'Description is required').max(512),
   category_id: z.string().min(1, 'Category is required'),
-  vendor_ids: z.array(z.string()).default([]),
+  supplier_ids: z.array(z.string()).default([]),
   avg_lead_days: z
     .string()
     .optional()
@@ -75,8 +75,8 @@ interface Props {
   onUpdated?: () => void;
 }
 
-/** Sorted-equal check for two vendor-id lists (order-insensitive). */
-function sameVendorSet(a: string[], b: string[]): boolean {
+/** Sorted-equal check for two supplier-id lists (order-insensitive). */
+function sameSupplierSet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   const sa = [...a].sort();
   const sb = [...b].sort();
@@ -85,21 +85,21 @@ function sameVendorSet(a: string[], b: string[]): boolean {
 
 /**
  * Edit dialog for the inventory item detail page. Captures the
- * commonly-edited fields: description, assigned vendors, lead time,
+ * commonly-edited fields: description, assigned suppliers, lead time,
  * thresholds, must-order flag. ``item_number`` is NOT here — it's the
  * immutable human handle. Pricing lives on the lot, not the item.
  *
  * Submit sends only what changed so the audit diff shows the operator's
- * actual intent. The vendor list is sent whole (replace semantics) when it
+ * actual intent. The supplier list is sent whole (replace semantics) when it
  * differs from what loaded.
  */
 export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props) {
-  const [vendors, setVendors] = React.useState<Vendor[]>([]);
-  const [vendorsError, setVendorsError] = React.useState<string | null>(null);
+  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
+  const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
   const [categories, setCategories] = React.useState<ApiCategory[]>([]);
   const [item, setItem] = React.useState<ApiItem | null>(null);
-  // The vendor list as it was when the dialog loaded — submit diffs against it.
-  const [loadedVendorIds, setLoadedVendorIds] = React.useState<string[]>([]);
+  // The supplier list as it was when the dialog loaded — submit diffs against it.
+  const [loadedSupplierIds, setLoadedSupplierIds] = React.useState<string[]>([]);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -115,7 +115,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     defaultValues: {
       description: '',
       category_id: '',
-      vendor_ids: [],
+      supplier_ids: [],
       avg_lead_days: '',
       reorder_threshold: '',
       near_expiry_threshold_days: '',
@@ -123,17 +123,17 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     },
   });
 
-  const vendorIds = watch('vendor_ids');
+  const supplierIds = watch('supplier_ids');
   const mustOrder = watch('must_order_flag');
   const categoryId = watch('category_id');
 
   // Purchasing fields apply only to Purchased categories (a Product is built,
-  // not bought) — vendors, lead time, reorder + near-expiry, must-order.
+  // not bought) — suppliers, lead time, reorder + near-expiry, must-order.
   const showPurchasing =
     categories.find((c) => c.id === categoryId)?.kind === 'purchased';
 
-  // Load vendors + the fresh item state every time the dialog opens.
-  // ``activeOnly: false`` so a vendor that's since been deactivated still
+  // Load suppliers + the fresh item state every time the dialog opens.
+  // ``activeOnly: false`` so a supplier that's since been deactivated still
   // appears in the list (and can be unchecked).
   React.useEffect(() => {
     if (!open || !itemId) {
@@ -142,22 +142,22 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       return;
     }
     const ctrl = new AbortController();
-    setVendorsError(null);
+    setSuppliersError(null);
     Promise.all([
-      vendorsApi.list({ activeOnly: false, signal: ctrl.signal }),
+      suppliersApi.list({ activeOnly: false, signal: ctrl.signal }),
       itemsApi.get(itemId, { signal: ctrl.signal }),
       categoriesApi.list({ signal: ctrl.signal }),
     ])
-      .then(([vendorList, freshItem, categoryList]) => {
-        setVendors(vendorList);
+      .then(([supplierList, freshItem, categoryList]) => {
+        setSuppliers(supplierList);
         setCategories(categoryList);
         setItem(freshItem);
-        const ids = freshItem.vendors.map((v) => v.vendor_id);
-        setLoadedVendorIds(ids);
+        const ids = freshItem.suppliers.map((v) => v.supplier_id);
+        setLoadedSupplierIds(ids);
         reset({
           description: freshItem.description,
           category_id: freshItem.category_id,
-          vendor_ids: ids,
+          supplier_ids: ids,
           avg_lead_days:
             freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
           // Reorder threshold is a whole count of units — never decimal. The
@@ -191,8 +191,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     const patch: ItemUpdateInput = {};
     if (dirtyFields.description) patch.description = values.description.trim();
     if (dirtyFields.category_id) patch.category_id = values.category_id;
-    if (!sameVendorSet(values.vendor_ids, loadedVendorIds)) {
-      patch.vendor_ids = values.vendor_ids;
+    if (!sameSupplierSet(values.supplier_ids, loadedSupplierIds)) {
+      patch.supplier_ids = values.supplier_ids;
     }
     if (dirtyFields.avg_lead_days) {
       patch.avg_lead_days = values.avg_lead_days
@@ -322,18 +322,18 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
             {showPurchasing && (
               <>
             <div className="space-y-1.5">
-              <Label htmlFor="it-vendors">Vendors</Label>
-              <VendorMultiSelect
-                id="it-vendors"
-                vendors={vendors}
-                value={vendorIds}
+              <Label htmlFor="it-suppliers">Suppliers</Label>
+              <SupplierMultiSelect
+                id="it-suppliers"
+                suppliers={suppliers}
+                value={supplierIds}
                 onChange={(next) =>
-                  setValue('vendor_ids', next, { shouldDirty: true })
+                  setValue('supplier_ids', next, { shouldDirty: true })
                 }
-                error={vendorsError}
+                error={suppliersError}
               />
               <p className="text-xs text-text-3">
-                Only these vendors can be selected when receiving stock for this
+                Only these suppliers can be selected when receiving stock for this
                 item.
               </p>
             </div>

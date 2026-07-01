@@ -53,7 +53,7 @@ export function KanbanItemSheet({ open, onOpenChange, selection }: Props) {
           </div>
 
           <dl className="grid grid-cols-2 gap-3 text-sm">
-            <Field label="Vendor" value={item.vendor} />
+            <Field label="Supplier" value={item.supplier} />
             <Field label="On hand" value={String(item.qty)} mono />
             <Field label="On PO" value={String(item.onOrder)} mono />
             <Field label="Threshold" value={String(item.threshold)} mono />

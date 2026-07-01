@@ -11,7 +11,7 @@ import {
   SearchableSelect,
   type SearchableSelectOption,
 } from '@/components/ui/searchable-select';
-import { itemsApi, type ApiItem, type ApiItemVendor } from '@/lib/api/items';
+import { itemsApi, type ApiItem, type ApiItemSupplier } from '@/lib/api/items';
 import type { Order, OrderLineInput } from '@/lib/api/receiving';
 
 // ── Draft model ────────────────────────────────────────────────────────────
@@ -19,12 +19,12 @@ import type { Order, OrderLineInput } from '@/lib/api/receiving';
 export interface OrderLineDraft {
   key: string;
   item_id: string;
-  vendorChoice: string; // vendor id | ''
+  supplierChoice: string; // supplier id | ''
   ordered_qty: string;
   unit_price: string;
-  // Vendors available for this line's selected item.
-  vendors: ApiItemVendor[];
-  vendorsLoading: boolean;
+  // Suppliers available for this line's selected item.
+  suppliers: ApiItemSupplier[];
+  suppliersLoading: boolean;
 }
 
 export interface OrderFormState {
@@ -45,11 +45,11 @@ export function emptyLine(): OrderLineDraft {
   return {
     key: nextKey(),
     item_id: '',
-    vendorChoice: '',
+    supplierChoice: '',
     ordered_qty: '',
     unit_price: '',
-    vendors: [],
-    vendorsLoading: false,
+    suppliers: [],
+    suppliersLoading: false,
   };
 }
 
@@ -73,13 +73,13 @@ export function formStateFromOrder(order: Order): OrderFormState {
     lines: order.lines.map((l) => ({
       key: nextKey(),
       item_id: l.item_id,
-      vendorChoice: l.vendor_id,
+      supplierChoice: l.supplier_id,
       ordered_qty: String(l.ordered_qty),
       unit_price: l.unit_price_amount ?? '',
-      // Seed with the line's own vendor so the Select shows a label before the
-      // item's full vendor list resolves; the loader replaces it.
-      vendors: [{ vendor_id: l.vendor_id, vendor_name: l.vendor_name ?? '' }],
-      vendorsLoading: false,
+      // Seed with the line's own supplier so the Select shows a label before the
+      // item's full supplier list resolves; the loader replaces it.
+      suppliers: [{ supplier_id: l.supplier_id, supplier_name: l.supplier_name ?? '' }],
+      suppliersLoading: false,
     })),
   };
 }
@@ -106,8 +106,8 @@ export function validateOrderForm(
     if (!l.item_id) {
       return { error: `Line ${n}: pick an item.` };
     }
-    if (!l.vendorChoice) {
-      return { error: `Line ${n}: pick a vendor.` };
+    if (!l.supplierChoice) {
+      return { error: `Line ${n}: pick a supplier.` };
     }
     const qty = Number(l.ordered_qty);
     if (!Number.isFinite(qty) || qty <= 0) {
@@ -123,7 +123,7 @@ export function validateOrderForm(
     }
     lines.push({
       item_id: l.item_id,
-      vendor_id: l.vendorChoice,
+      supplier_id: l.supplierChoice,
       ordered_qty: qty,
       unit_price: unitPrice,
     });
@@ -142,7 +142,7 @@ interface OrderFormProps {
 }
 
 /** Header (Order #, blanket window) + repeatable item lines. Shared by
- *  the New Order and Edit Order dialogs. Vendor options are loaded per line
+ *  the New Order and Edit Order dialogs. Supplier options are loaded per line
  *  from the line's selected item. */
 export function OrderForm({
   items,
@@ -160,23 +160,23 @@ export function OrderForm({
     [setState],
   );
 
-  // Load the selected item's vendors for a line, clearing the prior choice.
+  // Load the selected item's suppliers for a line, clearing the prior choice.
   const onItemChange = React.useCallback(
     (key: string, itemId: string) => {
       patchLine(key, {
         item_id: itemId,
-        vendorChoice: '',
-        vendors: [],
-        vendorsLoading: !!itemId,
+        supplierChoice: '',
+        suppliers: [],
+        suppliersLoading: !!itemId,
       });
       if (!itemId) return;
       itemsApi
-        .listVendors(itemId)
-        .then((vendors) =>
+        .listSuppliers(itemId)
+        .then((suppliers) =>
           setState((prev) => ({
             ...prev,
             lines: prev.lines.map((l) =>
-              l.key === key ? { ...l, vendors, vendorsLoading: false } : l,
+              l.key === key ? { ...l, suppliers, suppliersLoading: false } : l,
             ),
           })),
         )
@@ -184,7 +184,7 @@ export function OrderForm({
           setState((prev) => ({
             ...prev,
             lines: prev.lines.map((l) =>
-              l.key === key ? { ...l, vendors: [], vendorsLoading: false } : l,
+              l.key === key ? { ...l, suppliers: [], suppliersLoading: false } : l,
             ),
           })),
         );
@@ -318,29 +318,29 @@ export function OrderForm({
             <div className="mt-3 grid grid-cols-3 gap-3">
               <div className="space-y-1.5">
                 <Label>
-                  Vendor <span className="text-danger">*</span>
+                  Supplier <span className="text-danger">*</span>
                 </Label>
                 <SearchableSelect
-                  aria-label="Vendor"
-                  options={line.vendors.map((v) => ({
-                    value: v.vendor_id,
-                    label: v.vendor_name,
-                    searchText: v.vendor_name,
+                  aria-label="Supplier"
+                  options={line.suppliers.map((v) => ({
+                    value: v.supplier_id,
+                    label: v.supplier_name,
+                    searchText: v.supplier_name,
                   }))}
-                  value={line.vendorChoice}
-                  onChange={(v) => patchLine(line.key, { vendorChoice: v })}
-                  disabled={!line.item_id || line.vendorsLoading}
+                  value={line.supplierChoice}
+                  onChange={(v) => patchLine(line.key, { supplierChoice: v })}
+                  disabled={!line.item_id || line.suppliersLoading}
                   placeholder={
                     !line.item_id
                       ? 'Pick an item first'
-                      : line.vendorsLoading
+                      : line.suppliersLoading
                         ? 'Loading…'
-                        : line.vendors.length > 0
-                          ? 'Select vendor'
-                          : 'Item has no vendors'
+                        : line.suppliers.length > 0
+                          ? 'Select supplier'
+                          : 'Item has no suppliers'
                   }
-                  searchPlaceholder="Search vendors…"
-                  emptyText="No matching vendors."
+                  searchPlaceholder="Search suppliers…"
+                  emptyText="No matching suppliers."
                 />
               </div>
               <div className="space-y-1.5">
@@ -372,9 +372,9 @@ export function OrderForm({
               </div>
             </div>
 
-            {line.item_id && !line.vendorsLoading && line.vendors.length === 0 && (
+            {line.item_id && !line.suppliersLoading && line.suppliers.length === 0 && (
               <p className="mt-2 text-xs text-warning">
-                This item has no assigned vendors. Add one on the item before
+                This item has no assigned suppliers. Add one on the item before
                 ordering against it.
               </p>
             )}

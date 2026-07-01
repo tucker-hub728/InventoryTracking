@@ -1,6 +1,6 @@
 """``/v1/customers`` routes.
 
-Master-data writes, same gate as vendors/items: reads need ``inventory:view``,
+Master-data writes, same gate as suppliers/items: reads need ``inventory:view``,
 writes need ``inventory:create``. Updates + deletes are audit-logged via
 ``record_entity_change``. No e-signature — these aren't GxP stock movements.
 

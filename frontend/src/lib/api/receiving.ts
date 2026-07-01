@@ -39,8 +39,8 @@ export interface OrderLine {
   item_id: string;
   item_number: string | null;
   item_description: string | null;
-  vendor_id: string;
-  vendor_name: string | null;
+  supplier_id: string;
+  supplier_name: string | null;
   ordered_qty: number;
   /** Decimal serialised as a string (or null). */
   unit_price_amount: string | null;
@@ -98,8 +98,8 @@ export interface OrderListResponse {
 
 export interface OrderLineInput {
   item_id: string;
-  /** Must be one of the item's assigned vendors (``meta.item_vendors``). */
-  vendor_id: string;
+  /** Must be one of the item's assigned suppliers (``meta.item_suppliers``). */
+  supplier_id: string;
   ordered_qty: number;
   unit_price?: number | null;
 }

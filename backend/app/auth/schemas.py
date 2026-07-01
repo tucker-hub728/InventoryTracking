@@ -83,7 +83,7 @@ class ReauthRequest(BaseModel):
     # Free-text action verb (e.g. ``movement.receipt``). The endpoint
     # consuming the evidence checks ``action`` matches its own expected
     # value — so a ticket minted for ``movement.receipt`` cannot be
-    # replayed to satisfy ``vendor.update``.
+    # replayed to satisfy ``supplier.update``.
     action: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9_.-]+$")
     password: str = Field(min_length=1, max_length=128)
     # Optional attestation. The frontend dialog renders this verbatim

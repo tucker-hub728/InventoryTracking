@@ -1,4 +1,4 @@
-"""Inventory ORM — vendors, UOMs, items, locations, lots.
+"""Inventory ORM — suppliers, UOMs, items, locations, lots.
 
 Schema and constraints follow ``docs/backend-data-structure.md`` §4–§6.1
 verbatim, with the additions / omissions documented in the migrations.
@@ -34,13 +34,13 @@ from app.db.base import Base
 from app.models.identity import User
 
 
-class Vendor(Base):
+class Supplier(Base):
     """Sourcing partner. Items optionally reference one."""
 
-    __tablename__ = "vendors"
+    __tablename__ = "suppliers"
     __table_args__ = (
-        Index("uq_vendors_name", func.lower(text("name")), unique=True),
-        Index("ix_vendors_active", "is_active"),
+        Index("uq_suppliers_name", func.lower(text("name")), unique=True),
+        Index("ix_suppliers_active", "is_active"),
         {"schema": "meta"},
     )
 
@@ -209,9 +209,9 @@ class Item(Base):
         nullable=False,
     )
 
-    # An item's assigned vendors live in ``meta.item_vendors`` (the ``vendors``
-    # relationship below). There is no single default-vendor column — the list
-    # is the source of truth for which vendors an item can be received against.
+    # An item's assigned suppliers live in ``meta.item_suppliers`` (the ``suppliers``
+    # relationship below). There is no single default-supplier column — the list
+    # is the source of truth for which suppliers an item can be received against.
     avg_lead_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reorder_threshold: Mapped[Decimal] = mapped_column(
         Numeric(14, 3),
@@ -267,7 +267,7 @@ class Item(Base):
     )
 
     # ── Relationships (read-only views) ───────────────────────────────
-    # ``vendors`` (the assigned-vendor list) is defined after ItemVendor
+    # ``suppliers`` (the assigned-supplier list) is defined after ItemSupplier
     # below, mirroring the ``stock`` relationship pattern.
     creator: Mapped[User] = relationship(
         foreign_keys=[created_by_user_id],
@@ -398,7 +398,7 @@ class Lot(Base):
             postgresql_where=text("deleted_at IS NULL"),
         ),
         Index("ix_lots_item_id", "item_id"),
-        Index("ix_lots_vendor_id", "vendor_id"),
+        Index("ix_lots_supplier_id", "supplier_id"),
         Index("ix_lots_status", "status"),
         Index(
             "ix_lots_receipt_transaction_id",
@@ -448,9 +448,9 @@ class Lot(Base):
         nullable=False,
     )
     lot_number: Mapped[str] = mapped_column(Text, nullable=False)
-    vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+    supplier_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
+        ForeignKey("meta.suppliers.id", ondelete="RESTRICT"),
         nullable=True,
     )
     manufacture_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -528,7 +528,7 @@ class Lot(Base):
 
     # ── Relationships (read-only views) ────────────────────────────────
     item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
-    vendor: Mapped[Vendor | None] = relationship(lazy="joined", viewonly=True)
+    supplier: Mapped[Supplier | None] = relationship(lazy="joined", viewonly=True)
 
 
 # Single source of truth for accepted movement types. Keep aligned with
@@ -709,27 +709,27 @@ Item.stock = relationship(  # type: ignore[assignment]
 )
 
 
-# ── Item vendors ───────────────────────────────────────────────────────
+# ── Item suppliers ───────────────────────────────────────────────────────
 #
-# An item's assigned vendors — a plain many-to-many list. These ARE the
-# vendors an item can be received against (no separate approval concept).
+# An item's assigned suppliers — a plain many-to-many list. These ARE the
+# suppliers an item can be received against (no separate approval concept).
 
 
-class ItemVendor(Base):
-    """One vendor assigned to an item (zero-or-more per item).
+class ItemSupplier(Base):
+    """One supplier assigned to an item (zero-or-more per item).
 
-    The set of these rows is an item's complete vendor list. Receipt intake
-    only offers vendors from this list — there is no on-the-fly vendor
+    The set of these rows is an item's complete supplier list. Receipt intake
+    only offers suppliers from this list — there is no on-the-fly supplier
     creation and no ``approval_status``.
     """
 
-    __tablename__ = "item_vendors"
+    __tablename__ = "item_suppliers"
     __table_args__ = (
         UniqueConstraint(
-            "item_id", "vendor_id", name="uq_item_vendors_item_vendor"
+            "item_id", "supplier_id", name="uq_item_suppliers_item_supplier"
         ),
-        Index("ix_item_vendors_item_id", "item_id"),
-        Index("ix_item_vendors_vendor_id", "vendor_id"),
+        Index("ix_item_suppliers_item_id", "item_id"),
+        Index("ix_item_suppliers_supplier_id", "supplier_id"),
         {"schema": "meta"},
     )
 
@@ -744,9 +744,9 @@ class ItemVendor(Base):
         ForeignKey("app.items.id", ondelete="CASCADE"),
         nullable=False,
     )
-    vendor_id: Mapped[uuid.UUID] = mapped_column(
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
+        ForeignKey("meta.suppliers.id", ondelete="RESTRICT"),
         nullable=False,
     )
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
@@ -760,17 +760,17 @@ class ItemVendor(Base):
         server_default=func.now(),
     )
 
-    vendor: Mapped[Vendor] = relationship(lazy="joined", viewonly=True)
+    supplier: Mapped[Supplier] = relationship(lazy="joined", viewonly=True)
 
 
-# Eager-loaded ``Item.vendors`` — the assigned-vendor list, vendor joined.
-# Defined here (not on Item) so the forward reference to ItemVendor resolves
+# Eager-loaded ``Item.suppliers`` — the assigned-supplier list, supplier joined.
+# Defined here (not on Item) so the forward reference to ItemSupplier resolves
 # without a string lookup, mirroring ``Item.stock``.
-Item.vendors = relationship(  # type: ignore[assignment]
-    ItemVendor,
-    primaryjoin=Item.id == ItemVendor.item_id,
-    foreign_keys=[ItemVendor.item_id],
-    order_by=ItemVendor.created_at,
+Item.suppliers = relationship(  # type: ignore[assignment]
+    ItemSupplier,
+    primaryjoin=Item.id == ItemSupplier.item_id,
+    foreign_keys=[ItemSupplier.item_id],
+    order_by=ItemSupplier.created_at,
     lazy="selectin",
     viewonly=True,
 )
@@ -903,7 +903,7 @@ class ReceiptTransaction(Base):
 class ReceiptTransactionLine(Base):
     """One item ordered on an Order (Requirements v3).
 
-    Carries the item, the per-line vendor (∈ the item's ``meta.item_vendors``),
+    Carries the item, the per-line supplier (∈ the item's ``meta.item_suppliers``),
     the ordered quantity and the agreed unit price. The *same* item may appear
     on several lines (split sourcing) — there is intentionally no
     ``UNIQUE(receipt_transaction_id, item_id)``. Received quantity is derived
@@ -938,9 +938,9 @@ class ReceiptTransactionLine(Base):
         ForeignKey("app.items.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    vendor_id: Mapped[uuid.UUID] = mapped_column(
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("meta.vendors.id", ondelete="RESTRICT"),
+        ForeignKey("meta.suppliers.id", ondelete="RESTRICT"),
         nullable=False,
     )
     ordered_qty: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -961,7 +961,7 @@ class ReceiptTransactionLine(Base):
     )
 
     item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
-    vendor: Mapped[Vendor] = relationship(lazy="joined", viewonly=True)
+    supplier: Mapped[Supplier] = relationship(lazy="joined", viewonly=True)
     # The event-lines (draws) against this line — drives received/outstanding.
     event_lines: Mapped[list[ReceiptEventLine]] = relationship(
         "ReceiptEventLine",

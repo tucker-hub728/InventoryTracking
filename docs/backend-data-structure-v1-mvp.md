@@ -29,7 +29,7 @@ That's it. Anything else listed in the full spec is v2+.
 |--|--|--|
 | `meta` | `units_of_measure` | small lookup |
 | `meta` | `locations` | `ltree` tree; covers freezers, racks, LN2 positions later |
-| `meta` | `vendors` | seeded from workbook (74 rows) |
+| `meta` | `suppliers` | seeded from workbook (74 rows) |
 | `app` | `settings` | single-row global config |
 | `app` | `roles` | lookup with 4 codes (`super_admin`, `admin`, `editor`, `viewer`) |
 | `app` | `users` | `role TEXT FK → roles.code` denorm column |
@@ -54,7 +54,7 @@ Plus one **SQL view**:
 | Purchase orders | `purchase_orders`, `po_lines` | Optional `ledger_entries.external_ref` already exists to point at an externally-generated PO# in v1; the new tables can backfill from those refs. |
 | LN2 storage | `ln2_position_state` | `meta.locations` already supports the tree in v1; only the state overlay is new. |
 | Workflow / Kanban | `meta.workflow_stages`, `workflow_cards`, `workflow_transitions` | Fully additive. |
-| Forecast | `programs`, `item_program_demand`, `forecast_periods`, `forecast_demand`, `mfg_schedule` | Fully additive. Items keep `description`/`vendor`/`threshold` in v1; per-program columns N–AB stay parked in the workbook until forecast module ships. |
+| Forecast | `programs`, `item_program_demand`, `forecast_periods`, `forecast_demand`, `mfg_schedule` | Fully additive. Items keep `description`/`supplier`/`threshold` in v1; per-program columns N–AB stay parked in the workbook until forecast module ships. |
 | Notifications | `notification_subscriptions`, `notification_deliveries` | Fully additive. |
 | Item balances cache | (table form of) `app.item_balances` | v1 ships as a view of the same name + columns; v2 promotes to a table + trigger. App code reads through a repository so the swap is transparent. |
 | Async audit | `app.outbox`, partitioning of `audit_events` | v1 writes audit rows inline. v2 introduces the outbox without changing the `audit_events` schema; partitioning is a separate migration. |
@@ -124,7 +124,7 @@ tables ship with the movements / audit / settings modules.
 erDiagram
     ROLES ||--o{ USERS : "primary role"
     USERS ||--o{ USERS : "invited by"
-    VENDORS ||--o{ ITEMS : "supplies"
+    SUPPLIERS ||--o{ ITEMS : "supplies"
     UNITS_OF_MEASURE ||--o{ ITEMS : "measured in"
     USERS ||--o{ ITEMS : "created by"
     USERS ||--o{ ITEMS : "updated by"
@@ -152,7 +152,7 @@ erDiagram
         timestamptz updated_at "trigger-maintained"
         timestamptz deleted_at
     }
-    VENDORS {
+    SUPPLIERS {
         uuid id PK
         text name "UK on lower(name)"
         citext contact_email
@@ -177,7 +177,7 @@ erDiagram
         uuid id PK
         text item_number "UK where not deleted; CHECK prefix in CM-/NM-/CR-/AY-"
         text description "GIN FTS index"
-        uuid vendor_id FK "nullable"
+        uuid supplier_id FK "nullable"
         int avg_lead_days
         numeric reorder_threshold "CHECK >= 0"
         numeric unit_price_amount "REMOVED v2 §8 — moved to lot"
@@ -206,7 +206,7 @@ erDiagram
 | `app.roles` | 4 | seeded by migration `f0cc0b641382` |
 | `app.users` | 1 | lazy-provisioned on first `/auth/me` (bootstrap super admin) |
 | `meta.units_of_measure` | 9 | seeded by migration `b7c6522aca73` |
-| `meta.vendors` | 72 | seeded by migration `e052b2ffa00b` from the workbook (73 distinct names; one case-insensitive collision: `BioTechne` / `Biotechne`) |
+| `meta.suppliers` | 72 | seeded by migration `e052b2ffa00b` from the workbook (73 distinct names; one case-insensitive collision: `BioTechne` / `Biotechne`) |
 | `app.items` | 0–N | populated via `POST /v1/items` |
 
 **Deviations from §5 (intentional):**
@@ -231,7 +231,7 @@ erDiagram
     USERS ||--o{ SESSIONS : "has"
     USERS ||--o| SETTINGS : "updated by"
 
-    VENDORS ||--o{ ITEMS : "supplies"
+    SUPPLIERS ||--o{ ITEMS : "supplies"
     UNITS_OF_MEASURE ||--o{ ITEMS : "measured in"
     ITEMS ||--o{ LOTS : "produces"
     ITEMS ||--o{ ITEM_BATCHES : "stocked as"
@@ -536,7 +536,7 @@ Same approach as full spec §14, but trimmed:
 
 1. **Alembic init** — create `app`, `meta`, `audit` schemas. **Skip `archive`.**
 2. **Migration 0001** — reference tables: `meta.units_of_measure`,
-   `meta.locations`, `meta.vendors`, `app.roles`, `app.settings`.
+   `meta.locations`, `meta.suppliers`, `app.roles`, `app.settings`.
 3. **Migration 0002** — `app.users`, `app.sessions`.
 4. **Migration 0003** — `app.items`, `app.lots`, `app.item_batches`,
    `app.ledger_entries`, `app.electronic_signatures`. Triggers:
@@ -549,7 +549,7 @@ Same approach as full spec §14, but trimmed:
 7. **Seeder** —
    - Roles (4 rows from §5.2 above).
    - One `super_admin` user from env.
-   - Vendors from `Demo Inventory Control.xlsx` (74 rows).
+   - Suppliers from `Demo Inventory Control.xlsx` (74 rows).
    - Items + lots + batches + ledger entries via the existing
      `scripts/sync-from-xlsx.py` logic, ported into `app/seed.py`.
    - One `audit_events` row for the import (`inventory.import.completed`).

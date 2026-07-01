@@ -34,7 +34,7 @@ export type SortKey = 'id' | 'desc' | 'lastUpdated';
 export type SortDir = 'asc' | 'desc';
 
 // API sort fields that map cleanly. Other UI sort keys (qty, status,
-// vendor, etc.) are computed/derived and not backend-sortable yet —
+// supplier, etc.) are computed/derived and not backend-sortable yet —
 // they fall back to ``item_number``.
 const SORT_KEY_TO_API: Partial<Record<SortKey, ApiSortField>> = {
   id: 'item_number',

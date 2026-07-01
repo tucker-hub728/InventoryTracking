@@ -91,11 +91,11 @@ before a customer demo.
 ### 2.1 🟡 Lot edit dialog (frontend)
 
 **Status:** Backend PATCH/DELETE shipped with Chunk A (audit-recorded).
-Vendors / locations / items each got their edit dialog. Lots did not —
+Suppliers / locations / items each got their edit dialog. Lots did not —
 the lots table only supports create.
 
 **Scope:** Mirror `item-edit-dialog.tsx` for lots (lot_number is
-immutable; expiration_date / vendor_id / coa_url / notes are editable;
+immutable; expiration_date / supplier_id / coa_url / notes are editable;
 soft-delete refuses if `lot_has_movements`).
 
 **Effort:** ~30 min.
@@ -182,8 +182,8 @@ So when someone asks "what's already in":
 
 ### Backend (12 migrations on top of the boilerplate)
 - ✅ Identity (roles + users + Cognito mirror)
-- ✅ Inventory schema (items, vendors)
-- ✅ Vendors seeded from workbook (72 rows)
+- ✅ Inventory schema (items, suppliers)
+- ✅ Suppliers seeded from workbook (72 rows)
 - ✅ Locations + lots
 - ✅ Stock movements + ledger view
 - ✅ Append-only triggers (no `UPDATE` / `DELETE` / `TRUNCATE` on
@@ -195,7 +195,7 @@ So when someone asks "what's already in":
 ### Frontend
 - ✅ Auth (Cognito + session cookies)
 - ✅ Inventory list / detail / edit
-- ✅ Vendors / UOMs / Locations admin pages (full CRUD with audit)
+- ✅ Suppliers / UOMs / Locations admin pages (full CRUD with audit)
 - ✅ Lots admin page (create + view; **edit dialog missing** — see §2.1)
 - ✅ Movement wizard (receipt / dispense / discard / adjustment /
   transfer / reverse) with canvas e-signature

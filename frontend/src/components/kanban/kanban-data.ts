@@ -34,7 +34,7 @@ export function reasonFor(it: InventoryItem, col: KanbanStageId): string {
     return it.status === 'Expiring' ? 'Near expiration + low stock' : 'Quality review pending';
   if (col === 'pending') return 'Awaiting manager approval';
   if (col === 'ordered')
-    return it.onOrder > 0 ? `PO sent · ${it.onOrder} on order` : 'PO sent to vendor';
+    return it.onOrder > 0 ? `PO sent · ${it.onOrder} on order` : 'PO sent to supplier';
   if (col === 'received') return 'Routine restock';
   if (col === 'closed') return 'Workflow complete';
   return '';

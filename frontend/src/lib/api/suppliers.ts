@@ -1,5 +1,5 @@
 /**
- * Vendor API surface — wraps ``/api/v1/vendors``.
+ * Supplier API surface — wraps ``/api/v1/suppliers``.
  *
  * Includes update + soft-delete (Chunk A). Every PATCH / DELETE writes
  * an ``audit.audit_events`` row server-side; the UI doesn't need to
@@ -8,7 +8,7 @@
 
 import { api } from './client';
 
-export interface Vendor {
+export interface Supplier {
   id: string;
   name: string;
   contact_email: string | null;
@@ -19,7 +19,7 @@ export interface Vendor {
   updated_at: string;
 }
 
-export interface VendorCreateInput {
+export interface SupplierCreateInput {
   name: string;
   contact_email?: string | null;
   phone?: string | null;
@@ -32,7 +32,7 @@ export interface VendorCreateInput {
  * Omit a field to leave it alone; send ``null`` to clear a nullable
  * field. Empty objects (no fields) are rejected with 422 ``empty_patch``.
  */
-export interface VendorUpdateInput {
+export interface SupplierUpdateInput {
   name?: string;
   contact_email?: string | null;
   phone?: string | null;
@@ -40,28 +40,28 @@ export interface VendorUpdateInput {
   is_active?: boolean;
 }
 
-export const vendorsApi = {
+export const suppliersApi = {
   list: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
-    api.get<Vendor[]>('/vendors', {
+    api.get<Supplier[]>('/suppliers', {
       query: { active_only: opts?.activeOnly ?? true },
       signal: opts?.signal,
     }),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
-    api.get<Vendor>(`/vendors/${id}`, { signal: opts?.signal }),
+    api.get<Supplier>(`/suppliers/${id}`, { signal: opts?.signal }),
 
-  create: (input: VendorCreateInput) =>
-    api.post<Vendor>('/vendors', { json: input }),
+  create: (input: SupplierCreateInput) =>
+    api.post<Supplier>('/suppliers', { json: input }),
 
   /** Partial update. Returns the updated row. */
-  update: (id: string, input: VendorUpdateInput) =>
-    api.patch<Vendor>(`/vendors/${id}`, { json: input }),
+  update: (id: string, input: SupplierUpdateInput) =>
+    api.patch<Supplier>(`/suppliers/${id}`, { json: input }),
 
   /**
    * Soft delete (sets ``is_active=false``). Idempotent — calling
-   * again on an already-inactive vendor returns the current state
+   * again on an already-inactive supplier returns the current state
    * without writing a second audit row. To reactivate, PATCH with
    * ``{ is_active: true }``.
    */
-  deactivate: (id: string) => api.delete<Vendor>(`/vendors/${id}`),
+  deactivate: (id: string) => api.delete<Supplier>(`/suppliers/${id}`),
 };

@@ -105,7 +105,7 @@ def load_items(ws) -> list[dict]:
             continue
 
         desc = (str(row[0]).strip() if row[0] is not None else "")
-        vendor = (str(row[2]).strip() if row[2] is not None else "")
+        supplier = (str(row[2]).strip() if row[2] is not None else "")
         lead = to_int(row[3])
         inv_value = to_int(row[4])
         po_value = to_int(row[5])
@@ -132,7 +132,7 @@ def load_items(ws) -> list[dict]:
                 "_id": item_id,
                 "desc": desc,
                 "id": item_id,
-                "vendor": vendor,
+                "supplier": supplier,
                 "lead": lead,
                 "invValue": inv_value,
                 "poValue": po_value,
@@ -279,7 +279,7 @@ def main() -> None:
 
     # Re-order item keys to match existing seed.ts shape exactly
     item_keys = [
-        "desc", "id", "vendor", "lead", "invValue", "poValue", "qty", "months",
+        "desc", "id", "supplier", "lead", "invValue", "poValue", "qty", "months",
         "poNote", "poDue", "onOrder", "mustOrder", "category", "location", "lot",
         "expires", "threshold", "status",
     ]

@@ -19,7 +19,7 @@ export interface InventoryItem {
   categoryName: string;
   categoryKind: ItemKind;
   categoryTone: string;
-  vendor: string;
+  supplier: string;
   lead: number;
   invValue: number;
   poValue: number;

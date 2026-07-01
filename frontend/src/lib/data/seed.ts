@@ -70,7 +70,7 @@ const _seed = (function () {
   {
     "desc": "CryoStor CS10, 100 mL Bottle",
     "id": "CM-0001",
-    "vendor": "Fisher Scientific",
+    "supplier": "Fisher Scientific",
     "lead": 5,
     "invValue": 2777,
     "poValue": 0,
@@ -90,7 +90,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS CD56 Reagent (CRR US)",
     "id": "NM-0003",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -110,7 +110,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS PBS/EDTA Buffer, 1L",
     "id": "NM-0004",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -130,7 +130,7 @@ const _seed = (function () {
   {
     "desc": "Dulbecco's Phosphate Buffered Saline (DPBS), 1x w/o Ca & Mg",
     "id": "NM-0006",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 448,
     "poValue": 0,
@@ -150,7 +150,7 @@ const _seed = (function () {
   {
     "desc": "HUMAN AB SERUM (100 mL)",
     "id": "CM-0008",
-    "vendor": "Valley Biomedical",
+    "supplier": "Valley Biomedical",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -170,7 +170,7 @@ const _seed = (function () {
   {
     "desc": "Advanced RPMI 1640 Medium",
     "id": "CM-0009",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 120,
     "invValue": 0,
     "poValue": 0,
@@ -190,7 +190,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-15 GMP Protein, CF (25 ug)",
     "id": "CM-0014",
-    "vendor": "R&D Systems, Inc.",
+    "supplier": "R&D Systems, Inc.",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -210,7 +210,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-7 GMP Protein, 25 ug",
     "id": "CM-0017",
-    "vendor": "R&D Systems, Inc.",
+    "supplier": "R&D Systems, Inc.",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -230,7 +230,7 @@ const _seed = (function () {
   {
     "desc": "GLUTAMAX I 100X",
     "id": "CM-0019",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 10,
     "invValue": 1100,
     "poValue": 0,
@@ -250,7 +250,7 @@ const _seed = (function () {
   {
     "desc": "CLICK'S MEDIUM (EHAA)",
     "id": "CM-0020",
-    "vendor": "Irvine Scientific (fuji film)",
+    "supplier": "Irvine Scientific (fuji film)",
     "lead": 5,
     "invValue": 761,
     "poValue": 0,
@@ -270,7 +270,7 @@ const _seed = (function () {
   {
     "desc": "HBSS (1X), liquid w/o Calcium, Magnesium, or Phenol Red",
     "id": "CM-0026",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -290,7 +290,7 @@ const _seed = (function () {
   {
     "desc": "CryoPur (100% DMSO), 10 mL",
     "id": "CM-0028",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -310,7 +310,7 @@ const _seed = (function () {
   {
     "desc": "25% Human  Serum Albumin (HSA)",
     "id": "CM-0029",
-    "vendor": "Nova Biologics",
+    "supplier": "Nova Biologics",
     "lead": 5,
     "invValue": 1560,
     "poValue": 0,
@@ -330,7 +330,7 @@ const _seed = (function () {
   {
     "desc": "Serological pipettes 5 mL",
     "id": "NM-0032",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 18,
     "poValue": 0,
@@ -350,7 +350,7 @@ const _seed = (function () {
   {
     "desc": "Serological pipettes 10 mL",
     "id": "NM-0034",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 226,
     "poValue": 0,
@@ -370,7 +370,7 @@ const _seed = (function () {
   {
     "desc": "Serological pipettes 25 mL",
     "id": "NM-0036",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 333,
     "poValue": 0,
@@ -390,7 +390,7 @@ const _seed = (function () {
   {
     "desc": "Serological pipettes 50 mL",
     "id": "NM-0038",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 765,
     "poValue": 0,
@@ -410,7 +410,7 @@ const _seed = (function () {
   {
     "desc": "Serological pipettes 100 mL",
     "id": "NM-0040",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 4188,
     "poValue": 0,
@@ -430,7 +430,7 @@ const _seed = (function () {
   {
     "desc": "Aspirating pipettes 2 mL",
     "id": "NM-0042",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -450,7 +450,7 @@ const _seed = (function () {
   {
     "desc": "Pipette tips 10 µL",
     "id": "NM-0045",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -470,7 +470,7 @@ const _seed = (function () {
   {
     "desc": "Pipette tips 20 µL",
     "id": "NM-0047",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -490,7 +490,7 @@ const _seed = (function () {
   {
     "desc": "Pipette tips 200 µl",
     "id": "NM-0049",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -510,7 +510,7 @@ const _seed = (function () {
   {
     "desc": "Pipette tips 1250 µl (76322-156)",
     "id": "NM-0050",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -530,7 +530,7 @@ const _seed = (function () {
   {
     "desc": "Pipette tips 1000 µl",
     "id": "NM-0051",
-    "vendor": "Fisher Scientific",
+    "supplier": "Fisher Scientific",
     "lead": 5,
     "invValue": 1,
     "poValue": 0,
@@ -550,7 +550,7 @@ const _seed = (function () {
   {
     "desc": "Cryogenic vials 2 mL",
     "id": "NM-0052",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 10,
     "poValue": 0,
@@ -570,7 +570,7 @@ const _seed = (function () {
   {
     "desc": "Cryogenic vials 1.8 mL",
     "id": "NM-0053",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 291,
     "poValue": 0,
@@ -590,7 +590,7 @@ const _seed = (function () {
   {
     "desc": "Cryogenic vials 5 mL",
     "id": "NM-0054",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 37,
     "poValue": 0,
@@ -610,7 +610,7 @@ const _seed = (function () {
   {
     "desc": "Cryogenic vials 4.5 mL",
     "id": "NM-0055",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 69,
     "poValue": 0,
@@ -630,7 +630,7 @@ const _seed = (function () {
   {
     "desc": "15 mL conical centrifuge tube",
     "id": "NM-0056",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 6,
     "poValue": 0,
@@ -650,7 +650,7 @@ const _seed = (function () {
   {
     "desc": "50 mL conical Centrifuge tube",
     "id": "NM-0058",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 4,
     "poValue": 0,
@@ -670,7 +670,7 @@ const _seed = (function () {
   {
     "desc": "250 mL centrifuge tube",
     "id": "NM-0060",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 465,
     "poValue": 0,
@@ -690,7 +690,7 @@ const _seed = (function () {
   {
     "desc": "BD 3 mL Syringe",
     "id": "NM-0062",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 106,
     "poValue": 0,
@@ -710,7 +710,7 @@ const _seed = (function () {
   {
     "desc": "BD 5 mL syringe",
     "id": "NM-0063",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 88,
     "poValue": 0,
@@ -730,7 +730,7 @@ const _seed = (function () {
   {
     "desc": "BD 10 mL syringe",
     "id": "NM-0064",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 730,
     "poValue": 0,
@@ -750,7 +750,7 @@ const _seed = (function () {
   {
     "desc": "BD 20 mL syringe",
     "id": "NM-0065",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -770,7 +770,7 @@ const _seed = (function () {
   {
     "desc": "BD 30 mL Syringe",
     "id": "NM-0066",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 982,
     "poValue": 0,
@@ -790,7 +790,7 @@ const _seed = (function () {
   {
     "desc": "BD 50 mL Syringe",
     "id": "NM-0067",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 1366,
     "poValue": 0,
@@ -810,7 +810,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 100M",
     "id": "CM-0068",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -830,7 +830,7 @@ const _seed = (function () {
   {
     "desc": "300 mL Transfer Pack Container with Coupler",
     "id": "NM-0070",
-    "vendor": "Fisher Scientific",
+    "supplier": "Fisher Scientific",
     "lead": 5,
     "invValue": 902,
     "poValue": 0,
@@ -850,7 +850,7 @@ const _seed = (function () {
   {
     "desc": "CS50  Cryopreservation Bag",
     "id": "CM-0071",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -870,7 +870,7 @@ const _seed = (function () {
   {
     "desc": "S-FFP12 Spike Adapter",
     "id": "NM-0072",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 25,
     "invValue": 331,
     "poValue": 0,
@@ -890,7 +890,7 @@ const _seed = (function () {
   {
     "desc": "BD 18 G SafetyGlide Needle 1.5\"",
     "id": "NM-0073",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 336,
     "poValue": 0,
@@ -910,7 +910,7 @@ const _seed = (function () {
   {
     "desc": "Cassette for 50 mL Bag",
     "id": "NM-0074",
-    "vendor": "SCIENTIFIC RESOURCES SW",
+    "supplier": "SCIENTIFIC RESOURCES SW",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -930,7 +930,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS® Tubing Set LS, HUD",
     "id": "CM-0075",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -950,7 +950,7 @@ const _seed = (function () {
   {
     "desc": "TSA ICR + (90mm)",
     "id": "NM-0076",
-    "vendor": "Millipore Sigma",
+    "supplier": "Millipore Sigma",
     "lead": 25,
     "invValue": 643,
     "poValue": 0,
@@ -970,7 +970,7 @@ const _seed = (function () {
   {
     "desc": "TSA +LT - ICR+ (55mm)",
     "id": "NM-0077",
-    "vendor": "Millipore Sigma",
+    "supplier": "Millipore Sigma",
     "lead": 25,
     "invValue": 646,
     "poValue": 0,
@@ -990,7 +990,7 @@ const _seed = (function () {
   {
     "desc": "Benzonase® Nuclease HC, > 99% purity (25KU)",
     "id": "CM-0078",
-    "vendor": "Millipore Sigma",
+    "supplier": "Millipore Sigma",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -1010,7 +1010,7 @@ const _seed = (function () {
   {
     "desc": "CTL Medium, 1 L (Square Bottle)",
     "id": "CM-0103",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1030,7 +1030,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 100M-CS",
     "id": "CM-0104",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1050,7 +1050,7 @@ const _seed = (function () {
   {
     "desc": "IL-15 solution (100 ng/µL) 30 µL",
     "id": "CM-0107",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -1070,7 +1070,7 @@ const _seed = (function () {
   {
     "desc": "IL-12 solution (110 IU/µL) 510 µL",
     "id": "CM-0108",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -1090,7 +1090,7 @@ const _seed = (function () {
   {
     "desc": "IL-6 solution (100 ng/µL) 510 µL",
     "id": "CM-0109",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -1110,7 +1110,7 @@ const _seed = (function () {
   {
     "desc": "IL-7 solution (100 ng/µL) 60 µL",
     "id": "CM-0111",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -1130,7 +1130,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Square Media Bottle, 250 mL",
     "id": "NM-0120",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1150,7 +1150,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Square Media Bottle, 500 mL",
     "id": "NM-0121",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 554,
     "poValue": 0,
@@ -1170,7 +1170,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Square Media Bottle, 125 mL",
     "id": "NM-0122",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 5,
     "invValue": 540,
     "poValue": 0,
@@ -1190,7 +1190,7 @@ const _seed = (function () {
   {
     "desc": "50 mL conical Centrifuge tube",
     "id": "NM-0123",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1210,7 +1210,7 @@ const _seed = (function () {
   {
     "desc": "Cell Connect (CC1)",
     "id": "NM-0124",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 25,
     "invValue": 1212,
     "poValue": 0,
@@ -1230,7 +1230,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Access - Needle Free Spike (CBS)",
     "id": "NM-0125",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 25,
     "invValue": 937,
     "poValue": 0,
@@ -1250,7 +1250,7 @@ const _seed = (function () {
   {
     "desc": "Manifold Set (4S-4M60)",
     "id": "NM-0126",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 25,
     "invValue": 1500,
     "poValue": 0,
@@ -1270,7 +1270,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-7 GMP Protein, CF (1 mg)",
     "id": "CM-0127",
-    "vendor": "R&D Systems, Inc.",
+    "supplier": "R&D Systems, Inc.",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1290,7 +1290,7 @@ const _seed = (function () {
   {
     "desc": "Disposable Transfer Pipettes 8 mL (20 pack)",
     "id": "NM-0128",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1310,7 +1310,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Square Media Bottle, 1000 mL",
     "id": "NM-0129",
-    "vendor": "Fisher Scientific",
+    "supplier": "Fisher Scientific",
     "lead": 5,
     "invValue": 1871,
     "poValue": 0,
@@ -1330,7 +1330,7 @@ const _seed = (function () {
   {
     "desc": "Medivac Non-Conductive Suction Tubing",
     "id": "NM-0130",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 379,
     "poValue": 0,
@@ -1350,7 +1350,7 @@ const _seed = (function () {
   {
     "desc": "Waste Collection Canister, with Pour Spout & Lid, 2L",
     "id": "NM-0131",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 94,
     "poValue": 0,
@@ -1370,7 +1370,7 @@ const _seed = (function () {
   {
     "desc": "Dual Function Blue Cap with Male and Female End",
     "id": "NM-0132",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 674,
     "poValue": 0,
@@ -1390,7 +1390,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Graduated MicrocentrifugeTube, 1.5 mL",
     "id": "NM-0133",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 412,
     "poValue": 0,
@@ -1410,7 +1410,7 @@ const _seed = (function () {
   {
     "desc": "Y-type connector set with Luer Lock",
     "id": "NM-0134",
-    "vendor": "VWR, Fresenius Kabi, Fisher Scientific",
+    "supplier": "VWR, Fresenius Kabi, Fisher Scientific",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1430,7 +1430,7 @@ const _seed = (function () {
   {
     "desc": "1000 mL Rapid Flow Filter 90 mm (0.1 um)",
     "id": "NM-0136",
-    "vendor": "Thermo Fisher Scientific, VWR",
+    "supplier": "Thermo Fisher Scientific, VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1450,7 +1450,7 @@ const _seed = (function () {
   {
     "desc": "600 mL Transfer Pack with Male Luer",
     "id": "NM-0137",
-    "vendor": "Fresenius Kabi (Fenwal), Fisher Scientific",
+    "supplier": "Fresenius Kabi (Fenwal), Fisher Scientific",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1470,7 +1470,7 @@ const _seed = (function () {
   {
     "desc": "Plasma Transfer set 4\" Tubing with Female Luer",
     "id": "NM-0138",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 1028,
     "poValue": 0,
@@ -1490,7 +1490,7 @@ const _seed = (function () {
   {
     "desc": "ZAPR Lysis Buffer",
     "id": "NM-0139",
-    "vendor": "Incell",
+    "supplier": "Incell",
     "lead": 5,
     "invValue": 1500,
     "poValue": 0,
@@ -1510,7 +1510,7 @@ const _seed = (function () {
   {
     "desc": "TSB USP, 700 mL HDx, 1L Bag w/ports",
     "id": "NM-0144",
-    "vendor": "Hardy Diagnostics, VWR",
+    "supplier": "Hardy Diagnostics, VWR",
     "lead": 10,
     "invValue": 1094,
     "poValue": 0,
@@ -1530,7 +1530,7 @@ const _seed = (function () {
   {
     "desc": "TSB, USP, 500 mL Fill in a 500 mL Glass Bottle",
     "id": "NM-0145",
-    "vendor": "Hardy Diagnostics",
+    "supplier": "Hardy Diagnostics",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1550,7 +1550,7 @@ const _seed = (function () {
   {
     "desc": "TSB USP, 100 mL HDx, 100 mL vial",
     "id": "NM-0146",
-    "vendor": "Hardy Diagnostics",
+    "supplier": "Hardy Diagnostics",
     "lead": 10,
     "invValue": 2726,
     "poValue": 0,
@@ -1570,7 +1570,7 @@ const _seed = (function () {
   {
     "desc": "TSB USP, 15 mL HDx, 20 mL vial",
     "id": "NM-0147",
-    "vendor": "Hardy Diagnostics",
+    "supplier": "Hardy Diagnostics",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1590,7 +1590,7 @@ const _seed = (function () {
   {
     "desc": "ViaStain AO/PI Staining Solution, 25 mL",
     "id": "NM-0148",
-    "vendor": "Revvity, Fisher Scientific",
+    "supplier": "Revvity, Fisher Scientific",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1610,7 +1610,7 @@ const _seed = (function () {
   {
     "desc": "Cellometer Check Validation Bead Solution, 2 mL",
     "id": "NM-0149",
-    "vendor": "Revvity, Fisher Scientific, VWR",
+    "supplier": "Revvity, Fisher Scientific, VWR",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1630,7 +1630,7 @@ const _seed = (function () {
   {
     "desc": "Cellometer SD100 Counting Chambers",
     "id": "NM-0150",
-    "vendor": "Revvity, VWR",
+    "supplier": "Revvity, VWR",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1650,7 +1650,7 @@ const _seed = (function () {
   {
     "desc": "LOVO Cell Processing Disposable Kit (A)",
     "id": "NM-0151",
-    "vendor": "Frensenius Kabi",
+    "supplier": "Frensenius Kabi",
     "lead": 25,
     "invValue": 1995,
     "poValue": 0,
@@ -1670,7 +1670,7 @@ const _seed = (function () {
   {
     "desc": "200 mL Conical Tube PP w/Cap",
     "id": "NM-0153",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1690,7 +1690,7 @@ const _seed = (function () {
   {
     "desc": "BBL ™ Trypticase ™ Soy Broth 500 mL",
     "id": "NM-0154",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1710,7 +1710,7 @@ const _seed = (function () {
   {
     "desc": "LOVO Cell Processing Disposable Kit with Bag Access (A)",
     "id": "NM-0155",
-    "vendor": "Frensenius Kabi",
+    "supplier": "Frensenius Kabi",
     "lead": 25,
     "invValue": 2610,
     "poValue": 0,
@@ -1730,7 +1730,7 @@ const _seed = (function () {
   {
     "desc": "TSCD Wafers",
     "id": "NM-0156",
-    "vendor": "Fisher Scientific, VWR",
+    "supplier": "Fisher Scientific, VWR",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -1750,7 +1750,7 @@ const _seed = (function () {
   {
     "desc": "White Label - 2.5\"w x 2.0\"h",
     "id": "NM-0158",
-    "vendor": "CleanMark",
+    "supplier": "CleanMark",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -1770,7 +1770,7 @@ const _seed = (function () {
   {
     "desc": "Zebra 5095 Resin Ribbon, 3.27\" wide X 1476' long",
     "id": "NM-0159",
-    "vendor": "ScanTexas",
+    "supplier": "ScanTexas",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -1790,7 +1790,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 500M",
     "id": "CM-0164",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1810,7 +1810,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-15 GMP Protein, 1 mg",
     "id": "CM-0165",
-    "vendor": "R&D Systems, Inc.",
+    "supplier": "R&D Systems, Inc.",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -1830,7 +1830,7 @@ const _seed = (function () {
   {
     "desc": "BACT/ALERT iFN Plus Culture Media",
     "id": "NM-0166",
-    "vendor": "bioMerieux, Inc.",
+    "supplier": "bioMerieux, Inc.",
     "lead": 5,
     "invValue": 2150,
     "poValue": 0,
@@ -1850,7 +1850,7 @@ const _seed = (function () {
   {
     "desc": "BACT/ALERT iFA Plus Culture Media",
     "id": "NM-0167",
-    "vendor": "bioMerieux, Inc.",
+    "supplier": "bioMerieux, Inc.",
     "lead": 5,
     "invValue": 2150,
     "poValue": 0,
@@ -1870,7 +1870,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 500M-TF",
     "id": "CM-0168",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1890,7 +1890,7 @@ const _seed = (function () {
   {
     "desc": "Advanced RPMI 1640 Click's Medium (1:1), 5 L",
     "id": "CM-0169",
-    "vendor": "Gibco (Thermo Fisher Scientific)",
+    "supplier": "Gibco (Thermo Fisher Scientific)",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -1910,7 +1910,7 @@ const _seed = (function () {
   {
     "desc": "HUMAN AB SERUM (500 mL)",
     "id": "CM-0173",
-    "vendor": "Valley Biomedical",
+    "supplier": "Valley Biomedical",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -1930,7 +1930,7 @@ const _seed = (function () {
   {
     "desc": "3,000 mL Transfer Bag with Piercing Pin",
     "id": "NM-0174",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 14,
     "invValue": 2978,
     "poValue": 0,
@@ -1950,7 +1950,7 @@ const _seed = (function () {
   {
     "desc": "1,000 mL Transfer Pack Container with Coupler",
     "id": "NM-0175",
-    "vendor": "Fresenius Kabi (Fenwal), Fisher Scientific",
+    "supplier": "Fresenius Kabi (Fenwal), Fisher Scientific",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -1970,7 +1970,7 @@ const _seed = (function () {
   {
     "desc": "600 mL Transfer Pack Container with 8 Couplers",
     "id": "NM-0176",
-    "vendor": "Fresenius Kabi (Fenwal), Fisher Scientific",
+    "supplier": "Fresenius Kabi (Fenwal), Fisher Scientific",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -1990,7 +1990,7 @@ const _seed = (function () {
   {
     "desc": "1 mL Nunc Cryo Tube",
     "id": "NM-0177",
-    "vendor": "Thermo Fisher Scientific, VWR",
+    "supplier": "Thermo Fisher Scientific, VWR",
     "lead": 14,
     "invValue": 207,
     "poValue": 0,
@@ -2010,7 +2010,7 @@ const _seed = (function () {
   {
     "desc": "38-430 Versa Cap, PP, EZBio Tubing w/Male MPC, Vented w/Diptube for 1 L Bottle",
     "id": "NM-0182",
-    "vendor": "Foxx Life Sciences",
+    "supplier": "Foxx Life Sciences",
     "lead": 14,
     "invValue": 354,
     "poValue": 0,
@@ -2030,7 +2030,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS Tubing Set LS",
     "id": "CM-0185",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 5,
     "invValue": 88725,
     "poValue": 0,
@@ -2050,7 +2050,7 @@ const _seed = (function () {
   {
     "desc": "1 cc TB Luer-Slip Syringe with Detachable 25G x 1\" Needle, Sterile",
     "id": "NM-0186",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -2070,7 +2070,7 @@ const _seed = (function () {
   {
     "desc": "TSB, USP, 500 mL fill in a 500 mL Polycarbonate Bottle",
     "id": "NM-0187",
-    "vendor": "Hardy Diagnostics",
+    "supplier": "Hardy Diagnostics",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -2090,7 +2090,7 @@ const _seed = (function () {
   {
     "desc": "BD SafetyGlide™ Needle, 25 G x 1 in.",
     "id": "NM-0189",
-    "vendor": "VWR, Fisher Scientific",
+    "supplier": "VWR, Fisher Scientific",
     "lead": 14,
     "invValue": 38,
     "poValue": 0,
@@ -2110,7 +2110,7 @@ const _seed = (function () {
   {
     "desc": "Cassette for 50 mL Bag",
     "id": "NM-0190",
-    "vendor": "Coldstash",
+    "supplier": "Coldstash",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -2130,7 +2130,7 @@ const _seed = (function () {
   {
     "desc": "Y-Spike Adapter (2S-P20)",
     "id": "NM-0191",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 14,
     "invValue": 107,
     "poValue": 0,
@@ -2150,7 +2150,7 @@ const _seed = (function () {
   {
     "desc": "CryoPur (100% DMSO), 50 mL",
     "id": "CM-0192",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -2170,7 +2170,7 @@ const _seed = (function () {
   {
     "desc": "S-F10 Spike Adapter",
     "id": "NM-0193",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 14,
     "invValue": 926,
     "poValue": 0,
@@ -2190,7 +2190,7 @@ const _seed = (function () {
   {
     "desc": "CTL Medium, 1L (Round Bottle)",
     "id": "CM-0194",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -2210,7 +2210,7 @@ const _seed = (function () {
   {
     "desc": "VWR ® Universal Pipette Tips, Sterile, 20-200 µL",
     "id": "NM-0204",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 23,
     "poValue": 0,
@@ -2230,7 +2230,7 @@ const _seed = (function () {
   {
     "desc": "VWR ® Universal Pipette Tips, Sterile, 1000 µL",
     "id": "NM-0205",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 5,
     "poValue": 0,
@@ -2250,7 +2250,7 @@ const _seed = (function () {
   {
     "desc": "Sterile Square Media Bottle with Stranded Cap, 1000 mL",
     "id": "NM-0219",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 10,
     "invValue": 170,
     "poValue": 0,
@@ -2270,7 +2270,7 @@ const _seed = (function () {
   {
     "desc": "Irradiated Count-Tact 3P Agar with Locksure  (bioMerieux)",
     "id": "NM-0220",
-    "vendor": "BioMerieux Inc",
+    "supplier": "BioMerieux Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -2290,7 +2290,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-21 GMP Protein, 1 mg",
     "id": "CM-0221",
-    "vendor": "R&D Systems, Inc.",
+    "supplier": "R&D Systems, Inc.",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2310,7 +2310,7 @@ const _seed = (function () {
   {
     "desc": "NK MACS® GMP Supplement, 5.0 mL (10 mL vial)",
     "id": "CM-0222",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2330,7 +2330,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS PBS/EDTA-Buffer 3L",
     "id": "NM-0223",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2350,7 +2350,7 @@ const _seed = (function () {
   {
     "desc": "CryoMACS Freezing Bag 750",
     "id": "CM-0230",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2370,7 +2370,7 @@ const _seed = (function () {
   {
     "desc": "CryoStor CS10, 1000 mL Media Bag",
     "id": "CM-0231",
-    "vendor": "VWR, Fisher Scientific\n2) Fisher Scientific",
+    "supplier": "VWR, Fisher Scientific\n2) Fisher Scientific",
     "lead": 5,
     "invValue": 112991,
     "poValue": 0,
@@ -2390,7 +2390,7 @@ const _seed = (function () {
   {
     "desc": "Plasma-Lyte® A Injection pH 7.4 (1000 mL)",
     "id": "CM-0232",
-    "vendor": "McKesson",
+    "supplier": "McKesson",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2410,7 +2410,7 @@ const _seed = (function () {
   {
     "desc": "Plasma-Lyte® A Injection pH 7.4 (500 mL)",
     "id": "CM-0233",
-    "vendor": "McKesson",
+    "supplier": "McKesson",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2430,7 +2430,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-2 GMP Protein, 1 mg",
     "id": "CM-0234",
-    "vendor": "R&D Systems, Inc.",
+    "supplier": "R&D Systems, Inc.",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2450,7 +2450,7 @@ const _seed = (function () {
   {
     "desc": "NK MACS® GMP Basal Medium (Phenol Red), 2000 mL",
     "id": "CM-0235",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2470,7 +2470,7 @@ const _seed = (function () {
   {
     "desc": "Trypticase Soy Broth (TSB) 5L Bag",
     "id": "NM-0236",
-    "vendor": "Becton Dickinson (BD)",
+    "supplier": "Becton Dickinson (BD)",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2490,7 +2490,7 @@ const _seed = (function () {
   {
     "desc": "Cell Connect (CC2)",
     "id": "NM-0237",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 20,
     "invValue": 7663,
     "poValue": 0,
@@ -2510,7 +2510,7 @@ const _seed = (function () {
   {
     "desc": "CS50N Cryopreservation Bag",
     "id": "CM-0238",
-    "vendor": "OriGen Biomedical",
+    "supplier": "OriGen Biomedical",
     "lead": 20,
     "invValue": 4692,
     "poValue": 0,
@@ -2530,7 +2530,7 @@ const _seed = (function () {
   {
     "desc": "Immune Globulin Intravenous (Human) 10%, 20 mL",
     "id": "CM-0239",
-    "vendor": "Nova Biologics",
+    "supplier": "Nova Biologics",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2550,7 +2550,7 @@ const _seed = (function () {
   {
     "desc": "5L Labtainer w/Quick Connects, Aegis 5- 14",
     "id": "NM-0240",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2570,7 +2570,7 @@ const _seed = (function () {
   {
     "desc": "Human Male AB Plasma-Derived Serum, HI GI, 100 mL",
     "id": "CM-0241",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 20,
     "invValue": 35767,
     "poValue": 0,
@@ -2590,7 +2590,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 10M",
     "id": "CM-0242",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 4916,
     "poValue": 0,
@@ -2610,7 +2610,7 @@ const _seed = (function () {
   {
     "desc": "Water for Injection, USP Sterile Grade, 500 mL",
     "id": "CM-0243",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -2630,7 +2630,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS CD3 Reagent, CRR",
     "id": "NM-0244",
-    "vendor": "Miltenyi",
+    "supplier": "Miltenyi",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2650,7 +2650,7 @@ const _seed = (function () {
   {
     "desc": "Cassette for 750 mL Bag",
     "id": "NM-0245",
-    "vendor": "Coldstash",
+    "supplier": "Coldstash",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2670,7 +2670,7 @@ const _seed = (function () {
   {
     "desc": "Irradiated Cells from 221.AEH WCB",
     "id": "CM-0246",
-    "vendor": "Indapta Therapeutics",
+    "supplier": "Indapta Therapeutics",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2690,7 +2690,7 @@ const _seed = (function () {
   {
     "desc": "LOVO Pouch Kit",
     "id": "NM-0248",
-    "vendor": "Frensenius Kabi",
+    "supplier": "Frensenius Kabi",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2710,7 +2710,7 @@ const _seed = (function () {
   {
     "desc": "100 mL Syringe",
     "id": "NM-0251",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 3222,
     "poValue": 0,
@@ -2730,7 +2730,7 @@ const _seed = (function () {
   {
     "desc": "Wobble-not Low-Insertion Force Serological Pipettes 50 mL",
     "id": "NM-0265",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -2750,7 +2750,7 @@ const _seed = (function () {
   {
     "desc": "Wobble-not Low-Insertion Force Serological Pipettes 100 mL",
     "id": "NM-0266",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -2770,7 +2770,7 @@ const _seed = (function () {
   {
     "desc": "BD TSB 10L Bag",
     "id": "NM-0267",
-    "vendor": "Becton Dickinson (BD)",
+    "supplier": "Becton Dickinson (BD)",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2790,7 +2790,7 @@ const _seed = (function () {
   {
     "desc": "C110 Working Cell Bank 221.AEH",
     "id": "CM-0268",
-    "vendor": "BioReliance",
+    "supplier": "BioReliance",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2810,7 +2810,7 @@ const _seed = (function () {
   {
     "desc": "Clear-Pak SV 5L Bag",
     "id": "NM-0269",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2830,7 +2830,7 @@ const _seed = (function () {
   {
     "desc": "Corning® Vacuum Filter",
     "id": "NM-0270",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2850,7 +2850,7 @@ const _seed = (function () {
   {
     "desc": "Charter Medical 10L Bags",
     "id": "CR-0271",
-    "vendor": "Charter Medical",
+    "supplier": "Charter Medical",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -2870,7 +2870,7 @@ const _seed = (function () {
   {
     "desc": "Jurkat Cell Line",
     "id": "CR-0272",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -2890,7 +2890,7 @@ const _seed = (function () {
   {
     "desc": "THP-1 Cell Line",
     "id": "CR-0273",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -2910,7 +2910,7 @@ const _seed = (function () {
   {
     "desc": "AQS MPC Adapter",
     "id": "CR-0274",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -2930,7 +2930,7 @@ const _seed = (function () {
   {
     "desc": "5 mL Combitip",
     "id": "CR-0275",
-    "vendor": "Eppendorf",
+    "supplier": "Eppendorf",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -2950,7 +2950,7 @@ const _seed = (function () {
   {
     "desc": "10 mL Combitip",
     "id": "CR-0276",
-    "vendor": "Eppendorf",
+    "supplier": "Eppendorf",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -2970,7 +2970,7 @@ const _seed = (function () {
   {
     "desc": "25 mL Combitip",
     "id": "NM-0277",
-    "vendor": "Eppendorf",
+    "supplier": "Eppendorf",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -2990,7 +2990,7 @@ const _seed = (function () {
   {
     "desc": "White Label - 1.5\"w x 0.75\"h",
     "id": "CR-0281",
-    "vendor": "ScanTexas",
+    "supplier": "ScanTexas",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3010,7 +3010,7 @@ const _seed = (function () {
   {
     "desc": "NK MACS GMP Supplement, 10 mL, 10 mL Vial",
     "id": "CR-0288",
-    "vendor": "Miltenyi Biote",
+    "supplier": "Miltenyi Biote",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -3030,7 +3030,7 @@ const _seed = (function () {
   {
     "desc": "Nalgene CryoBox Freezer Storage Boxes, 2 mL cryovials",
     "id": "CR-0289",
-    "vendor": "ThermoFisher",
+    "supplier": "ThermoFisher",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -3050,7 +3050,7 @@ const _seed = (function () {
   {
     "desc": "Nalgene CryoBox Freezer Storage Boxes, 5 mL cryovials",
     "id": "CR-0290",
-    "vendor": "ThermoFisher",
+    "supplier": "ThermoFisher",
     "lead": 25,
     "invValue": 0,
     "poValue": 0,
@@ -3070,7 +3070,7 @@ const _seed = (function () {
   {
     "desc": "GMP Human T Cell Media",
     "id": "CR-0291",
-    "vendor": "Bio-Techne",
+    "supplier": "Bio-Techne",
     "lead": 14,
     "invValue": 5760,
     "poValue": 0,
@@ -3090,7 +3090,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-7 GMP Protein, CF, 10 ug",
     "id": "CR-0292",
-    "vendor": "Bio-Techne",
+    "supplier": "Bio-Techne",
     "lead": 14,
     "invValue": 18432,
     "poValue": 0,
@@ -3110,7 +3110,7 @@ const _seed = (function () {
   {
     "desc": "Recombinant Human IL-15 GMP Protein, CF, 10 ug",
     "id": "CR-0293",
-    "vendor": "Bio-Techne",
+    "supplier": "Bio-Techne",
     "lead": 14,
     "invValue": 16606,
     "poValue": 0,
@@ -3130,7 +3130,7 @@ const _seed = (function () {
   {
     "desc": "T Cell TransAct (RUO), Human",
     "id": "CR-0294",
-    "vendor": "Miltenyi-BioTec",
+    "supplier": "Miltenyi-BioTec",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -3150,7 +3150,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 6M Well Plate, (10 cm2)",
     "id": "CR-0295",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -3170,7 +3170,7 @@ const _seed = (function () {
   {
     "desc": "Complete T Cell Media (1 Liter Bottle)",
     "id": "AY-0296",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -3190,7 +3190,7 @@ const _seed = (function () {
   {
     "desc": "BioFire Mycoplasma Panel Kit",
     "id": "CR-0297",
-    "vendor": "Biomerieux",
+    "supplier": "Biomerieux",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -3210,7 +3210,7 @@ const _seed = (function () {
   {
     "desc": "BiFire Mycoplasma External Positive Control",
     "id": "CR-0298",
-    "vendor": "Biomeriuex",
+    "supplier": "Biomeriuex",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -3230,7 +3230,7 @@ const _seed = (function () {
   {
     "desc": "BioCapt Single-Use TSA with Neutralizer",
     "id": "CR-0299",
-    "vendor": "PMS",
+    "supplier": "PMS",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -3250,7 +3250,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 6M, 5cm2",
     "id": "CR-0300",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 3179,
     "poValue": 0,
@@ -3270,7 +3270,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 6M, 2cm2",
     "id": "CR-0301",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 1986,
     "poValue": 0,
@@ -3290,7 +3290,7 @@ const _seed = (function () {
   {
     "desc": "Selected T-Cells Frozen at 50 x 10e6 cell/mL",
     "id": "AY-0302",
-    "vendor": "CellReady",
+    "supplier": "CellReady",
     "lead": 0,
     "invValue": 0,
     "poValue": 0,
@@ -3310,7 +3310,7 @@ const _seed = (function () {
   {
     "desc": "Tryptic Soy Agar (bioMerieux)",
     "id": "CR-0303",
-    "vendor": "Biomeriuex",
+    "supplier": "Biomeriuex",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3330,7 +3330,7 @@ const _seed = (function () {
   {
     "desc": "Rinse Fluid A (Millipore)",
     "id": "CR-0304",
-    "vendor": "Millipore Sigma",
+    "supplier": "Millipore Sigma",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3350,7 +3350,7 @@ const _seed = (function () {
   {
     "desc": "BIOBALL MultiShot 550, 10 vials",
     "id": "CR-0305",
-    "vendor": "Biomeriuex",
+    "supplier": "Biomeriuex",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3370,7 +3370,7 @@ const _seed = (function () {
   {
     "desc": "BIOBALL MultiShot 550, 20 vials",
     "id": "CR-0306",
-    "vendor": "Biomeriuex",
+    "supplier": "Biomeriuex",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3390,7 +3390,7 @@ const _seed = (function () {
   {
     "desc": "EZ-Accu Shot",
     "id": "CR-0307",
-    "vendor": "Microbiologics",
+    "supplier": "Microbiologics",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3410,7 +3410,7 @@ const _seed = (function () {
   {
     "desc": "L-Shaped Plastic Spreader",
     "id": "CR-0308",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3430,7 +3430,7 @@ const _seed = (function () {
   {
     "desc": "Pyrex Culture tube with screw cap",
     "id": "CR-0309",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3450,7 +3450,7 @@ const _seed = (function () {
   {
     "desc": "BIOBALL MultiShot 10E8, 10 vials",
     "id": "CR-0310",
-    "vendor": "Biomeriuex",
+    "supplier": "Biomeriuex",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3470,7 +3470,7 @@ const _seed = (function () {
   {
     "desc": "BIOBALL Re-Hydration Fluid",
     "id": "CR-0311",
-    "vendor": "Biomeriuex",
+    "supplier": "Biomeriuex",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3490,7 +3490,7 @@ const _seed = (function () {
   {
     "desc": "Epower S. aereus ATCC6538",
     "id": "CR-0312",
-    "vendor": "Microbiologics",
+    "supplier": "Microbiologics",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3510,7 +3510,7 @@ const _seed = (function () {
   {
     "desc": "Dry Ice (Solid CO2)",
     "id": "CR-0313",
-    "vendor": "Carbonics, INC",
+    "supplier": "Carbonics, INC",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3530,7 +3530,7 @@ const _seed = (function () {
   {
     "desc": "ProPak GMP Recombinant Human IL-7",
     "id": "CR-0314",
-    "vendor": "BioTechne",
+    "supplier": "BioTechne",
     "lead": 15,
     "invValue": 3696,
     "poValue": 0,
@@ -3550,7 +3550,7 @@ const _seed = (function () {
   {
     "desc": "ProPak GMP Recombinant Human IL-15",
     "id": "CR-0315",
-    "vendor": "BioTechne",
+    "supplier": "BioTechne",
     "lead": 15,
     "invValue": 3156,
     "poValue": 0,
@@ -3570,7 +3570,7 @@ const _seed = (function () {
   {
     "desc": "Ingenuity GMP Direct CD4",
     "id": "CR-0316",
-    "vendor": "Applied Cells",
+    "supplier": "Applied Cells",
     "lead": 15,
     "invValue": 0,
     "poValue": 0,
@@ -3590,7 +3590,7 @@ const _seed = (function () {
   {
     "desc": "Ingenuity GmP Direct CD8",
     "id": "CR-0317",
-    "vendor": "Applied Cells",
+    "supplier": "Applied Cells",
     "lead": 15,
     "invValue": 0,
     "poValue": 0,
@@ -3610,7 +3610,7 @@ const _seed = (function () {
   {
     "desc": "MARS Bar Tubing Set (BRB02)",
     "id": "CR-0318",
-    "vendor": "Applied Cells",
+    "supplier": "Applied Cells",
     "lead": 15,
     "invValue": 0,
     "poValue": 0,
@@ -3630,7 +3630,7 @@ const _seed = (function () {
   {
     "desc": "GMP Human T Cell Media (1L Bag)",
     "id": "CR-0319",
-    "vendor": "BioTechne",
+    "supplier": "BioTechne",
     "lead": 15,
     "invValue": 690,
     "poValue": 0,
@@ -3650,7 +3650,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 5M Open System, Research Use Only",
     "id": "CR-0320",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -3670,7 +3670,7 @@ const _seed = (function () {
   {
     "desc": "Raji-Luc2 Cell Line Vial",
     "id": "CR-0321",
-    "vendor": "ATCC",
+    "supplier": "ATCC",
     "lead": 7,
     "invValue": 0,
     "poValue": 0,
@@ -3690,7 +3690,7 @@ const _seed = (function () {
   {
     "desc": "SUP-T1 Cell Line Vial",
     "id": "CR-0322",
-    "vendor": "ATCC",
+    "supplier": "ATCC",
     "lead": 7,
     "invValue": 0,
     "poValue": 0,
@@ -3710,7 +3710,7 @@ const _seed = (function () {
   {
     "desc": "WIL2-S-Luc2 Cells (B Lympoblastoid)",
     "id": "CR-0323",
-    "vendor": "ATCC",
+    "supplier": "ATCC",
     "lead": 7,
     "invValue": 0,
     "poValue": 0,
@@ -3730,7 +3730,7 @@ const _seed = (function () {
   {
     "desc": "DNAZap PCR DNA Degradation Solution",
     "id": "CR-0326",
-    "vendor": "Thermo Fisher Scientific",
+    "supplier": "Thermo Fisher Scientific",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3750,7 +3750,7 @@ const _seed = (function () {
   {
     "desc": "MiQuant CAR-T Cell Lenti - dPCR",
     "id": "CR-0327",
-    "vendor": "Minerva Biolabs",
+    "supplier": "Minerva Biolabs",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -3770,7 +3770,7 @@ const _seed = (function () {
   {
     "desc": "Qubit 1x dsDNA Reagent",
     "id": "CR-0328",
-    "vendor": "Invitrogen",
+    "supplier": "Invitrogen",
     "lead": 20,
     "invValue": 0,
     "poValue": 0,
@@ -3790,7 +3790,7 @@ const _seed = (function () {
   {
     "desc": "Molecular grade water (Nuclease-free water)",
     "id": "CR-0329",
-    "vendor": "VWR",
+    "supplier": "VWR",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -3810,7 +3810,7 @@ const _seed = (function () {
   {
     "desc": "RPMI-1640 Medium (Mammalian Cell Line)",
     "id": "CR-0330",
-    "vendor": "ATCC",
+    "supplier": "ATCC",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -3830,7 +3830,7 @@ const _seed = (function () {
   {
     "desc": "Fetal Bovine Serum (FBS)",
     "id": "CR-0331",
-    "vendor": "ATCC",
+    "supplier": "ATCC",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -3850,7 +3850,7 @@ const _seed = (function () {
   {
     "desc": "Complete Mammalian Suspension Cell Line Media",
     "id": "AY-0332",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3870,7 +3870,7 @@ const _seed = (function () {
   {
     "desc": "SUP-T1 (RCB)",
     "id": "AY-0335",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3890,7 +3890,7 @@ const _seed = (function () {
   {
     "desc": "QIAcuity Probe PCR Kit",
     "id": "CR-0336",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3910,7 +3910,7 @@ const _seed = (function () {
   {
     "desc": "D-Luciferin sodium salt",
     "id": "CR-0337",
-    "vendor": "Biotechne",
+    "supplier": "Biotechne",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3930,7 +3930,7 @@ const _seed = (function () {
   {
     "desc": "Sharpie Permanent Markers, Fine Point",
     "id": "CR-0338",
-    "vendor": "Sharpie",
+    "supplier": "Sharpie",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3950,7 +3950,7 @@ const _seed = (function () {
   {
     "desc": "20 mL Bag of 1.0e9 Frozen PBMC Cells",
     "id": "AY-0339",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3970,7 +3970,7 @@ const _seed = (function () {
   {
     "desc": "dPCR CGT Assay 5' LTR (FAM)",
     "id": "CR-0340",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -3990,7 +3990,7 @@ const _seed = (function () {
   {
     "desc": "dPCR CGT Assay RPP30 (HEX)",
     "id": "CR-0341",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4010,7 +4010,7 @@ const _seed = (function () {
   {
     "desc": "Carrier RNA (Poly A) 310, 1350 ug",
     "id": "CR-0342",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4030,7 +4030,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex 24 Well Plate",
     "id": "CR-0344",
-    "vendor": "Wilson Wolf",
+    "supplier": "Wilson Wolf",
     "lead": 7,
     "invValue": 1346,
     "poValue": 0,
@@ -4050,7 +4050,7 @@ const _seed = (function () {
   {
     "desc": "QIAamp DNA mini kit",
     "id": "CR-0345",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4070,7 +4070,7 @@ const _seed = (function () {
   {
     "desc": "QIAcuity nanoplates 8.5k 24-well",
     "id": "CR-0346",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4090,7 +4090,7 @@ const _seed = (function () {
   {
     "desc": "CD19 CAR LV (VBM) (1 mL)",
     "id": "CR-0347",
-    "vendor": "Vector BioMed",
+    "supplier": "Vector BioMed",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4110,7 +4110,7 @@ const _seed = (function () {
   {
     "desc": "anti CD19 CAR LV (VBM) (4 mL)",
     "id": "CR-0348",
-    "vendor": "Vector BioMed",
+    "supplier": "Vector BioMed",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4130,7 +4130,7 @@ const _seed = (function () {
   {
     "desc": "TE, pH 8.0, Rnase-free",
     "id": "CR-0349",
-    "vendor": "Initrogen (ThermoFisher)",
+    "supplier": "Initrogen (ThermoFisher)",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4150,7 +4150,7 @@ const _seed = (function () {
   {
     "desc": "EcoRI-HF",
     "id": "CR-0350",
-    "vendor": "New England Biolabs",
+    "supplier": "New England Biolabs",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4170,7 +4170,7 @@ const _seed = (function () {
   {
     "desc": "QIAcuity MasterMix",
     "id": "CR-0352",
-    "vendor": "QIAgen",
+    "supplier": "QIAgen",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4190,7 +4190,7 @@ const _seed = (function () {
   {
     "desc": "QIAcuity Nanoplate Tray",
     "id": "CR-0353",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4210,7 +4210,7 @@ const _seed = (function () {
   {
     "desc": "CryoStor CS5",
     "id": "CR-0354",
-    "vendor": "Biolife Solutions",
+    "supplier": "Biolife Solutions",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4230,7 +4230,7 @@ const _seed = (function () {
   {
     "desc": "Molecular Biology Ethanol",
     "id": "CR-0355",
-    "vendor": "Decon Labs",
+    "supplier": "Decon Labs",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4250,7 +4250,7 @@ const _seed = (function () {
   {
     "desc": "Cell Staining Buffer",
     "id": "CR-0356",
-    "vendor": "Cell Staining Buffer",
+    "supplier": "Cell Staining Buffer",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4270,7 +4270,7 @@ const _seed = (function () {
   {
     "desc": "SUP-T1 (MCB)",
     "id": "AY-0357",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4290,7 +4290,7 @@ const _seed = (function () {
   {
     "desc": "Zombie B550 Fixable Viability Kit",
     "id": "CR-0359",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4310,7 +4310,7 @@ const _seed = (function () {
   {
     "desc": "WIL2-S-Luc2 (PCB)",
     "id": "AY-0360",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4330,7 +4330,7 @@ const _seed = (function () {
   {
     "desc": "Minerva MasterMix Aliquots",
     "id": "AY-0362",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4350,7 +4350,7 @@ const _seed = (function () {
   {
     "desc": "Ghost Dye Violet 510",
     "id": "CR-0364",
-    "vendor": "Cytek Tonbo Reagents",
+    "supplier": "Cytek Tonbo Reagents",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4370,7 +4370,7 @@ const _seed = (function () {
   {
     "desc": "SpectroFlow QC Beads",
     "id": "CR-0365",
-    "vendor": "Cytek",
+    "supplier": "Cytek",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4390,7 +4390,7 @@ const _seed = (function () {
   {
     "desc": "Ultra Comp eBeads Compensation Beads",
     "id": "CR-0366",
-    "vendor": "ThermoFisher",
+    "supplier": "ThermoFisher",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4410,7 +4410,7 @@ const _seed = (function () {
   {
     "desc": "ArC Amine Reactive Compensation Bead Kit",
     "id": "CR-0367",
-    "vendor": "ThermoFisher",
+    "supplier": "ThermoFisher",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4430,7 +4430,7 @@ const _seed = (function () {
   {
     "desc": "Zombie NIR Fixable Viability Kit",
     "id": "CR-0368",
-    "vendor": "Biolegends",
+    "supplier": "Biolegends",
     "lead": 14,
     "invValue": 0,
     "poValue": 0,
@@ -4450,7 +4450,7 @@ const _seed = (function () {
   {
     "desc": "Endosafe PTS Cartridges",
     "id": "CR-0369",
-    "vendor": "Charles River",
+    "supplier": "Charles River",
     "lead": 10,
     "invValue": 66,
     "poValue": 0,
@@ -4470,7 +4470,7 @@ const _seed = (function () {
   {
     "desc": "APC Anti-human CD197 (CCR7) Antibody",
     "id": "CR-0370",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4490,7 +4490,7 @@ const _seed = (function () {
   {
     "desc": "Brilliant Violet 510 anti-mouse CD45 Antibody",
     "id": "CR-0371",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4510,7 +4510,7 @@ const _seed = (function () {
   {
     "desc": "Brillian Violet 605 anti-human CD127 (IL7Ra) Antibody",
     "id": "CR-0372",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4530,7 +4530,7 @@ const _seed = (function () {
   {
     "desc": "Brilliant Violet 711™ anti-human CD27 Antibody",
     "id": "CR-0373",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4550,7 +4550,7 @@ const _seed = (function () {
   {
     "desc": "Brilliant Violet 785™ anti-human/mouse/rat CD278 (ICOS) Antibody",
     "id": "CR-0374",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4570,7 +4570,7 @@ const _seed = (function () {
   {
     "desc": "FITC anti-mouse CD4 Antibody",
     "id": "CR-0375",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4590,7 +4590,7 @@ const _seed = (function () {
   {
     "desc": "PerCP/Cyanine5.5 anti-human CD3 Antibody",
     "id": "CR-0376",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4610,7 +4610,7 @@ const _seed = (function () {
   {
     "desc": "PE/Fire™ 700 anti-human CD45RA Antibody",
     "id": "CR-0377",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4630,7 +4630,7 @@ const _seed = (function () {
   {
     "desc": "APC anti-mouse CD62L Antibody",
     "id": "CR-0378",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4650,7 +4650,7 @@ const _seed = (function () {
   {
     "desc": "Spark NIR™ 685 anti-human CD8 Antibody",
     "id": "CR-0379",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4670,7 +4670,7 @@ const _seed = (function () {
   {
     "desc": "APC/Fire™ 810 anti-human CD25 Antibody",
     "id": "CR-0380",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4690,7 +4690,7 @@ const _seed = (function () {
   {
     "desc": "PE anti-human CD4 Antibody",
     "id": "CR-0381",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4710,7 +4710,7 @@ const _seed = (function () {
   {
     "desc": "KimWipes Delicate Task Wipers",
     "id": "CR-0382",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4730,7 +4730,7 @@ const _seed = (function () {
   {
     "desc": "BD FACSFlow™ Sheath Fluid",
     "id": "CR-0383",
-    "vendor": "BD Biosciences",
+    "supplier": "BD Biosciences",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4750,7 +4750,7 @@ const _seed = (function () {
   {
     "desc": "ViaStain AOPI Staining Solution",
     "id": "CR-0384",
-    "vendor": "Revvity",
+    "supplier": "Revvity",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4770,7 +4770,7 @@ const _seed = (function () {
   {
     "desc": "pH Buffer Reference Standard 4.01",
     "id": "CR-0385",
-    "vendor": "Oakton",
+    "supplier": "Oakton",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -4790,7 +4790,7 @@ const _seed = (function () {
   {
     "desc": "pH Buffer Reference Standard 7.00",
     "id": "CR-0386",
-    "vendor": "Oakton",
+    "supplier": "Oakton",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -4810,7 +4810,7 @@ const _seed = (function () {
   {
     "desc": "pH Buffer Reference Standard 10.01",
     "id": "CR-0387",
-    "vendor": "Oakton",
+    "supplier": "Oakton",
     "lead": 5,
     "invValue": 0,
     "poValue": 0,
@@ -4830,7 +4830,7 @@ const _seed = (function () {
   {
     "desc": "3M Attest Steam Biological Indicator",
     "id": "CR-0388",
-    "vendor": "Solventum",
+    "supplier": "Solventum",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4850,7 +4850,7 @@ const _seed = (function () {
   {
     "desc": "Fixable Viability Stain 510",
     "id": "CR-0389",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4870,7 +4870,7 @@ const _seed = (function () {
   {
     "desc": "Alexa Fluor® 647 anti-human CD56 (NCAM)",
     "id": "CR-0390",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4890,7 +4890,7 @@ const _seed = (function () {
   {
     "desc": "APC/Fire™ 810 anti-human CD14 Antibody",
     "id": "CR-0391",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4910,7 +4910,7 @@ const _seed = (function () {
   {
     "desc": "Brilliant Violet 421™ anti-human CD19 Antibody",
     "id": "CR-0392",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4930,7 +4930,7 @@ const _seed = (function () {
   {
     "desc": "PE/Cyanine5 anti-human CD3 Antibody",
     "id": "CR-0393",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4950,7 +4950,7 @@ const _seed = (function () {
   {
     "desc": "PE/Cyanine7 anti-human CD45 Antibody",
     "id": "CR-0394",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4970,7 +4970,7 @@ const _seed = (function () {
   {
     "desc": "Tube 5ml, 12x75 mm Polystyrene w/o cap, non-sterile (FACS)",
     "id": "CR-0395",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -4990,7 +4990,7 @@ const _seed = (function () {
   {
     "desc": "High Performance Microcentrifuge Tubes, PP, 1.5 mL (Amber)",
     "id": "CR-0396",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5010,7 +5010,7 @@ const _seed = (function () {
   {
     "desc": "CD19 CAR FMC63 Idiotype Antibody, REAfinity™",
     "id": "CR-0397",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5030,7 +5030,7 @@ const _seed = (function () {
   {
     "desc": "REA Control Antibody (S), human IgG1, REAfinity™",
     "id": "CR-0398",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5050,7 +5050,7 @@ const _seed = (function () {
   {
     "desc": "CD28 Recombinant Human Monoclonal Antibody (CD28.2)",
     "id": "CR-0403",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5070,7 +5070,7 @@ const _seed = (function () {
   {
     "desc": "pH Electrode Storage Solution",
     "id": "CR-0413",
-    "vendor": "Thermo Fisher",
+    "supplier": "Thermo Fisher",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5090,7 +5090,7 @@ const _seed = (function () {
   {
     "desc": "Ross Reference Electrode Filling Solution",
     "id": "CR-0414",
-    "vendor": "Thermo Fisher",
+    "supplier": "Thermo Fisher",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5110,7 +5110,7 @@ const _seed = (function () {
   {
     "desc": "pH Electrode Cleaning Solutions",
     "id": "CR-0415",
-    "vendor": "Thermo Fisher",
+    "supplier": "Thermo Fisher",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5130,7 +5130,7 @@ const _seed = (function () {
   {
     "desc": "PE/Dazzle™ 594 anti-human CD8 Antibody",
     "id": "CR-0416",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5150,7 +5150,7 @@ const _seed = (function () {
   {
     "desc": "APC anti-human CD56 (NCAM) (ASR)",
     "id": "CR-0417",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5170,7 +5170,7 @@ const _seed = (function () {
   {
     "desc": "APC/Fire™ 750 anti-human CD14 (ASR)",
     "id": "CR-0418",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5190,7 +5190,7 @@ const _seed = (function () {
   {
     "desc": "Pacific Blue™ anti-human CD19 (ASR)",
     "id": "CR-0419",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5210,7 +5210,7 @@ const _seed = (function () {
   {
     "desc": "FITC anti-human CD8a (ASR)",
     "id": "CR-0420",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5230,7 +5230,7 @@ const _seed = (function () {
   {
     "desc": "PE/Cyanine5 anti-human CD3 (ASR)",
     "id": "CR-0421",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5250,7 +5250,7 @@ const _seed = (function () {
   {
     "desc": "PE/Cyanine7 anti-human CD45 (ASR)",
     "id": "CR-0422",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5270,7 +5270,7 @@ const _seed = (function () {
   {
     "desc": "PE anti-human CD4 (ASR)",
     "id": "CR-0423",
-    "vendor": "BioLegend, Inc",
+    "supplier": "BioLegend, Inc",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5290,7 +5290,7 @@ const _seed = (function () {
   {
     "desc": "Accellix Cartridge TBNK-16 RTF Assay (L)",
     "id": "CR-0424",
-    "vendor": "Accellix",
+    "supplier": "Accellix",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5310,7 +5310,7 @@ const _seed = (function () {
   {
     "desc": "Accellix Cartridge T-Cell RTF Assay",
     "id": "CR-0425",
-    "vendor": "Accellix",
+    "supplier": "Accellix",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5330,7 +5330,7 @@ const _seed = (function () {
   {
     "desc": "Chamber Brite",
     "id": "CR-0426",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5350,7 +5350,7 @@ const _seed = (function () {
   {
     "desc": "Self Seal Sterilization Pouches",
     "id": "CR-0427",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5370,7 +5370,7 @@ const _seed = (function () {
   {
     "desc": "Sterilization Tape",
     "id": "CR-0428",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5390,7 +5390,7 @@ const _seed = (function () {
   {
     "desc": "Tuttnauer Printer Paper",
     "id": "CR-0429",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5410,7 +5410,7 @@ const _seed = (function () {
   {
     "desc": "Endosafe® Borosilicate Glass Tubes (13 x 100 mm)",
     "id": "CR-0430",
-    "vendor": "Eppendorf",
+    "supplier": "Eppendorf",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5430,7 +5430,7 @@ const _seed = (function () {
   {
     "desc": "LAL Reagent Grade Water",
     "id": "CR-0431",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5450,7 +5450,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex®50M Open System",
     "id": "CR-0432",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5470,7 +5470,7 @@ const _seed = (function () {
   {
     "desc": "ep Dualfilter T.I.P.S, 0.1 – 10 µL (Pipette Tips)",
     "id": "CR-0433",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5490,7 +5490,7 @@ const _seed = (function () {
   {
     "desc": "Expanded WIL2-S",
     "id": "CR-0434",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5510,7 +5510,7 @@ const _seed = (function () {
   {
     "desc": "T504AQX Septum Screw Cap For Sample Tubes with External Threads",
     "id": "CR-0435",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5530,7 +5530,7 @@ const _seed = (function () {
   {
     "desc": "VWR® Autoclavable Biohazard Bags and Containers",
     "id": "CR-0436",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5550,7 +5550,7 @@ const _seed = (function () {
   {
     "desc": "ATCC 135-XV Kit",
     "id": "CR-0437",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5570,7 +5570,7 @@ const _seed = (function () {
   {
     "desc": "PV-1 Reconditioning Kit",
     "id": "CR-0438",
-    "vendor": "Thermo Fisher",
+    "supplier": "Thermo Fisher",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5590,7 +5590,7 @@ const _seed = (function () {
   {
     "desc": "PV-8 Performance Verification Kit",
     "id": "CR-0439",
-    "vendor": "Thermo Fisher",
+    "supplier": "Thermo Fisher",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5610,7 +5610,7 @@ const _seed = (function () {
   {
     "desc": "CellSeal Connect",
     "id": "CR-0440",
-    "vendor": "Biolife Solutions",
+    "supplier": "Biolife Solutions",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5630,7 +5630,7 @@ const _seed = (function () {
   {
     "desc": "Resuspension Media, 100M",
     "id": "AY-0441",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5650,7 +5650,7 @@ const _seed = (function () {
   {
     "desc": "Activation & Transduction Mastermix, 100M",
     "id": "AY-0442",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5670,7 +5670,7 @@ const _seed = (function () {
   {
     "desc": "Complete T Cell Media, Closed, 1L",
     "id": "AY-0443",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5690,7 +5690,7 @@ const _seed = (function () {
   {
     "desc": "Thermal Printer Cleaning pen",
     "id": "CR-0444",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5710,7 +5710,7 @@ const _seed = (function () {
   {
     "desc": "99% Isopropyl alcohol",
     "id": "CR-0445",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5730,7 +5730,7 @@ const _seed = (function () {
   {
     "desc": "BMP 51 Lithium Ion Rechargeable Battery Pack",
     "id": "CR-0446",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5750,7 +5750,7 @@ const _seed = (function () {
   {
     "desc": "D-Luciferin Sodium Salt Working Stock",
     "id": "AY-0447",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5770,7 +5770,7 @@ const _seed = (function () {
   {
     "desc": "ep Dualfilter T.I.P.S, 2 – 20 µL (Pipette Tips)",
     "id": "CR-0448",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5790,7 +5790,7 @@ const _seed = (function () {
   {
     "desc": "Brady Cryogenic White Laboratory Labels, 0.5 x 1\" size",
     "id": "CR-0449",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5810,7 +5810,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS CD4 Reagent CR/GMP",
     "id": "CR-0450",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5830,7 +5830,7 @@ const _seed = (function () {
   {
     "desc": "CliniMACS CD8 Reagent CR/GMP",
     "id": "CR-0451",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5850,7 +5850,7 @@ const _seed = (function () {
   {
     "desc": "Accellix QC RTF Assay Kit",
     "id": "CR-0452",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5870,7 +5870,7 @@ const _seed = (function () {
   {
     "desc": "T Cell N-1 PE RTF Test Kit (L)",
     "id": "CR-0453",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5890,7 +5890,7 @@ const _seed = (function () {
   {
     "desc": "WIL2-S-Luc2 (MCB)",
     "id": "AY-0454",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5910,7 +5910,7 @@ const _seed = (function () {
   {
     "desc": "EZ-Accu Shot Pseudomonas aeruginosa ATCC® 9027",
     "id": "CR-0456",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5930,7 +5930,7 @@ const _seed = (function () {
   {
     "desc": "EZ-Accu Shot Bacillus spizizenii ATCC® 6633",
     "id": "CR-0457",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5950,7 +5950,7 @@ const _seed = (function () {
   {
     "desc": "EZ-Accu Shot Candida albicans ATCC® 10231",
     "id": "CR-0458",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5970,7 +5970,7 @@ const _seed = (function () {
   {
     "desc": "EZ-Accu Shot Aspergillus brasiliensis ATCC® 16404",
     "id": "CR-0459",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -5990,7 +5990,7 @@ const _seed = (function () {
   {
     "desc": "EZ-Accu Shot Clostridium sporogenes ATCC 19404",
     "id": "CR-0460",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -6010,7 +6010,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex®10M Open System, RUO",
     "id": "CR-0461",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -6030,7 +6030,7 @@ const _seed = (function () {
   {
     "desc": "G-Rex®100M Open System, RUO",
     "id": "CR-0462",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -6050,7 +6050,7 @@ const _seed = (function () {
   {
     "desc": "Soluble DynActivator™ CD3/CD28 Prototype",
     "id": "CR-0472",
-    "vendor": "",
+    "supplier": "",
     "lead": 10,
     "invValue": 0,
     "poValue": 0,
@@ -10381,7 +10381,7 @@ const _seed = (function () {
       units: 12,
       lot: "L-20264677",
       date: "2026-05-19 14:32",
-      reason: "Vendor receipt — PO #4421",
+      reason: "Supplier receipt — PO #4421",
       signature: sigSvg([
         "M10 45 Q 25 5 38 45 L 22 32 L 48 32",
         "M58 22 Q 72 12 82 28 Q 88 45 66 42 Q 60 52 80 50",

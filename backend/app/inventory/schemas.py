@@ -62,11 +62,11 @@ def _trimmed_non_blank(field_name: str):
     return BeforeValidator(_check)
 
 
-# ── Vendors ────────────────────────────────────────────────────────────
+# ── Suppliers ────────────────────────────────────────────────────────────
 
 
-class VendorRead(BaseModel):
-    """Minimal vendor surface used by the items list + create dropdown."""
+class SupplierRead(BaseModel):
+    """Minimal supplier surface used by the items list + create dropdown."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -80,12 +80,12 @@ class VendorRead(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_orm_row(cls, vendor: object) -> VendorRead:
-        return cls.model_validate(vendor, from_attributes=True)
+    def from_orm_row(cls, supplier: object) -> SupplierRead:
+        return cls.model_validate(supplier, from_attributes=True)
 
 
-class VendorCreate(BaseModel):
-    """Payload for ``POST /v1/vendors`` — admin master-data write.
+class SupplierCreate(BaseModel):
+    """Payload for ``POST /v1/suppliers`` — admin master-data write.
 
     Only ``name`` is required; the workbook only carries names for the
     74 seeded rows so every other field is optional and editable later.
@@ -100,8 +100,8 @@ class VendorCreate(BaseModel):
     is_active: bool = True
 
 
-class VendorUpdate(BaseModel):
-    """Payload for ``PATCH /v1/vendors/{id}`` — partial update.
+class SupplierUpdate(BaseModel):
+    """Payload for ``PATCH /v1/suppliers/{id}`` — partial update.
 
     Every field is optional. Omitted fields stay unchanged; sending an
     explicit ``null`` clears a nullable field. The audit log records
@@ -122,13 +122,13 @@ class VendorUpdate(BaseModel):
 # ── Items ──────────────────────────────────────────────────────────────
 
 
-class ItemVendorRead(BaseModel):
-    """One vendor assigned to an item (part of ``ItemRead.vendors``)."""
+class ItemSupplierRead(BaseModel):
+    """One supplier assigned to an item (part of ``ItemRead.suppliers``)."""
 
     model_config = ConfigDict(from_attributes=True)
 
-    vendor_id: str
-    vendor_name: str
+    supplier_id: str
+    supplier_name: str
 
 
 class ItemCreate(BaseModel):
@@ -138,9 +138,9 @@ class ItemCreate(BaseModel):
     The only server-side rule is uniqueness — there is no prefix /
     category constraint on what can be created.
 
-    ``vendor_ids`` is the item's assigned-vendor list (zero-or-more). These
-    are the only vendors the item can later be received against. Optional —
-    an item may start with no vendors and have them added later.
+    ``supplier_ids`` is the item's assigned-supplier list (zero-or-more). These
+    are the only suppliers the item can later be received against. Optional —
+    an item may start with no suppliers and have them added later.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -150,7 +150,7 @@ class ItemCreate(BaseModel):
     # Required: every item is categorised (requirements v2 §6). The category's
     # kind (purchased/built) decides whether the item may carry a BOM.
     category_id: str = Field(min_length=1)
-    vendor_ids: list[str] = Field(default_factory=list, max_length=100)
+    supplier_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
     near_expiry_threshold_days: int = Field(default=30, ge=0, le=3650)
@@ -168,8 +168,8 @@ class ItemUpdate(BaseModel):
     * ``created_by_user_id`` / ``created_at`` are never editable —
       they're audit columns.
 
-    ``vendor_ids``, when provided, **replaces** the item's whole assigned-vendor
-    list. Omit it to leave the vendors unchanged; send ``[]`` to clear them.
+    ``supplier_ids``, when provided, **replaces** the item's whole assigned-supplier
+    list. Omit it to leave the suppliers unchanged; send ``[]`` to clear them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -179,7 +179,7 @@ class ItemUpdate(BaseModel):
     # eligibility (the route blocks moving a BOM-bearing item to a purchased
     # category).
     category_id: str | None = Field(default=None, min_length=1)
-    vendor_ids: list[str] | None = Field(default=None, max_length=100)
+    supplier_ids: list[str] | None = Field(default=None, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
     near_expiry_threshold_days: int | None = Field(default=None, ge=0, le=3650)
@@ -205,8 +205,8 @@ class ItemRead(BaseModel):
     category_name: str
     category_kind: Literal["purchased", "built"]
     category_tone: str
-    # Assigned vendors (the list an item can be received against).
-    vendors: list[ItemVendorRead] = Field(default_factory=list)
+    # Assigned suppliers (the list an item can be received against).
+    suppliers: list[ItemSupplierRead] = Field(default_factory=list)
     avg_lead_days: int | None
     reorder_threshold: Decimal
     near_expiry_threshold_days: int
@@ -250,7 +250,7 @@ class LotCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
-    vendor_id: str | None = None
+    supplier_id: str | None = None
     manufacture_date: date | None = None
     expiration_date: date | None = None
     status: LotStatus = "available"
@@ -263,19 +263,21 @@ class LotUpdate(BaseModel):
     ``lot_number`` and ``item_id`` are immutable for the same reason
     item_number is — they're the identity of the lot. Editable fields:
     status (released → quarantined → recalled lifecycle), dates,
-    vendor, notes. The DB CHECK on date ordering still
+    supplier, notes. The DB CHECK on date ordering still
     applies; the route surfaces the structured error.
 
     Editing a lot after entry is a GxP-significant correction (e.g.
     fixing a wrong expiration date), so every edit is signed: the body
-    carries a fresh ``evidence_id`` minted for action='lot.update' and a
-    mandatory ``reason`` for the change. Both ride on the same payload
-    but are *not* lot columns — the route pops them before patching.
+    carries a fresh ``evidence_id`` minted for action='lot.update' and an
+    optional ``reason`` for the change (the e-signature comment — no
+    e-sign requires a comment, per the 2026-07-01 client directive). Both
+    ride on the same payload but are *not* lot columns — the route pops
+    them before patching.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    vendor_id: str | None = None
+    supplier_id: str | None = None
     manufacture_date: date | None = None
     expiration_date: date | None = None
     status: LotStatus | None = None
@@ -295,9 +297,10 @@ class LotUpdate(BaseModel):
         min_length=1,
         description="Fresh reauth evidence id for action='lot.update'",
     )
-    reason: Annotated[str, _trimmed_non_blank("reason")] = Field(
+    reason: str | None = Field(
+        default=None,
         max_length=512,
-        description="Reason for change, recorded on the audit row",
+        description="Optional reason for change, recorded on the audit row",
     )
 
 
@@ -307,8 +310,8 @@ class LotRead(BaseModel):
     id: str
     item_id: str
     lot_number: str
-    vendor_id: str | None
-    vendor_name: str | None = None
+    supplier_id: str | None
+    supplier_name: str | None = None
     item_number: str | None = None
     item_description: str | None = None
     manufacture_date: date | None
@@ -419,15 +422,15 @@ OrderStatus = Literal["open", "partially_received", "received", "cancelled"]
 class OrderLineInput(BaseModel):
     """One item line on an Order (intake / edit).
 
-    Vendor is **mandatory** and must be one of the item's assigned vendors
-    (``meta.item_vendors``). No lot / manufacture / expiry here — those are
+    Supplier is **mandatory** and must be one of the item's assigned suppliers
+    (``meta.item_suppliers``). No lot / manufacture / expiry here — those are
     captured at receive. ``ordered_qty`` is planning data (whole units).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     item_id: str
-    vendor_id: str
+    supplier_id: str
     ordered_qty: int = Field(gt=0)
     unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
 
@@ -529,8 +532,8 @@ class OrderLineRead(BaseModel):
     item_id: str
     item_number: str | None = None
     item_description: str | None = None
-    vendor_id: str
-    vendor_name: str | None = None
+    supplier_id: str
+    supplier_name: str | None = None
     ordered_qty: int
     unit_price_amount: Decimal | None = None
     # Derived (summed from receipt_event_lines) — never stored on the line.

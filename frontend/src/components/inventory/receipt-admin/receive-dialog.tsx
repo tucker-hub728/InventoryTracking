@@ -278,7 +278,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       </span>
                     </label>
                     <span className="text-xs text-text-3">
-                      outstanding {line.outstanding_qty} · {line.vendor_name ?? '—'}
+                      outstanding {line.outstanding_qty} · {line.supplier_name ?? '—'}
                     </span>
                   </div>
 

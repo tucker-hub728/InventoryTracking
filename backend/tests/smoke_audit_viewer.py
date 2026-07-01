@@ -125,14 +125,14 @@ def main() -> int:
     print(f"==> action=deleted: {b3['total']} rows")
 
     # ── q (free text) ─────────────────────────────────────────────────
-    s4, b4 = _req("GET", "/audit/events?q=vendor&limit=5", token=token)
+    s4, b4 = _req("GET", "/audit/events?q=supplier&limit=5", token=token)
     assert s4 == 200, b4
-    # Every row should contain 'vendor' in either event_type or
+    # Every row should contain 'supplier' in either event_type or
     # subject_label (case-insensitive).
     for r in b4["items"]:
         bag = (r["event_type"] + " " + (r["subject_label"] or "")).lower()
-        assert "vendor" in bag, r
-    print(f"==> q=vendor: {b4['total']} rows match")
+        assert "supplier" in bag, r
+    print(f"==> q=supplier: {b4['total']} rows match")
 
     # ── Single event lookup ───────────────────────────────────────────
     if b["items"]:

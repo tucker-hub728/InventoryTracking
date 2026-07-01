@@ -19,7 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api/client';
-import { vendorsApi, type Vendor, type VendorCreateInput } from '@/lib/api/vendors';
+import { suppliersApi, type Supplier, type SupplierCreateInput } from '@/lib/api/suppliers';
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required').max(128),
@@ -35,17 +35,17 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 
-interface VendorCreateDialogProps {
+interface SupplierCreateDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: (vendor: Vendor) => void;
+  onCreated: (supplier: Supplier) => void;
 }
 
-export function VendorCreateDialog({
+export function SupplierCreateDialog({
   open,
   onOpenChange,
   onCreated,
-}: VendorCreateDialogProps) {
+}: SupplierCreateDialogProps) {
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
@@ -67,22 +67,22 @@ export function VendorCreateDialog({
 
   const onSubmit = async (values: FormValues): Promise<void> => {
     setSubmitError(null);
-    const payload: VendorCreateInput = {
+    const payload: SupplierCreateInput = {
       name: values.name.trim(),
       contact_email: values.contact_email?.trim() || null,
       phone: values.phone?.trim() || null,
       notes: values.notes?.trim() || null,
     };
     try {
-      const created = await vendorsApi.create(payload);
+      const created = await suppliersApi.create(payload);
       onCreated(created);
       onOpenChange(false);
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'vendor_name_conflict') {
-        setSubmitError(`A vendor named "${payload.name}" already exists.`);
+      if (err instanceof ApiError && err.code === 'supplier_name_conflict') {
+        setSubmitError(`A supplier named "${payload.name}" already exists.`);
         return;
       }
-      setSubmitError(err instanceof ApiError ? err.message : 'Failed to create vendor.');
+      setSubmitError(err instanceof ApiError ? err.message : 'Failed to create supplier.');
     }
   };
 
@@ -91,20 +91,20 @@ export function VendorCreateDialog({
       <DialogContent className="max-w-lg">
         <form noValidate onSubmit={handleSubmit(onSubmit)}>
           <DialogHeader>
-            <DialogTitle>Add vendor</DialogTitle>
+            <DialogTitle>Add supplier</DialogTitle>
             <DialogDescription>
-              Master data — used by the Vendor dropdown on inventory items and lots.
+              Master data — used by the Supplier dropdown on inventory items and lots.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
             <Field
-              id="vendor-name"
+              id="supplier-name"
               label="Name"
               required
               error={errors.name?.message}
             >
               <Input
-                id="vendor-name"
+                id="supplier-name"
                 autoComplete="organization"
                 placeholder="e.g. Lonza Walkersville"
                 aria-invalid={Boolean(errors.name)}
@@ -114,22 +114,22 @@ export function VendorCreateDialog({
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field
-                id="vendor-email"
+                id="supplier-email"
                 label="Contact email"
                 error={errors.contact_email?.message}
               >
                 <Input
-                  id="vendor-email"
+                  id="supplier-email"
                   type="email"
                   autoComplete="email"
-                  placeholder="orders@vendor.com"
+                  placeholder="orders@supplier.com"
                   aria-invalid={Boolean(errors.contact_email)}
                   {...register('contact_email')}
                 />
               </Field>
-              <Field id="vendor-phone" label="Phone">
+              <Field id="supplier-phone" label="Phone">
                 <Input
-                  id="vendor-phone"
+                  id="supplier-phone"
                   type="tel"
                   autoComplete="tel"
                   placeholder="+1 555 123 4567"
@@ -139,9 +139,9 @@ export function VendorCreateDialog({
               </Field>
             </div>
 
-            <Field id="vendor-notes" label="Notes">
+            <Field id="supplier-notes" label="Notes">
               <Textarea
-                id="vendor-notes"
+                id="supplier-notes"
                 rows={3}
                 placeholder="Account number, contract terms, anything operators should know."
                 {...register('notes')}
@@ -149,7 +149,7 @@ export function VendorCreateDialog({
             </Field>
 
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
-              The vendor becomes available immediately in the Item and Lot
+              The supplier becomes available immediately in the Item and Lot
               creation dropdowns. Every edit and deactivation is recorded
               to the audit log with the operator and a field-level diff.
             </p>
@@ -168,7 +168,7 @@ export function VendorCreateDialog({
               Cancel
             </Button>
             <Button type="submit" variant="primary" disabled={isSubmitting}>
-              {isSubmitting ? 'Saving…' : 'Add vendor'}
+              {isSubmitting ? 'Saving…' : 'Add supplier'}
             </Button>
           </DialogFooter>
         </form>

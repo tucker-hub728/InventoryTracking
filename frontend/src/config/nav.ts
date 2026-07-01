@@ -80,7 +80,7 @@ export const navSections: readonly NavSection[] = [
       // },
       // Master data — viewer can read; admin/editor can create.
       // Page-level permission check enforces the write side.
-      { id: 'vendors', label: 'Vendors', href: '/vendors', icon: Building2, resource: 'inventory' },
+      { id: 'suppliers', label: 'Suppliers', href: '/suppliers', icon: Building2, resource: 'inventory' },
       // { id: 'uoms', label: 'Units of measure', href: '/uoms', icon: Ruler, resource: 'inventory' },
       // { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'inventory' },
       { id: 'audit', label: 'Audit log', href: '/audit', icon: History, resource: 'audit' },

@@ -36,7 +36,7 @@ interface Props {
 
 /**
  * New Order dialog (Receipt Admin v3). Creates an Order header with one-or-more
- * item lines (item, vendor, ordered qty, unit price). No lots / dates are
+ * item lines (item, supplier, ordered qty, unit price). No lots / dates are
  * captured here — lots are created later at each dated receive event. Not
  * e-signed.
  */

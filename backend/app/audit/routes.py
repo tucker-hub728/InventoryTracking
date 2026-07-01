@@ -30,7 +30,7 @@ audit_router = APIRouter(prefix="/audit", tags=["audit"])
 # constrain the column (writes can come from future modules) but we
 # narrow the API surface so the viewer doesn't accept arbitrary input.
 SubjectTable = Literal[
-    "meta.vendors",
+    "meta.suppliers",
     "meta.locations",
     "app.items",
     "app.lots",

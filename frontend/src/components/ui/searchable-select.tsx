@@ -30,8 +30,8 @@ interface Props {
 
 /**
  * Single-select dropdown with a search box — the searchable counterpart to the
- * plain Radix {@link Select}, modelled on {@link VendorMultiSelect}. Use it
- * anywhere a picklist can grow long (items, vendors, …). The trigger shows the
+ * plain Radix {@link Select}, modelled on {@link SupplierMultiSelect}. Use it
+ * anywhere a picklist can grow long (items, suppliers, …). The trigger shows the
  * selected option's label; the popover filters options by ``searchText``.
  */
 export function SearchableSelect({

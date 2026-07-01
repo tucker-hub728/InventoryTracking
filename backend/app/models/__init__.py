@@ -18,14 +18,14 @@ from app.models.inventory import (
     Item,
     ItemCategory,
     ItemStock,
-    ItemVendor,
+    ItemSupplier,
     Lot,
     ReceiptEvent,
     ReceiptEventLine,
     ReceiptTransaction,
     ReceiptTransactionLine,
     StockMovement,
-    Vendor,
+    Supplier,
 )
 from app.models.locations import (
     LocationNode,
@@ -42,7 +42,7 @@ __all__ = [
     "Item",
     "ItemCategory",
     "ItemStock",
-    "ItemVendor",
+    "ItemSupplier",
     "LocationNode",
     "Lot",
     "LotAllocation",
@@ -55,5 +55,5 @@ __all__ = [
     "Role",
     "StockMovement",
     "User",
-    "Vendor",
+    "Supplier",
 ]

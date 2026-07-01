@@ -7,11 +7,11 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import type { Vendor } from '@/lib/api/vendors';
+import type { Supplier } from '@/lib/api/suppliers';
 
 interface Props {
-  vendors: Vendor[];
-  /** Selected vendor ids. */
+  suppliers: Supplier[];
+  /** Selected supplier ids. */
   value: string[];
   onChange: (next: string[]) => void;
   loading?: boolean;
@@ -21,14 +21,14 @@ interface Props {
 }
 
 /**
- * Searchable multi-select dropdown of vendors for an item's assigned-vendor
- * set. These are the vendors an item can later be received against. Zero-or-more
+ * Searchable multi-select dropdown of suppliers for an item's assigned-supplier
+ * set. These are the suppliers an item can later be received against. Zero-or-more
  * may be picked. The trigger shows the chosen names (and a count); the popover
- * holds a search box over a checkable list, so it scales as the vendor master
+ * holds a search box over a checkable list, so it scales as the supplier master
  * data grows.
  */
-export function VendorMultiSelect({
-  vendors,
+export function SupplierMultiSelect({
+  suppliers,
   value,
   onChange,
   loading,
@@ -40,27 +40,27 @@ export function VendorMultiSelect({
   const [query, setQuery] = React.useState('');
   const selected = React.useMemo(() => new Set(value), [value]);
 
-  const toggle = (vendorId: string) => {
-    if (selected.has(vendorId)) onChange(value.filter((v) => v !== vendorId));
-    else onChange([...value, vendorId]);
+  const toggle = (supplierId: string) => {
+    if (selected.has(supplierId)) onChange(value.filter((v) => v !== supplierId));
+    else onChange([...value, supplierId]);
   };
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return vendors;
-    return vendors.filter((v) => v.name.toLowerCase().includes(q));
-  }, [vendors, query]);
+    if (!q) return suppliers;
+    return suppliers.filter((v) => v.name.toLowerCase().includes(q));
+  }, [suppliers, query]);
 
-  // Names of the currently-selected vendors, for the trigger label.
+  // Names of the currently-selected suppliers, for the trigger label.
   const selectedNames = React.useMemo(
-    () => vendors.filter((v) => selected.has(v.id)).map((v) => v.name),
-    [vendors, selected],
+    () => suppliers.filter((v) => selected.has(v.id)).map((v) => v.name),
+    [suppliers, selected],
   );
 
   if (loading) {
     return (
       <div className="rounded-md border border-border px-3 py-2.5 text-xs text-text-2">
-        Loading vendors…
+        Loading suppliers…
       </div>
     );
   }
@@ -71,10 +71,10 @@ export function VendorMultiSelect({
       </div>
     );
   }
-  if (vendors.length === 0) {
+  if (suppliers.length === 0) {
     return (
       <div className="rounded-md border border-border px-3 py-2.5 text-xs text-text-2">
-        No vendors available. Create a vendor first.
+        No suppliers available. Create a supplier first.
       </div>
     );
   }
@@ -101,7 +101,7 @@ export function VendorMultiSelect({
               className={cn('truncate', selectedNames.length === 0 && 'text-text-3')}
             >
               {selectedNames.length === 0
-                ? 'Select vendors…'
+                ? 'Select suppliers…'
                 : selectedNames.join(', ')}
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
@@ -124,10 +124,10 @@ export function VendorMultiSelect({
               icon={Search}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search vendors…"
+              placeholder="Search suppliers…"
             />
           </div>
-          <div className="max-h-56 overflow-y-auto p-1" role="group" aria-label="Vendors">
+          <div className="max-h-56 overflow-y-auto p-1" role="group" aria-label="Suppliers">
             {filtered.length === 0 ? (
               <p className="px-2 py-6 text-center text-xs text-text-3">No matches.</p>
             ) : (
@@ -167,8 +167,8 @@ export function VendorMultiSelect({
       </Popover>
       <p className="text-xs text-text-3">
         {value.length === 0
-          ? 'No vendors selected — you can add them later.'
-          : `${value.length} vendor${value.length === 1 ? '' : 's'} selected`}
+          ? 'No suppliers selected — you can add them later.'
+          : `${value.length} supplier${value.length === 1 ? '' : 's'} selected`}
       </p>
     </div>
   );

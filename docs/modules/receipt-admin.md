@@ -2,14 +2,14 @@
 
 > **Source of truth**
 > - `temp/CellReady_Inventory_System_Technical_Requirements_v2.pdf` (original
->   Item / Vendor / Lot / Receipt model).
+>   Item / Supplier / Lot / Receipt model).
 > - Client requirement updates 2026-06-29: rename "receipt" → **"Order"**;
 >   **multiple items per Order**; lot details captured **at receive, not
 >   intake**; **partial receipts**; **blanket Orders** with **multiple dated
 >   receipts**; delete an Order; drop e-sign on editing an un-received Order.
 >
 > Builds on [inventory.md](./inventory.md) — items, lots, the append-only ledger
-> (`app.stock_movements`), assigned vendors (`meta.item_vendors`), e-signatures
+> (`app.stock_movements`), assigned suppliers (`meta.item_suppliers`), e-signatures
 > (`audit.reauth_events`) and the audit trail (`audit.audit_events`). This file
 > describes only the **Order** (Receipt Admin) additions; everything it doesn't
 > mention is unchanged.
@@ -34,7 +34,7 @@
 | Lot creation | Lots are created **only at a receive event** (one lot per `line × event`), never at intake. |
 | Partial receipts | Tracked **per line**: `outstanding = ordered_qty − Σ received`. Received is **ledger/row-derived** (summed from `receipt_event_lines`), never stored. |
 | Blanket Orders | Header `is_blanket` + `valid_from`/`valid_to`. Drawn down by **many dated receive events** until every line is fully received. |
-| Vendor | **Per line** (`receipt_transaction_lines.vendor_id`), restricted to the item's `meta.item_vendors`. Header has no vendor → an Order may span vendors. |
+| Supplier | **Per line** (`receipt_transaction_lines.supplier_id`), restricted to the item's `meta.item_suppliers`. Header has no supplier → an Order may span suppliers. |
 | Over-receipt | **Allowed, no reason required** — a draw may exceed the line's outstanding quantity. (The `over_receipt_reason` column is retained but no longer collected.) |
 | E-signature | **Receiving only** (reauth + mandatory comment). Creating/**editing an un-received Order** is plain `inventory:create` — no reauth. |
 | Order number | User-entered `po_reference`; **unique** across non-deleted Orders. |
@@ -73,15 +73,15 @@
 | `receipt_transaction_id` | `UUID FK → app.receipt_transactions(id) ON DELETE CASCADE` | |
 | `line_no` | `INTEGER NOT NULL` | 1-based display order. |
 | `item_id` | `UUID FK → app.items(id) ON DELETE RESTRICT` | |
-| `vendor_id` | `UUID FK → meta.vendors(id) ON DELETE RESTRICT` | **must be in the item's `meta.item_vendors`** (service-validated, like today). |
+| `supplier_id` | `UUID FK → meta.suppliers(id) ON DELETE RESTRICT` | **must be in the item's `meta.item_suppliers`** (service-validated, like today). |
 | `ordered_qty` | `INTEGER NOT NULL` | `CHECK (ordered_qty > 0)`. Whole units. |
 | `unit_price_amount` | `NUMERIC(14,2) NULL` | agreed price; copied onto the lot at receive. |
 | `created_at`, `updated_at` | `TIMESTAMPTZ NOT NULL` | |
 
 **No `UNIQUE (receipt_transaction_id, item_id)`** — the *same* item may appear
-on several lines of one Order, each with its **own vendor / price** (split
+on several lines of one Order, each with its **own supplier / price** (split
 sourcing; e.g. legacy Order `PO-B-001` ordered `TEST-001` from both Acme and
-Wilson Wolf). Vendor is per line, so item-per-Order is intentionally **not**
+Wilson Wolf). Supplier is per line, so item-per-Order is intentionally **not**
 unique. Indexes: `(receipt_transaction_id)`, `(item_id)`.
 **`ordered_qty` is locked once any receive line references the line** (409;
 service-enforced).
@@ -122,7 +122,7 @@ Indexes: `(receipt_event_id)`, `(receipt_transaction_line_id)`, `(lot_id)`.
   back-compat / direct reads.
 - `lot_number`, `manufacture_date`, `expiration_date` are now populated **at
   receive**, not intake.
-- `vendor_id`, `unit_price_amount`, `ordered_qty` still live on the lot (set at
+- `supplier_id`, `unit_price_amount`, `ordered_qty` still live on the lot (set at
   receive from the line, with optional per-split override).
 
 ---
@@ -149,12 +149,12 @@ different total from Order "received" (order fulfilment vs. physical stock).
 
 ### 3.1 Intake — create an Order (`POST /v1/receiving/transactions`, NOT e-signed)
 1. Header: `po_reference`, optional `is_blanket` + `valid_from`/`valid_to`, notes.
-2. One or more **item lines**: `item_id`, `vendor_id` (∈ item_vendors),
+2. One or more **item lines**: `item_id`, `supplier_id` (∈ item_suppliers),
    `ordered_qty`, optional `unit_price`.
 3. **No lots created**, no stock moves. Status `open`.
 
 ### 3.2 Edit Order (`PATCH …/transactions/{id}`, NOT e-signed, un-received only)
-Edit header + lines (add/remove items, change vendor/qty/price). `ordered_qty`
+Edit header + lines (add/remove items, change supplier/qty/price). `ordered_qty`
 locked on a line once it has any received qty. UI title: **"Edit Order"**.
 
 ### 3.3 Receive — a dated receive event (`POST …/transactions/{id}/receive`, **e-signed**)
@@ -162,7 +162,7 @@ One reauth ticket (`action='receipt.confirm'`, consumed once) covers the whole
 event. Body = `received_at` + per-line draws. For each submitted line:
 1. resolve the Order line; compute `outstanding`; if `qty_received >
    outstanding` require `over_receipt_reason` (else 409);
-2. create one `app.lots` row (`status='available'`, `item_id`, `vendor_id` and
+2. create one `app.lots` row (`status='available'`, `item_id`, `supplier_id` and
    `unit_price_amount` from the line unless overridden, `ordered_qty` from the
    line, `po_reference` from the header, **`lot_number` + `manufacture_date` +
    `expiration_date` entered now**, `receipt_transaction_line_id` = the line);
@@ -228,17 +228,17 @@ Receive body:
       "manufacture_date": "2026-04-01", "expiration_date": "2027-04-01",
       "unit_price_amount": null },
     { "line_id": "…", "qty_received": 210, "lot_number": "CANE-B",
-      "over_receipt_reason": "Vendor shipped full pallet" }   // exceeds outstanding
+      "over_receipt_reason": "Supplier shipped full pallet" }   // exceeds outstanding
   ]
 }
 ```
 
 ---
 
-## 6. Item → Vendor resolution (unchanged)
+## 6. Item → Supplier resolution (unchanged)
 
-Vendor on a line is **mandatory** and must be one of the item's `meta.item_vendors`.
-No on-the-fly vendor creation. (The v2 unverified/not-previously-associated
+Supplier on a line is **mandatory** and must be one of the item's `meta.item_suppliers`.
+No on-the-fly supplier creation. (The v2 unverified/not-previously-associated
 flags were already dropped, migration `b0c1d2e3f4a5`.)
 
 ---
@@ -261,7 +261,7 @@ valid_from / valid_to / deleted_at`; widens the status CHECK; drops the header
 `item_id` (after backfill). **Backfill (per 2026-06-29 decision "convert to one
 line each, keep lot"):** for each existing `receipt_transaction`, create one
 `receipt_transaction_line` **per existing lot** (carrying that lot's
-`item`/`vendor`/`ordered_qty`/`unit_price`) and set the lot's
+`item`/`supplier`/`ordered_qty`/`unit_price`) and set the lot's
 `receipt_transaction_line_id`. Already-`received` transactions keep their lots
 linked to lines (no synthetic event). Reversible. **Not auto-applied** — exact
 backfill SQL is reviewed and run manually against the target DB.
@@ -277,7 +277,7 @@ backfill SQL is reviewed and run manually against the target DB.
    state — `cancel` covers abandoning an un-received Order while keeping the
    record; `delete` soft-removes an un-received Order entirely.
 3. **Backfill = one line per existing lot** (lossless — preserves per-lot
-   vendor/qty/price on multi-lot intakes); the lot is relinked via
+   supplier/qty/price on multi-lot intakes); the lot is relinked via
    `receipt_transaction_line_id`.
 
 ---

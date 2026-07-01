@@ -19,7 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api/client';
-import { vendorsApi, type Vendor, type VendorUpdateInput } from '@/lib/api/vendors';
+import { suppliersApi, type Supplier, type SupplierUpdateInput } from '@/lib/api/suppliers';
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required').max(128),
@@ -38,11 +38,11 @@ type FormValues = z.infer<typeof schema>;
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  vendor: Vendor | null;
-  onUpdated: (vendor: Vendor) => void;
+  supplier: Supplier | null;
+  onUpdated: (supplier: Supplier) => void;
 }
 
-export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Props) {
+export function SupplierEditDialog({ open, onOpenChange, supplier, onUpdated }: Props) {
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
@@ -61,24 +61,24 @@ export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Prop
   });
 
   React.useEffect(() => {
-    if (open && vendor) {
+    if (open && supplier) {
       reset({
-        name: vendor.name,
-        contact_email: vendor.contact_email ?? '',
-        phone: vendor.phone ?? '',
-        notes: vendor.notes ?? '',
+        name: supplier.name,
+        contact_email: supplier.contact_email ?? '',
+        phone: supplier.phone ?? '',
+        notes: supplier.notes ?? '',
       });
       setSubmitError(null);
     }
-  }, [open, vendor, reset]);
+  }, [open, supplier, reset]);
 
   const onSubmit = async (values: FormValues): Promise<void> => {
-    if (!vendor) return;
+    if (!supplier) return;
     setSubmitError(null);
 
     // Build the minimal PATCH from dirty fields only. Sending the full
     // form would write a useless full-row diff into the audit log.
-    const patch: VendorUpdateInput = {};
+    const patch: SupplierUpdateInput = {};
     if (dirtyFields.name) patch.name = values.name.trim();
     if (dirtyFields.contact_email) patch.contact_email = values.contact_email?.trim() || null;
     if (dirtyFields.phone) patch.phone = values.phone?.trim() || null;
@@ -90,15 +90,15 @@ export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Prop
     }
 
     try {
-      const updated = await vendorsApi.update(vendor.id, patch);
+      const updated = await suppliersApi.update(supplier.id, patch);
       onUpdated(updated);
       onOpenChange(false);
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'vendor_name_conflict') {
-        setSubmitError(`A vendor named "${patch.name}" already exists.`);
+      if (err instanceof ApiError && err.code === 'supplier_name_conflict') {
+        setSubmitError(`A supplier named "${patch.name}" already exists.`);
         return;
       }
-      setSubmitError(err instanceof ApiError ? err.message : 'Failed to update vendor.');
+      setSubmitError(err instanceof ApiError ? err.message : 'Failed to update supplier.');
     }
   };
 
@@ -107,16 +107,16 @@ export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Prop
       <DialogContent className="max-w-lg">
         <form noValidate onSubmit={handleSubmit(onSubmit)}>
           <DialogHeader>
-            <DialogTitle>Edit vendor</DialogTitle>
+            <DialogTitle>Edit supplier</DialogTitle>
             <DialogDescription>
               Every field-level change is recorded to the audit log with
               the operator and a before/after diff.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
-            <Field id="vendor-name" label="Name" required error={errors.name?.message}>
+            <Field id="supplier-name" label="Name" required error={errors.name?.message}>
               <Input
-                id="vendor-name"
+                id="supplier-name"
                 autoComplete="organization"
                 aria-invalid={Boolean(errors.name)}
                 {...register('name')}
@@ -125,21 +125,21 @@ export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Prop
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field
-                id="vendor-email"
+                id="supplier-email"
                 label="Contact email"
                 error={errors.contact_email?.message}
               >
                 <Input
-                  id="vendor-email"
+                  id="supplier-email"
                   type="email"
                   autoComplete="email"
                   aria-invalid={Boolean(errors.contact_email)}
                   {...register('contact_email')}
                 />
               </Field>
-              <Field id="vendor-phone" label="Phone">
+              <Field id="supplier-phone" label="Phone">
                 <Input
-                  id="vendor-phone"
+                  id="supplier-phone"
                   type="tel"
                   autoComplete="tel"
                   {...register('phone')}
@@ -147,8 +147,8 @@ export function VendorEditDialog({ open, onOpenChange, vendor, onUpdated }: Prop
               </Field>
             </div>
 
-            <Field id="vendor-notes" label="Notes">
-              <Textarea id="vendor-notes" rows={3} {...register('notes')} />
+            <Field id="supplier-notes" label="Notes">
+              <Textarea id="supplier-notes" rows={3} {...register('notes')} />
             </Field>
 
             {submitError && (

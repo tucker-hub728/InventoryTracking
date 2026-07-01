@@ -12,22 +12,22 @@ import { useConfirm } from '@/components/ui/confirm-dialog';
 import { EmptyState } from '@/components/shared/empty-state';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { usePermission } from '@/hooks/use-permission';
-import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
 import { ApiError } from '@/lib/api/client';
 
-import { VendorsTable } from './vendors-table';
-import { VendorCreateDialog } from './vendor-create-dialog';
-import { VendorEditDialog } from './vendor-edit-dialog';
+import { SuppliersTable } from './suppliers-table';
+import { SupplierCreateDialog } from './supplier-create-dialog';
+import { SupplierEditDialog } from './supplier-edit-dialog';
 
-export function VendorsPageClient() {
+export function SuppliersPageClient() {
   const canCreate = usePermission('inventory', 'create');
 
-  const [vendors, setVendors] = React.useState<Vendor[]>([]);
+  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState('');
   const [creating, setCreating] = React.useState(false);
-  const [editing, setEditing] = React.useState<Vendor | null>(null);
+  const [editing, setEditing] = React.useState<Supplier | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const { confirm, confirmDialog } = useConfirm();
 
@@ -38,11 +38,11 @@ export function VendorsPageClient() {
     setLoadError(null);
     try {
       // Pull both active and inactive so the admin sees everything.
-      const all = await vendorsApi.list({ activeOnly: false, signal });
-      setVendors(all);
+      const all = await suppliersApi.list({ activeOnly: false, signal });
+      setSuppliers(all);
     } catch (err) {
       if ((err as DOMException)?.name === 'AbortError') return;
-      setLoadError(err instanceof ApiError ? err.message : 'Failed to load vendors.');
+      setLoadError(err instanceof ApiError ? err.message : 'Failed to load suppliers.');
     } finally {
       setLoading(false);
     }
@@ -56,25 +56,25 @@ export function VendorsPageClient() {
 
   const filtered = React.useMemo(() => {
     const q = debounced.trim().toLowerCase();
-    if (!q) return vendors;
-    return vendors.filter((v) =>
+    if (!q) return suppliers;
+    return suppliers.filter((v) =>
       v.name.toLowerCase().includes(q) ||
       (v.contact_email ?? '').toLowerCase().includes(q),
     );
-  }, [vendors, debounced]);
+  }, [suppliers, debounced]);
 
-  const handleCreated = (created: Vendor) => {
+  const handleCreated = (created: Supplier) => {
     // Insert sorted by name (case-insensitive) so the new row lands where the user expects.
-    setVendors((prev) =>
+    setSuppliers((prev) =>
       [...prev, created].sort((a, b) =>
         a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
       ),
     );
-    toast.success('Vendor added', { description: created.name });
+    toast.success('Supplier added', { description: created.name });
   };
 
-  const replaceVendor = (updated: Vendor): void => {
-    setVendors((prev) =>
+  const replaceSupplier = (updated: Supplier): void => {
+    setSuppliers((prev) =>
       prev
         .map((v) => (v.id === updated.id ? updated : v))
         .sort((a, b) =>
@@ -83,14 +83,14 @@ export function VendorsPageClient() {
     );
   };
 
-  const handleUpdated = (updated: Vendor): void => {
-    replaceVendor(updated);
-    toast.success('Vendor updated', { description: updated.name });
+  const handleUpdated = (updated: Supplier): void => {
+    replaceSupplier(updated);
+    toast.success('Supplier updated', { description: updated.name });
   };
 
   // Soft-delete (deactivate) — server idempotent, but we keep client-
   // side optimism honest by always re-reading the server response.
-  const handleDeactivate = async (v: Vendor): Promise<void> => {
+  const handleDeactivate = async (v: Supplier): Promise<void> => {
     if (!canCreate) return;
     const ok = await confirm({
       title: `Deactivate ${v.name}?`,
@@ -101,28 +101,28 @@ export function VendorsPageClient() {
     if (!ok) return;
     setBusyId(v.id);
     try {
-      const updated = await vendorsApi.deactivate(v.id);
-      replaceVendor(updated);
-      toast.success('Vendor deactivated', { description: updated.name });
+      const updated = await suppliersApi.deactivate(v.id);
+      replaceSupplier(updated);
+      toast.success('Supplier deactivated', { description: updated.name });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : 'Failed to deactivate vendor.',
+        err instanceof ApiError ? err.message : 'Failed to deactivate supplier.',
       );
     } finally {
       setBusyId(null);
     }
   };
 
-  const handleReactivate = async (v: Vendor): Promise<void> => {
+  const handleReactivate = async (v: Supplier): Promise<void> => {
     if (!canCreate) return;
     setBusyId(v.id);
     try {
-      const updated = await vendorsApi.update(v.id, { is_active: true });
-      replaceVendor(updated);
-      toast.success('Vendor reactivated', { description: updated.name });
+      const updated = await suppliersApi.update(v.id, { is_active: true });
+      replaceSupplier(updated);
+      toast.success('Supplier reactivated', { description: updated.name });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : 'Failed to reactivate vendor.',
+        err instanceof ApiError ? err.message : 'Failed to reactivate supplier.',
       );
     } finally {
       setBusyId(null);
@@ -132,12 +132,12 @@ export function VendorsPageClient() {
   return (
     <>
       <PageHeader
-        title="Vendors"
-        subtitle="Master data for inventory item sourcing. Seeded from the workbook; admins add new vendors here."
+        title="Suppliers"
+        subtitle="Master data for inventory item sourcing. Seeded from the workbook; admins add new suppliers here."
         actions={
           canCreate ? (
             <Button variant="primary" onClick={() => setCreating(true)}>
-              <Plus size={14} /> Add vendor
+              <Plus size={14} /> Add supplier
             </Button>
           ) : undefined
         }
@@ -157,35 +157,35 @@ export function VendorsPageClient() {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search by name or email"
                 className="pl-9"
-                aria-label="Search vendors"
+                aria-label="Search suppliers"
               />
             </div>
             <div className="text-xs text-text-3">
-              {loading ? 'Loading…' : `${filtered.length} of ${vendors.length}`}
+              {loading ? 'Loading…' : `${filtered.length} of ${suppliers.length}`}
             </div>
           </div>
 
           {loadError ? (
             <EmptyState
-              title="Couldn't load vendors"
+              title="Couldn't load suppliers"
               hint={loadError}
               action={<Button onClick={() => void load()}>Retry</Button>}
             />
-          ) : !loading && vendors.length === 0 ? (
+          ) : !loading && suppliers.length === 0 ? (
             <EmptyState
-              title="No vendors yet"
+              title="No suppliers yet"
               hint="The seed migration usually populates this from the workbook. Add one manually below."
               action={
                 canCreate ? (
                   <Button variant="primary" onClick={() => setCreating(true)}>
-                    <Plus size={14} /> Add vendor
+                    <Plus size={14} /> Add supplier
                   </Button>
                 ) : undefined
               }
             />
           ) : (
-            <VendorsTable
-              vendors={filtered}
+            <SuppliersTable
+              suppliers={filtered}
               loading={loading}
               onEdit={canCreate ? (v) => setEditing(v) : undefined}
               onDeactivate={canCreate ? handleDeactivate : undefined}
@@ -196,18 +196,18 @@ export function VendorsPageClient() {
         </Card>
       </div>
 
-      <VendorCreateDialog
+      <SupplierCreateDialog
         open={creating}
         onOpenChange={setCreating}
         onCreated={handleCreated}
       />
 
-      <VendorEditDialog
+      <SupplierEditDialog
         open={editing !== null}
         onOpenChange={(o) => {
           if (!o) setEditing(null);
         }}
-        vendor={editing}
+        supplier={editing}
         onUpdated={handleUpdated}
       />
 

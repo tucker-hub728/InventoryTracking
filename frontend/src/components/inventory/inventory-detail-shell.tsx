@@ -230,7 +230,7 @@ export function InventoryDetailShell({
             {!built && (
               <>
                 <span aria-hidden>·</span>
-                <span>{item.vendor || '— No vendor —'}</span>
+                <span>{item.supplier || '— No supplier —'}</span>
                 <span aria-hidden>·</span>
                 <StatusBadge status={item.status} />
               </>

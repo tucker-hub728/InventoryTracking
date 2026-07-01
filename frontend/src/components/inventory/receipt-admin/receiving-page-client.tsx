@@ -611,7 +611,7 @@ function OrderDetailSheet({
                             {l.item_number ?? '—'}
                           </span>
                           <span className="text-xs text-text-3">
-                            {l.vendor_name ?? '—'}
+                            {l.supplier_name ?? '—'}
                           </span>
                         </div>
                         {l.item_description && (
@@ -692,9 +692,9 @@ function OrderDetailSheet({
                                   <span className="tabular-nums text-text-2">
                                     +{el.qty_received}
                                   </span>
-                                  {orderLine?.vendor_name && (
+                                  {orderLine?.supplier_name && (
                                     <span className="text-text-3">
-                                      ({orderLine.vendor_name})
+                                      ({orderLine.supplier_name})
                                     </span>
                                   )}
                                   {el.over_receipt_reason && (
@@ -759,7 +759,7 @@ function OrderDetailSheet({
         commentPlaceholder={
           reauthAction === 'delete'
             ? 'e.g. Order created in error'
-            : 'e.g. Vendor cancelled the order'
+            : 'e.g. Supplier cancelled the order'
         }
         onConfirmed={(evidence) => {
           const action = reauthAction;

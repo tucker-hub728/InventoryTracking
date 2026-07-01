@@ -21,7 +21,7 @@ import type { BadgeTone } from '@/types/ui';
 import type { InventoryItem } from '@/types/inventory';
 
 // Only the columns the backend can actually sort on are clickable. UI-only
-// columns (vendor / qty / status) read sort state but don't drive it; we'd
+// columns (supplier / qty / status) read sort state but don't drive it; we'd
 // need new backend sort fields to make them sortable.
 interface Column {
   key: keyof InventoryItem | 'lastUpdated';
@@ -31,7 +31,7 @@ interface Column {
   className?: string;
 }
 
-// Widths drive a ``table-fixed`` layout so long names / vendors get
+// Widths drive a ``table-fixed`` layout so long names / suppliers get
 // ellipsised rather than blowing out the column. The wrapper has
 // ``overflow-auto`` so the total width below acts as a min-width on
 // narrow viewports — under ~930 px the table scrolls horizontally
@@ -44,7 +44,7 @@ const COLUMNS: Column[] = [
   { key: 'desc', label: 'Name', sortKey: 'desc' },
   { key: 'categoryName', label: 'Category', className: 'w-[170px]' },
   { key: 'categoryKind', label: 'Type', className: 'w-[100px]' },
-  { key: 'vendor', label: 'Vendor', className: 'w-[150px]' },
+  { key: 'supplier', label: 'Supplier', className: 'w-[150px]' },
   { key: 'qty', label: 'Units', align: 'right', className: 'w-[90px]' },
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter
   // doesn't populate yet (per-item lot expiry isn't rolled up at item
@@ -165,8 +165,8 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                   {item.categoryKind === 'built' ? 'Product' : 'Purchased'}
                 </Badge>
               </TableCell>
-              <TableCell className="truncate text-xs text-text-2" title={item.vendor}>
-                {item.vendor || '—'}
+              <TableCell className="truncate text-xs text-text-2" title={item.supplier}>
+                {item.supplier || '—'}
               </TableCell>
               {/* Products aren't stocked (built on demand), so on-hand
                   Units + Stock status don't apply — both read "—". */}

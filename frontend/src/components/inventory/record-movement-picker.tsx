@@ -33,7 +33,7 @@ export function RecordMovementPicker({
     if (!needle) return all.slice(0, 60);
     return all
       .filter((it) =>
-        `${it.id} ${it.desc} ${it.vendor}`.toLowerCase().includes(needle),
+        `${it.id} ${it.desc} ${it.supplier}`.toLowerCase().includes(needle),
       )
       .slice(0, 60);
   }, [debounced]);
@@ -78,7 +78,7 @@ export function RecordMovementPicker({
                   <span className="flex flex-col">
                     <span className="font-medium">{it.desc}</span>
                     <span className="font-mono text-xs text-text-3">
-                      {it.id} · {it.vendor}
+                      {it.id} · {it.supplier}
                     </span>
                   </span>
                   <span className="shrink-0 font-mono text-xs text-text-2">Qty {it.qty}</span>

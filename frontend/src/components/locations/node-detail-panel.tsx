@@ -763,7 +763,6 @@ export function NodeDetailPanel({
               ? 'Reason for this placement'
               : 'Reason for this removal'
         }
-        commentRequired
         onConfirmed={(evidence) => {
           setShowReauth(false);
           void runSigned(evidence);
@@ -1073,7 +1072,7 @@ function AllocationDetailSheet({
                     <DetailRow label="Lot number" value={lot.lot_number} />
                     <DetailRow label="Item" value={lot.item_number ?? '—'} />
                     <DetailRow label="Status" value={lot.status} />
-                    <DetailRow label="Vendor" value={lot.vendor_name ?? '—'} />
+                    <DetailRow label="Supplier" value={lot.supplier_name ?? '—'} />
                     <DetailRow label="PO reference" value={lot.po_reference ?? '—'} />
                     <DetailRow label="Ordered qty" value={lot.ordered_qty == null ? '—' : `${lot.ordered_qty}`} />
                     <DetailRow label="Manufactured" value={lot.manufacture_date ?? '—'} />

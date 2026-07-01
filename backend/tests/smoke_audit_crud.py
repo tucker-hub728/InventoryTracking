@@ -5,11 +5,11 @@ Run from the project root after ``docker compose up``:
     python backend/tests/smoke_audit_crud.py
 
 Verifies:
-  * vendor PATCH writes an audit row with the right diff
-  * vendor PATCH with no fields → 422 empty_patch
-  * vendor PATCH duplicate name → 409 vendor_name_conflict
-  * vendor DELETE soft-deletes (is_active=false) + writes audit row
-  * vendor DELETE on already-inactive → idempotent (no new audit row)
+  * supplier PATCH writes an audit row with the right diff
+  * supplier PATCH with no fields → 422 empty_patch
+  * supplier PATCH duplicate name → 409 supplier_name_conflict
+  * supplier DELETE soft-deletes (is_active=false) + writes audit row
+  * supplier DELETE on already-inactive → idempotent (no new audit row)
   * location PATCH + DELETE round-trip
   * item PATCH (description) writes audit row
   * item DELETE rejected when stock > 0 (item_has_stock)
@@ -117,36 +117,36 @@ def _audit_rows_for(subject_table: str, subject_id: str) -> list[dict]:
 def main() -> int:
     token = _login()
 
-    # ── VENDORS ───────────────────────────────────────────────────────
+    # ── SUPPLIERS ───────────────────────────────────────────────────────
     suffix = uuid.uuid4().hex[:8]
     s, b = _req(
         "POST",
-        "/vendors",
+        "/suppliers",
         token=token,
-        json_body={"name": f"Smoke Vendor {suffix}", "notes": "initial"},
+        json_body={"name": f"Smoke Supplier {suffix}", "notes": "initial"},
     )
     assert s == 201, b
     vid = b["id"]
-    print(f"==> created vendor {vid[:8]} '{b['name']}'")
+    print(f"==> created supplier {vid[:8]} '{b['name']}'")
 
     # Empty patch → 422
-    s, b = _req("PATCH", f"/vendors/{vid}", token=token, json_body={})
+    s, b = _req("PATCH", f"/suppliers/{vid}", token=token, json_body={})
     assert s == 422 and b.get("code") == "empty_patch", b
     print("==> empty patch: 422 empty_patch")
 
     # Real patch → audit row written
     s, b = _req(
         "PATCH",
-        f"/vendors/{vid}",
+        f"/suppliers/{vid}",
         token=token,
         json_body={"notes": "edited", "phone": "+1 555 0100"},
     )
     assert s == 200, b
     assert b["notes"] == "edited", b
     assert b["phone"] == "+1 555 0100", b
-    print("==> patched vendor: notes + phone")
+    print("==> patched supplier: notes + phone")
 
-    rows = _audit_rows_for("meta.vendors", vid)
+    rows = _audit_rows_for("meta.suppliers", vid)
     update_rows = [r for r in rows if r["action"] == "updated"]
     assert update_rows, rows
     diff = update_rows[-1]["diff"]
@@ -155,36 +155,36 @@ def main() -> int:
     print(f"==> audit row written, diff fields = {sorted(diff.keys())}")
 
     # Duplicate name → 409
-    # Create a second vendor and try to rename the first to its name.
+    # Create a second supplier and try to rename the first to its name.
     s, other = _req(
         "POST",
-        "/vendors",
+        "/suppliers",
         token=token,
-        json_body={"name": f"Smoke Vendor Other {suffix}"},
+        json_body={"name": f"Smoke Supplier Other {suffix}"},
     )
     assert s == 201, other
     s, b = _req(
         "PATCH",
-        f"/vendors/{vid}",
+        f"/suppliers/{vid}",
         token=token,
         json_body={"name": other["name"]},
     )
-    assert s == 409 and b.get("code") == "vendor_name_conflict", b
-    print("==> rename to taken name: 409 vendor_name_conflict")
+    assert s == 409 and b.get("code") == "supplier_name_conflict", b
+    print("==> rename to taken name: 409 supplier_name_conflict")
 
     # DELETE → is_active=false + audit row
-    s, b = _req("DELETE", f"/vendors/{vid}", token=token)
+    s, b = _req("DELETE", f"/suppliers/{vid}", token=token)
     assert s == 200, b
     assert b["is_active"] is False, b
-    rows2 = _audit_rows_for("meta.vendors", vid)
+    rows2 = _audit_rows_for("meta.suppliers", vid)
     delete_rows = [r for r in rows2 if r["action"] == "deleted"]
     assert delete_rows and delete_rows[-1]["severity"] == "warning", delete_rows
-    print("==> soft-deleted vendor + audit (severity=warning)")
+    print("==> soft-deleted supplier + audit (severity=warning)")
 
     # Idempotent: second DELETE → 200, no new audit row
-    s, b = _req("DELETE", f"/vendors/{vid}", token=token)
+    s, b = _req("DELETE", f"/suppliers/{vid}", token=token)
     assert s == 200 and b["is_active"] is False, b
-    rows3 = _audit_rows_for("meta.vendors", vid)
+    rows3 = _audit_rows_for("meta.suppliers", vid)
     assert len(rows3) == len(rows2), (len(rows3), len(rows2))
     print("==> idempotent DELETE: no extra audit row")
 
