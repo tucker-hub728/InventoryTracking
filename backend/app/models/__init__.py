@@ -14,7 +14,9 @@ from app.models.audit import AuditEvent, ReauthConsumption, ReauthEvent
 from app.models.forecast import ForecastEntry
 from app.models.identity import Role, User
 from app.models.inventory import (
+    BomLine,
     Item,
+    ItemCategory,
     ItemStock,
     ItemVendor,
     Lot,
@@ -29,21 +31,21 @@ from app.models.locations import (
     LocationNode,
     LotAllocation,
 )
-from app.models.products import Customer, CustomerProduct, Product, ProductMaterial
+from app.models.products import Customer, CustomerItem
 
 __all__ = [
     "AuditEvent",
+    "BomLine",
     "Customer",
-    "CustomerProduct",
+    "CustomerItem",
     "ForecastEntry",
     "Item",
+    "ItemCategory",
     "ItemStock",
     "ItemVendor",
     "LocationNode",
     "Lot",
     "LotAllocation",
-    "Product",
-    "ProductMaterial",
     "ReauthConsumption",
     "ReauthEvent",
     "ReceiptEvent",

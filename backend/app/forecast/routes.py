@@ -28,6 +28,7 @@ from app.forecast.schemas import (
     ForecastSaveRequest,
     ForecastSaveResult,
 )
+from app.inventory import repository as inv_repo
 from app.models.forecast import ForecastEntry
 from app.products import repository as products_repo
 from app.security.permissions import RequirePermission
@@ -56,8 +57,10 @@ def _entry_to_read(e: ForecastEntry) -> ForecastEntryRead:
     return ForecastEntryRead(
         id=str(e.id),
         product_id=str(e.product_id),
-        product_sku=e.product.sku if e.product else "",
-        product_name=e.product.name if e.product else "",
+        # The forecasted finished good is now an Item: item_number ≈ "sku",
+        # description ≈ "name" (field names kept for the existing UI contract).
+        product_sku=e.product.item_number if e.product else "",
+        product_name=e.product.description if e.product else "",
         customer_id=str(e.customer_id) if e.customer_id else None,
         customer_name=e.customer.name if e.customer else None,
         year=e.forecast_year,
@@ -117,9 +120,15 @@ async def save_forecasts(
         product_uuid = _parse_uuid_or_422(ch.product_id, field="product_id")
         product = prod_cache.get(product_uuid)
         if product is None:
-            product = await products_repo.get_product(db, product_uuid)
+            # The forecast target is now a built (finished-good) item.
+            product = await inv_repo.get_item(db, product_uuid)
             if product is None:
-                raise NotFoundError(f"Product {ch.product_id} not found")
+                raise NotFoundError(f"Item {ch.product_id} not found")
+            if product.category is None or product.category.kind != "built":
+                raise ValidationError(
+                    "Forecasts can only target Product (built) items",
+                    code="item_not_built",
+                )
             prod_cache[product_uuid] = product
 
         customer_uuid: uuid.UUID | None = None
@@ -167,7 +176,7 @@ async def save_forecasts(
         if len(diffs) < _MAX_AUDIT_CHANGES:
             diffs.append(
                 {
-                    "product_sku": product.sku,
+                    "product_sku": product.item_number,
                     "customer": customer.name if customer else None,
                     "year": ch.year,
                     "month": ch.month,

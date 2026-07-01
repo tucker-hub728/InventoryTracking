@@ -16,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.inventory import (
+    BomLine,
     Item,
+    ItemCategory,
     ItemStock,
     ItemVendor,
     Lot,
@@ -129,8 +131,11 @@ def _apply_filters(
     q: str | None,
     vendor_id: uuid.UUID | None,
     status: str | None,
+    category_id: uuid.UUID | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
+    if category_id is not None:
+        stmt = stmt.where(Item.category_id == category_id)
     if vendor_id is not None:
         # Vendors live in ``meta.item_vendors`` now — filter items that have
         # the requested vendor in their assigned list.
@@ -175,6 +180,7 @@ async def list_items(
     q: str | None = None,
     vendor_id: uuid.UUID | None = None,
     status: str | None = None,
+    category_id: uuid.UUID | None = None,
     sort: SortField = "item_number",
     direction: SortDirection = "asc",
     limit: int = 50,
@@ -186,6 +192,7 @@ async def list_items(
         q=q,
         vendor_id=vendor_id,
         status=status,
+        category_id=category_id,
     )
 
     count_stmt = _apply_filters(
@@ -193,6 +200,7 @@ async def list_items(
         q=q,
         vendor_id=vendor_id,
         status=status,
+        category_id=category_id,
     )
     total = int((await session.execute(count_stmt)).scalar_one())
 
@@ -221,6 +229,7 @@ async def create_item(
     *,
     item_number: str,
     description: str,
+    category_id: uuid.UUID,
     created_by_user_id: uuid.UUID,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
@@ -234,6 +243,7 @@ async def create_item(
     item = Item(
         item_number=item_number,
         description=description,
+        category_id=category_id,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
         near_expiry_threshold_days=near_expiry_threshold_days,
@@ -295,6 +305,7 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     return {
         "item_number": item.item_number,
         "description": item.description,
+        "category_id": str(item.category_id),
         "vendor_ids": sorted(str(iv.vendor_id) for iv in item.vendors),
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
@@ -395,6 +406,49 @@ async def compute_item_valuations(
         row[2] = Decimal(qty_on_order)
 
     return {k: (v[0], v[1], v[2]) for k, v in rows.items()}
+
+
+# ── Categories + BOM helpers (shared by items + catalog modules) ────────
+
+
+async def get_category(
+    session: AsyncSession, category_id: uuid.UUID
+) -> ItemCategory | None:
+    """Fetch one live (non-deleted) category."""
+    stmt = select(ItemCategory).where(
+        ItemCategory.id == category_id,
+        ItemCategory.deleted_at.is_(None),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def item_has_lots(session: AsyncSession, item_id: uuid.UUID) -> bool:
+    """True if the item has any live lot — i.e. it has been received as stock.
+    Used to block re-typing a received (Purchased) item into a Product."""
+    stmt = (
+        select(Lot.id)
+        .where(Lot.item_id == item_id, Lot.deleted_at.is_(None))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
+
+
+async def items_with_bom(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> set[uuid.UUID]:
+    """Subset of ``item_ids`` that have at least one live BOM line (i.e. are
+    expandable in the structure tree)."""
+    if not item_ids:
+        return set()
+    stmt = (
+        select(BomLine.parent_item_id)
+        .where(
+            BomLine.parent_item_id.in_(item_ids),
+            BomLine.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    return set((await session.execute(stmt)).scalars().all())
 
 
 # ── Lots ───────────────────────────────────────────────────────────────

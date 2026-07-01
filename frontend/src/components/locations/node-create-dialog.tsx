@@ -24,7 +24,7 @@ import {
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { customersApi, type Customer } from '@/lib/api/customers';
-import { productsApi, type Product } from '@/lib/api/products';
+import { itemsApi } from '@/lib/api/items';
 import {
   locationNodesApi,
   CHILD_TYPES_OF,
@@ -86,7 +86,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
   const [dedKind, setDedKind] = React.useState<DedicationKind>('none');
   const [dedTarget, setDedTarget] = React.useState('');
   const [customers, setCustomers] = React.useState<Customer[]>([]);
-  const [products, setProducts] = React.useState<Product[]>([]);
+  const [products, setProducts] = React.useState<{ id: string; name: string }[]>([]);
 
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -135,7 +135,14 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
     const ctrl = new AbortController();
     Promise.all([
       customersApi.list({}, { signal: ctrl.signal }).catch(() => []),
-      productsApi.list({}, { signal: ctrl.signal }).catch(() => []),
+      itemsApi
+        .list({ limit: 200 }, { signal: ctrl.signal })
+        .then((resp) =>
+          resp.items
+            .filter((i) => i.category_kind === 'built')
+            .map((i) => ({ id: i.id, name: `${i.item_number} · ${i.description}` })),
+        )
+        .catch(() => []),
     ]).then(([cs, ps]) => {
       setCustomers(cs);
       setProducts(ps);

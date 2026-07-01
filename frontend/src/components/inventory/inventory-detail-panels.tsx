@@ -3,11 +3,12 @@
 import * as React from 'react';
 
 import { EmptyState } from '@/components/shared/empty-state';
-import { ItemProductsTab } from '@/components/products/item-products-tab';
 import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timeline';
 
 import { LedgerExpiryToolbar, LedgerTable, useLedgerExpiryControls } from './ledger-table';
 import { ForecastImpactTab } from './forecast-impact-tab';
+import { ItemBomTab } from './item-bom-tab';
+import { ItemBomTreeTab } from './item-bom-tree-tab';
 import { useInventoryDetail } from './inventory-detail-context';
 
 /**
@@ -67,9 +68,24 @@ export function ItemLedgerPanel() {
   );
 }
 
+/** Purchased "Products" tab + Product "BOM" tab both use ItemBomTab, which
+ *  branches on the item kind (purchased → where-used only; built → BOM editor
+ *  + where-used). */
 export function ItemProductsPanel() {
   const { item } = useInventoryDetail();
-  return <ItemProductsTab itemId={item.uuid} />;
+  return (
+    <ItemBomTab
+      itemId={item.uuid}
+      itemNumber={item.id}
+      itemKind={item.categoryKind}
+    />
+  );
+}
+
+/** Product "Structure" tab — the read-only multi-level BOM hierarchy. */
+export function ItemStructurePanel() {
+  const { item } = useInventoryDetail();
+  return <ItemBomTreeTab itemId={item.uuid} itemNumber={item.id} />;
 }
 
 export function ItemForecastPanel() {

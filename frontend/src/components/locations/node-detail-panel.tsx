@@ -53,7 +53,7 @@ import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog
 import { ApiError } from '@/lib/api/client';
 import { lotsApi, type Lot } from '@/lib/api/lots';
 import { customersApi } from '@/lib/api/customers';
-import { productsApi } from '@/lib/api/products';
+import { itemsApi } from '@/lib/api/items';
 import type { ReauthResponse } from '@/lib/api/auth';
 import { cn } from '@/lib/utils';
 import {
@@ -240,7 +240,10 @@ export function NodeDetailPanel({
     (async () => {
       try {
         if (custId) setDedName((await customersApi.get(custId, { signal: ctrl.signal })).name);
-        else if (prodId) setDedName((await productsApi.get(prodId, { signal: ctrl.signal })).name);
+        else if (prodId) {
+          const it = await itemsApi.get(prodId, { signal: ctrl.signal });
+          setDedName(`${it.item_number} · ${it.description}`);
+        }
       } catch {
         setDedName(null);
       }
@@ -1732,7 +1735,14 @@ function EditDialog({
     const ctrl = new AbortController();
     Promise.all([
       customersApi.list({}, { signal: ctrl.signal }).catch(() => []),
-      productsApi.list({}, { signal: ctrl.signal }).catch(() => []),
+      itemsApi
+        .list({ limit: 200 }, { signal: ctrl.signal })
+        .then((resp) =>
+          resp.items
+            .filter((i) => i.category_kind === 'built')
+            .map((i) => ({ id: i.id, name: `${i.item_number} · ${i.description}` })),
+        )
+        .catch(() => []),
     ]).then(([cs, ps]) => {
       setCustomers(cs);
       setProducts(ps);

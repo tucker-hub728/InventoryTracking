@@ -46,6 +46,7 @@ export function InventoryListClient() {
   // these *primitives* actually changes.
   const query = useInventoryStore((s) => s.query);
   const status = useInventoryStore((s) => s.status);
+  const categoryId = useInventoryStore((s) => s.categoryId);
   const sortKey = useInventoryStore((s) => s.sortKey);
   const sortDir = useInventoryStore((s) => s.sortDir);
   const page = useInventoryStore((s) => s.page);
@@ -59,7 +60,7 @@ export function InventoryListClient() {
     const ctrl = new AbortController();
     void fetchItems({ signal: ctrl.signal });
     return () => ctrl.abort();
-  }, [fetchItems, query, status, sortKey, sortDir, page, pageSize]);
+  }, [fetchItems, query, status, categoryId, sortKey, sortDir, page, pageSize]);
 
   // KPI tile inputs — until the movements module ships and we have a
   // ``/items/summary`` endpoint, derive what we can from the current

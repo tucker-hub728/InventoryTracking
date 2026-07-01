@@ -165,10 +165,15 @@ def _item_to_read(
         Decimal("0"),
         Decimal("0"),
     )
+    category = item.category
     return ItemRead(
         id=str(item.id),
         item_number=item.item_number,
         description=item.description,
+        category_id=str(item.category_id),
+        category_name=category.name if category else "",
+        category_kind=category.kind if category else "purchased",  # type: ignore[arg-type]
+        category_tone=category.tone if category else "neutral",
         vendors=[
             ItemVendorRead(
                 vendor_id=str(iv.vendor_id),
@@ -435,6 +440,9 @@ async def list_items(
     db: DBSession,
     q: Annotated[str | None, Query(description="Search description + item_number")] = None,
     vendor_id: Annotated[uuid.UUID | None, Query()] = None,
+    category_id: Annotated[
+        uuid.UUID | None, Query(description="Filter by item category")
+    ] = None,
     status_filter: Annotated[
         Literal["available", "low_stock", "out_of_stock"] | None,
         Query(
@@ -455,12 +463,14 @@ async def list_items(
         q=q,
         vendor_id=vendor_id,
         status=status_filter,
+        category_id=category_id,
         sort=sort,
         direction=direction,
         limit=limit,
         offset=offset,
     )
-    valuations = await inv_repo.compute_item_valuations(db, [i.id for i in items])
+    ids = [i.id for i in items]
+    valuations = await inv_repo.compute_item_valuations(db, ids)
     return ItemListResponse(
         items=[_item_to_read(i, valuations.get(i.id)) for i in items],
         total=total,
@@ -529,11 +539,17 @@ async def create_item(
     # Validate the assigned-vendor list (each must be an existing vendor).
     vendor_uuids = await _resolve_item_vendor_ids(db, payload.vendor_ids)
 
+    # Validate the category exists.
+    category_uuid = _parse_uuid_or_422(payload.category_id, field="category_id")
+    if (await inv_repo.get_category(db, category_uuid)) is None:
+        raise NotFoundError(f"Category {payload.category_id} not found")
+
     try:
         item = await inv_repo.create_item(
             db,
             item_number=payload.item_number,
             description=payload.description,
+            category_id=category_uuid,
             created_by_user_id=current.id,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
@@ -596,6 +612,34 @@ async def update_item(
     vendor_uuids: list[uuid.UUID] | None = None
     if vendor_ids is not None:
         vendor_uuids = await _resolve_item_vendor_ids(db, vendor_ids)
+
+    # Re-categorise: validate the target category, and block moving a
+    # BOM-bearing item into a purchased category (that would orphan its BOM).
+    if "category_id" in patch:
+        category_uuid = _parse_uuid_or_422(
+            str(patch["category_id"]), field="category_id"
+        )
+        target_category = await inv_repo.get_category(db, category_uuid)
+        if target_category is None:
+            raise NotFoundError(f"Category {patch['category_id']} not found")
+        if target_category.kind == "purchased":
+            # A Product with a BOM can't become Purchased (would orphan its BOM).
+            if item.id in await inv_repo.items_with_bom(db, [item.id]):
+                raise ConflictError(
+                    "Remove this item's bill of materials before moving it to a "
+                    "purchased category",
+                    code="bom_present",
+                )
+        elif target_category.kind == "built":
+            # A received (stocked) item can't become a Product — Products are
+            # built, not received, and we don't surface on-hand stock for them.
+            if await inv_repo.item_has_lots(db, item.id):
+                raise ConflictError(
+                    "This item has received stock (lots) and can't be changed to "
+                    "a Product category. Products are built, not received.",
+                    code="item_received",
+                )
+        patch["category_id"] = category_uuid
 
     if not patch and vendor_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")

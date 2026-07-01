@@ -1,10 +1,8 @@
-"""Product module — products, their bill of materials, and customers.
+"""Customer module — customers and their linked finished-good items.
 
-A **product** is a sellable/buildable finished good (a name + a BOM). The
-BOM (``app.product_materials``) lists the inventory ``items`` consumed per
-production run, carrying each item's live stock for the Available / Stock
-Status columns. **Customers** (``app.customers``) link to products
-many-to-many via ``app.customer_products``.
+Products / BOM moved into the unified catalogue (``items`` + ``bom_lines``,
+see ``app.catalog``). What remains here is the **Customer** and its
+many-to-many link to finished-good items (``app.customer_items``).
 
 Routes live in ``routes.py`` and are mounted by ``app.api.v1.router``.
 Persistence goes through ``repository.py`` (same caller-commits convention

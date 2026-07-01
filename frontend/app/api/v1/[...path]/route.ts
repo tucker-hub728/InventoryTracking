@@ -114,8 +114,12 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
 
   // Cache the body so we can replay it on a 401 retry. Reading a
   // NextRequest body is one-shot; an ArrayBuffer survives a replay.
-  const body =
-    method === 'GET' || method === 'DELETE' ? undefined : await req.arrayBuffer();
+  // DELETE may legitimately carry a body (e-signed deletes send
+  // ``{evidence_id, reason}``), so forward it whenever one is present —
+  // only GET is guaranteed body-less. Empty bodies are normalised to
+  // ``undefined`` so a body-less DELETE/POST isn't sent a 0-byte payload.
+  const rawBody = method === 'GET' ? undefined : await req.arrayBuffer();
+  const body = rawBody && rawBody.byteLength > 0 ? rawBody : undefined;
 
   // ── First attempt ───────────────────────────────────────────────────
   let upstream: Response | null = null;

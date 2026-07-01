@@ -16,10 +16,19 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
 import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
 
 import { VendorMultiSelect } from './vendor-multi-select';
 
@@ -36,6 +45,9 @@ const schema = z.object({
     .min(1, 'Item # is required')
     .max(64, 'Item # must be at most 64 characters'),
   desc: z.string().min(3, 'Description is required'),
+  // Required category — governs whether the item is a Product (built) or
+  // Purchased, and thus BOM eligibility.
+  categoryId: z.string().min(1, 'Category is required'),
   // Assigned vendors — zero-or-more. The only vendors this item can later be
   // received against. Optional: an item may start with none and add later.
   vendorIds: z.array(z.string()).default([]),
@@ -71,6 +83,8 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
   const [vendorsLoading, setVendorsLoading] = React.useState(false);
   const [vendorsError, setVendorsError] = React.useState<string | null>(null);
 
+  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
+
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
@@ -85,6 +99,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
     defaultValues: {
       itemId: '',
       desc: '',
+      categoryId: '',
       vendorIds: [],
       leadDays: 0,
       threshold: 0,
@@ -93,6 +108,13 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
   });
 
   const vendorIds = watch('vendorIds');
+  const categoryId = watch('categoryId');
+
+  // Purchasing fields (vendors, lead time, reorder + near-expiry) only apply to
+  // Purchased categories — a Product is built, not bought. Shown once a
+  // Purchased category is picked; hidden for Product / before a pick.
+  const selectedCategory = categories.find((c) => c.id === categoryId);
+  const showPurchasing = selectedCategory?.kind === 'purchased';
 
   // ── Side effects ─────────────────────────────────────────────────────
 
@@ -112,6 +134,19 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
         );
       })
       .finally(() => setVendorsLoading(false));
+    return () => ctrl.abort();
+  }, [open]);
+
+  // Load categories once when the dialog opens.
+  React.useEffect(() => {
+    if (!open) return;
+    const ctrl = new AbortController();
+    categoriesApi
+      .list({ signal: ctrl.signal })
+      .then(setCategories)
+      .catch(() => {
+        /* surfaced via the empty dropdown */
+      });
     return () => ctrl.abort();
   }, [open]);
 
@@ -138,6 +173,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       const created = await createItem({
         item_number: data.itemId,
         description: data.desc,
+        category_id: data.categoryId,
         vendor_ids: data.vendorIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
@@ -199,6 +235,37 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
               </Field>
             </div>
 
+            <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
+              <Select
+                value={categoryId}
+                onValueChange={(v) =>
+                  setValue('categoryId', v, { shouldValidate: true })
+                }
+              >
+                <SelectTrigger id="ni-category" aria-label="Category">
+                  <SelectValue placeholder="Pick a category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {categories.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      <span className="flex items-center gap-2">
+                        <span className="truncate">{c.name}</span>
+                        <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
+                          {c.kind === 'built' ? 'Product' : 'Purchased'}
+                        </Badge>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-text-3">
+                The category decides whether this is a Product (can have a BOM) or
+                a Purchased item. Manage the BOM from the item&apos;s detail page.
+              </p>
+            </Field>
+
+            {showPurchasing && (
+              <>
             <Field
               id="ni-vendors"
               label="Vendors"
@@ -260,10 +327,13 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
                 />
               </Field>
             </div>
+              </>
+            )}
 
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
-              After creating, you’ll be able to record the first unit in to bring the
-              item into stock. The item is initially created with zero balance.
+              {showPurchasing
+                ? 'After creating, you’ll be able to record the first unit in to bring the item into stock. The item is initially created with zero balance.'
+                : 'After creating, open the item’s detail page to define its bill of materials. The item is initially created with zero balance.'}
             </p>
 
             {submitError && (

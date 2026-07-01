@@ -28,10 +28,18 @@ export interface ApiItemVendor {
 }
 
 /** Raw API row — numeric fields come back as strings (Postgres NUMERIC). */
+export type ApiCategoryKind = 'purchased' | 'built';
+
 export interface ApiItem {
   id: string;
   item_number: string;
   description: string;
+  /** Category (requirements v2 §6). ``category_kind`` drives the Type column:
+   *  built → "Product" (may have a BOM), purchased → bought as-is. */
+  category_id: string;
+  category_name: string;
+  category_kind: ApiCategoryKind;
+  category_tone: string;
   /** Assigned vendors — the vendors this item can be received against. */
   vendors: ApiItemVendor[];
   avg_lead_days: number | null;
@@ -71,6 +79,8 @@ export type ApiSortDirection = 'asc' | 'desc';
 export interface ListItemsParams {
   q?: string | null;
   vendor_id?: string | null;
+  /** Filter by item category (server-side). */
+  category_id?: string | null;
   /** Filter by ``v_item_stock.status_code`` (server-side). */
   status?: ApiItemStatus | null;
   sort?: ApiSortField;
@@ -82,6 +92,8 @@ export interface ListItemsParams {
 export interface ItemCreateInput {
   item_number: string;
   description: string;
+  /** Required — the item's category (governs BOM eligibility). */
+  category_id: string;
   /** Assigned vendors (zero-or-more). The only vendors the item can later
    *  be received against. */
   vendor_ids?: string[];
@@ -97,6 +109,9 @@ export interface ItemCreateInput {
  */
 export interface ItemUpdateInput {
   description?: string;
+  /** Re-categorise the item. Blocked server-side if moving a BOM-bearing
+   *  item to a purchased category. */
+  category_id?: string;
   vendor_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
@@ -112,6 +127,7 @@ export const itemsApi = {
       query: {
         q: params.q ?? undefined,
         vendor_id: params.vendor_id ?? undefined,
+        category_id: params.category_id ?? undefined,
         status: params.status ?? undefined,
         sort: params.sort,
         direction: params.direction,

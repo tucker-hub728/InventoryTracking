@@ -2,11 +2,17 @@
  * Customers API surface — wraps ``/api/v1/customers``.
  *
  * A customer has a name, optional contact + email, and links to many
- * products (the link set is sent as ``product_ids`` on create/update).
+ * finished-good **items** (the link set is sent as ``item_ids`` on
+ * create/update).
  */
 
 import { api } from './client';
-import type { LinkedRef } from './products';
+
+/** Lightweight ``{id, name}`` reference for list badges. */
+export interface LinkedRef {
+  id: string;
+  name: string;
+}
 
 export interface Customer {
   id: string;
@@ -17,25 +23,26 @@ export interface Customer {
   updated_at: string;
   created_by_user_id: string;
   updated_by_user_id: string;
-  products: LinkedRef[];
+  /** Linked finished-good items (label is "ITEM# · description"). */
+  items: LinkedRef[];
 }
 
 export interface CustomerCreateInput {
   name: string;
   contact_person?: string | null;
   email?: string | null;
-  product_ids?: string[];
+  item_ids?: string[];
 }
 
 /**
- * Partial update. ``product_ids``, when present, REPLACES the linked set;
+ * Partial update. ``item_ids``, when present, REPLACES the linked set;
  * omit it to leave links unchanged, send ``[]`` to clear them.
  */
 export interface CustomerUpdateInput {
   name?: string;
   contact_person?: string | null;
   email?: string | null;
-  product_ids?: string[];
+  item_ids?: string[];
 }
 
 export const customersApi = {

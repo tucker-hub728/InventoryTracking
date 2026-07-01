@@ -58,6 +58,8 @@ interface FilterState {
   /** UI display label. Forwarded to the API only when it maps to a
    *  status the backend view can compute (see ``STATUS_CODE_BY_LABEL``). */
   status: InventoryStatus | 'all';
+  /** Item-category id filter, or 'all'. */
+  categoryId: string | 'all';
   sortKey: SortKey;
   sortDir: SortDir;
   page: number;
@@ -84,6 +86,7 @@ interface InventoryStore extends FilterState, DataState {
   // existing components don't need to change).
   setQuery: (q: string) => void;
   setStatus: (s: InventoryStatus | 'all') => void;
+  setCategory: (c: string | 'all') => void;
   setSort: (key: SortKey, dir?: SortDir) => void;
   toggleSort: (key: SortKey) => void;
   setPage: (p: number) => void;
@@ -110,6 +113,7 @@ interface InventoryStore extends FilterState, DataState {
 const initialFilters: FilterState = {
   query: '',
   status: 'all',
+  categoryId: 'all',
   sortKey: 'id',
   sortDir: 'asc',
   page: 1,
@@ -140,6 +144,7 @@ export const useInventoryStore = create<InventoryStore>()(
       // ── Filter mutators ────────────────────────────────────────────
       setQuery: (query) => set({ query, page: 1 }),
       setStatus: (status) => set({ status, page: 1 }),
+      setCategory: (categoryId) => set({ categoryId, page: 1 }),
       setSort: (sortKey, sortDir) => set({ sortKey, sortDir: sortDir ?? 'asc', page: 1 }),
       toggleSort: (sortKey) => {
         const cur = get();
@@ -170,6 +175,7 @@ export const useInventoryStore = create<InventoryStore>()(
             {
               q: s.query.trim() || undefined,
               status: statusCode,
+              category_id: s.categoryId === 'all' ? undefined : s.categoryId,
               sort: apiSort,
               direction: apiDirection,
               limit: s.pageSize,
@@ -232,6 +238,7 @@ export const useInventoryStore = create<InventoryStore>()(
       partialize: (s): FilterState => ({
         query: s.query,
         status: s.status,
+        categoryId: s.categoryId,
         sortKey: s.sortKey,
         sortDir: s.sortDir,
         page: s.page,

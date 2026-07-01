@@ -32,7 +32,8 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.products import Customer, Product
+from app.models.inventory import Item
+from app.models.products import Customer
 
 
 class ForecastEntry(Base):
@@ -71,9 +72,11 @@ class ForecastEntry(Base):
         default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    # The forecasted finished good — a *built*-category item (enforced in the
+    # route). Column name kept as ``product_id`` for continuity.
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("app.products.id", ondelete="CASCADE"),
+        ForeignKey("app.items.id", ondelete="CASCADE"),
         nullable=False,
     )
     # Optional: NULL = a product-level ("Unassigned") forecast.
@@ -106,7 +109,12 @@ class ForecastEntry(Base):
         nullable=False,
     )
 
-    # Eager-joined so a read hydrates sku/name in one query (same pattern as
-    # ProductMaterial). ``customer`` is optional.
-    product: Mapped[Product] = relationship(lazy="joined", viewonly=True)
-    customer: Mapped[Customer | None] = relationship(lazy="joined", viewonly=True)
+    # Eager-joined so a read hydrates the finished good (item_number/description)
+    # in one query. ``customer`` is optional. ``product`` keeps its name but now
+    # points at the unified Item.
+    product: Mapped[Item] = relationship(
+        foreign_keys=[product_id], lazy="joined", viewonly=True
+    )
+    customer: Mapped[Customer | None] = relationship(
+        foreign_keys=[customer_id], lazy="joined", viewonly=True
+    )

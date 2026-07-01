@@ -2,12 +2,13 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { notFound, usePathname } from 'next/navigation';
+import { notFound, usePathname, useRouter } from 'next/navigation';
 import { ArrowLeft, Loader2, Pencil } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
@@ -17,18 +18,28 @@ import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber } from '@/lib/utils';
 import { movementsApi, type ApiMovement } from '@/lib/api/movements';
 import { apiMovementsToLedgerEntries } from '@/lib/api/movements-adapter';
-import { productsApi } from '@/lib/api/products';
+import { bomApi } from '@/lib/api/bom';
 import { forecastApi } from '@/lib/api/forecast';
 import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
 
-const TABS = [
+// Purchased items are *received into stock* — they get the ledger, the
+// "used in" (Products) view, forecast impact, and audit.
+const PURCHASED_TABS = [
   { seg: 'ledger', label: 'Unit Ledger' },
   { seg: 'products', label: 'Products' },
   { seg: 'forecast', label: 'Forecast Impact' },
   { seg: 'audit', label: 'Audit History' },
+] as const;
+
+// Product (built) items are *assembled from a BOM* — no stock ledger/snapshot.
+// They get the multi-level structure (hierarchy) and the BOM editor.
+// (Forecast + Audit for Products are deferred.)
+const PRODUCT_TABS = [
+  { seg: 'structure', label: 'Structure' },
+  { seg: 'bom', label: 'BOM' },
 ] as const;
 
 /**
@@ -46,6 +57,7 @@ export function InventoryDetailShell({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const fetchOne = useInventoryStore((s) => s.fetchOne);
   const canSign = usePermission('inventory', 'sign');
   const canCreate = usePermission('inventory', 'create');
@@ -112,14 +124,16 @@ export function InventoryDetailShell({
     return () => ctrl.abort();
   }, [item]);
 
-  // Forecast demand = Σ products-using-item (qty_per_run × the product's runs
-  // this year). Left null if the forecast API is unavailable (e.g. pre-migration).
+  // Forecast demand = Σ over the items that consume this one (where-used)
+  // of (qty_per_run × that parent's forecast runs this year). Left null if the
+  // forecast API is unavailable. Only relevant for Purchased items (the demand
+  // shows in their Snapshot aside); Products have no stock snapshot.
   React.useEffect(() => {
-    if (!item) return;
+    if (!item || item.categoryKind === 'built') return;
     const ctrl = new AbortController();
     setDemand(null);
     Promise.all([
-      productsApi.usingItem(item.uuid, { signal: ctrl.signal }),
+      bomApi.whereUsed(item.uuid, { signal: ctrl.signal }),
       forecastApi.list({ year: currentYear }, { signal: ctrl.signal }),
     ])
       .then(([using, entries]) => {
@@ -127,7 +141,7 @@ export function InventoryDetailShell({
         const total = using.reduce((sum, p) => {
           const perRun = Number(p.qty_per_run ?? 0);
           const runs = entries
-            .filter((e) => e.productId === p.id)
+            .filter((e) => e.productId === p.parent_item_id)
             .reduce((r, e) => r + e.runs, 0);
           return sum + perRun * runs;
         }, 0);
@@ -147,6 +161,21 @@ export function InventoryDetailShell({
   const refresh = React.useCallback(() => {
     void load();
   }, [load]);
+
+  // Kind-aware tabs. The server-side index redirect can't know the item kind,
+  // so if we land on a segment that doesn't belong to this item's kind
+  // (e.g. a Product on /ledger, or a Purchased item on /structure), bounce to
+  // the kind's first tab.
+  const built = item?.categoryKind === 'built';
+  const tabs = built ? PRODUCT_TABS : PURCHASED_TABS;
+  React.useEffect(() => {
+    if (!item) return;
+    const seg = pathname.split('/').pop();
+    const valid = (built ? PRODUCT_TABS : PURCHASED_TABS).map((t) => t.seg) as string[];
+    if (seg && !valid.includes(seg)) {
+      router.replace(`/inventory/${item.id}/${valid[0]}`);
+    }
+  }, [item, built, pathname, router]);
 
   // ── Loading / error shells ───────────────────────────────────────────
   if (loading && item === null) {
@@ -192,9 +221,20 @@ export function InventoryDetailShell({
           <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-accent">{item.id}</span>
             <span aria-hidden>·</span>
-            <span>{item.vendor || '— No vendor —'}</span>
-            <span aria-hidden>·</span>
-            <StatusBadge status={item.status} />
+            <Badge tone={(item.categoryTone as never) ?? 'neutral'} dot>
+              {item.categoryName}
+            </Badge>
+            <Badge tone={built ? 'accent' : 'neutral'}>
+              {built ? 'Product' : 'Purchased'}
+            </Badge>
+            {!built && (
+              <>
+                <span aria-hidden>·</span>
+                <span>{item.vendor || '— No vendor —'}</span>
+                <span aria-hidden>·</span>
+                <StatusBadge status={item.status} />
+              </>
+            )}
           </span>
         }
         actions={
@@ -214,7 +254,8 @@ export function InventoryDetailShell({
       />
 
       <div className="px-6 py-5 sm:px-8">
-        <div className="grid gap-5 lg:grid-cols-[280px_1fr]">
+        <div className={cn('grid gap-5', !built && 'lg:grid-cols-[280px_1fr]')}>
+          {!built && (
           <aside className="space-y-3">
             <Card>
               <CardHeader>
@@ -291,6 +332,7 @@ export function InventoryDetailShell({
               </CardContent>
             </Card>
           </aside>
+          )}
 
           <Card className="min-w-0 overflow-hidden">
             <div className="border-b border-border px-4">
@@ -298,7 +340,7 @@ export function InventoryDetailShell({
                 className="inline-flex items-center justify-start gap-1"
                 aria-label="Item sections"
               >
-                {TABS.map((t) => {
+                {tabs.map((t) => {
                   const active = activeSeg === t.seg;
                   return (
                     <Link

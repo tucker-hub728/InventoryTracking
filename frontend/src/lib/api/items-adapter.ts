@@ -36,6 +36,10 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     id: api.item_number,
     uuid: api.id,
     desc: api.description,
+    categoryId: api.category_id,
+    categoryName: api.category_name,
+    categoryKind: api.category_kind,
+    categoryTone: api.category_tone,
     // Items can have multiple assigned vendors — show them joined. Empty
     // when the item has no vendors yet.
     vendor: api.vendors.map((v) => v.vendor_name).join(', '),

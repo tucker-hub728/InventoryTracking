@@ -5,7 +5,7 @@ import {
   History,
   LineChart,
   MapPin,
-  Package,
+  Tags,
   Truck,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -41,7 +41,7 @@ export const navSections: readonly NavSection[] = [
     items: [
       { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
-      { id: 'products', label: 'Products', href: '/products', icon: Package, resource: 'inventory' },
+      { id: 'categories', label: 'Categories', href: '/categories', icon: Tags, resource: 'inventory' },
       { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
       { id: 'forecast', label: 'Forecast', href: '/forecast', icon: LineChart, resource: 'inventory' },
       // Hidden for now — route stays wired; uncomment to restore.

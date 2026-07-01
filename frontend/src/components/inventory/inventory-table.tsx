@@ -13,9 +13,11 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { StatusBadge } from '@/components/shared/status-badge';
+import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
 import { useInventoryStore, type SortKey } from '@/stores/inventory.store';
 import { cn, formatNumber } from '@/lib/utils';
+import type { BadgeTone } from '@/types/ui';
 import type { InventoryItem } from '@/types/inventory';
 
 // Only the columns the backend can actually sort on are clickable. UI-only
@@ -38,10 +40,12 @@ interface Column {
 // On-PO and Reorder were dropped from this main list (they pushed the
 // table into horizontal scroll); both remain on the item detail screen.
 const COLUMNS: Column[] = [
-  { key: 'id', label: 'Item ID', sortKey: 'id', className: 'w-[110px]' },
+  { key: 'id', label: 'Item #', sortKey: 'id', className: 'w-[110px]' },
   { key: 'desc', label: 'Name', sortKey: 'desc' },
-  { key: 'vendor', label: 'Vendor', className: 'w-[160px]' },
-  { key: 'qty', label: 'Units', align: 'right', className: 'w-[96px]' },
+  { key: 'categoryName', label: 'Category', className: 'w-[170px]' },
+  { key: 'categoryKind', label: 'Type', className: 'w-[100px]' },
+  { key: 'vendor', label: 'Vendor', className: 'w-[150px]' },
+  { key: 'qty', label: 'Units', align: 'right', className: 'w-[90px]' },
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter
   // doesn't populate yet (per-item lot expiry isn't rolled up at item
   // level). Column re-lands once ``v_item_lot_summary`` ships.
@@ -77,7 +81,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
   }
 
   return (
-    <Table className="min-w-[930px] table-fixed">
+    <Table className="min-w-[1080px] table-fixed">
       <TableHeader>
         <TableRow>
           {COLUMNS.map((c) => {
@@ -114,6 +118,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
       </TableHeader>
       <TableBody>
         {rows.map((item) => {
+          const isBuilt = item.categoryKind === 'built';
           const lowQty = item.qtyAvailable > 0 && item.qtyAvailable <= item.threshold;
           // Units shown = available (excludes date-expired lots), clamped at 0
           // so a data artifact (expired-lot units exceeding on-hand) never
@@ -122,11 +127,16 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
           // list, not just detail.
           const availableShown = Math.max(0, item.qtyAvailable);
           const expired = Math.max(0, item.qty - item.qtyAvailable);
+          // Products open on their Structure tab; Purchased on the Ledger.
+          const detailHref =
+            item.categoryKind === 'built'
+              ? `/inventory/${item.id}/structure`
+              : `/inventory/${item.id}/ledger`;
           return (
             <TableRow key={item.id} className="group">
               <TableCell className="font-mono text-xs">
                 <Link
-                  href={`/inventory/${item.id}/ledger`}
+                  href={detailHref}
                   className="text-accent transition-opacity hover:opacity-80"
                 >
                   {item.id}
@@ -134,37 +144,61 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
               </TableCell>
               <TableCell className="truncate">
                 <Link
-                  href={`/inventory/${item.id}/ledger`}
+                  href={detailHref}
                   title={item.desc}
                   className="text-sm font-medium text-text transition-colors hover:text-accent"
                 >
                   {item.desc}
                 </Link>
               </TableCell>
+              <TableCell className="truncate" title={item.categoryName}>
+                {item.categoryName ? (
+                  <Badge tone={(item.categoryTone as BadgeTone) ?? 'neutral'} dot>
+                    {item.categoryName}
+                  </Badge>
+                ) : (
+                  <span className="text-text-3">—</span>
+                )}
+              </TableCell>
+              <TableCell>
+                <Badge tone={item.categoryKind === 'built' ? 'accent' : 'neutral'}>
+                  {item.categoryKind === 'built' ? 'Product' : 'Purchased'}
+                </Badge>
+              </TableCell>
               <TableCell className="truncate text-xs text-text-2" title={item.vendor}>
                 {item.vendor || '—'}
               </TableCell>
+              {/* Products aren't stocked (built on demand), so on-hand
+                  Units + Stock status don't apply — both read "—". */}
               <TableCell
                 className={cn(
                   'text-right font-mono text-xs',
-                  item.qtyAvailable <= 0 && 'text-danger',
-                  lowQty && 'text-warning',
+                  !isBuilt && item.qtyAvailable <= 0 && 'text-danger',
+                  !isBuilt && lowQty && 'text-warning',
                 )}
               >
-                <div className="flex flex-col items-end leading-tight">
-                  <span className="font-semibold">{formatNumber(availableShown)}</span>
-                  {expired > 0 && (
-                    <span
-                      className="text-[10px] font-normal text-text-3"
-                      title={`${formatNumber(expired)} expired unit(s) on hand (excluded from available)`}
-                    >
-                      +{formatNumber(expired)} exp
-                    </span>
-                  )}
-                </div>
+                {isBuilt ? (
+                  <span className="text-text-3">—</span>
+                ) : (
+                  <div className="flex flex-col items-end leading-tight">
+                    <span className="font-semibold">{formatNumber(availableShown)}</span>
+                    {expired > 0 && (
+                      <span
+                        className="text-[10px] font-normal text-text-3"
+                        title={`${formatNumber(expired)} expired unit(s) on hand (excluded from available)`}
+                      >
+                        +{formatNumber(expired)} exp
+                      </span>
+                    )}
+                  </div>
+                )}
               </TableCell>
               <TableCell>
-                <StatusBadge status={item.status} />
+                {isBuilt ? (
+                  <span className="text-text-3">—</span>
+                ) : (
+                  <StatusBadge status={item.status} />
+                )}
               </TableCell>
               <TableCell className="font-mono text-xs text-text-2">
                 {formatUpdated(item.updatedAt)}

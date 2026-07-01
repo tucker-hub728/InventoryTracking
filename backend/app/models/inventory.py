@@ -77,11 +77,97 @@ class Vendor(Base):
     )
 
 
+# Item-category kind (requirements v2 §6). A category is either:
+#   * purchased — its items are bought as-is (raw components / materials)
+#   * built     — its items are assembled from a BOM (sub-assemblies, finished
+#                 goods). Surfaced in the UI as "Product".
+# The kind is fixed at creation and decides whether an item may carry a BOM.
+ITEM_CATEGORY_KINDS: tuple[str, ...] = ("purchased", "built")
+
+
+class ItemCategory(Base):
+    """A user-managed item category (finished goods, sub-assemblies, …).
+
+    Every :class:`Item` belongs to exactly one category. The category's
+    ``kind`` (purchased vs built) is inherited by its items and governs BOM
+    eligibility. Seeded with the five client categories; users can add more.
+    """
+
+    __tablename__ = "item_categories"
+    __table_args__ = (
+        Index(
+            "uq_item_categories_name",
+            func.lower(text("name")),
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index("ix_item_categories_updated_at_desc", text("updated_at DESC")),
+        CheckConstraint(
+            "char_length(trim(name)) > 0",
+            name="ck_item_categories_name_not_blank",
+        ),
+        CheckConstraint(
+            "kind IN ('purchased', 'built')",
+            name="ck_item_categories_kind",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'purchased' | 'built' — immutable after creation (enforced in the route).
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Display colour token ('neutral' | 'accent' | 'success' | 'warning' |
+    # 'danger'); cosmetic only.
+    tone: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'neutral'")
+    )
+    # Seeded categories may be renamed/recoloured but are protected from
+    # deletion of the canonical five (enforced in the route).
+    is_seeded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Nullable so the migration can seed the 5 default categories with no
+    # creator (system seed). App-created categories always set these.
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+
 class Item(Base):
     """Inventory catalogue row. One per Excel master tracker line.
 
     Quantities are NOT on this table — they're derived from the ledger
     once the movements module ships. ``status`` is similarly derived.
+
+    Every item belongs to an :class:`ItemCategory`; the category's ``kind``
+    decides whether the item is *built* (may carry a BOM via
+    :class:`BomLine`) or *purchased*.
     """
 
     __tablename__ = "items"
@@ -115,6 +201,13 @@ class Item(Base):
 
     item_number: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # Every item is categorised (requirements v2 §6). The category's ``kind``
+    # (purchased/built) governs whether this item may carry a BOM.
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.item_categories.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
 
     # An item's assigned vendors live in ``meta.item_vendors`` (the ``vendors``
     # relationship below). There is no single default-vendor column — the list
@@ -183,6 +276,92 @@ class Item(Base):
     updater: Mapped[User] = relationship(
         foreign_keys=[updated_by_user_id],
         viewonly=True,
+    )
+    # Eager-joined so a read hydrates the category (name/kind/tone) in one query.
+    category: Mapped[ItemCategory] = relationship(
+        foreign_keys=[category_id],
+        lazy="joined",
+        viewonly=True,
+    )
+
+
+class BomLine(Base):
+    """One bill-of-materials line: ``parent_item`` consumes ``qty_per_run`` of
+    ``child_item`` per production run.
+
+    Self-referencing over :class:`Item`, so a child may itself be a built item
+    with its own BOM — this is what enables multi-level / nested BOMs
+    (requirements v2 §6). A parent should be a *built*-category item; cycle
+    prevention (A→B→A) is enforced in the route, not by a DB constraint.
+    """
+
+    __tablename__ = "bom_lines"
+    __table_args__ = (
+        Index(
+            "uq_bom_lines_parent_child",
+            "parent_item_id",
+            "child_item_id",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index("ix_bom_lines_parent_item_id", "parent_item_id"),
+        Index("ix_bom_lines_child_item_id", "child_item_id"),
+        CheckConstraint(
+            "parent_item_id <> child_item_id",
+            name="ck_bom_lines_no_self_reference",
+        ),
+        CheckConstraint("qty_per_run > 0", name="ck_bom_lines_qty_per_run_positive"),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    parent_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    child_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    qty_per_run: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    updated_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    # The child item eager-joins its stock + category so a BOM read reaches
+    # ``child.stock.qty_on_hand`` and the child's category in one query.
+    child_item: Mapped[Item] = relationship(
+        foreign_keys=[child_item_id], lazy="joined", viewonly=True
+    )
+    parent_item: Mapped[Item] = relationship(
+        foreign_keys=[parent_item_id], viewonly=True
     )
 
 

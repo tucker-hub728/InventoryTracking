@@ -6,12 +6,19 @@ export type InventoryStatus =
   | 'Expired'
   | 'Out of stock';
 
+export type ItemKind = 'purchased' | 'built';
+
 export interface InventoryItem {
   /** Human-readable item number (e.g. ``CM-0001``). What URLs key on. */
   id: string;
   /** Backend UUID. Needed for endpoints that take an item_id (ledger, …). */
   uuid: string;
   desc: string;
+  /** Category (requirements v2 §6). ``categoryKind`` drives the Type column. */
+  categoryId: string;
+  categoryName: string;
+  categoryKind: ItemKind;
+  categoryTone: string;
   vendor: string;
   lead: number;
   invValue: number;

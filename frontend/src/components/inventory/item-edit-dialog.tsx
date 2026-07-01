@@ -17,15 +17,25 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem, type ItemUpdateInput } from '@/lib/api/items';
 import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
 
 import { VendorMultiSelect } from './vendor-multi-select';
 
 const schema = z.object({
   description: z.string().min(1, 'Description is required').max(512),
+  category_id: z.string().min(1, 'Category is required'),
   vendor_ids: z.array(z.string()).default([]),
   avg_lead_days: z
     .string()
@@ -86,6 +96,7 @@ function sameVendorSet(a: string[], b: string[]): boolean {
 export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props) {
   const [vendors, setVendors] = React.useState<Vendor[]>([]);
   const [vendorsError, setVendorsError] = React.useState<string | null>(null);
+  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
   const [item, setItem] = React.useState<ApiItem | null>(null);
   // The vendor list as it was when the dialog loaded — submit diffs against it.
   const [loadedVendorIds, setLoadedVendorIds] = React.useState<string[]>([]);
@@ -103,6 +114,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     resolver: zodResolver(schema),
     defaultValues: {
       description: '',
+      category_id: '',
       vendor_ids: [],
       avg_lead_days: '',
       reorder_threshold: '',
@@ -113,6 +125,12 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
   const vendorIds = watch('vendor_ids');
   const mustOrder = watch('must_order_flag');
+  const categoryId = watch('category_id');
+
+  // Purchasing fields apply only to Purchased categories (a Product is built,
+  // not bought) — vendors, lead time, reorder + near-expiry, must-order.
+  const showPurchasing =
+    categories.find((c) => c.id === categoryId)?.kind === 'purchased';
 
   // Load vendors + the fresh item state every time the dialog opens.
   // ``activeOnly: false`` so a vendor that's since been deactivated still
@@ -128,14 +146,17 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     Promise.all([
       vendorsApi.list({ activeOnly: false, signal: ctrl.signal }),
       itemsApi.get(itemId, { signal: ctrl.signal }),
+      categoriesApi.list({ signal: ctrl.signal }),
     ])
-      .then(([vendorList, freshItem]) => {
+      .then(([vendorList, freshItem, categoryList]) => {
         setVendors(vendorList);
+        setCategories(categoryList);
         setItem(freshItem);
         const ids = freshItem.vendors.map((v) => v.vendor_id);
         setLoadedVendorIds(ids);
         reset({
           description: freshItem.description,
+          category_id: freshItem.category_id,
           vendor_ids: ids,
           avg_lead_days:
             freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
@@ -169,6 +190,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
     const patch: ItemUpdateInput = {};
     if (dirtyFields.description) patch.description = values.description.trim();
+    if (dirtyFields.category_id) patch.category_id = values.category_id;
     if (!sameVendorSet(values.vendor_ids, loadedVendorIds)) {
       patch.vendor_ids = values.vendor_ids;
     }
@@ -202,6 +224,18 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       onUpdated?.();
       onOpenChange(false);
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'bom_present') {
+        setSubmitError(
+          'This Product has a bill of materials — remove its BOM before moving it to a Purchased category.',
+        );
+        return;
+      }
+      if (err instanceof ApiError && err.code === 'item_received') {
+        setSubmitError(
+          'This item has received stock (lots), so it can’t be changed to a Product category. Products are built, not received.',
+        );
+        return;
+      }
       setSubmitError(err instanceof ApiError ? err.message : 'Failed to update item.');
     }
   };
@@ -250,6 +284,43 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               )}
             </div>
 
+            <div className="space-y-1.5">
+              <Label htmlFor="it-category">Category</Label>
+              {/* key remounts the Select once the item + categories have loaded
+                  so the pre-selected value renders (Radix shows the placeholder
+                  if value is set before its options mount). */}
+              <Select
+                key={item?.id ?? 'loading'}
+                value={categoryId}
+                onValueChange={(v) =>
+                  setValue('category_id', v, { shouldDirty: true, shouldValidate: true })
+                }
+              >
+                <SelectTrigger id="it-category" aria-label="Category">
+                  <SelectValue placeholder="Pick a category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {categories.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      <span className="flex items-center gap-2">
+                        <span className="truncate">{c.name}</span>
+                        <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
+                          {c.kind === 'built' ? 'Product' : 'Purchased'}
+                        </Badge>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {errors.category_id && (
+                <p role="alert" className="text-xs text-danger">
+                  {errors.category_id.message}
+                </p>
+              )}
+            </div>
+
+            {showPurchasing && (
+              <>
             <div className="space-y-1.5">
               <Label htmlFor="it-vendors">Vendors</Label>
               <VendorMultiSelect
@@ -335,6 +406,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               />
               <span>Flag as must-order for next PO</span>
             </label>
+              </>
+            )}
 
             {submitError && (
               <p

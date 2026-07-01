@@ -147,6 +147,9 @@ class ItemCreate(BaseModel):
 
     item_number: ItemNumber
     description: str = Field(min_length=1, max_length=512)
+    # Required: every item is categorised (requirements v2 §6). The category's
+    # kind (purchased/built) decides whether the item may carry a BOM.
+    category_id: str = Field(min_length=1)
     vendor_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
@@ -172,6 +175,10 @@ class ItemUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str | None = Field(default=None, min_length=1, max_length=512)
+    # Re-categorise an item. The new category's kind still governs BOM
+    # eligibility (the route blocks moving a BOM-bearing item to a purchased
+    # category).
+    category_id: str | None = Field(default=None, min_length=1)
     vendor_ids: list[str] | None = Field(default=None, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
@@ -192,6 +199,12 @@ class ItemRead(BaseModel):
     id: str
     item_number: str
     description: str
+    # Category (requirements v2 §6). ``category_kind`` drives the UI "Type"
+    # column: built → "Product" (may have a BOM), purchased → bought as-is.
+    category_id: str
+    category_name: str
+    category_kind: Literal["purchased", "built"]
+    category_tone: str
     # Assigned vendors (the list an item can be received against).
     vendors: list[ItemVendorRead] = Field(default_factory=list)
     avg_lead_days: int | None

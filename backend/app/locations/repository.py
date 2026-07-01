@@ -15,12 +15,12 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory import StockMovement
+from app.models.inventory import Item, StockMovement
 from app.models.locations import (
     LocationNode,
     LotAllocation,
 )
-from app.models.products import Customer, Product
+from app.models.products import Customer
 
 # ── Nodes ───────────────────────────────────────────────────────────────
 
@@ -468,8 +468,13 @@ async def customer_exists(session: AsyncSession, customer_id: uuid.UUID) -> bool
 
 
 async def product_exists(session: AsyncSession, product_id: uuid.UUID) -> bool:
+    """A location can be dedicated to a finished-good (built) item now."""
     return (
-        await session.execute(select(Product.id).where(Product.id == product_id))
+        await session.execute(
+            select(Item.id).where(
+                Item.id == product_id, Item.deleted_at.is_(None)
+            )
+        )
     ).first() is not None
 
 

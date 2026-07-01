@@ -19,7 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ApiError } from '@/lib/api/client';
-import { productsApi, type Product } from '@/lib/api/products';
+import { itemsApi, type ApiItem } from '@/lib/api/items';
 import {
   customersApi,
   type Customer,
@@ -56,7 +56,8 @@ interface Props {
 export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Props) {
   const isEdit = Boolean(customer);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
-  const [products, setProducts] = React.useState<Product[]>([]);
+  // Finished-good (built) items a customer can be linked to.
+  const [products, setProducts] = React.useState<ApiItem[]>([]);
   const [productsLoading, setProductsLoading] = React.useState(false);
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
 
@@ -72,7 +73,7 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
 
   // Original linked set, to detect changes on edit.
   const originalIds = React.useMemo(
-    () => new Set((customer?.products ?? []).map((p) => p.id)),
+    () => new Set((customer?.items ?? []).map((p) => p.id)),
     [customer],
   );
 
@@ -80,9 +81,12 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
     if (!open) return;
     const ctrl = new AbortController();
     setProductsLoading(true);
-    productsApi
-      .list({}, { signal: ctrl.signal })
-      .then((rows) => setProducts(rows))
+    itemsApi
+      .list({ limit: 200 }, { signal: ctrl.signal })
+      .then((resp) =>
+        // Customers link to finished-good (Product / built) items only.
+        setProducts(resp.items.filter((i) => i.category_kind === 'built')),
+      )
       .catch(() => {})
       .finally(() => setProductsLoading(false));
     return () => ctrl.abort();
@@ -99,7 +103,7 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
           }
         : { name: '', contact_person: '', email: '' },
     );
-    setSelected(new Set((customer?.products ?? []).map((p) => p.id)));
+    setSelected(new Set((customer?.items ?? []).map((p) => p.id)));
     setSubmitError(null);
   }, [open, customer, reset]);
 
@@ -121,7 +125,7 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
         if (dirtyFields.contact_person)
           patch.contact_person = values.contact_person?.trim() || null;
         if (dirtyFields.email) patch.email = values.email?.trim() || null;
-        if (!sameSet(selected, originalIds)) patch.product_ids = [...selected];
+        if (!sameSet(selected, originalIds)) patch.item_ids = [...selected];
         if (Object.keys(patch).length === 0) {
           setSubmitError('No changes to save.');
           return;
@@ -132,7 +136,7 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
           name: values.name.trim(),
           contact_person: values.contact_person?.trim() || null,
           email: values.email?.trim() || null,
-          product_ids: [...selected],
+          item_ids: [...selected],
         };
         saved = await customersApi.create(input);
       }
@@ -158,7 +162,7 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
           <DialogHeader>
             <DialogTitle>{isEdit ? 'Edit customer' : 'Add customer'}</DialogTitle>
             <DialogDescription>
-              Customer details and the products they order.
+              Customer details and the finished goods they order.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -196,13 +200,14 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
             </div>
 
             <div className="space-y-1.5">
-              <Label>Linked products</Label>
+              <Label>Linked finished goods</Label>
               <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-border p-2">
                 {productsLoading ? (
-                  <p className="px-2 py-3 text-center text-xs text-text-3">Loading products…</p>
+                  <p className="px-2 py-3 text-center text-xs text-text-3">Loading items…</p>
                 ) : products.length === 0 ? (
                   <p className="px-2 py-3 text-center text-xs text-text-3">
-                    No products yet — create products first to link them.
+                    No Product items yet — create finished-good items first to link
+                    them.
                   </p>
                 ) : (
                   products.map((p) => (
@@ -214,7 +219,10 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
                         checked={selected.has(p.id)}
                         onCheckedChange={() => toggle(p.id)}
                       />
-                      <span>{p.name}</span>
+                      <span className="font-mono text-xs text-text-2">
+                        {p.item_number}
+                      </span>
+                      <span>{p.description}</span>
                     </label>
                   ))
                 )}
