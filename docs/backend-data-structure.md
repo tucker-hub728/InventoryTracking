@@ -175,9 +175,11 @@ Why a table not enum: should the spec ever add a fourth derivable item-
 level value (e.g. `expiring_soon` if the UI starts showing it on the list
 view), we add a row, not a migration.
 
-### 4.3 `meta.units_of_measure`
+### 4.3 ~~`meta.units_of_measure`~~ — REMOVED
 
-`code` (`unit`, `mL`, `g`, `bag`, `vial`, …), `label`, `is_discrete`.
+**Dropped entirely (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** UOM was
+removed along with the package/price columns; quantities are whole units and
+there is no unit-of-measure lookup.
 
 ### 4.4 `meta.locations`
 
@@ -321,10 +323,10 @@ under "Fields explicitly NOT stored on `items`".
 | `vendor_id` | `UUID FK → meta.vendors` | col C `Vendor` | nullable for unsourced items |
 | `avg_lead_days` | `INT NULL` | col D `Average Lead Times (Days)` | |
 | `reorder_threshold` | `NUMERIC(14,3) NOT NULL DEFAULT 0` | col M `MUST HAVE INVENTORY LEVEL` | |
-| `unit_price_amount` | `NUMERIC(14,2) NULL` | col AC `Unit Price` | |
-| `units_per_package` | `INT NULL` | col AD `Units Per package configuration` | |
-| `price_per_package_amount` | `NUMERIC(14,2) NULL` | col AE `Price Per Package configuration` | derived in Excel (= AC × AD); we **store** it because the workbook stores it, but enforce the invariant via trigger |
-| `uom_code` | `TEXT FK → meta.units_of_measure` | — | default `unit`; not in Excel but required for clean qty arithmetic |
+| ~~`unit_price_amount`~~ | — | col AC `Unit Price` | **REMOVED (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** Unit price now lives on the **lot** (`app.lots.unit_price_amount`) and order lines; item inv $ / PO $ are derived (Σ qty × lot unit price). |
+| ~~`units_per_package`~~ | — | col AD `Units Per package configuration` | **REMOVED (v2 §8).** No package-configuration concept — variable package sizes make package-level pricing impractical; **track unit price only**. |
+| ~~`price_per_package_amount`~~ | — | col AE `Price Per Package configuration` | **REMOVED (v2 §8).** No separate packaging-configuration price. |
+| ~~`uom_code`~~ | — | — | **REMOVED (migration `b7c8d9e0f1a2`).** `meta.units_of_measure` dropped entirely; quantities are whole units. |
 | `po_note` | `TEXT NULL` | col I `Comment/ Note on Outstanding POs` | |
 | `po_due_text` | `TEXT NULL` | col J `PO Due Date(s)` | free-form on the master sheet; structured POs live in `purchase_orders` |
 | `must_order_flag` | `BOOL NOT NULL DEFAULT FALSE` | col L `Must Order` | |
@@ -854,10 +856,11 @@ A short list of invariants we enforce in the DB, not the app:
 4. **Signature required for sensitive events** — trigger on
    `ledger_entries` rejects `INSERT` where `direction='out'` and
    `signature_id IS NULL` (toggled via `app.settings.require_signature_on_stock_out`).
-5. **Package-price invariant** — trigger
-   `tg_items_check_pkg_price` rejects `INSERT/UPDATE` where
-   `price_per_package_amount IS DISTINCT FROM (unit_price_amount × units_per_package)`
-   when all three are non-null. Mirrors the Excel formula in col AE.
+5. ~~**Package-price invariant**~~ — **REMOVED (v2 §8 · migration
+   `b7c8d9e0f1a2`).** No `price_per_package_amount` / `units_per_package`
+   columns and no `tg_items_check_pkg_price` trigger remain: the system
+   tracks **unit price only** (on lots / order lines), with no
+   packaging-configuration price.
 6. **Soft-delete sweep** — partial unique indexes everywhere
    (`WHERE deleted_at IS NULL`) so the unique constraint releases the value
    when the row is logically deleted, but the row is preserved.
@@ -962,8 +965,8 @@ SELECT i.id,
        v.name AS vendor,
        i.avg_lead_days,
        i.reorder_threshold,
-       i.unit_price_amount,
-       i.units_per_package,
+       -- unit_price_amount / units_per_package REMOVED (v2 §8) — valuation
+       -- now comes from lots (b.inv_value_amount below), not the item
        i.last_updated_on,
        b.qty_on_hand,
        b.qty_on_order,
@@ -1046,12 +1049,11 @@ These are the spots where you should weigh in before I generate models.
    cases where two `item_numbers` share a single physical lot? (Catalogue
    updates, repackaging?) If yes, a `materials` table sits between `items`
    and `lots`. The Excel suggests no — skip it for v1.
-4. **`price_per_package_amount` storage.** Excel stores both the unit
-   price (col AC) and the package price (col AE, a formula). We mirror
-   both with a trigger enforcing `AE = AC × AD`. Alternative: store only
-   `unit_price_amount` and `units_per_package`, expose package price as a
-   generated column. Default: mirror Excel exactly (store both) so a
-   round-trip export to xlsx is bit-for-bit faithful.
+4. ~~**`price_per_package_amount` storage.**~~ **Superseded 2026-06-11
+   (v2 §8):** no package-configuration price. The package/UOM columns were
+   dropped (migration `b7c8d9e0f1a2`) and pricing consolidated onto the lot
+   — **track unit price only**, since variable package sizes make
+   package-level pricing impractical.
 5. **Hash chain scope.** Per-UTC-day is my default. The alternative is one
    global chain, which makes any out-of-order insert a problem. Day scoping
    is operationally friendlier; please confirm.

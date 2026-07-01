@@ -168,6 +168,11 @@ erDiagram
         text label
         bool is_discrete
     }
+    %% HISTORICAL v1-MVP SNAPSHOT. The pricing/UOM columns below
+    %% (unit_price_amount, units_per_package, price_per_package_amount,
+    %% uom_code) were REMOVED per v2 §8 — track unit price only, no
+    %% package-configuration price. Unit price now lives on the lot
+    %% (migration b7c8d9e0f1a2). Do not carry these forward.
     ITEMS {
         uuid id PK
         text item_number "UK where not deleted; CHECK prefix in CM-/NM-/CR-/AY-"
@@ -175,10 +180,10 @@ erDiagram
         uuid vendor_id FK "nullable"
         int avg_lead_days
         numeric reorder_threshold "CHECK >= 0"
-        numeric unit_price_amount "CHECK >= 0"
-        int units_per_package
-        numeric price_per_package_amount "trigger TODO"
-        text uom_code FK "default 'unit'"
+        numeric unit_price_amount "REMOVED v2 §8 — moved to lot"
+        int units_per_package "REMOVED v2 §8 — no package config"
+        numeric price_per_package_amount "REMOVED v2 §8 — no package price"
+        text uom_code FK "REMOVED — units_of_measure dropped"
         text po_note
         text po_due_text
         bool must_order_flag

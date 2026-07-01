@@ -33,7 +33,7 @@ it.
 | Denormalised balances | `app.item_balances` |
 | Per-program demand snapshot (Excel cols N–AB) | `app.item_program_demand` |
 | Vendors | `meta.vendors` |
-| Units of measure | `meta.units_of_measure` |
+| ~~Units of measure~~ | ~~`meta.units_of_measure`~~ — REMOVED (v2 §8) |
 | Locations (incl. LN2 tree) | `meta.locations` |
 | LN2 position state | `app.ln2_position_state`, `app.ln2_assignment_events` |
 | Kanban stages | `meta.workflow_stages` |
@@ -150,16 +150,11 @@ to get `vendor_id = NULL`. This is the root cause of the empty
 > sheet does. If you opened a `CM-0001` / `NM-0237` / etc. tab and saw
 > no vendor, that's why.
 
-### 3.4 `meta.units_of_measure`
+### 3.4 ~~`meta.units_of_measure`~~ — REMOVED
 
-Not in Excel; required for clean qty arithmetic when units differ
-(bottles vs. mL vs. vials).
-
-| col | type | notes |
-|--|--|--|
-| `code` | `TEXT PK` | `unit`, `mL`, `g`, `bag`, `vial`, `box`, `pack` |
-| `label` | `TEXT NOT NULL` | |
-| `is_discrete` | `BOOL NOT NULL` | `TRUE` for `unit/vial/bag`; `FALSE` for `mL/g` |
+**Dropped entirely (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** UOM was
+removed together with the package/price columns — quantities are whole units
+and there is no unit-of-measure lookup table.
 
 Default `unit`.
 
@@ -270,10 +265,10 @@ Columns map **1:1** to the `Component Inventory Tracker` header row 49.
 | `vendor_id` | `UUID FK → meta.vendors` | col C `Vendor` | nullable for unsourced items (blank vendor in Excel) |
 | `avg_lead_days` | `INT NULL` | col D `Average Lead Times (Days)` | |
 | `reorder_threshold` | `NUMERIC(14,3) NOT NULL DEFAULT 0` | col M `MUST HAVE INVENTORY LEVEL` | drives `reorder_threshold` notification (§6) and `low_stock` Kanban card creation (§5) |
-| `unit_price_amount` | `NUMERIC(14,2) NULL` | col AC `Unit Price` | |
-| `units_per_package` | `INT NULL` | col AD `Units Per package configuration` | |
-| `price_per_package_amount` | `NUMERIC(14,2) NULL` | col AE `Price Per Package configuration` | stored for 1:1 export fidelity; invariant `AE = AC × AD` enforced by trigger (§7 rule 5) |
-| `uom_code` | `TEXT FK → meta.units_of_measure` | — | default `unit` |
+| ~~`unit_price_amount`~~ | — | col AC `Unit Price` | **REMOVED (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** Unit price now lives on the **lot** (`app.lots.unit_price_amount`) and order lines; item inv $ / PO $ are derived (Σ qty × lot unit price). |
+| ~~`units_per_package`~~ | — | col AD `Units Per package configuration` | **REMOVED (v2 §8).** No package-configuration concept — variable package sizes make package-level pricing impractical; **track unit price only**. |
+| ~~`price_per_package_amount`~~ | — | col AE `Price Per Package configuration` | **REMOVED (v2 §8).** No separate packaging-configuration price. |
+| ~~`uom_code`~~ | — | — | **REMOVED (migration `b7c8d9e0f1a2`).** `meta.units_of_measure` dropped entirely; quantities are whole units. |
 | `po_note` | `TEXT NULL` | col I `Comment/ Note on Outstanding POs` | |
 | `po_due_text` | `TEXT NULL` | col J `PO Due Date(s)` | free-form on master sheet; structured POs live in `purchase_orders` |
 | `must_order_flag` | `BOOL NOT NULL DEFAULT FALSE` | col L `Must Order` | |
@@ -754,9 +749,11 @@ DB-level invariants for the inventory module:
    each `INSERT` updates `item_batches.balance_units` and
    `item_balances.qty_on_hand` in the same transaction.
 4. **Sign-off required for sensitive events** — triggers in §8.2.
-5. **Package-price invariant** — `tg_items_check_pkg_price` enforces
-   `price_per_package_amount = unit_price_amount × units_per_package`
-   when all three are non-null. Mirrors Excel col AE formula.
+5. ~~**Package-price invariant**~~ — **REMOVED (v2 §8 · migration
+   `b7c8d9e0f1a2`).** There is no `price_per_package_amount` /
+   `units_per_package` and no `tg_items_check_pkg_price` trigger: the
+   system tracks **unit price only** (on lots / order lines), with no
+   packaging-configuration price.
 6. **Soft-delete sweep** — partial unique indexes
    (`WHERE deleted_at IS NULL`) so unique constraints release the value
    on logical delete.
@@ -787,8 +784,8 @@ SELECT i.id,
        v.name AS vendor,
        i.avg_lead_days,
        i.reorder_threshold,
-       i.unit_price_amount,
-       i.units_per_package,
+       -- unit_price_amount / units_per_package REMOVED (v2 §8) — valuation
+       -- now comes from lots (b.inv_value_amount below), not the item
        i.last_updated_on,
        b.qty_on_hand,
        b.qty_on_order,
@@ -959,8 +956,10 @@ Resolved questions are struck through.
    `item_number`; no category table, no prefix CHECK, no lookup. Whatever
    the user types is stored. `UNIQUE` is the only backend rule. `item_prefix`
    generated column for convenience filtering only.
-2. ~~**`price_per_package_amount` storage.**~~ **Resolved 2026-05-26:**
-   mirror Excel — store all three columns; trigger enforces AE = AC × AD.
+2. ~~**`price_per_package_amount` storage.**~~ **Superseded 2026-06-11
+   (v2 §8):** no package-configuration price. Package/UOM columns dropped
+   (migration `b7c8d9e0f1a2`); **track unit price only** — variable package
+   sizes make package-level pricing impractical.
 3. ~~**Quarantine model.**~~ **Resolved 2026-05-26:** deferred from v1.
    No `lots.status='quarantine'`, no quarantine workflow card, no
    quarantines table.
