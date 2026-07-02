@@ -7,8 +7,11 @@ import {
   Pencil,
   Plus,
   Search,
+  Trash2,
   Truck,
   X,
+  XCircle,
+  PackageCheck,
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -33,39 +36,47 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
+import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { usePermission } from '@/hooks/use-permission';
+import type { ReauthResponse } from '@/lib/api/auth';
 import { cn } from '@/lib/utils';
+import type { BadgeTone } from '@/types/ui';
 import { ApiError } from '@/lib/api/client';
 import {
   receivingApi,
-  RECEIPT_STATUS_LABEL,
-  type ReceiptTransaction,
-  type ReceiptTransactionStatus,
+  ORDER_STATUS_LABEL,
+  type Order,
+  type OrderStatus,
 } from '@/lib/api/receiving';
-
-import type { Lot } from '@/lib/api/lots';
 
 import { ReceiptTransactionsTable } from './receipt-transactions-table';
 import { ReceiptIntakeDialog } from './receipt-intake-dialog';
 import { ReceiveDialog } from './receive-dialog';
-import { LotEditDialog } from './lot-edit-dialog';
+import { OrderEditDialog } from './lot-edit-dialog';
+import { LotDetailEditDialog } from './lot-detail-edit-dialog';
 
 const STATUS_ALL = '__all__';
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 // Search and pagination run client-side over the loaded set; the backend has no
-// text-search param. This caps how many (most-recent) rows that set covers — we
-// surface a notice when the cap is actually reached so it isn't silent.
-const TXN_LIMIT = 200;
+// text-search param. This caps how many (most-recent) rows that set covers.
+const ORDER_LIMIT = 200;
+
+const STATUS_TONE: Record<OrderStatus, BadgeTone> = {
+  open: 'accent',
+  partially_received: 'warning',
+  received: 'success',
+  cancelled: 'neutral',
+};
 
 export function ReceivingPageClient() {
   const canCreate = usePermission('inventory', 'create');
   const canReceive = usePermission('inventory', 'sign');
 
-  const [transactions, setTransactions] = React.useState<ReceiptTransaction[]>([]);
+  const [orders, setOrders] = React.useState<Order[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [statusFilter, setStatusFilter] = React.useState<
-    ReceiptTransactionStatus | typeof STATUS_ALL
+    OrderStatus | typeof STATUS_ALL
   >(STATUS_ALL);
 
   const [query, setQuery] = React.useState('');
@@ -73,26 +84,24 @@ export function ReceivingPageClient() {
   const [pageSize, setPageSize] = React.useState<number>(PAGE_SIZE_OPTIONS[0]);
 
   const [intakeOpen, setIntakeOpen] = React.useState(false);
-  const [receiveTarget, setReceiveTarget] = React.useState<ReceiptTransaction | null>(
-    null,
-  );
-  const [detail, setDetail] = React.useState<ReceiptTransaction | null>(null);
+  const [receiveTarget, setReceiveTarget] = React.useState<Order | null>(null);
+  const [detail, setDetail] = React.useState<Order | null>(null);
 
   const load = React.useCallback(
     async (signal?: AbortSignal) => {
       setLoading(true);
       setLoadError(null);
       try {
-        const resp = await receivingApi.listTransactions({
+        const resp = await receivingApi.listOrders({
           status: statusFilter === STATUS_ALL ? undefined : statusFilter,
-          limit: TXN_LIMIT,
+          limit: ORDER_LIMIT,
           signal,
         });
-        setTransactions(resp.items);
+        setOrders(resp.items);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(
-          err instanceof ApiError ? err.message : 'Failed to load receipts.',
+          err instanceof ApiError ? err.message : 'Failed to load orders.',
         );
       } finally {
         setLoading(false);
@@ -107,46 +116,49 @@ export function ReceivingPageClient() {
     return () => ctrl.abort();
   }, [load]);
 
-  const upsert = (txn: ReceiptTransaction) =>
-    setTransactions((prev) => {
-      const i = prev.findIndex((t) => t.id === txn.id);
-      if (i === -1) return [txn, ...prev];
-      const next = [...prev];
-      next[i] = txn;
-      return next;
-    });
+  const upsert = React.useCallback(
+    (order: Order) =>
+      setOrders((prev) => {
+        const i = prev.findIndex((o) => o.id === order.id);
+        if (i === -1) return [order, ...prev];
+        const next = [...prev];
+        next[i] = order;
+        return next;
+      }),
+    [],
+  );
 
-  // Client-side search across item number/description, PO ref and any lot
-  // number on the transaction. The list is loaded whole (status-filtered on the
-  // server), so filtering and paging here keep the toolbar snappy.
+  const removeOrder = React.useCallback(
+    (id: string) => setOrders((prev) => prev.filter((o) => o.id !== id)),
+    [],
+  );
+
+  // Client-side search across po_reference, item number/description on lines
+  // and lot numbers across receive events.
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return transactions;
-    return transactions.filter((t) => {
-      const haystacks = [
-        t.item_number,
-        t.item_description,
-        t.po_reference,
-        ...t.lots.map((l) => l.lot_number),
-      ];
+    if (!q) return orders;
+    return orders.filter((o) => {
+      const haystacks: Array<string | null> = [o.po_reference];
+      for (const l of o.lines) {
+        haystacks.push(l.item_number, l.item_description);
+      }
+      for (const ev of o.events) {
+        for (const el of ev.lines) haystacks.push(el.lot_number);
+      }
       return haystacks.some((s) => s?.toLowerCase().includes(q));
     });
-  }, [transactions, query]);
+  }, [orders, query]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  // Clamp for display/slicing so a stale page (e.g. just after a search narrows
-  // the set) never renders an out-of-range, empty page before the effects fire.
   const safePage = Math.min(page, pageCount);
   const startIdx = (safePage - 1) * pageSize;
   const paged = filtered.slice(startIdx, startIdx + pageSize);
 
-  // Snap back to page 1 whenever the result set changes shape (new search,
-  // status switch or page-size change).
   React.useEffect(() => {
     setPage(1);
   }, [query, statusFilter, pageSize]);
 
-  // Keep the current page in range if the filtered set shrinks under it.
   React.useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
@@ -155,11 +167,11 @@ export function ReceivingPageClient() {
     <>
       <PageHeader
         title="Receipt Admin"
-        subtitle="Order intake and physical receipt — on-order lots become available stock, with vendor and price captured per lot."
+        subtitle="Multi-item orders received over time — place an order, then draw it down with dated, e-signed partial or blanket receipts."
         actions={
           canCreate ? (
             <Button variant="primary" onClick={() => setIntakeOpen(true)}>
-              <Plus size={14} /> New intake
+              <Plus size={14} /> New Order
             </Button>
           ) : undefined
         }
@@ -171,7 +183,7 @@ export function ReceivingPageClient() {
             <Select
               value={statusFilter}
               onValueChange={(v) =>
-                setStatusFilter(v as ReceiptTransactionStatus | typeof STATUS_ALL)
+                setStatusFilter(v as OrderStatus | typeof STATUS_ALL)
               }
             >
               <SelectTrigger className="w-[200px]">
@@ -179,9 +191,16 @@ export function ReceivingPageClient() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={STATUS_ALL}>All statuses</SelectItem>
-                {(['open', 'received'] as const).map((s) => (
+                {(
+                  [
+                    'open',
+                    'partially_received',
+                    'received',
+                    'cancelled',
+                  ] as const
+                ).map((s) => (
                   <SelectItem key={s} value={s}>
-                    {RECEIPT_STATUS_LABEL[s]}
+                    {ORDER_STATUS_LABEL[s]}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -192,8 +211,8 @@ export function ReceivingPageClient() {
                 icon={Search}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by item or lot…"
-                aria-label="Search receipts by item or lot"
+                placeholder="Search by order #, item or lot…"
+                aria-label="Search orders by order number, item or lot"
                 trailing={
                   query ? (
                     <button
@@ -225,19 +244,19 @@ export function ReceivingPageClient() {
                 <Skeleton key={i} className="h-11 w-full" />
               ))}
             </div>
-          ) : transactions.length === 0 ? (
+          ) : orders.length === 0 ? (
             <EmptyState
               icon={Truck}
-              title="No receipt transactions yet"
+              title="No orders yet"
               hint={
                 canCreate
-                  ? 'Create an intake to place an order and track it through to receipt.'
-                  : 'Intakes will appear here once created.'
+                  ? 'Create an order to place items and receive them over time.'
+                  : 'Orders will appear here once created.'
               }
               action={
                 canCreate ? (
                   <Button variant="primary" onClick={() => setIntakeOpen(true)}>
-                    <Plus size={14} /> New intake
+                    <Plus size={14} /> New Order
                   </Button>
                 ) : undefined
               }
@@ -245,20 +264,20 @@ export function ReceivingPageClient() {
           ) : filtered.length === 0 ? (
             <EmptyState
               icon={Search}
-              title="No matching receipts"
-              hint={`Nothing matches “${query.trim()}”. Try a different item number or lot.`}
+              title="No matching orders"
+              hint={`Nothing matches “${query.trim()}”. Try a different order number, item or lot.`}
             />
           ) : (
             <>
               <ReceiptTransactionsTable
-                transactions={paged}
+                orders={paged}
                 canReceive={canReceive}
                 onView={setDetail}
                 onReceive={setReceiveTarget}
               />
-              {transactions.length >= TXN_LIMIT && (
+              {orders.length >= ORDER_LIMIT && (
                 <p className="mt-3 text-xs text-text-3">
-                  Showing the {TXN_LIMIT} most recent receipts — search and paging
+                  Showing the {ORDER_LIMIT} most recent orders — search and paging
                   cover these only.
                 </p>
               )}
@@ -286,17 +305,26 @@ export function ReceivingPageClient() {
       <ReceiveDialog
         open={receiveTarget !== null}
         onOpenChange={(o) => !o && setReceiveTarget(null)}
-        transaction={receiveTarget}
-        onReceived={(txn) => {
-          upsert(txn);
+        order={receiveTarget}
+        onReceived={(order) => {
+          upsert(order);
           setReceiveTarget(null);
         }}
       />
 
-      <TransactionDetailSheet
-        transaction={detail}
-        canEdit={canReceive}
+      <OrderDetailSheet
+        order={detail}
+        canCreate={canCreate}
+        canReceive={canReceive}
         onUpdated={upsert}
+        onRemoved={(id) => {
+          removeOrder(id);
+          setDetail(null);
+        }}
+        onReceive={(order) => {
+          setDetail(null);
+          setReceiveTarget(order);
+        }}
         onOpenChange={(o) => !o && setDetail(null)}
       />
     </>
@@ -324,7 +352,6 @@ function ReceiptPagination({
   onPage: (p: number) => void;
   onPageSize: (n: number) => void;
 }) {
-  // Compact page list with ellipses for long ranges (1 … 4 5 6 … 20).
   const pages = React.useMemo<Array<number | '…'>>(() => {
     if (pageCount <= 7) return Array.from({ length: pageCount }, (_, i) => i + 1);
     const set = new Set<number>([1, pageCount, page, page - 1, page + 1]);
@@ -351,7 +378,7 @@ function ReceiptPagination({
         <strong className="text-text-2">
           {startIdx + 1}–{startIdx + rowsOnPage}
         </strong>{' '}
-        of <strong className="text-text-2">{total.toLocaleString()}</strong> receipts
+        of <strong className="text-text-2">{total.toLocaleString()}</strong> orders
       </div>
 
       <div className="flex items-center gap-3">
@@ -424,123 +451,326 @@ function ReceiptPagination({
 
 // ── Detail sheet ─────────────────────────────────────────────────────────
 
-function TransactionDetailSheet({
-  transaction,
-  canEdit,
+function OrderDetailSheet({
+  order,
+  canCreate,
+  canReceive,
   onUpdated,
+  onRemoved,
+  onReceive,
   onOpenChange,
 }: {
-  transaction: ReceiptTransaction | null;
-  canEdit: boolean;
-  onUpdated: (txn: ReceiptTransaction) => void;
+  order: Order | null;
+  canCreate: boolean;
+  canReceive: boolean;
+  onUpdated: (order: Order) => void;
+  onRemoved: (id: string) => void;
+  onReceive: (order: Order) => void;
   onOpenChange: (open: boolean) => void;
 }) {
-  // Local copy so a lot edit can refresh the sheet in place without waiting
-  // for the parent to re-fetch.
-  const [txn, setTxn] = React.useState<ReceiptTransaction | null>(transaction);
-  const [editLot, setEditLot] = React.useState<Lot | null>(null);
+  // Local copy so an edit can refresh the sheet in place.
+  const [current, setCurrent] = React.useState<Order | null>(order);
+  const [editOrder, setEditOrder] = React.useState<Order | null>(null);
+  const [editLotId, setEditLotId] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  // Cancel / delete are e-signed: this drives one shared reauth dialog.
+  const [reauthAction, setReauthAction] = React.useState<'cancel' | 'delete' | null>(
+    null,
+  );
 
-  React.useEffect(() => setTxn(transaction), [transaction]);
+  React.useEffect(() => setCurrent(order), [order]);
 
-  const refresh = React.useCallback(async () => {
-    if (!txn) return;
+  const isOpen = current?.status === 'open';
+
+  const performCancel = async (evidence: ReauthResponse) => {
+    if (!current) return;
+    setBusy(true);
     try {
-      const fresh = await receivingApi.getTransaction(txn.id);
-      setTxn(fresh);
+      const updated = await receivingApi.cancelOrder(current.id, evidence.evidence_id);
+      setCurrent(updated);
+      onUpdated(updated);
+    } catch {
+      /* surfaced by the list reload; keep the sheet open */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // After an e-signed lot edit, re-fetch the order so lines + history (and any
+  // resulting status change, e.g. received → partially_received after a qty
+  // reduction) reflect in both the sheet and the parent list/table.
+  const refreshAfterLotEdit = async () => {
+    if (!current) return;
+    try {
+      const fresh = await receivingApi.getOrder(current.id);
+      setCurrent(fresh);
       onUpdated(fresh);
     } catch {
-      /* keep the stale view; the edit toast already confirmed success */
+      /* the list reload / next open will reconcile; keep the sheet open */
     }
-  }, [txn, onUpdated]);
+  };
+
+  const performDelete = async (evidence: ReauthResponse) => {
+    if (!current) return;
+    setBusy(true);
+    try {
+      await receivingApi.deleteOrder(current.id, evidence.evidence_id);
+      onRemoved(current.id);
+    } catch {
+      /* keep the sheet open on failure */
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
-      <Sheet open={transaction !== null} onOpenChange={onOpenChange}>
-        <SheetContent className="w-[480px] sm:max-w-[480px]">
-          {txn && (
+      <Sheet open={order !== null} onOpenChange={onOpenChange}>
+        <SheetContent className="w-[560px] sm:max-w-[560px]">
+          {current && (
             <>
               <SheetHeader>
                 <SheetTitle>
                   <span className="font-mono text-sm text-accent">
-                    {txn.item_number}
+                    {current.po_reference}
                   </span>{' '}
-                  <Badge
-                    tone={
-                      txn.status === 'received'
-                        ? 'success'
-                        : txn.status === 'open'
-                          ? 'accent'
-                          : 'neutral'
-                    }
-                    dot
-                    className="ml-1 align-middle"
-                  >
-                    {RECEIPT_STATUS_LABEL[txn.status]}
+                  <Badge tone={STATUS_TONE[current.status]} dot className="ml-1 align-middle">
+                    {ORDER_STATUS_LABEL[current.status]}
                   </Badge>
+                  {current.is_blanket && (
+                    <Badge tone="accent" className="ml-1 align-middle">
+                      Blanket
+                    </Badge>
+                  )}
                 </SheetTitle>
                 <SheetDescription>
-                  {txn.item_description ?? ''}
-                  {txn.po_reference ? ` · PO ${txn.po_reference}` : ''}
+                  {current.is_blanket && (current.valid_from || current.valid_to)
+                    ? `Valid ${current.valid_from ?? '…'} → ${current.valid_to ?? '…'}`
+                    : 'Standard order'}
                 </SheetDescription>
               </SheetHeader>
-              <SheetBody className="space-y-3">
-                {txn.lots.length === 0 && (
-                  <p className="text-sm text-text-3">No lots on this transaction.</p>
-                )}
-                {txn.lots.map((lot) => (
-                  <div
-                    key={lot.id}
-                    className="rounded-md border border-border bg-surface p-3 text-sm"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-xs text-accent">
-                        {lot.lot_number}
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <Badge tone={lot.status === 'available' ? 'success' : 'accent'}>
-                          {lot.status === 'available' ? 'Available' : 'On order'}
-                        </Badge>
-                        {canEdit && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setEditLot(lot)}
-                            aria-label={`Edit lot ${lot.lot_number}`}
-                          >
-                            <Pencil size={13} />
-                          </Button>
+
+              <SheetBody className="space-y-5">
+                {/* Action bar */}
+                <div className="flex flex-wrap gap-2">
+                  {canReceive &&
+                    (current.status === 'open' ||
+                      current.status === 'partially_received') && (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => onReceive(current)}
+                      >
+                        <PackageCheck size={14} /> Receive
+                      </Button>
+                    )}
+                  {canCreate && isOpen && (
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={() => setEditOrder(current)}
+                    >
+                      <Pencil size={13} /> Edit
+                    </Button>
+                  )}
+                  {canCreate && isOpen && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setReauthAction('cancel')}
+                      disabled={busy}
+                    >
+                      <XCircle size={13} /> Cancel order
+                    </Button>
+                  )}
+                  {canCreate && isOpen && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setReauthAction('delete')}
+                      disabled={busy}
+                    >
+                      <Trash2 size={13} /> Delete
+                    </Button>
+                  )}
+                </div>
+
+                {/* Lines */}
+                <div>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-3">
+                    Lines
+                  </h3>
+                  <div className="space-y-2">
+                    {current.lines.map((l) => (
+                      <div
+                        key={l.id}
+                        className="rounded-md border border-border bg-surface p-3 text-sm"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-xs text-accent">
+                            {l.item_number ?? '—'}
+                          </span>
+                          <span className="text-xs text-text-3">
+                            {l.supplier_name ?? '—'}
+                          </span>
+                        </div>
+                        {l.item_description && (
+                          <p className="mt-0.5 text-text-2">{l.item_description}</p>
                         )}
+                        <dl className="mt-2 grid grid-cols-4 gap-2 text-xs">
+                          <div>
+                            <dt className="text-text-3">Ordered</dt>
+                            <dd className="font-mono tabular-nums">{l.ordered_qty}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-text-3">Received</dt>
+                            <dd className="font-mono tabular-nums">{l.received_qty}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-text-3">Outstanding</dt>
+                            <dd className="font-mono tabular-nums">
+                              {l.outstanding_qty}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-text-3">Unit price</dt>
+                            <dd className="font-mono tabular-nums">
+                              {l.unit_price_amount ?? '—'}
+                            </dd>
+                          </div>
+                        </dl>
                       </div>
-                    </div>
-                    <dl className="mt-2 grid grid-cols-[110px_1fr] gap-x-3 gap-y-1 text-xs">
-                      <dt className="text-text-3">Vendor</dt>
-                      <dd>{lot.vendor_name ?? '—'}</dd>
-                      <dt className="text-text-3">Ordered</dt>
-                      <dd className="font-mono">{lot.ordered_qty ?? '—'}</dd>
-                      <dt className="text-text-3">Unit price</dt>
-                      <dd className="font-mono">{lot.unit_price_amount ?? '—'}</dd>
-                      {lot.parent_lot_id && (
-                        <>
-                          <dt className="text-text-3">Split from</dt>
-                          <dd className="font-mono">{lot.parent_lot_id.slice(0, 8)}…</dd>
-                        </>
-                      )}
-                    </dl>
+                    ))}
                   </div>
-                ))}
+                </div>
+
+                {/* Receive history */}
+                <div>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-3">
+                    Receive history
+                  </h3>
+                  {current.events.length === 0 ? (
+                    <p className="text-sm text-text-3">No receipts yet.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {current.events.map((ev) => (
+                        <div
+                          key={ev.id}
+                          className="rounded-md border border-border bg-surface p-3 text-sm"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium text-text-2">
+                              {ev.received_at}
+                            </span>
+                            <span className="text-xs text-text-3">
+                              by{' '}
+                              {ev.received_by_user_name ??
+                                `${ev.received_by_user_id.slice(0, 8)}…`}
+                            </span>
+                          </div>
+                          <ul className="mt-2 space-y-1 text-xs">
+                            {ev.lines.map((el) => {
+                              const orderLine = current.lines.find(
+                                (l) => l.id === el.line_id,
+                              );
+                              return (
+                                <li
+                                  key={el.id}
+                                  className="flex flex-wrap items-center gap-2"
+                                >
+                                  <span className="font-mono text-accent">
+                                    {el.lot_number ?? '—'}
+                                  </span>
+                                  {orderLine && (
+                                    <span className="text-text-2">
+                                      <span className="font-mono">
+                                        {orderLine.item_number ?? '—'}
+                                      </span>
+                                      {orderLine.item_description
+                                        ? ` — ${orderLine.item_description}`
+                                        : ''}
+                                    </span>
+                                  )}
+                                  <span className="tabular-nums text-text-2">
+                                    +{el.qty_received}
+                                  </span>
+                                  {orderLine?.supplier_name && (
+                                    <span className="text-text-3">
+                                      ({orderLine.supplier_name})
+                                    </span>
+                                  )}
+                                  {el.over_receipt_reason && (
+                                    <span className="text-warning">
+                                      over: {el.over_receipt_reason}
+                                    </span>
+                                  )}
+                                  {canReceive && el.lot_id && (
+                                    <Button
+                                      size="icon-sm"
+                                      variant="ghost"
+                                      className="ml-auto"
+                                      onClick={() => setEditLotId(el.lot_id)}
+                                      aria-label={`Edit lot ${el.lot_number ?? ''}`}
+                                    >
+                                      <Pencil size={12} />
+                                    </Button>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </SheetBody>
             </>
           )}
         </SheetContent>
       </Sheet>
 
-      <LotEditDialog
-        lot={editLot}
-        onOpenChange={(o) => !o && setEditLot(null)}
-        onSaved={() => {
-          setEditLot(null);
-          void refresh();
+      <OrderEditDialog
+        order={editOrder}
+        onOpenChange={(o) => !o && setEditOrder(null)}
+        onSaved={(updated) => {
+          setEditOrder(null);
+          setCurrent(updated);
+          onUpdated(updated);
         }}
+      />
+
+      <LotDetailEditDialog
+        lotId={editLotId}
+        onOpenChange={(o) => !o && setEditLotId(null)}
+        onSaved={() => {
+          setEditLotId(null);
+          void refreshAfterLotEdit();
+        }}
+      />
+
+      <PasswordReauthDialog
+        open={reauthAction !== null}
+        onOpenChange={(o) => !o && setReauthAction(null)}
+        action={reauthAction === 'delete' ? 'order.delete' : 'order.cancel'}
+        meaning={
+          reauthAction === 'delete'
+            ? `I am deleting order ${current?.po_reference ?? ''}.`
+            : `I am cancelling order ${current?.po_reference ?? ''}.`
+        }
+        commentPlaceholder={
+          reauthAction === 'delete'
+            ? 'e.g. Order created in error'
+            : 'e.g. Supplier cancelled the order'
+        }
+        onConfirmed={(evidence) => {
+          const action = reauthAction;
+          setReauthAction(null);
+          if (action === 'delete') void performDelete(evidence);
+          else void performCancel(evidence);
+        }}
+        title={reauthAction === 'delete' ? 'Sign this deletion' : 'Sign this cancellation'}
+        submitLabel={reauthAction === 'delete' ? 'Sign & delete' : 'Sign & cancel'}
       />
     </>
   );

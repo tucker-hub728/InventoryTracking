@@ -36,9 +36,13 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     id: api.item_number,
     uuid: api.id,
     desc: api.description,
-    // Items can have multiple assigned vendors — show them joined. Empty
-    // when the item has no vendors yet.
-    vendor: api.vendors.map((v) => v.vendor_name).join(', '),
+    categoryId: api.category_id,
+    categoryName: api.category_name,
+    categoryKind: api.category_kind,
+    categoryTone: api.category_tone,
+    // Items can have multiple assigned suppliers — show them joined. Empty
+    // when the item has no suppliers yet.
+    supplier: api.suppliers.map((v) => v.supplier_name).join(', '),
     lead: api.avg_lead_days ?? 0,
     invValue: num(api.inv_value_amount),
     poValue: num(api.po_value_amount),

@@ -67,7 +67,7 @@ export const KanbanCard = React.memo(function KanbanCard({
       </div>
       <div className="mt-2 text-xs text-text-2">{reason}</div>
       <div className="mt-3 flex items-center justify-between text-[11px] text-text-3">
-        <span className="font-mono">{item.vendor}</span>
+        <span className="font-mono">{item.supplier}</span>
         <Avatar className="size-5 text-[9px]">
           <AvatarFallback>{assignee.initials}</AvatarFallback>
         </Avatar>

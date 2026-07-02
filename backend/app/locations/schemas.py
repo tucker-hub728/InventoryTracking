@@ -42,18 +42,6 @@ def _trim_nonblank(field: str):
     return BeforeValidator(_check)
 
 
-# A required, non-blank comment — used on e-signed operations (§3: comments
-# are mandatory on transactions requiring an electronic signature).
-def _required_comment(v: str) -> str:
-    s = (v or "").strip()
-    if not s:
-        raise ValueError("A comment is required for this action")
-    return s
-
-
-RequiredComment = Annotated[str, BeforeValidator(_required_comment), Field(max_length=2048)]
-
-
 # ── Nodes ───────────────────────────────────────────────────────────────
 
 
@@ -186,8 +174,8 @@ class PlaceRequest(BaseModel):
 
     Placement is the inbound quantity event: it posts a ``+qty`` ``receipt``
     movement to the GxP ledger (on-hand becomes ledger-derived) AND writes an
-    allocation. E-signed — ``evidence_id`` (action ``movement.receipt``) and a
-    comment are required. Total placed for a lot may not exceed its
+    allocation. E-signed — ``evidence_id`` (action ``movement.receipt``) is
+    required; a comment is optional. Total placed for a lot may not exceed its
     ``ordered_qty`` (when set).
     """
 
@@ -200,7 +188,7 @@ class PlaceRequest(BaseModel):
     grid_col: int | None = Field(default=None, ge=1, le=400)
     override: bool = False
     evidence_id: str
-    notes: RequiredComment
+    notes: str | None = Field(default=None, max_length=2048)
 
 
 class BatchCell(BaseModel):
@@ -216,9 +204,9 @@ class PlaceBatchRequest(BaseModel):
     """Place one lot into several Box cells in a single e-signed action (§3).
 
     Each listed cell receives exactly one unit; the whole batch is authorised
-    by ONE re-authentication (``evidence_id``, action ``movement.receipt``) and
-    one comment. Cells must be distinct, within the Box grid, and empty unless
-    ``override`` is set. The lifetime cap (total placed ≤ ``ordered_qty``)
+    by ONE re-authentication (``evidence_id``, action ``movement.receipt``); a
+    comment is optional. Cells must be distinct, within the Box grid, and empty
+    unless ``override`` is set. The lifetime cap (total placed ≤ ``ordered_qty``)
     applies across the batch.
     """
 
@@ -229,7 +217,7 @@ class PlaceBatchRequest(BaseModel):
     cells: list[BatchCell] = Field(min_length=1, max_length=400)
     override: bool = False
     evidence_id: str
-    notes: RequiredComment
+    notes: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
     def _distinct_cells(self) -> PlaceBatchRequest:
@@ -252,7 +240,7 @@ class ConsumeBatchRequest(BaseModel):
     allocation_ids: list[str] = Field(min_length=1, max_length=400)
     to_node_id: str
     evidence_id: str
-    notes: RequiredComment
+    notes: str | None = Field(default=None, max_length=2048)
 
 
 class TransferBatchRequest(BaseModel):
@@ -278,7 +266,7 @@ class TransferBatchRequest(BaseModel):
     qty: int | None = Field(default=None, gt=0)
     override: bool = False
     evidence_id: str
-    notes: RequiredComment
+    notes: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
     def _distinct_cells(self) -> TransferBatchRequest:
@@ -305,8 +293,8 @@ class TransferRequest(BaseModel):
     """Move a quantity from one allocation to another node cell (§3 Transfer).
 
     Recorded in the GxP ledger as a ``transfer_out`` / ``transfer_in`` pair —
-    e-signed, so ``evidence_id`` (action ``movement.transfer``) and a comment
-    are required.
+    e-signed, so ``evidence_id`` (action ``movement.transfer``) is required; a
+    comment is optional.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -318,7 +306,7 @@ class TransferRequest(BaseModel):
     to_grid_col: int | None = Field(default=None, ge=1, le=400)
     override: bool = False
     evidence_id: str
-    notes: RequiredComment
+    notes: str | None = Field(default=None, max_length=2048)
 
 
 class ConsumeRequest(BaseModel):
@@ -328,7 +316,7 @@ class ConsumeRequest(BaseModel):
     so on-hand drops; the unit can't be used again. ``to_node_id`` is the
     **Flat location** that consumed it (e.g. a lab / Kanban) — recorded as the
     movement's destination. E-signed — ``evidence_id`` (action
-    ``movement.dispense``) and a comment are required.
+    ``movement.dispense``) is required; a comment is optional.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -338,7 +326,7 @@ class ConsumeRequest(BaseModel):
     to_node_id: str
     qty: int = Field(gt=0)
     evidence_id: str
-    notes: RequiredComment
+    notes: str | None = Field(default=None, max_length=2048)
 
 
 class NodeMovementRead(BaseModel):

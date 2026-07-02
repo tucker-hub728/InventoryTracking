@@ -13,7 +13,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.forecast import ForecastEntry
-from app.models.products import Customer, Product
+from app.models.inventory import Item
+from app.models.products import Customer
 
 
 async def list_forecast_entries(
@@ -29,11 +30,11 @@ async def list_forecast_entries(
     """
     stmt = (
         select(ForecastEntry)
-        .join(Product, Product.id == ForecastEntry.product_id)
+        .join(Item, Item.id == ForecastEntry.product_id)
         .outerjoin(Customer, Customer.id == ForecastEntry.customer_id)
         .where(
             ForecastEntry.forecast_year == year,
-            Product.deleted_at.is_(None),
+            Item.deleted_at.is_(None),
             or_(
                 ForecastEntry.customer_id.is_(None),
                 Customer.deleted_at.is_(None),
@@ -46,11 +47,11 @@ async def list_forecast_entries(
         stmt = stmt.where(ForecastEntry.customer_id == customer_id)
 
     rows = list((await session.execute(stmt)).scalars().unique().all())
-    # Unassigned (no customer) sorts first, then by customer name, sku, month.
+    # Unassigned (no customer) sorts first, then by customer name, item #, month.
     rows.sort(
         key=lambda e: (
             e.customer.name.lower() if e.customer else "",
-            e.product.sku.lower() if e.product else "",
+            e.product.item_number.lower() if e.product else "",
             e.forecast_month,
         )
     )

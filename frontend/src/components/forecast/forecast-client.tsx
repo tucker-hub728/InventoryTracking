@@ -26,10 +26,21 @@ import {
   type ForecastChange,
   type ForecastEntry,
 } from '@/lib/api/forecast';
-import { productsApi, type Product } from '@/lib/api/products';
+import { itemsApi } from '@/lib/api/items';
 import { customersApi, type Customer } from '@/lib/api/customers';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
+
+/**
+ * A forecastable finished good. Under the unified catalogue a "product" is a
+ * built item; ``sku`` maps to its item number and ``name`` to its description,
+ * keeping the rest of this grid unchanged.
+ */
+interface Product {
+  id: string;
+  sku: string;
+  name: string;
+}
 
 const ALL_PRODUCTS = 'all';
 const ALL_CUSTOMERS = 'all';
@@ -96,12 +107,17 @@ export function ForecastClient() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [prods, custs] = await Promise.all([
-        productsApi.list({}, { signal }),
+      const [itemsResp, custs] = await Promise.all([
+        itemsApi.list({ limit: 200 }, { signal }),
         customersApi.list({}, { signal }),
       ]);
       if (signal?.aborted) return;
-      setProducts(prods);
+      // Forecastable products = built (finished-good) items.
+      setProducts(
+        itemsResp.items
+          .filter((i) => i.category_kind === 'built')
+          .map((i) => ({ id: i.id, sku: i.item_number, name: i.description })),
+      );
       setCustomers(custs);
     } catch (err) {
       if ((err as DOMException)?.name === 'AbortError') return;
@@ -195,7 +211,7 @@ export function ForecastClient() {
       for (const customer of customers) {
         if (customerId !== ALL_CUSTOMERS && customerId !== customer.id) continue;
         const ids = new Set<string>();
-        for (const ref of customer.products) ids.add(ref.id);
+        for (const ref of customer.items) ids.add(ref.id);
         for (const e of entries) {
           if (e.customerId === customer.id) ids.add(e.productId);
         }
@@ -466,7 +482,7 @@ function ProductRow({ product, monthRuns, dirty, editable, onSet }: ProductRowPr
     <tr className="border-b border-border/60 hover:bg-surface/40">
       <td className="sticky left-0 z-10 bg-bg-elev px-3 py-1.5">
         <Link
-          href={`/products/${product.id}`}
+          href={`/inventory/${product.sku}/ledger`}
           className="font-mono text-xs text-accent hover:underline"
         >
           {product.sku}

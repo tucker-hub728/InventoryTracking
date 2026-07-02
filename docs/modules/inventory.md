@@ -32,8 +32,8 @@ it.
 | Movement ledger | `app.ledger_entries` |
 | Denormalised balances | `app.item_balances` |
 | Per-program demand snapshot (Excel cols N–AB) | `app.item_program_demand` |
-| Vendors | `meta.vendors` |
-| Units of measure | `meta.units_of_measure` |
+| Suppliers | `meta.suppliers` |
+| ~~Units of measure~~ | ~~`meta.units_of_measure`~~ — REMOVED (v2 §8) |
 | Locations (incl. LN2 tree) | `meta.locations` |
 | LN2 position state | `app.ln2_position_state`, `app.ln2_assignment_events` |
 | Kanban stages | `meta.workflow_stages` |
@@ -119,10 +119,10 @@ Derivation in function `compute_inventory_status(item_id)`:
 roll up "has an expired lot" as a UI hint but it is never a value on
 this table. Quarantine deferred from v1 (§99 Q3).
 
-### 3.3 `meta.vendors`
+### 3.3 `meta.suppliers`
 
-Sourced **directly from Excel master sheet col C `Vendor`** (header row
-49, data rows 50+). 73 distinct vendor names in the current workbook —
+Sourced **directly from Excel master sheet col C `Supplier`** (header row
+49, data rows 50+). 73 distinct supplier names in the current workbook —
 e.g. `Fisher Scientific`, `Miltenyi`, `Thermo Fisher Scientific`,
 `Valley Biomedical`, `R&D Systems, Inc.`, `Irvine Scientific (fuji film)`,
 `VWR`, `Wilson Wolf`, `OriGen Biomedical`, `Hardy Diagnostics`,
@@ -139,27 +139,22 @@ e.g. `Fisher Scientific`, `Miltenyi`, `Thermo Fisher Scientific`,
 | `notes` | `TEXT NULL` | |
 | `created_at`, `updated_at`, `deleted_at` | | |
 
-**Important:** seeder skips blank vendor strings. Excel rows with
-`vendor = ''` create no `meta.vendors` row, and the items they belong
-to get `vendor_id = NULL`. This is the root cause of the empty
+**Important:** seeder skips blank supplier strings. Excel rows with
+`supplier = ''` create no `meta.suppliers` row, and the items they belong
+to get `supplier_id = NULL`. This is the root cause of the empty
 `<Select.Item />` bug already fixed in
 [../../src/components/inventory/new-item-dialog.tsx](../../src/components/inventory/new-item-dialog.tsx).
 
 > **Note:** the per-item ledger sheets (`XX-XXXX` template) do **not**
-> have a vendor column — only the master `Component Inventory Tracker`
+> have a supplier column — only the master `Component Inventory Tracker`
 > sheet does. If you opened a `CM-0001` / `NM-0237` / etc. tab and saw
-> no vendor, that's why.
+> no supplier, that's why.
 
-### 3.4 `meta.units_of_measure`
+### 3.4 ~~`meta.units_of_measure`~~ — REMOVED
 
-Not in Excel; required for clean qty arithmetic when units differ
-(bottles vs. mL vs. vials).
-
-| col | type | notes |
-|--|--|--|
-| `code` | `TEXT PK` | `unit`, `mL`, `g`, `bag`, `vial`, `box`, `pack` |
-| `label` | `TEXT NOT NULL` | |
-| `is_discrete` | `BOOL NOT NULL` | `TRUE` for `unit/vial/bag`; `FALSE` for `mL/g` |
+**Dropped entirely (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** UOM was
+removed together with the package/price columns — quantities are whole units
+and there is no unit-of-measure lookup table.
 
 Default `unit`.
 
@@ -267,13 +262,13 @@ Columns map **1:1** to the `Component Inventory Tracker` header row 49.
 | `id` | `UUID PK` | — | internal |
 | `item_number` | `TEXT NOT NULL` | col B `Item # (MIN)` | free-form, user-supplied. `UNIQUE (item_number) WHERE deleted_at IS NULL`. **No prefix CHECK** (§3.1) |
 | `description` | `TEXT NOT NULL` | col A `Item Description` | |
-| `vendor_id` | `UUID FK → meta.vendors` | col C `Vendor` | nullable for unsourced items (blank vendor in Excel) |
+| `supplier_id` | `UUID FK → meta.suppliers` | col C `Supplier` | nullable for unsourced items (blank supplier in Excel) |
 | `avg_lead_days` | `INT NULL` | col D `Average Lead Times (Days)` | |
 | `reorder_threshold` | `NUMERIC(14,3) NOT NULL DEFAULT 0` | col M `MUST HAVE INVENTORY LEVEL` | drives `reorder_threshold` notification (§6) and `low_stock` Kanban card creation (§5) |
-| `unit_price_amount` | `NUMERIC(14,2) NULL` | col AC `Unit Price` | |
-| `units_per_package` | `INT NULL` | col AD `Units Per package configuration` | |
-| `price_per_package_amount` | `NUMERIC(14,2) NULL` | col AE `Price Per Package configuration` | stored for 1:1 export fidelity; invariant `AE = AC × AD` enforced by trigger (§7 rule 5) |
-| `uom_code` | `TEXT FK → meta.units_of_measure` | — | default `unit` |
+| ~~`unit_price_amount`~~ | — | col AC `Unit Price` | **REMOVED (v2 §8 · migration `b7c8d9e0f1a2`, 2026-06-23).** Unit price now lives on the **lot** (`app.lots.unit_price_amount`) and order lines; item inv $ / PO $ are derived (Σ qty × lot unit price). |
+| ~~`units_per_package`~~ | — | col AD `Units Per package configuration` | **REMOVED (v2 §8).** No package-configuration concept — variable package sizes make package-level pricing impractical; **track unit price only**. |
+| ~~`price_per_package_amount`~~ | — | col AE `Price Per Package configuration` | **REMOVED (v2 §8).** No separate packaging-configuration price. |
+| ~~`uom_code`~~ | — | — | **REMOVED (migration `b7c8d9e0f1a2`).** `meta.units_of_measure` dropped entirely; quantities are whole units. |
 | `po_note` | `TEXT NULL` | col I `Comment/ Note on Outstanding POs` | |
 | `po_due_text` | `TEXT NULL` | col J `PO Due Date(s)` | free-form on master sheet; structured POs live in `purchase_orders` |
 | `must_order_flag` | `BOOL NOT NULL DEFAULT FALSE` | col L `Must Order` | |
@@ -287,7 +282,7 @@ Columns map **1:1** to the `Component Inventory Tracker` header row 49.
 
 **Indexes:**
 - `UNIQUE (item_number) WHERE deleted_at IS NULL`
-- `(vendor_id)`
+- `(supplier_id)`
 - Generated column `item_prefix TEXT GENERATED ALWAYS AS (CASE WHEN position('-' IN item_number) > 0 THEN split_part(item_number, '-', 1) ELSE NULL END) STORED`, indexed for the optional prefix-group filter — a convenience derivation, not a constraint
 - `GIN (to_tsvector('english', description))` — search bar
 - `(updated_at DESC)`, `(last_updated_on DESC)` — recently-changed list
@@ -333,7 +328,7 @@ Indexes: `(item_id, expires_on)`, `(status)`.
 | `reserved → active` | allocation released | unsigned |
 | `reserved → consumed` | balance hits zero via ledger stock-out | inherits the ledger entry's signature |
 | `active → consumed` | balance hits zero via ledger stock-out | inherits the ledger entry's signature |
-| `* → recalled` | manual vendor-recall action | **signed** (`electronic_signatures` row required) |
+| `* → recalled` | manual supplier-recall action | **signed** (`electronic_signatures` row required) |
 
 ### 4.3 `app.item_batches` — physical placement
 
@@ -754,9 +749,11 @@ DB-level invariants for the inventory module:
    each `INSERT` updates `item_batches.balance_units` and
    `item_balances.qty_on_hand` in the same transaction.
 4. **Sign-off required for sensitive events** — triggers in §8.2.
-5. **Package-price invariant** — `tg_items_check_pkg_price` enforces
-   `price_per_package_amount = unit_price_amount × units_per_package`
-   when all three are non-null. Mirrors Excel col AE formula.
+5. ~~**Package-price invariant**~~ — **REMOVED (v2 §8 · migration
+   `b7c8d9e0f1a2`).** There is no `price_per_package_amount` /
+   `units_per_package` and no `tg_items_check_pkg_price` trigger: the
+   system tracks **unit price only** (on lots / order lines), with no
+   packaging-configuration price.
 6. **Soft-delete sweep** — partial unique indexes
    (`WHERE deleted_at IS NULL`) so unique constraints release the value
    on logical delete.
@@ -784,11 +781,11 @@ SELECT i.id,
        i.item_number,
        i.item_prefix,                     -- generated column
        i.description,
-       v.name AS vendor,
+       v.name AS supplier,
        i.avg_lead_days,
        i.reorder_threshold,
-       i.unit_price_amount,
-       i.units_per_package,
+       -- unit_price_amount / units_per_package REMOVED (v2 §8) — valuation
+       -- now comes from lots (b.inv_value_amount below), not the item
        i.last_updated_on,
        b.qty_on_hand,
        b.qty_on_order,
@@ -798,7 +795,7 @@ SELECT i.id,
        b.earliest_lot_expires_on,
        b.last_movement_at
 FROM   app.items        i
-LEFT   JOIN meta.vendors v ON v.id = i.vendor_id
+LEFT   JOIN meta.suppliers v ON v.id = i.supplier_id
 LEFT   JOIN app.item_balances b ON b.item_id = i.id
 WHERE  i.deleted_at IS NULL
   AND  ($1::text IS NULL OR b.status_code = $1)
@@ -867,14 +864,14 @@ SELECT s.code           AS stage_code,
        c.opened_reason,
        i.item_number,
        i.description,
-       v.name           AS vendor,
+       v.name           AS supplier,
        b.qty_on_hand,
        b.qty_on_order,
        i.reorder_threshold
 FROM   meta.workflow_stages s
 LEFT   JOIN app.workflow_cards  c ON c.stage_id = s.id AND c.closed_at IS NULL
 LEFT   JOIN app.items           i ON i.id = c.item_id
-LEFT   JOIN meta.vendors        v ON v.id = i.vendor_id
+LEFT   JOIN meta.suppliers        v ON v.id = i.supplier_id
 LEFT   JOIN app.item_balances   b ON b.item_id = c.item_id
 WHERE  s.is_active = TRUE
 ORDER  BY s.sort_order, c.priority DESC, c.opened_at;
@@ -914,8 +911,8 @@ Idempotent: re-running with the same xlsx is a no-op.
    freezers, fridges, PD lab, LN2 tanks → racks → positions). Extract
    distinct location strings from per-item ledger col E and create
    `kind='generic'` rows for any unmatched.
-3. **Vendors** — upsert `meta.vendors` from master sheet col C. **Skip
-   blank vendor strings** (the empty-vendor rows in Excel).
+3. **Suppliers** — upsert `meta.suppliers` from master sheet col C. **Skip
+   blank supplier strings** (the empty-supplier rows in Excel).
 4. **Items** — upsert `app.items` from master sheet (rows 50+). Map
    each column per §4.1. No prefix validation (§3.1). Reject only on
    missing `item_number` / duplicate.
@@ -959,8 +956,10 @@ Resolved questions are struck through.
    `item_number`; no category table, no prefix CHECK, no lookup. Whatever
    the user types is stored. `UNIQUE` is the only backend rule. `item_prefix`
    generated column for convenience filtering only.
-2. ~~**`price_per_package_amount` storage.**~~ **Resolved 2026-05-26:**
-   mirror Excel — store all three columns; trigger enforces AE = AC × AD.
+2. ~~**`price_per_package_amount` storage.**~~ **Superseded 2026-06-11
+   (v2 §8):** no package-configuration price. Package/UOM columns dropped
+   (migration `b7c8d9e0f1a2`); **track unit price only** — variable package
+   sizes make package-level pricing impractical.
 3. ~~**Quarantine model.**~~ **Resolved 2026-05-26:** deferred from v1.
    No `lots.status='quarantine'`, no quarantine workflow card, no
    quarantines table.
@@ -974,7 +973,7 @@ Resolved questions are struck through.
 6. **Sign-off scope for stock-in.** Spec doc requires "electronic
    sign-off for all status changes" but doesn't enumerate which ledger
    directions count. Current default: signed `out` and `adjust`,
-   unsigned `in` (vendor receipts). Confirm, or expand to all
+   unsigned `in` (supplier receipts). Confirm, or expand to all
    directions, or make per-item / per-category configurable?
 7. **Default expiration warning lead times.** Spec doc says "approach
    their expiration dates" without specifying days. Proposed: 30 days

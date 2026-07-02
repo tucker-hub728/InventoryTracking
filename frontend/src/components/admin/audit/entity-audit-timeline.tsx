@@ -140,10 +140,10 @@ function formatTime(iso: string): string {
  *
  *   * Movement rows (receipt / dispense / discard / adjustment /
  *     transfer / reverse) from ``items/{id}/ledger``, and
- *   * Master-data edits (description / vendor / threshold / etc.)
+ *   * Master-data edits (description / supplier / threshold / etc.)
  *     from ``audit/events?subject_table=app.items&subject_id=<id>``.
  *
- * For non-item subjects (vendors, locations, lots), only audit events
+ * For non-item subjects (suppliers, locations, lots), only audit events
  * are fetched — those entities don't appear in the movement ledger.
  *
  * Each row carries the appropriate icon + colour tint. When the row

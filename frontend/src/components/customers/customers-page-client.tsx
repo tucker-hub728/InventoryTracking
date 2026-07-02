@@ -93,7 +93,7 @@ export function CustomersPageClient() {
     <>
       <PageHeader
         title="Customers"
-        subtitle="The customers who order your products."
+        subtitle="The customers who order your finished goods."
         actions={
           canCreate ? (
             <Button variant="primary" onClick={() => setCreating(true)}>
@@ -134,7 +134,7 @@ export function CustomersPageClient() {
           ) : !loading && customers.length === 0 ? (
             <EmptyState
               title="No customers yet"
-              hint="Add a customer and link the products they order."
+              hint="Add a customer and link the finished goods they order."
               action={
                 canCreate ? (
                   <Button variant="primary" onClick={() => setCreating(true)}>
@@ -153,7 +153,7 @@ export function CustomersPageClient() {
                     <th className="px-3 py-2 font-medium">Customer</th>
                     <th className="px-3 py-2 font-medium">Contact</th>
                     <th className="px-3 py-2 font-medium">Email</th>
-                    <th className="px-3 py-2 font-medium">Linked products</th>
+                    <th className="px-3 py-2 font-medium">Linked finished goods</th>
                     {canCreate && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
@@ -171,11 +171,11 @@ export function CustomersPageClient() {
                         {c.email ?? <span className="text-text-3">—</span>}
                       </td>
                       <td className="px-3 py-2.5">
-                        {c.products.length === 0 ? (
+                        {c.items.length === 0 ? (
                           <span className="text-text-3">—</span>
                         ) : (
                           <div className="flex flex-wrap gap-1">
-                            {c.products.map((p) => (
+                            {c.items.map((p) => (
                               <Badge key={p.id} tone="neutral">
                                 {p.name}
                               </Badge>

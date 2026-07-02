@@ -5,7 +5,7 @@ import {
   History,
   LineChart,
   MapPin,
-  Package,
+  Tags,
   Truck,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -41,7 +41,7 @@ export const navSections: readonly NavSection[] = [
     items: [
       { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
-      { id: 'products', label: 'Products', href: '/products', icon: Package, resource: 'inventory' },
+      { id: 'categories', label: 'Categories', href: '/categories', icon: Tags, resource: 'inventory' },
       { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
       { id: 'forecast', label: 'Forecast', href: '/forecast', icon: LineChart, resource: 'inventory' },
       // Hidden for now — route stays wired; uncomment to restore.
@@ -80,7 +80,7 @@ export const navSections: readonly NavSection[] = [
       // },
       // Master data — viewer can read; admin/editor can create.
       // Page-level permission check enforces the write side.
-      { id: 'vendors', label: 'Vendors', href: '/vendors', icon: Building2, resource: 'inventory' },
+      { id: 'suppliers', label: 'Suppliers', href: '/suppliers', icon: Building2, resource: 'inventory' },
       // { id: 'uoms', label: 'Units of measure', href: '/uoms', icon: Ruler, resource: 'inventory' },
       // { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'inventory' },
       { id: 'audit', label: 'Audit log', href: '/audit', icon: History, resource: 'audit' },

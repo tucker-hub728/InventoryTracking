@@ -39,18 +39,18 @@
 | Table | PK | Key FKs |
 |--|--|--|
 | `meta.inventory_statuses` | `code` | — |
-| `meta.units_of_measure` | `code` | — |
+| ~~`meta.units_of_measure`~~ | — | **REMOVED (v2 §8 · migration `b7c8d9e0f1a2`)** — UOM dropped |
 | `meta.locations` | `id` | self: `parent_id` |
-| `meta.vendors` | `id` | — |
+| `meta.suppliers` | `id` | — |
 | `meta.programs` | `id` | — |
-| `app.items` | `id` | `vendor_id → vendors`, `uom_code → units_of_measure`, `created_by_user_id`, `updated_by_user_id` |
+| `app.items` | `id` | `supplier_id → suppliers`, `created_by_user_id`, `updated_by_user_id` (`uom_code → units_of_measure` REMOVED, v2 §8) |
 | `app.item_program_demand` | `(item_id, program_id)` | `→ items`, `→ programs` |
 | `app.lots` | `id` | `item_id → items` |
 | `app.item_batches` | `id` | `item_id → items`, `lot_id → lots`, `location_id → locations` |
 | `app.item_balances` | `item_id` | `→ items`, `status_code → inventory_statuses` |
 | `app.ledger_entries` | `id` | `batch_id → item_batches`; denorm: `item_id`, `lot_id`, `location_id`; `entered_by_user_id → users`, `signature_id → electronic_signatures` |
 | `app.electronic_signatures` | `id` | `signer_user_id → users`; polymorphic `(subject_table, subject_id)` — no FK |
-| `app.purchase_orders` | `id` | `vendor_id → vendors`, `approval_signature_id → electronic_signatures` |
+| `app.purchase_orders` | `id` | `supplier_id → suppliers`, `approval_signature_id → electronic_signatures` |
 | `app.po_lines` | `id` | `po_id → purchase_orders`, `item_id → items`, `lot_received_id → lots` |
 
 ### Module 3 — Storage / LN2 (§7)
@@ -188,7 +188,7 @@ erDiagram
 
 ```mermaid
 erDiagram
-    VENDORS ||--o{ ITEMS : "supplies"
+    SUPPLIERS ||--o{ ITEMS : "supplies"
     UNITS_OF_MEASURE ||--o{ ITEMS : "measured in"
     ITEMS ||--o{ LOTS : "produces"
     ITEMS ||--o{ ITEM_BATCHES : "stocked as"
@@ -202,24 +202,24 @@ erDiagram
     USERS ||--o{ LEDGER_ENTRIES : "entered by"
     ELECTRONIC_SIGNATURES ||--o| LEDGER_ENTRIES : "signs"
     USERS ||--o{ ELECTRONIC_SIGNATURES : "signed by"
-    VENDORS ||--o{ PURCHASE_ORDERS : "ordered from"
+    SUPPLIERS ||--o{ PURCHASE_ORDERS : "ordered from"
     PURCHASE_ORDERS ||--o{ PO_LINES : "contains"
     ITEMS ||--o{ PO_LINES : "ordered"
     LOTS ||--o{ PO_LINES : "received as"
     ELECTRONIC_SIGNATURES ||--o| PURCHASE_ORDERS : "approves"
     LOCATIONS ||--o{ LOCATIONS : "parent"
 
+    %% Pricing/UOM columns (unit_price_amount, units_per_package,
+    %% price_per_package_amount, uom_code) REMOVED per v2 §8 — track unit
+    %% price only, no package-configuration price. Unit price now lives on
+    %% LOTS.unit_price_amount (migration b7c8d9e0f1a2).
     ITEMS {
         uuid id PK
-        text item_number UK "CM-/NM-/CR-/AY- CHECK"
+        text item_number UK
         text description
-        uuid vendor_id FK
-        text uom_code FK
+        uuid supplier_id FK
         int avg_lead_days
         numeric reorder_threshold "col M"
-        numeric unit_price_amount "col AC"
-        int units_per_package "col AD"
-        numeric price_per_package_amount "col AE = AC*AD trigger"
         date last_updated_on "col AF"
         int row_version
         timestamptz deleted_at
@@ -287,7 +287,7 @@ erDiagram
     }
     PURCHASE_ORDERS {
         uuid id PK
-        uuid vendor_id FK
+        uuid supplier_id FK
         text po_number UK
         text status "draft|sent|partial|received|closed|cancelled"
         timestamptz ordered_at
@@ -304,7 +304,7 @@ erDiagram
         numeric unit_price_amount
         uuid lot_received_id FK
     }
-    VENDORS {
+    SUPPLIERS {
         uuid id PK
         text name UK
         text contact_email
@@ -507,7 +507,7 @@ Worth flagging because they affect review:
 1. **Polymorphic links.** `app.electronic_signatures(subject_table, subject_id)` and `audit.audit_events(subject_table, subject_id)` point at any of `items`, `lots`, `purchase_orders`, `workflow_cards`, `users`, etc. Mermaid can't draw "FK to N possible tables", so it's annotated as `"polymorphic"` on the column. The app enforces validity; no DB FK.
 2. **Denormalised FKs on `ledger_entries`.** `(item_id, lot_id, location_id)` are duplicated from `item_batches` for query speed. Real referential integrity is via `batch_id`. Triggers keep the denorm in sync.
 3. **Partitioning.** `audit.audit_events` and `audit.activity_feed` are partitioned by month/week on `occurred_at`. The diagrams show only the logical table; physical partitions live in the `audit` schema (hot) or `archive` schema (cold).
-4. **Per-table triggers** (`tg_ledger_update_batch_balance`, `tg_audit_events_chain`, `tg_items_check_pkg_price`, …) — see structure doc §13.
+4. **Per-table triggers** (`tg_ledger_update_batch_balance`, `tg_audit_events_chain`, …) — see structure doc §13. (`tg_items_check_pkg_price` REMOVED — no package-price invariant, v2 §8.)
 5. **`row_version` columns.** Shown only on `items` and `ln2_position_state` for brevity; the rule (§1 #8) applies to every mutable operational row.
 
 ---

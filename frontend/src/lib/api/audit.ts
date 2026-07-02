@@ -14,7 +14,7 @@ export type ApiAuditAction = 'created' | 'updated' | 'deleted' | 'restored';
 
 /** Whitelisted subject_table values — keep aligned with the backend. */
 export type ApiAuditSubjectTable =
-  | 'meta.vendors'
+  | 'meta.suppliers'
   | 'meta.locations'
   | 'app.items'
   | 'app.lots'
@@ -23,7 +23,7 @@ export type ApiAuditSubjectTable =
 
 /** Human-readable labels for the subject_table dropdown. */
 export const AUDIT_SUBJECT_TABLE_LABEL: Record<ApiAuditSubjectTable, string> = {
-  'meta.vendors': 'Vendors',
+  'meta.suppliers': 'Suppliers',
   'meta.locations': 'Locations',
   'app.items': 'Items',
   'app.lots': 'Lots',

@@ -16,12 +16,21 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
-import { vendorsApi, type Vendor } from '@/lib/api/vendors';
+import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
+import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
 
-import { VendorMultiSelect } from './vendor-multi-select';
+import { SupplierMultiSelect } from './supplier-multi-select';
 
 // ── Form schema ────────────────────────────────────────────────────────
 
@@ -36,9 +45,12 @@ const schema = z.object({
     .min(1, 'Item # is required')
     .max(64, 'Item # must be at most 64 characters'),
   desc: z.string().min(3, 'Description is required'),
-  // Assigned vendors — zero-or-more. The only vendors this item can later be
+  // Required category — governs whether the item is a Product (built) or
+  // Purchased, and thus BOM eligibility.
+  categoryId: z.string().min(1, 'Category is required'),
+  // Assigned suppliers — zero-or-more. The only suppliers this item can later be
   // received against. Optional: an item may start with none and add later.
-  vendorIds: z.array(z.string()).default([]),
+  supplierIds: z.array(z.string()).default([]),
   leadDays: z.coerce.number().int().nonnegative('Must be ≥ 0'),
   threshold: z.coerce.number().int().nonnegative('Must be ≥ 0'),
   nearExpiryThresholdDays: z.coerce
@@ -64,12 +76,14 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
   const createItem = useInventoryStore((s) => s.create);
   const createPending = useInventoryStore((s) => s.createPending);
 
-  // Vendor dropdown source. Loaded once when the dialog opens — the
+  // Supplier dropdown source. Loaded once when the dialog opens — the
   // master-data list is small (≤ ~100 rows) and changes rarely, so a
   // simple on-open fetch beats wiring it into the store.
-  const [vendors, setVendors] = React.useState<Vendor[]>([]);
-  const [vendorsLoading, setVendorsLoading] = React.useState(false);
-  const [vendorsError, setVendorsError] = React.useState<string | null>(null);
+  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
+  const [suppliersLoading, setSuppliersLoading] = React.useState(false);
+  const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
+
+  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
 
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -85,33 +99,54 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
     defaultValues: {
       itemId: '',
       desc: '',
-      vendorIds: [],
+      categoryId: '',
+      supplierIds: [],
       leadDays: 0,
       threshold: 0,
       nearExpiryThresholdDays: 30,
     },
   });
 
-  const vendorIds = watch('vendorIds');
+  const supplierIds = watch('supplierIds');
+  const categoryId = watch('categoryId');
+
+  // Purchasing fields (suppliers, lead time, reorder + near-expiry) only apply to
+  // Purchased categories — a Product is built, not bought. Shown once a
+  // Purchased category is picked; hidden for Product / before a pick.
+  const selectedCategory = categories.find((c) => c.id === categoryId);
+  const showPurchasing = selectedCategory?.kind === 'purchased';
 
   // ── Side effects ─────────────────────────────────────────────────────
 
-  // Load vendors once when the dialog opens.
+  // Load suppliers once when the dialog opens.
   React.useEffect(() => {
     if (!open) return;
     const ctrl = new AbortController();
-    setVendorsLoading(true);
-    setVendorsError(null);
-    vendorsApi
+    setSuppliersLoading(true);
+    setSuppliersError(null);
+    suppliersApi
       .list({ activeOnly: true, signal: ctrl.signal })
-      .then((rows) => setVendors(rows))
+      .then((rows) => setSuppliers(rows))
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
-        setVendorsError(
-          err instanceof ApiError ? err.message : 'Failed to load vendors.',
+        setSuppliersError(
+          err instanceof ApiError ? err.message : 'Failed to load suppliers.',
         );
       })
-      .finally(() => setVendorsLoading(false));
+      .finally(() => setSuppliersLoading(false));
+    return () => ctrl.abort();
+  }, [open]);
+
+  // Load categories once when the dialog opens.
+  React.useEffect(() => {
+    if (!open) return;
+    const ctrl = new AbortController();
+    categoriesApi
+      .list({ signal: ctrl.signal })
+      .then(setCategories)
+      .catch(() => {
+        /* surfaced via the empty dropdown */
+      });
     return () => ctrl.abort();
   }, [open]);
 
@@ -121,7 +156,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       reset({
         itemId: '',
         desc: '',
-        vendorIds: [],
+        supplierIds: [],
         leadDays: 0,
         threshold: 0,
         nearExpiryThresholdDays: 30,
@@ -138,7 +173,8 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       const created = await createItem({
         item_number: data.itemId,
         description: data.desc,
-        vendor_ids: data.vendorIds,
+        category_id: data.categoryId,
+        supplier_ids: data.supplierIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
         near_expiry_threshold_days: data.nearExpiryThresholdDays,
@@ -199,23 +235,55 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
               </Field>
             </div>
 
-            <Field
-              id="ni-vendors"
-              label="Vendors"
-              error={errors.vendorIds?.message}
-            >
-              <VendorMultiSelect
-                id="ni-vendors"
-                vendors={vendors}
-                value={vendorIds}
-                onChange={(next) =>
-                  setValue('vendorIds', next, { shouldValidate: true })
+            <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
+              <Select
+                value={categoryId}
+                onValueChange={(v) =>
+                  setValue('categoryId', v, { shouldValidate: true })
                 }
-                loading={vendorsLoading}
-                error={vendorsError}
+              >
+                <SelectTrigger id="ni-category" aria-label="Category">
+                  <SelectValue placeholder="Pick a category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {categories.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      <span className="flex items-center gap-2">
+                        <span className="truncate">{c.name}</span>
+                        <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
+                          {c.kind === 'built' ? 'Product' : 'Purchased'}
+                        </Badge>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-text-3">
+                The category decides whether this is a Product (can have a BOM) or
+                a Purchased item. Manage the BOM from the item&apos;s detail page.
+              </p>
+            </Field>
+
+            {showPurchasing && (
+              <>
+            <Field
+              id="ni-suppliers"
+              label="Suppliers"
+              error={errors.supplierIds?.message}
+            >
+              <SupplierMultiSelect
+                id="ni-suppliers"
+                modal
+                suppliers={suppliers}
+                value={supplierIds}
+                onChange={(next) =>
+                  setValue('supplierIds', next, { shouldValidate: true })
+                }
+                loading={suppliersLoading}
+                error={suppliersError}
               />
               <p className="text-xs text-text-3">
-                Only these vendors can be selected when receiving stock for this
+                Only these suppliers can be selected when receiving stock for this
                 item.
               </p>
             </Field>
@@ -260,10 +328,13 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
                 />
               </Field>
             </div>
+              </>
+            )}
 
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
-              After creating, you’ll be able to record the first unit in to bring the
-              item into stock. The item is initially created with zero balance.
+              {showPurchasing
+                ? 'After creating, you’ll be able to record the first unit in to bring the item into stock. The item is initially created with zero balance.'
+                : 'After creating, open the item’s detail page to define its bill of materials. The item is initially created with zero balance.'}
             </p>
 
             {submitError && (

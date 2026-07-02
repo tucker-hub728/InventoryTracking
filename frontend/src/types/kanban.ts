@@ -5,7 +5,7 @@ export interface KanbanCardData {
   itemId: string;
   stage: KanbanStageId;
   item: InventoryItem;
-  vendor: string;
+  supplier: string;
   qty: number;
   onOrder: number;
   threshold: number;

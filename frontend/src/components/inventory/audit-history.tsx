@@ -95,7 +95,7 @@ function buildEntries(item: InventoryItem, signoffs: Signoff[]): AuditEntry[] {
     const action = s.direction === 'in' ? 'Received' : 'Released';
     const subject =
       s.direction === 'in'
-        ? `${s.units} units from vendor (PO #4421)`
+        ? `${s.units} units from supplier (PO #4421)`
         : `${s.units} units for manufacturing run M-2026-031`;
 
     const balanceFrom = 16 + i * 3;
@@ -110,7 +110,7 @@ function buildEntries(item: InventoryItem, signoffs: Signoff[]): AuditEntry[] {
       body: (
         <>
           {action} <strong>{s.units} units</strong>
-          {s.direction === 'in' ? ' from vendor (PO #4421)' : ` for ${s.reason}`}.{' '}
+          {s.direction === 'in' ? ' from supplier (PO #4421)' : ` for ${s.reason}`}.{' '}
           Balance moved {balanceFrom} → {balanceTo}.
         </>
       ),

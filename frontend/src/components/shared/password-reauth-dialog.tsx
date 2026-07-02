@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { Eye, EyeOff, ShieldCheck } from 'lucide-react';
 
 import {
   Dialog,
@@ -33,20 +33,23 @@ interface Props {
   /** Submit-button label. Defaults to "Sign". */
   submitLabel?: string;
   /**
-   * Placeholder for the mandatory comment/reason field, so each flow can
-   * prompt for the right kind of rationale (e.g. "Reason for this
-   * placement"). The field itself is always required.
+   * Placeholder for the comment/reason field, so each flow can prompt for the
+   * right kind of rationale (e.g. "Reason for this placement").
    */
   commentPlaceholder?: string;
 }
 
 /**
  * Reusable e-signature dialog. The user types their password to mint a
- * single-use evidence id that the caller passes to the write endpoint, and
- * a mandatory reason/comment recorded with it. Every GxP-significant write
- * flow (receipts, dispenses, adjustments, transfers, lot edits, forecast
- * saves) uses this exact dialog so the experience is identical across the
- * system — a 21 CFR Part 11 expectation (consistent identity-verification UX).
+ * single-use evidence id that the caller passes to the write endpoint, plus an
+ * optional reason/comment recorded with it. Every GxP-significant write flow
+ * (receipts, dispenses, adjustments, transfers, lot edits, forecast saves) uses
+ * this exact dialog so the experience is identical across the system — a 21 CFR
+ * Part 11 expectation (consistent identity-verification UX).
+ *
+ * The reason/comment is **always optional** (client directive, 2026-07-01 — no
+ * e-signature requires a comment): whatever the operator provides is recorded,
+ * a blank is fine.
  *
  * The signature is the *electronic* signature: the password re-auth plus the
  * recorded rationale, attributed in the audit trail to the signed-in user with
@@ -64,14 +67,16 @@ export function PasswordReauthDialog({
 }: Props) {
   const { reauth, pending, error, rateLimited, reset } = useReauth(action);
   const [password, setPassword] = React.useState('');
-  // Mandatory rationale for the action — recorded on the e-signature row
-  // and surfaced on the audit log (21 CFR Part 11).
+  const [showPassword, setShowPassword] = React.useState(false);
+  // Optional rationale for the action — recorded on the e-signature row and
+  // surfaced on the audit log. Never required.
   const [comment, setComment] = React.useState('');
 
   // Wipe state every time the dialog closes so a re-open starts clean.
   React.useEffect(() => {
     if (!open) {
       setPassword('');
+      setShowPassword(false);
       setComment('');
       reset();
     }
@@ -80,12 +85,11 @@ export function PasswordReauthDialog({
   const submit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (!password) return;
-    if (!comment.trim()) return;
 
     const evidence = await reauth({
       password,
       meaning,
-      comment: comment.trim(),
+      comment: comment.trim() || undefined,
     });
     if (evidence) {
       onConfirmed(evidence);
@@ -93,8 +97,7 @@ export function PasswordReauthDialog({
     }
   };
 
-  const submitDisabled =
-    pending || rateLimited || !password || !comment.trim();
+  const submitDisabled = pending || rateLimited || !password;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -125,7 +128,8 @@ export function PasswordReauthDialog({
 
             <div className="space-y-1.5">
               <Label htmlFor="reauth-comment">
-                Reason / comment <span className="text-danger">*</span>
+                Reason / comment{' '}
+                <span className="font-normal text-text-3">(optional)</span>
               </Label>
               <Textarea
                 id="reauth-comment"
@@ -147,12 +151,29 @@ export function PasswordReauthDialog({
               </Label>
               <Input
                 id="reauth-password"
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 autoComplete="current-password"
                 disabled={pending || rateLimited}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 aria-invalid={Boolean(error)}
+                trailing={
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((s) => !s)}
+                    disabled={pending || rateLimited}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPassword}
+                    tabIndex={-1}
+                    className="flex-none rounded-sm p-0.5 text-text-3 transition-colors hover:text-text-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {showPassword ? (
+                      <EyeOff size={14} aria-hidden />
+                    ) : (
+                      <Eye size={14} aria-hidden />
+                    )}
+                  </button>
+                }
               />
             </div>
 

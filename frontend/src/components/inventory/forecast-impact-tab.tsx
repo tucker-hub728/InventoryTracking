@@ -8,7 +8,7 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { YearPicker } from '@/components/forecast/year-picker';
 import { formatNumber } from '@/lib/utils';
 import { forecastApi, type ForecastEntry } from '@/lib/api/forecast';
-import { productsApi, type Product } from '@/lib/api/products';
+import { bomApi, type ApiWhereUsed } from '@/lib/api/bom';
 import { ApiError } from '@/lib/api/client';
 
 interface Props {
@@ -19,9 +19,9 @@ interface Props {
 }
 
 interface DemandRow {
-  product: Product;
-  perRun: number; // qty of this item consumed per run of that product
-  runs: number; // forecasted runs for the product this year
+  parent: ApiWhereUsed;
+  perRun: number; // qty of this item consumed per run of that parent
+  runs: number; // forecasted runs for the parent this year
   needed: number; // perRun × runs
 }
 
@@ -36,7 +36,7 @@ interface DemandRow {
 export function ForecastImpactTab({ itemId, onHand }: Props) {
   const [year, setYear] = React.useState(() => new Date().getFullYear());
 
-  const [usingProducts, setUsingProducts] = React.useState<Product[]>([]);
+  const [usingProducts, setUsingProducts] = React.useState<ApiWhereUsed[]>([]);
   const [entries, setEntries] = React.useState<ForecastEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -46,7 +46,7 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
     setLoading(true);
     setError(null);
     Promise.all([
-      productsApi.usingItem(itemId, { signal: ctrl.signal }),
+      bomApi.whereUsed(itemId, { signal: ctrl.signal }),
       forecastApi.list({ year }, { signal: ctrl.signal }),
     ])
       .then(([using, ents]) => {
@@ -67,12 +67,12 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
   // One row per product that has forecasted runs for this item this year.
   const rows = React.useMemo<DemandRow[]>(() => {
     return usingProducts
-      .map((product) => {
+      .map((parent) => {
         const runs = entries
-          .filter((e) => e.productId === product.id)
+          .filter((e) => e.productId === parent.parent_item_id)
           .reduce((sum, e) => sum + e.runs, 0);
-        const perRun = Number(product.qty_per_run ?? 0);
-        return { product, perRun, runs, needed: perRun * runs };
+        const perRun = Number(parent.qty_per_run ?? 0);
+        return { parent, perRun, runs, needed: perRun * runs };
       })
       .filter((r) => r.runs > 0)
       .sort((a, b) => b.needed - a.needed);
@@ -95,8 +95,8 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
   if (usingProducts.length === 0) {
     return (
       <EmptyState
-        title="Not used in any product"
-        hint="This item isn't part of any product's bill of materials, so it has no forecasted demand."
+        title="Not used in any Product"
+        hint="This item isn't part of any Product's bill of materials, so it has no forecasted demand."
       />
     );
   }
@@ -122,23 +122,23 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-surface text-left text-[11px] uppercase tracking-wider text-text-3">
-                <th className="px-4 py-2.5 font-medium">Product</th>
+                <th className="px-4 py-2.5 font-medium">Used in (Product)</th>
                 <th className="px-4 py-2.5 text-right font-medium">Per run</th>
                 <th className="px-4 py-2.5 text-right font-medium">× Runs</th>
                 <th className="px-4 py-2.5 text-right font-medium">= Needed</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map(({ product, perRun, runs, needed }) => (
-                <tr key={product.id} className="border-b border-border/60">
+              {rows.map(({ parent, perRun, runs, needed }) => (
+                <tr key={parent.parent_item_id} className="border-b border-border/60">
                   <td className="px-4 py-2.5">
                     <Link
-                      href={`/products/${product.id}`}
+                      href={`/inventory/${parent.parent_item_number}/ledger`}
                       className="font-mono text-xs text-accent hover:underline"
                     >
-                      {product.sku}
+                      {parent.parent_item_number}
                     </Link>
-                    <span className="ml-2 text-text-2">{product.name}</span>
+                    <span className="ml-2 text-text-2">{parent.parent_description}</span>
                   </td>
                   <td className="px-4 py-2.5 text-right font-mono">{formatNumber(perRun)}</td>
                   <td className="px-4 py-2.5 text-right font-mono text-accent">

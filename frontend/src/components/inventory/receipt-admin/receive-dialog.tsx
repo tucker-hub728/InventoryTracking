@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ShieldCheck, Split, Trash2 } from 'lucide-react';
+import { ShieldCheck } from 'lucide-react';
 
 import {
   Dialog,
@@ -15,233 +15,183 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { itemsApi, type ApiItemVendor } from '@/lib/api/items';
 import {
   receivingApi,
-  type ReceiptTransaction,
-  type ReceiveInput,
-  type ReceiveLineInput,
-  type ReceiveSplitInput,
+  type Order,
+  type OrderLine,
+  type ReceiveEventInput,
+  type ReceiveEventLineInput,
 } from '@/lib/api/receiving';
 
-// Radix <Select.Item> forbids an empty-string value, so the "same as the
-// lot's vendor" choice uses a sentinel (not '').
-const SAME_VENDOR = '__same__';
-
-interface SplitDraft {
-  key: string;
-  isChild: boolean;
-  lot_number: string;
-  vendorChoice: string; // SAME_VENDOR | vendor id
-  unit_price: string;
-  quantity: string;
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
-let _seq = 0;
-function newSplit(child: boolean): SplitDraft {
-  _seq += 1;
+interface LineDraft {
+  include: boolean;
+  qty_received: string;
+  lot_number: string;
+  manufacture_date: string;
+  expiration_date: string;
+  unit_price: string;
+}
+
+function seedLineDraft(line: OrderLine): LineDraft {
   return {
-    key: `split-${_seq}`,
-    isChild: child,
+    include: false,
+    qty_received: String(line.outstanding_qty),
     lot_number: '',
-    vendorChoice: SAME_VENDOR,
-    unit_price: '',
-    quantity: '',
+    manufacture_date: '',
+    expiration_date: '',
+    unit_price: line.unit_price_amount ?? '',
   };
 }
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  transaction: ReceiptTransaction | null;
-  onReceived: (txn: ReceiptTransaction) => void;
+  order: Order | null;
+  onReceived: (order: Order) => void;
 }
 
 /**
- * Physical receipt (Requirements v2 §5). Per ON_ORDER lot the operator
- * submits one or more splits: the first receives into the original lot
- * (flips it AVAILABLE), the rest create child supplier lots. Receive records
- * NO quantity and NO placement — quantity is added later as a unit-IN (place)
- * in the Location System. The whole receipt is covered by one e-signature
- * (action ``receipt.confirm``).
+ * Dated receive event (Receipt Admin v3). For each outstanding line the
+ * operator enters a qty + lot number (+ optional mfg/expiry/price); a lot is
+ * created per included line. Partial receipts are allowed (skip lines or
+ * receive fewer than outstanding); over-receipt (qty > outstanding) is allowed
+ * with no reason. The whole event is covered by one e-signature
+ * (``receipt.confirm``).
  */
-export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: Props) {
-  // The item's assigned vendors — the only allowed split-vendor overrides.
-  const [vendors, setVendors] = React.useState<ApiItemVendor[]>([]);
-  const [splitsByLot, setSplitsByLot] = React.useState<Record<string, SplitDraft[]>>(
-    {},
-  );
-  // The transaction re-fetched fresh when the dialog opens — the list row
-  // we were handed can be stale (e.g. its lots weren't hydrated), so we
-  // always reload to be sure the ON_ORDER lots are current.
-  const [freshTxn, setFreshTxn] = React.useState<ReceiptTransaction | null>(null);
-  const [loadingTxn, setLoadingTxn] = React.useState(false);
+export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) {
+  const [receivedAt, setReceivedAt] = React.useState(todayIso);
+  const [drafts, setDrafts] = React.useState<Record<string, LineDraft>>({});
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
 
-  const activeTxn = freshTxn ?? transaction;
-  const onOrderLots = React.useMemo(
-    () => (activeTxn?.lots ?? []).filter((l) => l.status === 'on_order'),
-    [activeTxn],
+  const outstandingLines = React.useMemo(
+    () => (order?.lines ?? []).filter((l) => l.outstanding_qty > 0),
+    [order],
   );
 
+  // Seed one draft per outstanding line when the dialog opens.
   React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    setLoadingTxn(true);
-    Promise.all([
-      transaction
-        ? itemsApi.listVendors(transaction.item_id, { signal: ctrl.signal })
-        : Promise.resolve([]),
-      transaction
-        ? receivingApi.getTransaction(transaction.id, { signal: ctrl.signal })
-        : Promise.resolve(null),
-    ])
-      .then(([vendorList, fresh]) => {
-        setVendors(vendorList);
-        if (fresh) setFreshTxn(fresh);
-      })
-      .catch((err) => {
-        if ((err as DOMException)?.name === 'AbortError') return;
-        setFormError(err instanceof ApiError ? err.message : 'Failed to load data.');
-      })
-      .finally(() => setLoadingTxn(false));
-    return () => ctrl.abort();
-  }, [open, transaction]);
-
-  // Seed one "into original lot" split per on-order lot.
-  React.useEffect(() => {
-    if (!open) return;
-    const seed: Record<string, SplitDraft[]> = {};
-    for (const lot of onOrderLots) {
-      // Prefill the "into original lot" split's qty + unit price with the
-      // lot's values so they show as editable values (not grey placeholders)
-      // and carry through unless the operator corrects them.
-      seed[lot.id] = [
-        {
-          ...newSplit(false),
-          quantity: lot.ordered_qty != null ? String(lot.ordered_qty) : '',
-          unit_price: lot.unit_price_amount ?? '',
-        },
-      ];
+    if (!open || !order) return;
+    const seed: Record<string, LineDraft> = {};
+    for (const line of order.lines) {
+      if (line.outstanding_qty > 0) seed[line.id] = seedLineDraft(line);
     }
-    setSplitsByLot(seed);
-  }, [open, onOrderLots]);
+    setDrafts(seed);
+    setReceivedAt(todayIso());
+    setShowReauth(false);
+    setSubmitting(false);
+    setFormError(null);
+  }, [open, order]);
 
-  React.useEffect(() => {
-    if (!open) {
-      setSplitsByLot({});
-      setFreshTxn(null);
-      setShowReauth(false);
-      setSubmitting(false);
-      setFormError(null);
+  const patch = (lineId: string, p: Partial<LineDraft>) =>
+    setDrafts((prev) => {
+      const existing = prev[lineId];
+      if (!existing) return prev;
+      return { ...prev, [lineId]: { ...existing, ...p } };
+    });
+
+  const buildLines = (): ReceiveEventLineInput[] | { error: string } => {
+    const out: ReceiveEventLineInput[] = [];
+    // Track lot numbers already used per item so the same lot number can't be
+    // typed twice for the SAME item across lines (backend enforces per-item
+    // uniqueness; this is a friendly pre-check). The same lot number on
+    // DIFFERENT items is allowed.
+    const seenLotsByItem = new Map<string, Set<string>>();
+    for (const line of outstandingLines) {
+      const d = drafts[line.id];
+      if (!d || !d.include) continue;
+      const qty = Number(d.qty_received);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return {
+          error: `Line ${line.line_no}: received qty must be greater than 0.`,
+        };
+      }
+      const lotNumber = d.lot_number.trim();
+      if (!lotNumber) {
+        return { error: `Line ${line.line_no}: a lot number is required.` };
+      }
+      const lotKey = lotNumber.toLowerCase();
+      const seen = seenLotsByItem.get(line.item_id);
+      if (seen?.has(lotKey)) {
+        return {
+          error: `Line ${line.line_no}: lot number "${lotNumber}" is already used for this item on another line. Use a different lot number per item.`,
+        };
+      }
+      if (seen) seen.add(lotKey);
+      else seenLotsByItem.set(line.item_id, new Set([lotKey]));
+      if (
+        d.manufacture_date &&
+        d.expiration_date &&
+        d.expiration_date < d.manufacture_date
+      ) {
+        return {
+          error: `Line ${line.line_no}: expiration must be on or after manufacture date.`,
+        };
+      }
+      let unitPrice: number | undefined;
+      if (d.unit_price.trim() !== '') {
+        const p = Number(d.unit_price);
+        if (!Number.isFinite(p) || p < 0) {
+          return { error: `Line ${line.line_no}: unit price must be non-negative.` };
+        }
+        unitPrice = p;
+      }
+      out.push({
+        line_id: line.id,
+        qty_received: qty,
+        lot_number: lotNumber,
+        manufacture_date: d.manufacture_date || undefined,
+        expiration_date: d.expiration_date || undefined,
+        unit_price_amount: unitPrice,
+      });
     }
-  }, [open]);
-
-  const patchSplit = (lotId: string, key: string, patch: Partial<SplitDraft>) =>
-    setSplitsByLot((prev) => ({
-      ...prev,
-      [lotId]: (prev[lotId] ?? []).map((s) =>
-        s.key === key ? { ...s, ...patch } : s,
-      ),
-    }));
-
-  const addSplit = (lotId: string) => {
-    // Seed a new supplier-lot split's unit price from the parent lot so the
-    // field shows a value to start from.
-    const parent = onOrderLots.find((l) => l.id === lotId);
-    setSplitsByLot((prev) => ({
-      ...prev,
-      [lotId]: [
-        ...(prev[lotId] ?? []),
-        { ...newSplit(true), unit_price: parent?.unit_price_amount ?? '' },
-      ],
-    }));
+    if (out.length === 0) {
+      return { error: 'Include at least one line to receive.' };
+    }
+    return out;
   };
 
-  const removeSplit = (lotId: string, key: string) =>
-    setSplitsByLot((prev) => ({
-      ...prev,
-      [lotId]: (prev[lotId] ?? []).filter((s) => s.key !== key),
-    }));
-
-  const buildPayload = (evidenceId: string): ReceiveInput | null => {
-    const lines: ReceiveLineInput[] = [];
-    for (const lot of onOrderLots) {
-      const drafts = splitsByLot[lot.id] ?? [];
-      if (drafts.length === 0) {
-        setFormError(`Lot ${lot.lot_number} needs at least one received split.`);
-        return null;
-      }
-      const seenChild = new Set<string>();
-      const splits: ReceiveSplitInput[] = [];
-      drafts.forEach((d, idx) => {
-        const split: ReceiveSplitInput = {};
-        if (idx > 0) {
-          const childNo = d.lot_number.trim();
-          if (!childNo) {
-            throw new SplitError(
-              `Lot ${lot.lot_number}: each additional split needs its own lot number.`,
-            );
-          }
-          if (seenChild.has(childNo.toLowerCase())) {
-            throw new SplitError(`Duplicate split lot number "${childNo}".`);
-          }
-          seenChild.add(childNo.toLowerCase());
-          split.lot_number = childNo;
-        }
-        if (d.vendorChoice && d.vendorChoice !== SAME_VENDOR) {
-          split.vendor_id = d.vendorChoice;
-        }
-        if (d.unit_price) split.unit_price = Number(d.unit_price);
-        if (d.quantity) {
-          const q = Number(d.quantity);
-          if (!Number.isInteger(q) || q <= 0) {
-            throw new SplitError(
-              `Lot ${lot.lot_number}: quantity must be a whole number greater than 0.`,
-            );
-          }
-          split.quantity = q;
-        }
-        splits.push(split);
-      });
-      lines.push({ lot_id: lot.id, splits });
+  const openSign = () => {
+    setFormError(null);
+    if (!receivedAt) {
+      setFormError('A received date is required.');
+      return;
     }
-    return { lines, evidence_id: evidenceId };
+    const result = buildLines();
+    if ('error' in result) {
+      setFormError(result.error);
+      return;
+    }
+    setShowReauth(true);
   };
 
   const submit = async (evidence: ReauthResponse) => {
-    if (!transaction) return;
+    if (!order) return;
+    const result = buildLines();
+    if ('error' in result) {
+      setFormError(result.error);
+      return;
+    }
+    const payload: ReceiveEventInput = {
+      received_at: receivedAt,
+      lines: result,
+      evidence_id: evidence.evidence_id,
+    };
     setSubmitting(true);
     setFormError(null);
-    let payload: ReceiveInput | null;
     try {
-      payload = buildPayload(evidence.evidence_id);
-    } catch (err) {
-      setFormError(err instanceof SplitError ? err.message : 'Invalid receive lines.');
-      setSubmitting(false);
-      return;
-    }
-    if (!payload) {
-      setSubmitting(false);
-      return;
-    }
-    try {
-      const updated = await receivingApi.receive(transaction.id, payload);
-      toast.success('Receipt confirmed', {
-        description: `${updated.item_number ?? ''} — lots are now available`,
+      const updated = await receivingApi.receive(order.id, payload);
+      toast.success('Receipt recorded', {
+        description: `${updated.po_reference} — ${result.length} line(s) received`,
       });
       onReceived(updated);
       onOpenChange(false);
@@ -256,194 +206,147 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
           setFormError(err.message);
         }
       } else {
-        setFormError('Failed to confirm receipt. Please try again.');
+        setFormError('Failed to record the receipt. Please try again.');
       }
     } finally {
       setSubmitting(false);
     }
   };
 
-  // Pre-validate before opening the e-sign dialog so the operator fixes
-  // input errors before the password ceremony.
-  const openSign = () => {
-    setFormError(null);
-    try {
-      const ok = buildPayload('preview');
-      if (!ok) return;
-    } catch (err) {
-      setFormError(err instanceof SplitError ? err.message : 'Invalid receive lines.');
-      return;
-    }
-    setShowReauth(true);
-  };
-
-  const itemLabel = transaction
-    ? `${transaction.item_number ?? ''} ${transaction.item_description ?? ''}`.trim()
+  const attestation = order
+    ? `I attest the receipt recorded against order ${order.po_reference} is accurate.`
     : '';
-  const attestation = `I attest the physical receipt of ${itemLabel || 'this order'} is accurate and the lots are correct.`;
 
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Confirm physical receipt</DialogTitle>
+            <DialogTitle>Receive against order</DialogTitle>
             <DialogDescription>
-              Confirm what arrived and split a lot into multiple supplier lots if
-              needed. On confirmation the lots become available under your
-              e-signature. Quantity is added later by placing units in Locations.
+              Record a dated receive event. Per line, enter the quantity and a new
+              lot number. Partial receipts are allowed — skip a line or receive
+              fewer than outstanding. Recorded under your e-signature.
             </DialogDescription>
           </DialogHeader>
 
           <DialogBody className="space-y-4">
-            {/* Render the editable split form only once the authoritative
-                transaction has loaded. The dialog opens against the (lot-bearing)
-                list row, then re-fetches; gating on ``loadingTxn`` keeps the
-                fields hidden until the fresh data lands, so the seed effect's
-                re-run on fresh lots can't clobber values the operator typed. */}
-            {loadingTxn && (
-              <p className="text-sm text-text-3">Loading lots…</p>
-            )}
-            {!loadingTxn && onOrderLots.length === 0 && (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="receive-date">
+                  Received on <span className="text-danger">*</span>
+                </Label>
+                <Input
+                  id="receive-date"
+                  type="date"
+                  value={receivedAt}
+                  onChange={(e) => setReceivedAt(e.target.value)}
+                />
+              </div>
+            </div>
+
+            {outstandingLines.length === 0 && (
               <p className="text-sm text-text-3">
-                This transaction has no on-order lots to receive.
+                Nothing outstanding to receive on this order.
               </p>
             )}
 
-            {!loadingTxn &&
-              onOrderLots.map((lot) => {
-              const drafts = splitsByLot[lot.id] ?? [];
+            {outstandingLines.map((line) => {
+              const d = drafts[line.id];
+              if (!d) return null;
               return (
                 <div
-                  key={lot.id}
+                  key={line.id}
                   className="rounded-md border border-border bg-surface p-3"
                 >
                   <div className="mb-2 flex items-center justify-between">
-                    <div className="text-sm">
+                    <label className="inline-flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="size-4 rounded border-border-strong accent-accent"
+                        checked={d.include}
+                        onChange={(e) =>
+                          patch(line.id, { include: e.target.checked })
+                        }
+                        aria-label={`Receive line ${line.line_no}`}
+                      />
                       <span className="font-mono text-xs text-accent">
-                        {lot.lot_number}
+                        {line.item_number ?? '—'}
                       </span>
-                      <span className="ml-2 text-text-3">
-                        ordered {lot.ordered_qty ?? '—'} ·{' '}
-                        {lot.vendor_name ?? 'no vendor'}
+                      <span className="text-text-2">
+                        {line.item_description ?? ''}
                       </span>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => addSplit(lot.id)}
-                    >
-                      <Split size={14} /> Split
-                    </Button>
+                    </label>
+                    <span className="text-xs text-text-3">
+                      outstanding {line.outstanding_qty} · {line.supplier_name ?? '—'}
+                    </span>
                   </div>
 
-                  <div className="space-y-2">
-                    {drafts.map((d, idx) => (
-                      <div
-                        key={d.key}
-                        className="rounded border border-border/60 bg-bg-elev p-2.5"
-                      >
-                        <div className="mb-1.5 flex items-center justify-between">
-                          <span className="text-xs text-text-3">
-                            {idx === 0 ? 'Into original lot' : 'New supplier lot'}
-                          </span>
-                          {idx > 0 && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => removeSplit(lot.id, d.key)}
-                              aria-label="Remove split"
-                            >
-                              <Trash2 size={13} />
-                            </Button>
-                          )}
-                        </div>
-                        <div className="grid grid-cols-3 gap-2.5">
-                          {idx > 0 ? (
-                            <div className="space-y-1">
-                              <Label className="text-xs">Lot number</Label>
-                              <Input
-                                className="font-mono"
-                                placeholder="L-…-B"
-                                value={d.lot_number}
-                                onChange={(e) =>
-                                  patchSplit(lot.id, d.key, {
-                                    lot_number: e.target.value,
-                                  })
-                                }
-                              />
-                            </div>
-                          ) : (
-                            <div className="space-y-1">
-                              <Label className="text-xs">Lot number</Label>
-                              <Input
-                                className="font-mono"
-                                value={lot.lot_number}
-                                disabled
-                              />
-                            </div>
-                          )}
-                          <div className="space-y-1">
-                            <Label className="text-xs">Qty</Label>
-                            <Input
-                              type="number"
-                              min={1}
-                              step="1"
-                              placeholder={
-                                lot.ordered_qty != null
-                                  ? String(lot.ordered_qty)
-                                  : '0'
-                              }
-                              value={d.quantity}
-                              onChange={(e) =>
-                                patchSplit(lot.id, d.key, {
-                                  quantity: e.target.value,
-                                })
-                              }
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <Label className="text-xs">Unit price</Label>
-                            <Input
-                              type="number"
-                              min={0}
-                              step="0.01"
-                              placeholder={lot.unit_price_amount ?? '0.00'}
-                              value={d.unit_price}
-                              onChange={(e) =>
-                                patchSplit(lot.id, d.key, {
-                                  unit_price: e.target.value,
-                                })
-                              }
-                            />
-                          </div>
-                        </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Lot number</Label>
+                      <Input
+                        className="font-mono"
+                        placeholder="L-20260629-A"
+                        value={d.lot_number}
+                        disabled={!d.include}
+                        onChange={(e) =>
+                          patch(line.id, { lot_number: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Qty received</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        step="1"
+                        value={d.qty_received}
+                        disabled={!d.include}
+                        onChange={(e) =>
+                          patch(line.id, { qty_received: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Unit price</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        placeholder="0.00"
+                        value={d.unit_price}
+                        disabled={!d.include}
+                        onChange={(e) =>
+                          patch(line.id, { unit_price: e.target.value })
+                        }
+                      />
+                    </div>
+                  </div>
 
-                        <div className="mt-2 space-y-1">
-                          <Label className="text-xs">Vendor</Label>
-                          <Select
-                            value={d.vendorChoice}
-                            onValueChange={(v) =>
-                              patchSplit(lot.id, d.key, { vendorChoice: v })
-                            }
-                          >
-                            <SelectTrigger aria-label="Split vendor">
-                              <SelectValue placeholder="Same as lot vendor" />
-                            </SelectTrigger>
-                            <SelectContent className="max-h-72">
-                              <SelectItem value={SAME_VENDOR}>
-                                Same as lot ({lot.vendor_name ?? 'none'})
-                              </SelectItem>
-                              {vendors.map((v) => (
-                                <SelectItem key={v.vendor_id} value={v.vendor_id}>
-                                  {v.vendor_name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </div>
-                    ))}
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Manufacture date</Label>
+                      <Input
+                        type="date"
+                        value={d.manufacture_date}
+                        disabled={!d.include}
+                        onChange={(e) =>
+                          patch(line.id, { manufacture_date: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Expiration date</Label>
+                      <Input
+                        type="date"
+                        value={d.expiration_date}
+                        disabled={!d.include}
+                        onChange={(e) =>
+                          patch(line.id, { expiration_date: e.target.value })
+                        }
+                      />
+                    </div>
                   </div>
                 </div>
               );
@@ -467,7 +370,7 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
               type="button"
               variant="primary"
               onClick={openSign}
-              disabled={submitting || loadingTxn || onOrderLots.length === 0}
+              disabled={submitting || outstandingLines.length === 0}
             >
               <ShieldCheck size={14} /> Sign &amp; receive
             </Button>
@@ -480,6 +383,7 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
         onOpenChange={setShowReauth}
         action="receipt.confirm"
         meaning={attestation}
+        commentPlaceholder="e.g. Received against PO, lots verified against the packing slip"
         onConfirmed={submit}
         title="Sign this receipt"
         submitLabel="Sign & receive"
@@ -487,7 +391,3 @@ export function ReceiveDialog({ open, onOpenChange, transaction, onReceived }: P
     </>
   );
 }
-
-// Thrown inside buildPayload's split loop to bubble a friendly message up
-// to the form (kept local — not part of the API surface).
-class SplitError extends Error {}

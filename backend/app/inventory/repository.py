@@ -16,13 +16,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.inventory import (
+    BomLine,
     Item,
+    ItemCategory,
     ItemStock,
-    ItemVendor,
+    ItemSupplier,
     Lot,
+    ReceiptEvent,
+    ReceiptEventLine,
     ReceiptTransaction,
+    ReceiptTransactionLine,
     StockMovement,
-    Vendor,
+    Supplier,
 )
 
 # Whitelist for the ``status`` query filter. Aligned with the
@@ -30,34 +35,34 @@ from app.models.inventory import (
 ITEM_STATUS_CODES: tuple[str, ...] = ("available", "low_stock", "out_of_stock")
 
 
-# ── Vendors ────────────────────────────────────────────────────────────
+# ── Suppliers ────────────────────────────────────────────────────────────
 
 
-async def list_vendors(
+async def list_suppliers(
     session: AsyncSession,
     *,
     active_only: bool = True,
-) -> list[Vendor]:
-    stmt = select(Vendor)
+) -> list[Supplier]:
+    stmt = select(Supplier)
     if active_only:
-        stmt = stmt.where(Vendor.is_active.is_(True))
-    stmt = stmt.order_by(func.lower(Vendor.name))
+        stmt = stmt.where(Supplier.is_active.is_(True))
+    stmt = stmt.order_by(func.lower(Supplier.name))
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def get_vendor(session: AsyncSession, vendor_id: uuid.UUID) -> Vendor | None:
+async def get_supplier(session: AsyncSession, supplier_id: uuid.UUID) -> Supplier | None:
     return (
-        await session.execute(select(Vendor).where(Vendor.id == vendor_id))
+        await session.execute(select(Supplier).where(Supplier.id == supplier_id))
     ).scalar_one_or_none()
 
 
-async def get_vendor_by_name(session: AsyncSession, name: str) -> Vendor | None:
+async def get_supplier_by_name(session: AsyncSession, name: str) -> Supplier | None:
     """Case-insensitive lookup — mirrors the partial-unique index."""
-    stmt = select(Vendor).where(func.lower(Vendor.name) == name.lower())
+    stmt = select(Supplier).where(func.lower(Supplier.name) == name.lower())
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def create_vendor(
+async def create_supplier(
     session: AsyncSession,
     *,
     name: str,
@@ -65,51 +70,51 @@ async def create_vendor(
     phone: str | None = None,
     notes: str | None = None,
     is_active: bool = True,
-) -> Vendor:
-    """Insert a vendor row. Caller commits."""
-    vendor = Vendor(
+) -> Supplier:
+    """Insert a supplier row. Caller commits."""
+    supplier = Supplier(
         name=name.strip(),
         contact_email=contact_email,
         phone=phone,
         notes=notes,
         is_active=is_active,
     )
-    session.add(vendor)
+    session.add(supplier)
     await session.flush()
-    return vendor
+    return supplier
 
 
-async def apply_vendor_patch(
+async def apply_supplier_patch(
     session: AsyncSession,
     *,
-    vendor: Vendor,
+    supplier: Supplier,
     patch: dict[str, object],
-) -> Vendor:
+) -> Supplier:
     """Apply a dict of changes (from ``model_dump(exclude_unset=True)``)
-    to a loaded vendor and flush. Caller commits.
+    to a loaded supplier and flush. Caller commits.
 
     ``patch`` is trusted — schema-level validation has already run, and
     the caller is responsible for resolving FKs (e.g. checking the
-    target vendor name isn't a duplicate).
+    target supplier name isn't a duplicate).
     """
     for col, value in patch.items():
-        setattr(vendor, col, value)
+        setattr(supplier, col, value)
     await session.flush()
-    return vendor
+    return supplier
 
 
-def vendor_to_audit_snapshot(vendor: Vendor) -> dict[str, object | None]:
-    """Trim a vendor row to the fields worth recording in the audit log.
+def supplier_to_audit_snapshot(supplier: Supplier) -> dict[str, object | None]:
+    """Trim a supplier row to the fields worth recording in the audit log.
 
     Skipping the audit columns (created_at, updated_at) so a no-op patch
     produces an empty diff instead of a meaningless timestamp delta.
     """
     return {
-        "name": vendor.name,
-        "contact_email": vendor.contact_email,
-        "phone": vendor.phone,
-        "notes": vendor.notes,
-        "is_active": vendor.is_active,
+        "name": supplier.name,
+        "contact_email": supplier.contact_email,
+        "phone": supplier.phone,
+        "notes": supplier.notes,
+        "is_active": supplier.is_active,
     }
 
 
@@ -124,17 +129,20 @@ def _apply_filters(
     stmt: Select[tuple[Item]],
     *,
     q: str | None,
-    vendor_id: uuid.UUID | None,
+    supplier_id: uuid.UUID | None,
     status: str | None,
+    category_id: uuid.UUID | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
-    if vendor_id is not None:
-        # Vendors live in ``meta.item_vendors`` now — filter items that have
-        # the requested vendor in their assigned list.
+    if category_id is not None:
+        stmt = stmt.where(Item.category_id == category_id)
+    if supplier_id is not None:
+        # Suppliers live in ``meta.item_suppliers`` now — filter items that have
+        # the requested supplier in their assigned list.
         stmt = stmt.where(
             Item.id.in_(
-                select(ItemVendor.item_id).where(
-                    ItemVendor.vendor_id == vendor_id
+                select(ItemSupplier.item_id).where(
+                    ItemSupplier.supplier_id == supplier_id
                 )
             )
         )
@@ -170,8 +178,9 @@ async def list_items(
     session: AsyncSession,
     *,
     q: str | None = None,
-    vendor_id: uuid.UUID | None = None,
+    supplier_id: uuid.UUID | None = None,
     status: str | None = None,
+    category_id: uuid.UUID | None = None,
     sort: SortField = "item_number",
     direction: SortDirection = "asc",
     limit: int = 50,
@@ -181,15 +190,17 @@ async def list_items(
     base = _apply_filters(
         select(Item),
         q=q,
-        vendor_id=vendor_id,
+        supplier_id=supplier_id,
         status=status,
+        category_id=category_id,
     )
 
     count_stmt = _apply_filters(
         select(func.count()).select_from(Item),
         q=q,
-        vendor_id=vendor_id,
+        supplier_id=supplier_id,
         status=status,
+        category_id=category_id,
     )
     total = int((await session.execute(count_stmt)).scalar_one())
 
@@ -218,19 +229,21 @@ async def create_item(
     *,
     item_number: str,
     description: str,
+    category_id: uuid.UUID,
     created_by_user_id: uuid.UUID,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
     near_expiry_threshold_days: int = 30,
 ) -> Item:
-    """Insert an item row (no vendors yet). Caller commits.
+    """Insert an item row (no suppliers yet). Caller commits.
 
-    Assigned vendors are written separately via ``replace_item_vendors`` so
+    Assigned suppliers are written separately via ``replace_item_suppliers`` so
     the FK validation / audit happen at the route layer.
     """
     item = Item(
         item_number=item_number,
         description=description,
+        category_id=category_id,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
         near_expiry_threshold_days=near_expiry_threshold_days,
@@ -239,7 +252,7 @@ async def create_item(
     )
     session.add(item)
     await session.flush()
-    # Re-read so eager relationships (vendors, stock) populate. The naive
+    # Re-read so eager relationships (suppliers, stock) populate. The naive
     # ORM returns a half-hydrated instance after flush.
     refreshed = await get_item(session, item.id)
     assert refreshed is not None
@@ -254,8 +267,8 @@ async def apply_item_patch(
     updated_by_user_id: uuid.UUID,
 ) -> Item:
     """Apply an item PATCH dict and bump ``updated_by_user_id``. Caller
-    commits. ``patch`` carries scalar item columns only — vendor changes go
-    through ``replace_item_vendors``.
+    commits. ``patch`` carries scalar item columns only — supplier changes go
+    through ``replace_item_suppliers``.
     """
     for col, value in patch.items():
         setattr(item, col, value)
@@ -292,7 +305,8 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     return {
         "item_number": item.item_number,
         "description": item.description,
-        "vendor_ids": sorted(str(iv.vendor_id) for iv in item.vendors),
+        "category_id": str(item.category_id),
+        "supplier_ids": sorted(str(iv.supplier_id) for iv in item.suppliers),
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
         "near_expiry_threshold_days": item.near_expiry_threshold_days,
@@ -313,12 +327,16 @@ async def compute_item_valuations(
         ``lot.unit_price_amount``), which is algebraically Σ(per-lot on-hand ×
         per-lot price) since price is constant per lot. Tracks ``v_item_stock``'s
         *physical* on-hand (expired stock still counts as a held asset).
-      * ``po_value``    — Σ over the item's ON_ORDER lots of
-        (``ordered_qty`` × ``unit_price_amount``).
-      * ``qty_on_order``— Σ ``ordered_qty`` over the item's ON_ORDER lots.
+      * ``po_value``    — Σ over the item's **outstanding** Order lines of
+        (outstanding × line ``unit_price_amount``).
+      * ``qty_on_order``— Σ outstanding over the item's open Order lines.
 
-    Items with no priced stock and no on-order lots are absent from the dict;
-    callers default the missing entries to zero.
+    "Outstanding" (v3) = ``ordered_qty − Σ received`` on a line, for Orders that
+    are not cancelled / soft-deleted. Lots are created at receive, so there are
+    no ON_ORDER lots any more — on-order is now line-derived.
+
+    Items with no priced stock and no outstanding lines are absent from the
+    dict; callers default the missing entries to zero.
     """
     if not item_ids:
         return {}
@@ -348,18 +366,39 @@ async def compute_item_valuations(
     for item_id, inv_value in (await session.execute(inv_stmt)).all():
         _row(item_id)[0] = Decimal(inv_value)
 
+    # Outstanding per Order line = ordered − Σ received (clamped at 0).
+    received_sub = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = func.greatest(
+        ReceiptTransactionLine.ordered_qty - func.coalesce(received_sub.c.recd, 0),
+        0,
+    )
     po_stmt = (
         select(
-            Lot.item_id,
-            func.coalesce(func.sum(Lot.ordered_qty * Lot.unit_price_amount), 0),
-            func.coalesce(func.sum(Lot.ordered_qty), 0),
+            ReceiptTransactionLine.item_id,
+            func.coalesce(
+                func.sum(outstanding * ReceiptTransactionLine.unit_price_amount), 0
+            ),
+            func.coalesce(func.sum(outstanding), 0),
         )
+        .select_from(ReceiptTransactionLine)
+        .join(
+            ReceiptTransaction,
+            ReceiptTransaction.id == ReceiptTransactionLine.receipt_transaction_id,
+        )
+        .outerjoin(received_sub, received_sub.c.line_id == ReceiptTransactionLine.id)
         .where(
-            Lot.item_id.in_(item_ids),
-            Lot.status == "on_order",
-            Lot.deleted_at.is_(None),
+            ReceiptTransactionLine.item_id.in_(item_ids),
+            ReceiptTransaction.deleted_at.is_(None),
+            ReceiptTransaction.status != "cancelled",
         )
-        .group_by(Lot.item_id)
+        .group_by(ReceiptTransactionLine.item_id)
     )
     for item_id, po_value, qty_on_order in (await session.execute(po_stmt)).all():
         row = _row(item_id)
@@ -367,6 +406,49 @@ async def compute_item_valuations(
         row[2] = Decimal(qty_on_order)
 
     return {k: (v[0], v[1], v[2]) for k, v in rows.items()}
+
+
+# ── Categories + BOM helpers (shared by items + catalog modules) ────────
+
+
+async def get_category(
+    session: AsyncSession, category_id: uuid.UUID
+) -> ItemCategory | None:
+    """Fetch one live (non-deleted) category."""
+    stmt = select(ItemCategory).where(
+        ItemCategory.id == category_id,
+        ItemCategory.deleted_at.is_(None),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def item_has_lots(session: AsyncSession, item_id: uuid.UUID) -> bool:
+    """True if the item has any live lot — i.e. it has been received as stock.
+    Used to block re-typing a received (Purchased) item into a Product."""
+    stmt = (
+        select(Lot.id)
+        .where(Lot.item_id == item_id, Lot.deleted_at.is_(None))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).first() is not None
+
+
+async def items_with_bom(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> set[uuid.UUID]:
+    """Subset of ``item_ids`` that have at least one live BOM line (i.e. are
+    expandable in the structure tree)."""
+    if not item_ids:
+        return set()
+    stmt = (
+        select(BomLine.parent_item_id)
+        .where(
+            BomLine.parent_item_id.in_(item_ids),
+            BomLine.deleted_at.is_(None),
+        )
+        .distinct()
+    )
+    return set((await session.execute(stmt)).scalars().all())
 
 
 # ── Lots ───────────────────────────────────────────────────────────────
@@ -427,7 +509,7 @@ async def create_lot(
     item_id: uuid.UUID,
     lot_number: str,
     created_by_user_id: uuid.UUID,
-    vendor_id: uuid.UUID | None = None,
+    supplier_id: uuid.UUID | None = None,
     manufacture_date: date | None = None,
     expiration_date: date | None = None,
     status: str = "available",
@@ -436,20 +518,21 @@ async def create_lot(
     po_reference: str | None = None,
     ordered_qty: Decimal | None = None,
     receipt_transaction_id: uuid.UUID | None = None,
+    receipt_transaction_line_id: uuid.UUID | None = None,
     parent_lot_id: uuid.UUID | None = None,
 ) -> Lot:
     """Insert a lot row. Caller commits.
 
-    Receipt Admin v2 fields (``unit_price_amount``, ``po_reference``,
-    ``ordered_qty``, ``receipt_transaction_id``, ``parent_lot_id``) default to
-    None so existing callers (admin lot create, direct receipt) are unaffected.
-    ``ordered_qty`` is planning data for ON_ORDER lots; on-hand stays
-    ledger-derived.
+    Receipt Admin fields (``unit_price_amount``, ``po_reference``,
+    ``ordered_qty``, ``receipt_transaction_id``, ``receipt_transaction_line_id``,
+    ``parent_lot_id``) default to None so existing callers (admin lot create,
+    direct receipt) are unaffected. In v3 a received lot is tied to its Order
+    line via ``receipt_transaction_line_id``; on-hand stays ledger-derived.
     """
     lot = Lot(
         item_id=item_id,
         lot_number=lot_number.strip(),
-        vendor_id=vendor_id,
+        supplier_id=supplier_id,
         manufacture_date=manufacture_date,
         expiration_date=expiration_date,
         status=status,
@@ -458,6 +541,7 @@ async def create_lot(
         po_reference=po_reference,
         ordered_qty=ordered_qty,
         receipt_transaction_id=receipt_transaction_id,
+        receipt_transaction_line_id=receipt_transaction_line_id,
         parent_lot_id=parent_lot_id,
         created_by_user_id=created_by_user_id,
         updated_by_user_id=created_by_user_id,
@@ -512,7 +596,7 @@ def lot_to_audit_snapshot(lot: Lot) -> dict[str, object | None]:
     return {
         "lot_number": lot.lot_number,
         "item_id": str(lot.item_id),
-        "vendor_id": str(lot.vendor_id) if lot.vendor_id else None,
+        "supplier_id": str(lot.supplier_id) if lot.supplier_id else None,
         "manufacture_date": lot.manufacture_date.isoformat() if lot.manufacture_date else None,
         "expiration_date": lot.expiration_date.isoformat() if lot.expiration_date else None,
         "status": lot.status,
@@ -629,56 +713,56 @@ async def get_movement(
     ).scalar_one_or_none()
 
 
-# ── Item vendors ───────────────────────────────────────────────────────
+# ── Item suppliers ───────────────────────────────────────────────────────
 #
-# An item's assigned-vendor list (``meta.item_vendors``). These are the only
-# vendors an item can be received against.
+# An item's assigned-supplier list (``meta.item_suppliers``). These are the only
+# suppliers an item can be received against.
 
 
-async def list_item_vendors(
+async def list_item_suppliers(
     session: AsyncSession, item_id: uuid.UUID
-) -> list[ItemVendor]:
-    """Assigned vendors for an item (oldest first), vendor joined."""
+) -> list[ItemSupplier]:
+    """Assigned suppliers for an item (oldest first), supplier joined."""
     stmt = (
-        select(ItemVendor)
-        .where(ItemVendor.item_id == item_id)
-        .order_by(ItemVendor.created_at)
+        select(ItemSupplier)
+        .where(ItemSupplier.item_id == item_id)
+        .order_by(ItemSupplier.created_at)
     )
     return list((await session.execute(stmt)).scalars().unique().all())
 
 
-async def item_vendor_ids(
+async def item_supplier_ids(
     session: AsyncSession, item_id: uuid.UUID
 ) -> set[uuid.UUID]:
-    """The set of vendor ids assigned to an item — used to validate that an
-    intake / receive vendor is one of the item's vendors.
+    """The set of supplier ids assigned to an item — used to validate that an
+    intake / receive supplier is one of the item's suppliers.
     """
-    stmt = select(ItemVendor.vendor_id).where(ItemVendor.item_id == item_id)
+    stmt = select(ItemSupplier.supplier_id).where(ItemSupplier.item_id == item_id)
     return set((await session.execute(stmt)).scalars().all())
 
 
-async def replace_item_vendors(
+async def replace_item_suppliers(
     session: AsyncSession,
     *,
     item_id: uuid.UUID,
-    vendor_ids: list[uuid.UUID],
+    supplier_ids: list[uuid.UUID],
     created_by_user_id: uuid.UUID,
 ) -> None:
-    """Make the item's assigned-vendor list exactly ``vendor_ids``.
+    """Make the item's assigned-supplier list exactly ``supplier_ids``.
 
     Adds the missing ones, removes the extras, leaves unchanged rows alone
-    (so ``created_at`` / ``created_by`` are preserved for kept vendors).
-    Caller commits. Vendor FKs are assumed validated by the caller.
+    (so ``created_at`` / ``created_by`` are preserved for kept suppliers).
+    Caller commits. Supplier FKs are assumed validated by the caller.
     """
-    target = list(dict.fromkeys(vendor_ids))  # de-dup, keep order
-    existing = {iv.vendor_id: iv for iv in await list_item_vendors(session, item_id)}
+    target = list(dict.fromkeys(supplier_ids))  # de-dup, keep order
+    existing = {iv.supplier_id: iv for iv in await list_item_suppliers(session, item_id)}
 
     for vid in target:
         if vid not in existing:
             session.add(
-                ItemVendor(
+                ItemSupplier(
                     item_id=item_id,
-                    vendor_id=vid,
+                    supplier_id=vid,
                     created_by_user_id=created_by_user_id,
                 )
             )
@@ -693,63 +777,98 @@ async def replace_item_vendors(
 # ── Receipt transactions ───────────────────────────────────────────────
 
 
-async def create_receipt_transaction(
+def _order_load_options() -> list:
+    """Eager-load an Order's lines (+item/supplier) and events (+lines/lots)."""
+    return [
+        selectinload(ReceiptTransaction.lines),
+        selectinload(ReceiptTransaction.events).selectinload(ReceiptEvent.lines),
+    ]
+
+
+async def create_order(
     session: AsyncSession,
     *,
-    item_id: uuid.UUID,
     created_by_user_id: uuid.UUID,
-    po_reference: str | None = None,
+    po_reference: str,
+    is_blanket: bool = False,
+    valid_from: date | None = None,
+    valid_to: date | None = None,
     notes: str | None = None,
 ) -> ReceiptTransaction:
-    """Insert an ``open`` receipt-transaction header. Caller commits."""
+    """Insert an ``open`` Order header. Caller adds lines + commits."""
     txn = ReceiptTransaction(
-        item_id=item_id,
         status="open",
         po_reference=po_reference,
+        is_blanket=is_blanket,
+        valid_from=valid_from,
+        valid_to=valid_to,
         notes=notes,
         created_by_user_id=created_by_user_id,
     )
     session.add(txn)
     await session.flush()
-    refreshed = await get_receipt_transaction(session, txn.id)
-    assert refreshed is not None
-    return refreshed
+    return txn
 
 
-async def get_receipt_transaction(
+async def add_order_line(
+    session: AsyncSession,
+    *,
+    txn_id: uuid.UUID,
+    line_no: int,
+    item_id: uuid.UUID,
+    supplier_id: uuid.UUID,
+    ordered_qty: int,
+    unit_price_amount: Decimal | None = None,
+) -> ReceiptTransactionLine:
+    """Insert one Order line. Caller commits."""
+    line = ReceiptTransactionLine(
+        receipt_transaction_id=txn_id,
+        line_no=line_no,
+        item_id=item_id,
+        supplier_id=supplier_id,
+        ordered_qty=ordered_qty,
+        unit_price_amount=unit_price_amount,
+    )
+    session.add(line)
+    await session.flush()
+    return line
+
+
+async def get_order(
     session: AsyncSession, txn_id: uuid.UUID
 ) -> ReceiptTransaction | None:
-    """Load a transaction with its (non-deleted) lots eager-loaded.
+    """Load a non-deleted Order with lines + events eager-loaded.
 
-    ``populate_existing`` forces the eager ``lots`` collection to refresh
-    even when the transaction instance is already in the session identity
-    map. Without it, the intake flow (which loads the txn once with an
-    empty ``lots`` before adding lots, then re-reads) would return the
-    stale empty collection, and the receive flow would show pre-mutation
-    lot statuses.
+    ``populate_existing`` forces the eager collections to refresh even when
+    the instance is already in the identity map (intake/receive load the
+    header, mutate, then re-read).
     """
     stmt = (
         select(ReceiptTransaction)
-        .where(ReceiptTransaction.id == txn_id)
-        .options(selectinload(ReceiptTransaction.lots))
+        .where(
+            ReceiptTransaction.id == txn_id,
+            ReceiptTransaction.deleted_at.is_(None),
+        )
+        .options(*_order_load_options())
         .execution_options(populate_existing=True)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def list_receipt_transactions(
+async def list_orders(
     session: AsyncSession,
     *,
-    item_id: uuid.UUID | None = None,
     status: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[ReceiptTransaction], int]:
-    """Return ``(transactions, total)`` newest first, lots eager-loaded."""
+    """Return ``(orders, total)`` newest first, lines + events eager-loaded.
+
+    Soft-deleted Orders are excluded.
+    """
 
     def _apply(stmt):
-        if item_id is not None:
-            stmt = stmt.where(ReceiptTransaction.item_id == item_id)
+        stmt = stmt.where(ReceiptTransaction.deleted_at.is_(None))
         if status is not None:
             stmt = stmt.where(ReceiptTransaction.status == status)
         return stmt
@@ -757,11 +876,7 @@ async def list_receipt_transactions(
     count_stmt = _apply(select(func.count()).select_from(ReceiptTransaction))
     total = int((await session.execute(count_stmt)).scalar_one())
 
-    base = _apply(
-        select(ReceiptTransaction).options(
-            selectinload(ReceiptTransaction.lots)
-        )
-    )
+    base = _apply(select(ReceiptTransaction).options(*_order_load_options()))
     base = (
         base.order_by(desc(ReceiptTransaction.created_at)).limit(limit).offset(offset)
     )
@@ -769,36 +884,165 @@ async def list_receipt_transactions(
     return list(rows), total
 
 
-async def set_receipt_transaction_status(
+async def get_event_line_by_lot(
+    session: AsyncSession, lot_id: uuid.UUID
+) -> ReceiptEventLine | None:
+    """The receive-event draw that created a given lot (one-to-one via lot_id)."""
+    stmt = select(ReceiptEventLine).where(ReceiptEventLine.lot_id == lot_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def received_qty_by_line(
+    session: AsyncSession, line_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    """Σ ``qty_received`` per Order line. Missing lines default to 0."""
+    if not line_ids:
+        return {}
+    stmt = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id,
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0),
+        )
+        .where(ReceiptEventLine.receipt_transaction_line_id.in_(line_ids))
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+    )
+    return {lid: int(q) for lid, q in (await session.execute(stmt)).all()}
+
+
+def derive_order_status(
+    lines: list[ReceiptTransactionLine],
+    received: dict[uuid.UUID, int],
+) -> str:
+    """Derive open / partially_received / received from line fulfilment.
+
+    ``cancelled`` is set explicitly elsewhere — never derived here.
+    """
+    total_received = sum(received.get(line.id, 0) for line in lines)
+    if total_received == 0:
+        return "open"
+    if all(received.get(line.id, 0) >= line.ordered_qty for line in lines):
+        return "received"
+    return "partially_received"
+
+
+async def delete_order_lines(session: AsyncSession, *, txn_id: uuid.UUID) -> None:
+    """Hard-delete all lines of an Order (used to replace lines on edit).
+
+    Only valid while the Order is un-received (no event lines reference these
+    lines), so the RESTRICT FK from ``receipt_event_lines`` is never hit.
+    """
+    from sqlalchemy import delete as sa_delete
+
+    await session.execute(
+        sa_delete(ReceiptTransactionLine).where(
+            ReceiptTransactionLine.receipt_transaction_id == txn_id
+        )
+    )
+    await session.flush()
+
+
+async def create_receipt_event(
+    session: AsyncSession,
+    *,
+    txn_id: uuid.UUID,
+    received_at: date,
+    received_by_user_id: uuid.UUID,
+    reauth_event_id: uuid.UUID,
+    notes: str | None = None,
+) -> ReceiptEvent:
+    """Insert one dated receive-event header. Caller adds lines + commits."""
+    event = ReceiptEvent(
+        receipt_transaction_id=txn_id,
+        received_at=received_at,
+        received_by_user_id=received_by_user_id,
+        reauth_event_id=reauth_event_id,
+        notes=notes,
+    )
+    session.add(event)
+    await session.flush()
+    return event
+
+
+async def add_receipt_event_line(
+    session: AsyncSession,
+    *,
+    event_id: uuid.UUID,
+    line_id: uuid.UUID,
+    qty_received: int,
+    lot_id: uuid.UUID,
+    over_receipt_reason: str | None = None,
+) -> ReceiptEventLine:
+    """Insert one per-line draw within a receive event. Caller commits."""
+    row = ReceiptEventLine(
+        receipt_event_id=event_id,
+        receipt_transaction_line_id=line_id,
+        qty_received=qty_received,
+        over_receipt_reason=over_receipt_reason,
+        lot_id=lot_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def set_order_status(
     session: AsyncSession,
     *,
     txn: ReceiptTransaction,
     status: str,
     received_by_user_id: uuid.UUID | None = None,
-) -> ReceiptTransaction:
-    """Flip a transaction's status (``received`` stamps the receiver).
-    Caller commits.
+) -> None:
+    """Set an Order's status. ``received`` stamps the receiver/time; any other
+    status clears them. Caller commits.
     """
     txn.status = status
     if status == "received":
         txn.received_by_user_id = received_by_user_id
         txn.received_at = datetime.now(UTC)
+    else:
+        txn.received_by_user_id = None
+        txn.received_at = None
     await session.flush()
-    refreshed = await get_receipt_transaction(session, txn.id)
-    assert refreshed is not None
-    return refreshed
 
 
-def receipt_transaction_to_audit_snapshot(
+async def soft_delete_order(
+    session: AsyncSession,
+    *,
     txn: ReceiptTransaction,
-) -> dict[str, object | None]:
+    deleted_by_user_id: uuid.UUID,
+) -> None:
+    """Soft-delete an un-received Order (stamps ``deleted_at``). Caller commits."""
+    txn.deleted_at = datetime.now(UTC)
+    await session.flush()
+
+
+def order_to_audit_snapshot(txn: ReceiptTransaction) -> dict[str, object | None]:
     return {
-        "item_id": str(txn.item_id),
-        "status": txn.status,
         "po_reference": txn.po_reference,
+        "status": txn.status,
+        "is_blanket": txn.is_blanket,
+        "valid_from": txn.valid_from.isoformat() if txn.valid_from else None,
+        "valid_to": txn.valid_to.isoformat() if txn.valid_to else None,
         "notes": txn.notes,
         "received_by_user_id": (
             str(txn.received_by_user_id) if txn.received_by_user_id else None
         ),
         "received_at": txn.received_at.isoformat() if txn.received_at else None,
+        "deleted_at": txn.deleted_at.isoformat() if txn.deleted_at else None,
+    }
+
+
+def order_line_to_audit_snapshot(
+    line: ReceiptTransactionLine,
+) -> dict[str, object | None]:
+    return {
+        "line_no": line.line_no,
+        "item_id": str(line.item_id),
+        "supplier_id": str(line.supplier_id),
+        "ordered_qty": line.ordered_qty,
+        "unit_price_amount": (
+            str(line.unit_price_amount)
+            if line.unit_price_amount is not None
+            else None
+        ),
     }

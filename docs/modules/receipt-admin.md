@@ -1,261 +1,285 @@
-# Receipt Admin Module — Backend Contract (v2)
+# Receipt Admin / Orders Module — Backend Contract (v3)
 
 > **Source of truth**
-> - `temp/CellReady_Inventory_System_Technical_Requirements_v2.pdf`
->   (*Item / Vendor / Lot / Receipt Transaction model*, *Lot status rules*,
->   *Item→Vendor relation rules*, *Receipt Admin flow*, *Physical receipt
->   process*, *Edge case rules*, *Data consistency rules*, *Business
->   constraints*).
+> - `temp/CellReady_Inventory_System_Technical_Requirements_v2.pdf` (original
+>   Item / Supplier / Lot / Receipt model).
+> - Client requirement updates 2026-06-29: rename "receipt" → **"Order"**;
+>   **multiple items per Order**; lot details captured **at receive, not
+>   intake**; **partial receipts**; **blanket Orders** with **multiple dated
+>   receipts**; delete an Order; drop e-sign on editing an un-received Order.
 >
-> Builds on the inventory contract in [inventory.md](./inventory.md) — items,
-> lots, vendors, the append-only ledger (`app.stock_movements`), e-signatures
+> Builds on [inventory.md](./inventory.md) — items, lots, the append-only ledger
+> (`app.stock_movements`), assigned suppliers (`meta.item_suppliers`), e-signatures
 > (`audit.reauth_events`) and the audit trail (`audit.audit_events`). This file
-> only describes the **Receipt Admin** additions; everything it doesn't mention
-> is unchanged.
+> describes only the **Order** (Receipt Admin) additions; everything it doesn't
+> mention is unchanged.
 
 ---
 
-> **Amendment 2026-06-22 (lot table simplification, migration `b0c1d2e3f4a5`)**
-> The sections below predate these changes — read them with these overrides:
-> - **`app.lots.coa_url` removed** (no longer tracked).
-> - **`app.lots.metadata_` removed.** The two vendor flags it held
->   (`unverified_vendor_for_item`, `vendor_not_previously_associated_with_item`)
->   are **dropped entirely** — receipt no longer computes or surfaces them.
-> - **`ordered_qty` is now a real `NUMERIC(14,3)` column** on `app.lots`
->   (promoted out of `metadata_`). Received / on-hand quantity is **still
->   ledger-derived** — `ordered_qty` is planning data for ON_ORDER lots only.
+> **This module is now the single Order system.** The earlier standalone
+> Purchase Orders design (`docs/modules/purchase-orders.md`) is folded in here —
+> blanket/partial/multi-receipt are part of Receipt Admin, not a separate
+> module. "Order" is a UI-only rename; backend routes/tables keep the
+> `receipt_*` names.
 
 ---
 
-## 0. How v2 maps onto the existing flow
+## 0. v3 decisions (2026-06-29)
 
-The v2 requirements describe a vendor-aware, two-step inbound process. Most of
-the primitives already exist; v2 adds an **approved-vendor mapping**, a
-**receipt-transaction header**, and **per-lot pricing / PO reference**. The
-decisions taken (see commit / PR description) were:
-
-| v2 requirement | Decision |
+| Topic | Decision |
 |--|--|
-| Lot is source of truth for vendor / unit price / qty received | **Unit price + PO ref live on the lot**; **quantity stays ledger-derived** (the receipt movement *is* the quantity). No duplicated `received_qty` column — the GxP ledger remains the single balance authority. |
-| Item has zero-or-more approved vendors | New join table `meta.item_approved_vendors`. `app.items.vendor_id` is **retained** as the optional *primary/default* vendor. |
-| Unverified / not-previously-associated flags | Stored in a new `app.lots.metadata_` JSONB (`unverified_vendor_for_item`, `vendor_not_previously_associated_with_item`). Not status values (§ Lot status rules). |
-| ON_ORDER → AVAILABLE intake with splitting | New **Receipt Admin** intake flow (`receipt_transactions` header + `/receiving` endpoints). The existing `POST /v1/movements/receipt` (goods-in-hand, single lot) is left untouched. |
-| Category (optional) on Item | New nullable free-text `app.items.category` (no lookup table, no CHECK). Reverses the earlier "no category" decision ([inventory.md §99 Q1](./inventory.md)) specifically for v2. |
+| Terminology | "receipt" → **"Order"** in the **UI only**. Routes (`/v1/receiving`), tables (`app.receipt_transactions`), and API fields keep their names. |
+| Multiple items per Order | **Yes.** A new `app.receipt_transaction_lines` table — one row per item. The header no longer carries `item_id`. |
+| Lot details at intake | **Removed.** Intake captures no `lot_number`, `manufacture_date`, or `expiration_date`. Those are entered **at receive**. |
+| Lot creation | Lots are created **only at a receive event** (one lot per `line × event`), never at intake. |
+| Partial receipts | Tracked **per line**: `outstanding = ordered_qty − Σ received`. Received is **ledger/row-derived** (summed from `receipt_event_lines`), never stored. |
+| Blanket Orders | Header `is_blanket` + `valid_from`/`valid_to`. Drawn down by **many dated receive events** until every line is fully received. |
+| Supplier | **Per line** (`receipt_transaction_lines.supplier_id`), restricted to the item's `meta.item_suppliers`. Header has no supplier → an Order may span suppliers. |
+| Over-receipt | **Allowed, no reason required** — a draw may exceed the line's outstanding quantity. (The `over_receipt_reason` column is retained but no longer collected.) |
+| E-signature | **Receiving only** (reauth + mandatory comment). Creating/**editing an un-received Order** is plain `inventory:create` — no reauth. |
+| Order number | User-entered `po_reference`; **unique** across non-deleted Orders. |
+| Delete | **Soft-delete** (`deleted_at`), allowed **only while the Order is not yet received** (no ledger/stock impact). |
+| Status | Derived: `open → partially_received → received`, or `cancelled`. **No `closed`/early-close state** (cancel covers abandonment). |
 
 ---
 
-## 1. Domain entities (v2)
+## 1. Domain entities (v3)
 
-### 1.1 Item (additions)
-- `category TEXT NULL` — free-form, optional. No lookup table, no CHECK.
-- Approved vendors: zero-or-more, via `meta.item_approved_vendors`.
-- `vendor_id` (existing) stays as the optional default vendor — it is **not**
-  the source of truth for what a lot was sourced from (the lot is, §5).
-
-### 1.2 Vendor
-Unchanged shape (`meta.vendors`). A vendor can supply many items; price is
-**never** stored globally per item — it is captured per lot at receipt (§5).
-
-### 1.3 `meta.item_approved_vendors` — approved-vendor mapping
+### 1.1 `app.receipt_transactions` — Order header
 
 | col | type | notes |
 |--|--|--|
 | `id` | `UUID PK` | |
-| `item_id` | `UUID FK → app.items(id) ON DELETE CASCADE` | |
-| `vendor_id` | `UUID FK → meta.vendors(id) ON DELETE RESTRICT` | |
-| `approval_status` | `TEXT NOT NULL` | `CHECK IN ('approved','pending')`. `pending` = added dynamically during a receipt (§ edge case 2). |
-| `created_by_user_id` | `UUID FK → app.users(id)` | |
-| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | |
-
-`UNIQUE (item_id, vendor_id)`. Indexes: `(item_id)`, `(vendor_id)`.
-
-**Rules**
-- An item with one or more `approved` rows → only those vendors are
-  *suggested* in the receipt UI.
-- Receipt is **never blocked** by the approved list — any active vendor can be
-  selected; if it isn't approved the lot is flagged `unverified_vendor_for_item`.
-- A vendor created/added during receipt is inserted with
-  `approval_status='pending'` only when the operator opts in.
-
-### 1.4 `app.lots` (additions)
-
-| col | type | notes |
-|--|--|--|
-| `unit_price_amount` | `NUMERIC(14,2) NULL` | price paid for this lot, captured at receipt (§ data consistency). |
-| `po_reference` | `TEXT NULL` | manual PO text (§ business constraints). No PO system. |
-| `metadata_` | `JSONB NOT NULL DEFAULT '{}'` | carries `unverified_vendor_for_item`, `vendor_not_previously_associated_with_item`, plus future QC/Hold/Rejected flags (§ lot status rules — **never** new statuses). |
-| `receipt_transaction_id` | `UUID NULL FK → app.receipt_transactions(id)` | the intake that created this lot. |
-| `parent_lot_id` | `UUID NULL FK → app.lots(id)` | split lineage — set on child lots produced when a receipt is split (§6). |
-
-`vendor_id` stays **nullable at the column level** (historical / seeded lots
-predate the mandatory-vendor rule), but the Receipt Admin intake path
-**requires** a resolved vendor on every lot it creates.
-
-### 1.5 `app.receipt_transactions` — inbound event header
-
-Represents one "Receipt Transaction": an inbound processing event that creates
-or updates lots and can split them.
-
-| col | type | notes |
-|--|--|--|
-| `id` | `UUID PK` | |
-| `status` | `TEXT NOT NULL DEFAULT 'open'` | `CHECK IN ('open','received','cancelled')`. `open` = lots created ON_ORDER; `received` = physical receipt confirmed; `cancelled` = abandoned before receipt. |
-| `item_id` | `UUID FK → app.items(id)` | the item being received (one item per transaction; multiple vendors/lots allowed within it, § edge case 3). |
-| `po_reference` | `TEXT NULL` | manual PO text, copied onto created lots unless overridden. |
+| `po_reference` | `TEXT NOT NULL` | user-entered Order #. **Unique** (partial-unique index where `deleted_at IS NULL`). (Was nullable in v2; the UI already required it.) |
+| `is_blanket` | `BOOLEAN NOT NULL DEFAULT false` | **NEW.** Blanket vs. standard — informational; the receive loop is identical. |
+| `status` | `TEXT NOT NULL DEFAULT 'open'` | **Widened CHECK:** `('open','partially_received','received','cancelled')`. Derived on every receive/cancel — never hand-set. |
+| `valid_from` | `DATE NULL` | **NEW.** Blanket window start. |
+| `valid_to` | `DATE NULL` | **NEW.** Blanket window end. `CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)`. |
 | `notes` | `TEXT NULL` | |
-| `created_by_user_id` | `UUID FK → app.users(id)` | |
-| `received_by_user_id` | `UUID NULL FK → app.users(id)` | who confirmed the physical receipt. |
-| `received_at` | `TIMESTAMPTZ NULL` | |
+| `created_by_user_id` | `UUID FK → app.users` | |
+| `received_by_user_id`, `received_at` | (existing) | stamped on the **final** receive that completes the Order. |
+| `deleted_at` | `TIMESTAMPTZ NULL` | **NEW.** Soft delete. |
 | `created_at`, `updated_at` | `TIMESTAMPTZ NOT NULL` | |
 
-Indexes: `(item_id)`, `(status)`, `(created_at DESC)`.
+- **REMOVED:** `item_id` (moves to lines, §1.2).
+- Indexes: `(status)`, `(created_at DESC)`, partial-unique on `po_reference`
+  where `deleted_at IS NULL`.
+
+### 1.2 `app.receipt_transaction_lines` — one item on the Order (NEW)
+
+| col | type | notes |
+|--|--|--|
+| `id` | `UUID PK` | |
+| `receipt_transaction_id` | `UUID FK → app.receipt_transactions(id) ON DELETE CASCADE` | |
+| `line_no` | `INTEGER NOT NULL` | 1-based display order. |
+| `item_id` | `UUID FK → app.items(id) ON DELETE RESTRICT` | |
+| `supplier_id` | `UUID FK → meta.suppliers(id) ON DELETE RESTRICT` | **must be in the item's `meta.item_suppliers`** (service-validated, like today). |
+| `ordered_qty` | `INTEGER NOT NULL` | `CHECK (ordered_qty > 0)`. Whole units. |
+| `unit_price_amount` | `NUMERIC(14,2) NULL` | agreed price; copied onto the lot at receive. |
+| `created_at`, `updated_at` | `TIMESTAMPTZ NOT NULL` | |
+
+**No `UNIQUE (receipt_transaction_id, item_id)`** — the *same* item may appear
+on several lines of one Order, each with its **own supplier / price** (split
+sourcing; e.g. legacy Order `PO-B-001` ordered `TEST-001` from both Acme and
+Wilson Wolf). Supplier is per line, so item-per-Order is intentionally **not**
+unique. Indexes: `(receipt_transaction_id)`, `(item_id)`.
+**`ordered_qty` is locked once any receive line references the line** (409;
+service-enforced).
+
+### 1.3 `app.receipt_events` — one dated receive event (NEW)
+
+| col | type | notes |
+|--|--|--|
+| `id` | `UUID PK` | |
+| `receipt_transaction_id` | `UUID FK → app.receipt_transactions(id) ON DELETE RESTRICT` | |
+| `received_at` | `DATE NOT NULL` | the delivery date (blanket "multiple dates"). |
+| `received_by_user_id` | `UUID FK → app.users` | |
+| `reauth_event_id` | `UUID FK → audit.reauth_events(id) ON DELETE RESTRICT` | the e-signature authorising this receive (one ticket per event). |
+| `notes` | `TEXT NULL` | |
+| `created_at` | `TIMESTAMPTZ NOT NULL` | |
+
+Indexes: `(receipt_transaction_id)`, `(received_at DESC)`.
+
+### 1.4 `app.receipt_event_lines` — qty received this delivery, per Order line (NEW)
+
+| col | type | notes |
+|--|--|--|
+| `id` | `UUID PK` | |
+| `receipt_event_id` | `UUID FK → app.receipt_events(id) ON DELETE CASCADE` | |
+| `receipt_transaction_line_id` | `UUID FK → app.receipt_transaction_lines(id) ON DELETE RESTRICT` | |
+| `qty_received` | `INTEGER NOT NULL` | `CHECK (qty_received > 0)`. |
+| `over_receipt_reason` | `TEXT NULL` | required (service-enforced) only when this draw pushes the line past `ordered_qty`. |
+| `lot_id` | `UUID FK → app.lots(id) ON DELETE RESTRICT` | the lot this draw created (§3). |
+
+`UNIQUE (receipt_event_id, receipt_transaction_line_id)`.
+Indexes: `(receipt_event_id)`, `(receipt_transaction_line_id)`, `(lot_id)`.
+
+### 1.5 `app.lots` (changes)
+
+- **NEW** `receipt_transaction_line_id UUID NULL FK → receipt_transaction_lines`
+  — the Order line a lot was received against (replaces the conceptual link the
+  old `receipt_transaction_id` gave). `receipt_transaction_id` is retained for
+  back-compat / direct reads.
+- `lot_number`, `manufacture_date`, `expiration_date` are now populated **at
+  receive**, not intake.
+- `supplier_id`, `unit_price_amount`, `ordered_qty` still live on the lot (set at
+  receive from the line, with optional per-split override).
 
 ---
 
-## 2. Lot status rules (unchanged, restated for v2)
+## 2. Derived quantities & status (never stored)
 
-System statuses are **only** `ON_ORDER` and `AVAILABLE`
-([inventory.py `LOT_STATUSES`](../../backend/app/models/inventory.py)). No
-`quarantine`. QC / Hold / Rejected are represented as `metadata_` flags, never
-as status values.
+```
+received(line)     = Σ receipt_event_lines.qty_received WHERE line = line.id
+outstanding(line)  = max(0, line.ordered_qty − received(line))
 
----
+Order.status (recomputed on every receive / cancel):
+   no receive events on any line                  → 'open'
+   some received, ≥1 line still outstanding > 0    → 'partially_received'
+   every line outstanding = 0                      → 'received'   (auto; stamps received_at/by)
+   cancelled / soft-deleted before any receive     → 'cancelled'
+```
 
-## 3. Item → Vendor resolution rules
-
-At receipt time vendor selection is **mandatory**. Given the chosen vendor and
-the item:
-
-| Condition | Effect on the created lot's `metadata_` |
-|--|--|
-| Item has approved vendors, chosen vendor **is** approved | no flags |
-| Item has approved vendors, chosen vendor is **not** approved | `unverified_vendor_for_item = true` |
-| Vendor has **never** appeared on a prior lot for this item *and* isn't in the approved list | `vendor_not_previously_associated_with_item = true` |
-| Item has **no** approved vendors at all | receipt still allowed; flags computed as above (typically `vendor_not_previously_associated_with_item = true` on first-ever sourcing) |
-
-The two flags are independent and may both be set.
+On-hand per item stays ledger-derived via `app.v_item_stock` (unchanged) — a
+different total from Order "received" (order fulfilment vs. physical stock).
 
 ---
 
-## 4. Receipt Admin flow (intake → ON_ORDER lots)
+## 3. Flow
 
-`POST /v1/receiving/transactions` — **not** e-signed (no stock moves yet; this
-is a planning/order-intake step, gated on `inventory:create`).
+### 3.1 Intake — create an Order (`POST /v1/receiving/transactions`, NOT e-signed)
+1. Header: `po_reference`, optional `is_blanket` + `valid_from`/`valid_to`, notes.
+2. One or more **item lines**: `item_id`, `supplier_id` (∈ item_suppliers),
+   `ordered_qty`, optional `unit_price`.
+3. **No lots created**, no stock moves. Status `open`.
 
-**Steps (from v2 §4):**
-1. **Select item** — `item_id`. 404 if unknown.
-2. **Vendor resolution** — each lot line resolves a vendor:
-   - `vendor_id` (existing vendor), **or**
-   - `vendor_name` (free input). If no active vendor matches case-insensitively,
-     a vendor is **created dynamically** (§ edge case 2). With
-     `add_to_item_vendors=true`, an `item_approved_vendors` row is inserted with
-     `approval_status='pending'`.
-3. **Receipt entry** — per lot line: `lot_number`, `quantity` (ordered),
-   `unit_price` (optional), `po_reference` (optional, falls back to the header),
-   expiry / manufacture dates (optional).
-4. **Lot creation** — one `app.lots` row per line:
-   - `status='on_order'`, linked item + resolved vendor,
-   - `unit_price_amount`, `po_reference`, computed `metadata_` flags (§3),
-   - `receipt_transaction_id` = the new header.
-   - **No ledger movement is posted** — the goods aren't physically in yet.
+### 3.2 Edit Order (`PATCH …/transactions/{id}`, NOT e-signed, un-received only)
+Edit header + lines (add/remove items, change supplier/qty/price). `ordered_qty`
+locked on a line once it has any received qty. UI title: **"Edit Order"**.
 
-A single transaction may create multiple lots, each with exactly one vendor
-(§ edge case 3). The header `status` starts `open`.
+### 3.3 Receive — a dated receive event (`POST …/transactions/{id}/receive`, **e-signed**)
+One reauth ticket (`action='receipt.confirm'`, consumed once) covers the whole
+event. Body = `received_at` + per-line draws. For each submitted line:
+1. resolve the Order line; compute `outstanding`; if `qty_received >
+   outstanding` require `over_receipt_reason` (else 409);
+2. create one `app.lots` row (`status='available'`, `item_id`, `supplier_id` and
+   `unit_price_amount` from the line unless overridden, `ordered_qty` from the
+   line, `po_reference` from the header, **`lot_number` + `manufacture_date` +
+   `expiration_date` entered now**, `receipt_transaction_line_id` = the line);
+3. insert the `receipt_event_lines` row (`lot_id`).
 
----
+A line omitted from the event simply isn't drawn this delivery. All lots for one
+event commit atomically under the single e-signature. Recompute Order status
+(§2). Quantity/placement still flow through the Location System `place` step —
+receive records the lot, not its physical location (unchanged from v2).
 
-## 5. Physical receipt process (ON_ORDER → AVAILABLE, with split)
+> Lines may be received across **many** events on **many** dates (blanket /
+> partial). The Order stays `partially_received` until every line's outstanding
+> hits 0, then auto-flips to `received`.
 
-`POST /v1/receiving/transactions/{id}/receive` — **e-signed**
-(`inventory:sign` + a fresh reauth ticket for `action='receipt.confirm'`,
-consumed once, target = the transaction).
-
-For each ON_ORDER lot in the transaction the operator submits one or more
-**receive lines**. Per the v2 split rule, when received qty ≠ ordered qty the
-line may split into multiple lots under the same item, **same or different
-vendors**:
-
-- `splits[0]` (no `lot_number` override) → received **into the original lot**:
-  flip `on_order → available`, post a `+received_qty` `receipt` movement (to the
-  destination location if one is given), set `unit_price`/`po_reference` if
-  supplied.
-- `splits[1..]` → **child lots**: a new `app.lots` row per split
-  (`parent_lot_id` = original, own vendor / unit price / lot number,
-  `status='available'`), each with its own `+received_qty` receipt movement.
-
-All movements ride **one** e-signature (consumed against the transaction id) and
-commit atomically — a failure rolls back the entire receipt. Destination is
-**optional**: receiving records the quantity and flips the lot to `available`,
-but no longer pins it to a physical location. Omit `location_id` (and any
-per-split `location_id`) to receive without placing — the `receipt` movement is
-posted with no `to_location_id` and the lot stays *unplaced* until it is mapped
-to a node via the Location System (`/v1/locations/allocations/place`). On-hand
-stays ledger-derived (`v_item_stock` sums per item, ignoring location), so an
-unplaced receipt still counts as available stock. If a `location_id` *is*
-supplied (per-split override allowed) and that location has racks, vials fill
-positions exactly like
-[`POST /v1/movements/receipt`](../../backend/app/inventory/routes.py) (one unit
-= one vial = one position; capacity-checked).
-
-On success the header flips to `received` (`received_at`, `received_by_user_id`
-stamped).
+### 3.4 Delete Order (`DELETE …/transactions/{id}`, NOT e-signed)
+Soft-delete (`deleted_at`), **allowed only when no receive event exists** (still
+`open`). Cascades a soft state to its lines. Received Orders cannot be deleted
+(preserves the ledger). The existing `cancel` action remains for marking an
+un-received Order abandoned without deleting it.
 
 ---
 
-## 6. Edge cases (v2 §6) — handling
+## 4. One lot per (line × event)
 
-| Case | Handling |
-|--|--|
-| **1. Vendor not in item mapping** | Receipt allowed; lot flagged `vendor_not_previously_associated_with_item=true` (and `unverified_vendor_for_item=true` if the item *has* an approved list). |
-| **2. Unknown vendor added during receipt** | Vendor created dynamically from `vendor_name`; optionally added to the item's vendor list as `approval_status='pending'`. |
-| **3. Multiple vendors in same receipt** | One transaction → multiple lots; each lot has exactly one vendor (enforced: each lot line resolves a single vendor). |
-| **4. Price variance per vendor** | `unit_price_amount` captured **per lot** at receipt. No global item pricing is read or written by this flow. |
-| **5. Item with no vendors defined** | Receipt allowed; vendor still mandatory per line. |
+Each receive draw mints a **new** `app.lots` row — every dated delivery is a
+distinct physical batch (own lot number, expiry, manufacture date, price). Lots
+are never merged across events. Example — a blanket Order, 3 items, 3 deliveries:
 
----
+```
+                 EVENT R1 (Feb 10)  EVENT R2 (May 5)  EVENT R3 (Sep 20)
+line vials 1000  +300 VIAL-A        +400 VIAL-B       +300 VIAL-C   → 1000/1000 ✓
+line canes  200    —                +120 CANE-A       + 80 CANE-B   →  200/200  ✓
+line gloves  50  + 50 GLOVE-A         —    (done)        —          →   50/50   ✓
+Order status:    partially_received  partially_received  received
+```
 
-## 7. Data consistency & audit (v2 §7–§8)
-
-- **Lot is the source of truth** for vendor used, unit price, and (via its
-  receipt movements) quantity received. The item never stores transactional
-  vendor pricing.
-- **Vendor performance** is derived from lot history (`app.lots` joined to
-  `app.stock_movements`), never cached on the item.
-- **Audit trail** (`audit.audit_events` via `record_entity_change`) is written
-  for:
-  - vendor assignment / dynamic vendor creation / approved-vendor mapping
-    changes,
-  - receipt transaction creation and confirmation (`receipt adjustments`),
-  - lot splitting (child-lot creation records `parent_lot_id` + the split in
-    `context`).
-- PO traceability is via the manual `po_reference` text only — no PO system
-  integration (§ business constraints).
+Reading a row = that item's partial-receipt history; reading a column = one
+dated `receipt_event` and the lots it created.
 
 ---
 
-## 8. Endpoints summary
+## 5. Endpoints
 
 | Method | Path | Auth | Purpose |
 |--|--|--|--|
-| `GET` | `/v1/items/{item_id}/approved-vendors` | `inventory:view` | List approved/pending vendors for an item |
-| `POST` | `/v1/items/{item_id}/approved-vendors` | `inventory:create` | Add a vendor mapping (approved/pending) |
-| `DELETE` | `/v1/items/{item_id}/approved-vendors/{vendor_id}` | `inventory:create` | Remove a mapping |
-| `POST` | `/v1/receiving/transactions` | `inventory:create` | Create intake → ON_ORDER lots |
-| `GET` | `/v1/receiving/transactions` | `inventory:view` | List receipt transactions |
-| `GET` | `/v1/receiving/transactions/{id}` | `inventory:view` | One transaction + its lots |
-| `POST` | `/v1/receiving/transactions/{id}/receive` | `inventory:sign` | Physical receipt → AVAILABLE (+split), e-signed |
-| `POST` | `/v1/receiving/transactions/{id}/cancel` | `inventory:create` | Cancel an `open` transaction |
+| `POST` | `/v1/receiving/transactions` | `inventory:create` | Create Order header + item lines (multi-item) |
+| `GET` | `/v1/receiving/transactions` | `inventory:view` | List Orders (derived status + % received) |
+| `GET` | `/v1/receiving/transactions/{id}` | `inventory:view` | One Order: lines (with outstanding) + receive history |
+| `PATCH` | `/v1/receiving/transactions/{id}` | `inventory:create` | Edit un-received Order (header + lines) |
+| `POST` | `/v1/receiving/transactions/{id}/receive` | `inventory:sign` | Record one dated receive event (partial, multi-line) — e-signed |
+| `POST` | `/v1/receiving/transactions/{id}/cancel` | `inventory:create` | Cancel an un-received Order (keeps the record) |
+| `DELETE` | `/v1/receiving/transactions/{id}` | `inventory:create` | Soft-delete an un-received Order |
+
+Receive body:
+
+```jsonc
+// POST /v1/receiving/transactions/{id}/receive
+{
+  "received_at": "2026-05-05",
+  "evidence_id": "…",              // reauth ticket, action='receipt.confirm', consumed once
+  "lines": [
+    { "line_id": "…", "qty_received": 400, "lot_number": "VIAL-B",
+      "manufacture_date": "2026-04-01", "expiration_date": "2027-04-01",
+      "unit_price_amount": null },
+    { "line_id": "…", "qty_received": 210, "lot_number": "CANE-B",
+      "over_receipt_reason": "Supplier shipped full pallet" }   // exceeds outstanding
+  ]
+}
+```
 
 ---
 
-## 9. Migration
+## 6. Item → Supplier resolution (unchanged)
 
-`2026_06_18_1200-..._receipt_admin_v2` (down_revision `f4a5b6c7d8e9`). Adds:
-`items.category`; `lots.unit_price_amount` / `po_reference` / `metadata_` /
-`receipt_transaction_id` / `parent_lot_id`; `meta.item_approved_vendors`;
-`app.receipt_transactions`. Reversible. **Not auto-applied** — run
-`alembic upgrade head` against the target DB after review.
+Supplier on a line is **mandatory** and must be one of the item's `meta.item_suppliers`.
+No on-the-fly supplier creation. (The v2 unverified/not-previously-associated
+flags were already dropped, migration `b0c1d2e3f4a5`.)
 
 ---
 
-*End of Receipt Admin v2 contract.*
+## 7. Audit (`audit.audit_events` via `record_entity_change`)
+
+Written for: Order create/edit, line add/remove, each receive event (the
+`receipt_events` row + the lots/movements it created, split detail in
+`context`), cancel, and delete. Receive events additionally carry the
+reauth evidence id, consistent with existing receive auditing.
+
+---
+
+## 8. Migration
+
+New revision `orders_multi_item_v3` (down_revision `c8d9e0f1a2b3`). Adds
+`receipt_transaction_lines`, `receipt_events`, `receipt_event_lines`;
+`lots.receipt_transaction_line_id`; `receipt_transactions.is_blanket /
+valid_from / valid_to / deleted_at`; widens the status CHECK; drops the header
+`item_id` (after backfill). **Backfill (per 2026-06-29 decision "convert to one
+line each, keep lot"):** for each existing `receipt_transaction`, create one
+`receipt_transaction_line` **per existing lot** (carrying that lot's
+`item`/`supplier`/`ordered_qty`/`unit_price`) and set the lot's
+`receipt_transaction_line_id`. Already-`received` transactions keep their lots
+linked to lines (no synthetic event). Reversible. **Not auto-applied** — exact
+backfill SQL is reviewed and run manually against the target DB.
+
+---
+
+## 9. Resolved decisions (2026-06-29)
+
+1. **Order # (`po_reference`) is unique** across non-deleted Orders
+   (partial-unique index where `deleted_at IS NULL`). Existing dev rows are
+   checked for duplicates before the constraint is added.
+2. **End-states = `cancelled` + soft-delete only.** No `closed`/early-close
+   state — `cancel` covers abandoning an un-received Order while keeping the
+   record; `delete` soft-removes an un-received Order entirely.
+3. **Backfill = one line per existing lot** (lossless — preserves per-lot
+   supplier/qty/price on multi-lot intakes); the lot is relinked via
+   `receipt_transaction_line_id`.
+
+---
+
+*End of Receipt Admin / Orders v3 contract.*

@@ -208,9 +208,11 @@ class LocationNode(Base):
         ForeignKey("app.customers.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    # Now points at a finished-good Item (unified catalogue) rather than the
+    # retired products table.
     dedicated_product_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("app.products.id", ondelete="RESTRICT"),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
         nullable=True,
     )
     metadata_: Mapped[dict] = mapped_column(

@@ -31,8 +31,8 @@ export interface Lot {
   id: string;
   item_id: string;
   lot_number: string;
-  vendor_id: string | null;
-  vendor_name: string | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
   /** Convenience joined from items for the admin list. */
   item_number: string | null;
   item_description: string | null;
@@ -59,7 +59,7 @@ export interface Lot {
 
 export interface LotCreateInput {
   lot_number: string;
-  vendor_id?: string | null;
+  supplier_id?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;
   status?: LotStatus;
@@ -69,26 +69,28 @@ export interface LotCreateInput {
 /**
  * Body for ``PATCH /v1/lots/{id}``. ``lot_number`` and the parent item
  * are immutable identity, so they're absent. Editing a lot after entry
- * is a GxP-significant correction, so two fields are always required:
- *
- *   * ``evidence_id`` — a fresh reauth ticket minted for the
- *     ``lot.update`` action (see {@link PasswordReauthDialog}).
- *   * ``reason`` — the mandatory "reason for change" recorded on the
- *     audit row.
+ * is a GxP-significant correction, so ``evidence_id`` (a fresh reauth
+ * ticket minted for the ``lot.update`` action — see
+ * {@link PasswordReauthDialog}) is always required. The ``reason`` (the
+ * e-signature comment) is optional and recorded on the audit row when
+ * provided.
  *
  * The editable fields are all optional — only send the ones that change.
  */
 export interface LotUpdateInput {
-  vendor_id?: string | null;
+  supplier_id?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;
   status?: LotStatus;
   notes?: string | null;
-  /** Price paid for this lot. (Ordered qty is NOT editable here — it's set
-   *  only during receipt: intake + receive splits.) */
+  /** Price paid for this lot. */
   unit_price_amount?: number | null;
+  /** Received quantity for this lot (whole units). Editable as a correction,
+   *  but the backend rejects (code ``qty_below_placed``) any value below what
+   *  is already physically placed in locations — unplace first. */
+  ordered_qty?: number | null;
   evidence_id: string;
-  reason: string;
+  reason?: string;
 }
 
 export const lotsApi = {
