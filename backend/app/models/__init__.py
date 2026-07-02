@@ -54,6 +54,6 @@ __all__ = [
     "ReceiptTransactionLine",
     "Role",
     "StockMovement",
-    "User",
     "Supplier",
+    "User",
 ]

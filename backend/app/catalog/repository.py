@@ -12,7 +12,6 @@ from sqlalchemy.orm import joinedload
 
 from app.models.inventory import BomLine, Item, ItemCategory
 
-
 # ── Categories ─────────────────────────────────────────────────────────
 
 

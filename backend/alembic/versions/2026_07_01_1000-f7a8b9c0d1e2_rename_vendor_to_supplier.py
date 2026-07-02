@@ -48,6 +48,8 @@ def _rename_pk(table_fqn: str, new_name: str) -> None:
     PK is ``vendors_pkey`` (Postgres default) or ``pk_vendors`` (naming
     convention). A no-op if it is already ``new_name``.
     """
+    # Both args are hardcoded table/constraint names from the call sites below,
+    # never user input — the f-string is not an injection vector.
     op.execute(
         f"""
         DO $$
@@ -63,7 +65,7 @@ def _rename_pk(table_fqn: str, new_name: str) -> None:
             );
           END IF;
         END $$;
-        """
+        """  # noqa: S608
     )
 
 
