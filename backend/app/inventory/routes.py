@@ -1249,6 +1249,7 @@ def _order_to_read(
                 id=str(ev.id),
                 received_at=ev.received_at,
                 received_by_user_id=str(ev.received_by_user_id),
+                received_by_user_name=ev.received_by.full_name if ev.received_by else None,
                 notes=ev.notes,
                 created_at=ev.created_at,
                 lines=ev_lines,

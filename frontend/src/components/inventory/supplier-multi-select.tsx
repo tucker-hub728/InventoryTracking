@@ -18,6 +18,13 @@ interface Props {
   error?: string | null;
   disabled?: boolean;
   id?: string;
+  /**
+   * Render the popover as a modal. Set this when used inside a Dialog/Sheet so
+   * the list can be wheel-scrolled: a modal popover owns its own scroll-lock and
+   * becomes the topmost lock, whereas a non-modal popover portals outside the
+   * Dialog's lock and its list freezes. Leave false for page-level use.
+   */
+  modal?: boolean;
 }
 
 /**
@@ -35,6 +42,7 @@ export function SupplierMultiSelect({
   error,
   disabled,
   id,
+  modal = false,
 }: Props) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
@@ -82,6 +90,7 @@ export function SupplierMultiSelect({
   return (
     <div className="space-y-1.5">
       <Popover
+        modal={modal}
         open={open}
         onOpenChange={(o) => {
           setOpen(o);

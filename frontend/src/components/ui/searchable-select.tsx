@@ -26,6 +26,15 @@ interface Props {
   id?: string;
   'aria-label'?: string;
   className?: string;
+  /**
+   * Render the popover as a modal. Set this when the select lives inside a
+   * Dialog/Sheet: a modal popover owns its own scroll-lock (react-remove-scroll),
+   * so it becomes the topmost lock and its list can be wheel-scrolled — a
+   * non-modal popover portals outside the Dialog's lock and its list freezes.
+   * Leave false for page-level use to avoid locking page scroll / hiding the
+   * page from AT while open. Mirrors Radix Select/DropdownMenu (modal) behaviour.
+   */
+  modal?: boolean;
 }
 
 /**
@@ -45,6 +54,7 @@ export function SearchableSelect({
   id,
   className,
   'aria-label': ariaLabel,
+  modal = false,
 }: Props) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
@@ -62,6 +72,7 @@ export function SearchableSelect({
 
   return (
     <Popover
+      modal={modal}
       open={open}
       onOpenChange={(o) => {
         setOpen(o);

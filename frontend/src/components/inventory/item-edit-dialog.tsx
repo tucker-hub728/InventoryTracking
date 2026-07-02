@@ -325,6 +325,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               <Label htmlFor="it-suppliers">Suppliers</Label>
               <SupplierMultiSelect
                 id="it-suppliers"
+                modal
                 suppliers={suppliers}
                 value={supplierIds}
                 onChange={(next) =>

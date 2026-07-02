@@ -663,7 +663,9 @@ function OrderDetailSheet({
                               {ev.received_at}
                             </span>
                             <span className="text-xs text-text-3">
-                              by {ev.received_by_user_id.slice(0, 8)}…
+                              by{' '}
+                              {ev.received_by_user_name ??
+                                `${ev.received_by_user_id.slice(0, 8)}…`}
                             </span>
                           </div>
                           <ul className="mt-2 space-y-1 text-xs">

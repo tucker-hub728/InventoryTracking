@@ -562,6 +562,9 @@ class ReceiptEventRead(BaseModel):
     id: str
     received_at: date
     received_by_user_id: str
+    # Resolved from the receiver's User row (via ReceiptEvent.received_by) so the
+    # UI can show a name rather than a raw id. None only if the user is missing.
+    received_by_user_name: str | None = None
     notes: str | None = None
     created_at: datetime
     lines: list[ReceiptEventLineRead] = Field(default_factory=list)

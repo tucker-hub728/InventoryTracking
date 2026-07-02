@@ -202,51 +202,59 @@ export function OrderForm({
     }));
 
   // Searchable item options (item number + description both match the query).
+  // Only purchased items are orderable — built/product items are BOM outputs
+  // with no supplier to receive against (no unit-in / unit-out flow).
   const itemOptions = React.useMemo<SearchableSelectOption[]>(
     () =>
-      items.map((i) => ({
-        value: i.id,
-        label: (
-          <>
-            <span className="font-mono text-xs">{i.item_number}</span>
-            <span className="ml-2 text-text-2">{i.description}</span>
-          </>
-        ),
-        searchText: `${i.item_number} ${i.description}`,
-      })),
+      items
+        .filter((i) => i.category_kind === 'purchased')
+        .map((i) => ({
+          value: i.id,
+          label: (
+            <>
+              <span className="font-mono text-xs">{i.item_number}</span>
+              <span className="ml-2 text-text-2">{i.description}</span>
+            </>
+          ),
+          searchText: `${i.item_number} ${i.description}`,
+        })),
     [items],
   );
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor={`${idPrefix}-po`}>
-            Order # <span className="text-danger">*</span>
-          </Label>
-          <Input
-            id={`${idPrefix}-po`}
-            placeholder="PO-2026-0042"
-            value={state.po_reference}
+      {/* Order # is full-width while the blanket-order option is hidden. To
+          re-enable the blanket order, wrap this field and the commented block
+          below back in a `grid grid-cols-2 gap-3` container. */}
+      <div className="space-y-1.5">
+        <Label htmlFor={`${idPrefix}-po`}>
+          Order # <span className="text-danger">*</span>
+        </Label>
+        <Input
+          id={`${idPrefix}-po`}
+          placeholder="PO-2026-0042"
+          value={state.po_reference}
+          onChange={(e) =>
+            setState((prev) => ({ ...prev, po_reference: e.target.value }))
+          }
+        />
+      </div>
+
+      {/* Blanket order — hidden for now (kept for later use).
+      <div className="flex items-end pb-1.5">
+        <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-text-2">
+          <input
+            type="checkbox"
+            className="size-4 cursor-pointer rounded border-border-strong accent-accent"
+            checked={state.is_blanket}
             onChange={(e) =>
-              setState((prev) => ({ ...prev, po_reference: e.target.value }))
+              setState((prev) => ({ ...prev, is_blanket: e.target.checked }))
             }
           />
-        </div>
-        <div className="flex items-end pb-1.5">
-          <label className="inline-flex items-center gap-2 text-sm text-text-2">
-            <input
-              type="checkbox"
-              className="size-4 rounded border-border-strong accent-accent"
-              checked={state.is_blanket}
-              onChange={(e) =>
-                setState((prev) => ({ ...prev, is_blanket: e.target.checked }))
-              }
-            />
-            Blanket order
-          </label>
-        </div>
+          Blanket order
+        </label>
       </div>
+      */}
 
       {state.is_blanket && (
         <div className="grid grid-cols-2 gap-3">
@@ -305,6 +313,7 @@ export function OrderForm({
               </Label>
               <SearchableSelect
                 aria-label="Item"
+                modal
                 options={itemOptions}
                 value={line.item_id}
                 onChange={(v) => onItemChange(line.key, v)}
@@ -322,6 +331,7 @@ export function OrderForm({
                 </Label>
                 <SearchableSelect
                   aria-label="Supplier"
+                  modal
                   options={line.suppliers.map((v) => ({
                     value: v.supplier_id,
                     label: v.supplier_name,

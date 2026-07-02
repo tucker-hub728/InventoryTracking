@@ -1022,6 +1022,13 @@ class ReceiptEvent(Base):
         primaryjoin="ReceiptEvent.id == foreign(ReceiptEventLine.receipt_event_id)",
         viewonly=True,
     )
+    # Joined eagerly so the receive history can show "by <full_name>" instead of
+    # a raw user id, without a per-row N+1.
+    received_by: Mapped[User] = relationship(
+        foreign_keys=[received_by_user_id],
+        lazy="joined",
+        viewonly=True,
+    )
 
 
 class ReceiptEventLine(Base):

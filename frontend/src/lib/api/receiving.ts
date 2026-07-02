@@ -63,6 +63,9 @@ export interface ReceiptEvent {
   id: string;
   received_at: string; // date (YYYY-MM-DD)
   received_by_user_id: string;
+  /** Receiver's full name, resolved server-side. Null only if the user row is
+   *  missing; fall back to the id when absent. */
+  received_by_user_name: string | null;
   notes: string | null;
   created_at: string;
   lines: ReceiptEventLine[];

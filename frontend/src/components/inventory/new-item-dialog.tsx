@@ -273,6 +273,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
             >
               <SupplierMultiSelect
                 id="ni-suppliers"
+                modal
                 suppliers={suppliers}
                 value={supplierIds}
                 onChange={(next) =>
