@@ -126,7 +126,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
             <DialogTitle>{isEdit ? 'Edit category' : 'New category'}</DialogTitle>
             <DialogDescription>
               {isEdit
-                ? 'Rename or recolour. The Product/Purchased kind is fixed at creation.'
+                ? 'Rename or recolour. The Product/Purchased type is fixed at creation.'
                 : 'Categories decide whether their items are Products (can have a BOM) or Purchased.'}
             </DialogDescription>
           </DialogHeader>
@@ -143,11 +143,11 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
             </div>
 
             <div className="space-y-1.5">
-              <Label>Kind</Label>
+              <Label>Type</Label>
               <div
                 className="flex w-fit overflow-hidden rounded-md border border-border-strong"
                 role="radiogroup"
-                aria-label="Category kind"
+                aria-label="Category type"
               >
                 {(['purchased', 'built'] as CategoryKind[]).map((k) => (
                   <button
@@ -169,7 +169,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
                 ))}
               </div>
               {isEdit && (
-                <p className="text-xs text-text-3">Kind can&apos;t change after creation.</p>
+                <p className="text-xs text-text-3">Type can&apos;t change after creation.</p>
               )}
             </div>
 
