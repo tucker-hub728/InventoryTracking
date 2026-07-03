@@ -19,10 +19,10 @@ interface Props {
 
 /**
  * Structure tab — the full multi-level BOM hierarchy for a Product, read-only
- * (the editor lives on the BOM tab). Mirrors the demo's nested-tree preview:
- * every line shows the child's category, qty/run, in-stock and how many builds
- * it supports; sub-assembly lines expand (lazily fetched) to reveal their own
- * BOM. The top-level bottleneck (lowest supports) is highlighted.
+ * (the editor lives on the BOM tab). The whole tree is fetched in one nested
+ * call (`?nested=true`) and rendered fully expanded, so the entire hierarchy is
+ * visible on load; every line shows the child's category, qty/run, in-stock and
+ * stock status, and sub-assemblies can still be collapsed by hand.
  */
 export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
   const [lines, setLines] = React.useState<ApiBomLine[]>([]);
@@ -34,7 +34,7 @@ export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
     setLoading(true);
     setError(null);
     bomApi
-      .forItem(itemId, { signal: ctrl.signal })
+      .forItem(itemId, { signal: ctrl.signal, nested: true })
       .then((bom) => {
         setLines(bom.lines);
       })
@@ -85,7 +85,9 @@ export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
   );
 }
 
-/** One tree row; lazily fetches its children when expanded. */
+/** One tree row. Children arrive embedded in the nested payload, so the whole
+ *  subtree is present up front and rendered open by default; the caret just
+ *  collapses/expands what's already loaded. */
 function BomNode({
   line,
   depth,
@@ -93,22 +95,11 @@ function BomNode({
   line: ApiBomLine;
   depth: number;
 }) {
-  const [expanded, setExpanded] = React.useState(false);
-  const [children, setChildren] = React.useState<ApiBomLine[] | null>(null);
-  const [loading, setLoading] = React.useState(false);
-
-  const toggle = () => {
-    const next = !expanded;
-    setExpanded(next);
-    if (next && children === null && line.child_has_bom) {
-      setLoading(true);
-      bomApi
-        .forItem(line.child_item_id)
-        .then((bom) => setChildren(bom.lines))
-        .catch(() => setChildren([]))
-        .finally(() => setLoading(false));
-    }
-  };
+  const children = line.children ?? [];
+  const hasChildren = line.child_has_bom && children.length > 0;
+  // Open by default so the entire hierarchy shows on load.
+  const [expanded, setExpanded] = React.useState(true);
+  const toggle = () => setExpanded((e) => !e);
 
   // Products (built items) aren't stocked, so their on-hand Available + Stock
   // status are hidden. For purchased children the badge = the child's REAL
@@ -127,7 +118,7 @@ function BomNode({
         className="flex items-center gap-2 rounded-md py-1.5 pr-2 text-sm"
         style={{ paddingLeft: `${depth * 18 + 8}px` }}
       >
-        {line.child_has_bom ? (
+        {hasChildren ? (
           <button
             type="button"
             onClick={toggle}
@@ -179,25 +170,12 @@ function BomNode({
         </span>
       </div>
 
-      {expanded && (
-        <>
-          {loading && (
-            <div
-              className="flex items-center gap-2 py-1 text-xs text-text-3"
-              style={{ paddingLeft: `${(depth + 1) * 18 + 8}px` }}
-              role="status"
-            >
-              <Loader2 size={12} className="animate-spin" /> Loading…
-            </div>
-          )}
-          {children && children.length > 0 && (
-            <ul className="space-y-0.5">
-              {children.map((c) => (
-                <BomNode key={c.id} line={c} depth={depth + 1} />
-              ))}
-            </ul>
-          )}
-        </>
+      {expanded && hasChildren && (
+        <ul className="space-y-0.5">
+          {children.map((c) => (
+            <BomNode key={c.id} line={c} depth={depth + 1} />
+          ))}
+        </ul>
       )}
     </li>
   );

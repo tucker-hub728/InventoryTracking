@@ -118,6 +118,16 @@ class BomLineRead(BaseModel):
     child_has_bom: bool
     created_at: datetime
     updated_at: datetime
+    # The child's own BOM lines, populated only when the endpoint is called
+    # with ``?nested=true`` (the Structure tab pre-expands the whole tree). It
+    # stays ``None`` for the flat/direct listing so the default response and the
+    # write endpoints are unchanged.
+    children: list["BomLineRead"] | None = None
+
+
+# Resolve the self-referential ``children`` forward ref (``from __future__
+# import annotations`` makes every annotation a string).
+BomLineRead.model_rebuild()
 
 
 class ItemBomResponse(BaseModel):
