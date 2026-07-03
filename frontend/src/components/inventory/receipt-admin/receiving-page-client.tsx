@@ -644,10 +644,10 @@ function OrderDetailSheet({
                   </div>
                 </div>
 
-                {/* Receive history */}
+                {/* Receive lots */}
                 <div>
                   <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-3">
-                    Receive history
+                    Receive lots
                   </h3>
                   {current.events.length === 0 ? (
                     <p className="text-sm text-text-3">No receipts yet.</p>

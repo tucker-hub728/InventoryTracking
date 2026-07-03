@@ -11,7 +11,7 @@ import uuid
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path, Query, status
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentDbUserDep, DBSession
@@ -97,6 +97,45 @@ async def _line_read(db: DBSession, line: BomLine) -> BomLineRead:
     """Serialise one BOM line (child stock from the item's own v_item_stock)."""
     have_bom = await inv_repo.items_with_bom(db, [line.child_item_id])
     return _bom_line_to_read(line, child_has_bom=line.child_item_id in have_bom)
+
+
+# Defensive ceiling on how deep the nested-BOM walk recurses. BOM cycles are
+# rejected at create time, so the graph is a DAG; this only guards against a
+# pathological chain (and pairs with the ancestor-path check below).
+_MAX_BOM_DEPTH = 20
+
+
+async def _build_bom_subtree(
+    db: DBSession,
+    parent_item_id: uuid.UUID,
+    ancestors: frozenset[uuid.UUID],
+    depth: int,
+) -> list[BomLineRead]:
+    """Recursively serialise a parent's BOM lines, embedding each built child's
+    own lines in ``children``. ``ancestors`` is the chain from the root down to
+    (and including) this parent, so a would-be cycle stops expanding instead of
+    looping forever."""
+    lines = await cat_repo.list_bom_lines(db, parent_item_id)
+    if not lines:
+        return []
+    have_bom = await inv_repo.items_with_bom(db, [ln.child_item_id for ln in lines])
+    reads: list[BomLineRead] = []
+    for ln in lines:
+        child_has_bom = ln.child_item_id in have_bom
+        read = _bom_line_to_read(ln, child_has_bom=child_has_bom)
+        if (
+            child_has_bom
+            and depth < _MAX_BOM_DEPTH
+            and ln.child_item_id not in ancestors
+        ):
+            read.children = await _build_bom_subtree(
+                db,
+                ln.child_item_id,
+                ancestors | {ln.child_item_id},
+                depth + 1,
+            )
+        reads.append(read)
+    return reads
 
 
 # ── Categories ─────────────────────────────────────────────────────────
@@ -311,11 +350,24 @@ async def delete_category(
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
 async def list_item_bom(
-    db: DBSession, item_id: Annotated[uuid.UUID, Path()]
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+    nested: Annotated[
+        bool,
+        Query(
+            description=(
+                "When true, each built child's own BOM lines are embedded in "
+                "``children`` so the whole structure tree arrives in one call."
+            )
+        ),
+    ] = False,
 ) -> ItemBomResponse:
     item = await inv_repo.get_item(db, item_id)
     if item is None:
         raise NotFoundError(f"Item {item_id} not found")
+    if nested:
+        reads = await _build_bom_subtree(db, item_id, frozenset({item_id}), 0)
+        return ItemBomResponse(item_id=str(item_id), lines=reads)
     lines = await cat_repo.list_bom_lines(db, item_id)
     have_bom = await inv_repo.items_with_bom(db, [ln.child_item_id for ln in lines])
     return ItemBomResponse(

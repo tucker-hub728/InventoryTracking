@@ -31,6 +31,9 @@ export interface ApiBomLine {
   child_has_bom: boolean;
   created_at: string;
   updated_at: string;
+  /** The child's own BOM lines — populated only when the item BOM is fetched
+   *  with `{ nested: true }`; `null`/absent for the flat listing. */
+  children?: ApiBomLine[] | null;
 }
 
 export interface ApiItemBom {
@@ -65,9 +68,17 @@ export interface BomLineDeleteInput {
 }
 
 export const bomApi = {
-  /** An item's direct BOM lines + its one-level buildable count. */
-  forItem: (itemId: string, opts?: { signal?: AbortSignal }) =>
-    api.get<ApiItemBom>(`/items/${itemId}/bom`, { signal: opts?.signal }),
+  /** An item's BOM lines. By default just the direct lines; pass
+   *  `{ nested: true }` to get the whole multi-level tree in one call, with
+   *  each built child's lines embedded in `children`. */
+  forItem: (
+    itemId: string,
+    opts?: { signal?: AbortSignal; nested?: boolean },
+  ) =>
+    api.get<ApiItemBom>(`/items/${itemId}/bom`, {
+      signal: opts?.signal,
+      query: opts?.nested ? { nested: true } : undefined,
+    }),
 
   addLine: (itemId: string, input: BomLineCreateInput) =>
     api.post<ApiBomLine>(`/items/${itemId}/bom`, { json: input }),
