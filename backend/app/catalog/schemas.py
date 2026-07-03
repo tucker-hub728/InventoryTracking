@@ -122,7 +122,7 @@ class BomLineRead(BaseModel):
     # with ``?nested=true`` (the Structure tab pre-expands the whole tree). It
     # stays ``None`` for the flat/direct listing so the default response and the
     # write endpoints are unchanged.
-    children: list["BomLineRead"] | None = None
+    children: list[BomLineRead] | None = None
 
 
 # Resolve the self-referential ``children`` forward ref (``from __future__

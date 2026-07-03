@@ -43,10 +43,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from sqlalchemy import text
-
 from app.core.config import Environment, get_settings
 from app.db.session import dispose_engine, get_engine
+from sqlalchemy import text
 
 # Tables we never truncate: Alembic's bookkeeping. Wiping this would strand the
 # DB at an unknown migration state and force a full re-migrate.

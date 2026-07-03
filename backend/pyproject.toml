@@ -120,6 +120,10 @@ ignore = [
 # Smoke scripts: long linear main(), `Decimal as _D` alias, throwaway locals.
 "tests/**" = ["S", "PLR2004", "N814", "E741", "F841"]
 "alembic/**" = ["E", "F", "I"]
+# DB-admin CLI scripts (reset_db, seed_super_admins) run manually by operators:
+# S608 fires on SQL built from fixed internal constants (never user input) and
+# S603 on the alembic subprocess call with a fully-static argv — both safe here.
+"scripts/**" = ["S608", "S603"]
 # Forward-ref dependency type resolved at runtime by FastAPI (see the
 # `# type: ignore[name-defined]` on the same line).
 "app/security/permissions.py" = ["F821"]

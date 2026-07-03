@@ -46,12 +46,11 @@ import asyncio
 import sys
 from typing import Any
 
-from botocore.exceptions import ClientError
-
 from app.auth import repository as users_repo
 from app.auth.cognito_client import get_cognito_client
 from app.core.config import Environment, get_settings
 from app.db.session import dispose_engine, get_sessionmaker
+from botocore.exceptions import ClientError
 
 # ── Users to seed ───────────────────────────────────────────────────────────
 # Edit this list to change who gets seeded. All are role=super_admin.
@@ -139,7 +138,7 @@ def _ensure_cognito_user(
             sub = _extract_sub(got["UserAttributes"])
             created = False
         except ClientError:
-            raise exc
+            raise exc from None
 
     # Permanent password => account is immediately usable, no reset challenge.
     client.admin_set_user_password(
@@ -270,7 +269,7 @@ async def main() -> int:
                     cog = "created" if cog_created else "exists"
                     db = "created" if db_created else "exists"
                     print(f"  OK  {email:<28} cognito={cog:<7} db_row={db:<7} sub={sub}")
-                except Exception as exc:  # noqa: BLE001 — report per-user, keep going
+                except Exception as exc:
                     exit_code = 1
                     print(f"  FAIL {email:<28} {type(exc).__name__}: {exc}")
             await session.commit()
