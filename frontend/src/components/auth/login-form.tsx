@@ -77,7 +77,7 @@ export function LoginForm() {
     toast.success('Signed in', { description: `Welcome back, ${user.fullName}.` });
 
     const next = params.get('next');
-    router.replace(next && next.startsWith('/') ? next : '/inventory');
+    router.replace(next && next.startsWith('/') ? next : '/inventory/cr');
     // Refresh server components so the new cookies are picked up.
     router.refresh();
   };

@@ -1,14 +1,13 @@
 'use client';
 
 import * as React from 'react';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+import { toast } from 'sonner';
 
 import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -16,375 +15,148 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
-import { toast } from '@/components/ui/sonner';
-import { useInventoryStore } from '@/stores/inventory.store';
+import { Switch } from '@/components/ui/switch';
+import { Textarea } from '@/components/ui/textarea';
 import { ApiError } from '@/lib/api/client';
-import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
-import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
-
-import { SupplierMultiSelect } from './supplier-multi-select';
-
-// ── Form schema ────────────────────────────────────────────────────────
-
-const schema = z.object({
-  // Free-form item number — any non-blank code the operator issues
-  // (e.g. CM-0001, CM-0001A, REF-017). Per docs/modules/inventory.md §3.1
-  // the only backend rule is uniqueness, so we just trim, require non-blank
-  // and cap the length to match the server contract.
-  itemId: z
-    .string()
-    .trim()
-    .min(1, 'Item # is required')
-    .max(64, 'Item # must be at most 64 characters'),
-  desc: z.string().min(3, 'Description is required'),
-  // Required category — governs whether the item is a Product (built) or
-  // Purchased, and thus BOM eligibility.
-  categoryId: z.string().min(1, 'Category is required'),
-  // Assigned suppliers — zero-or-more. The only suppliers this item can later be
-  // received against. Optional: an item may start with none and add later.
-  supplierIds: z.array(z.string()).default([]),
-  leadDays: z.coerce.number().int().nonnegative('Must be ≥ 0'),
-  threshold: z.coerce.number().int().nonnegative('Must be ≥ 0'),
-  nearExpiryThresholdDays: z.coerce
-    .number()
-    .int()
-    .nonnegative('Must be ≥ 0')
-    .max(3650, 'Must be ≤ 3650'),
-});
-
-type Values = z.infer<typeof schema>;
+import { itemsApi, type ApiItem } from '@/lib/api/items';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Called after a successful create (in addition to the toast). Lets a
-   *  host list refresh itself — the inventory list relies on the store
-   *  refetch instead and omits this. */
-  onCreated?: () => void;
+  onCreated: (item: ApiItem) => void;
 }
 
+const EMPTY = {
+  code_suffix: '',
+  item_name: '',
+  description: '',
+  unit_of_measure: '',
+  is_consumable: false,
+};
+
+/** SKU is always CR-prefixed for the raw-material tier. */
+const PREFIX = 'CR-';
+
 export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
-  // Store actions — the only thing this component does for I/O.
-  const createItem = useInventoryStore((s) => s.create);
-  const createPending = useInventoryStore((s) => s.createPending);
+  const [form, setForm] = React.useState({ ...EMPTY });
+  const [saving, setSaving] = React.useState(false);
 
-  // Supplier dropdown source. Loaded once when the dialog opens — the
-  // master-data list is small (≤ ~100 rows) and changes rarely, so a
-  // simple on-open fetch beats wiring it into the store.
-  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
-  const [suppliersLoading, setSuppliersLoading] = React.useState(false);
-  const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
-
-  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
-
-  const [submitError, setSubmitError] = React.useState<string | null>(null);
-
-  const {
-    register,
-    handleSubmit,
-    setValue,
-    watch,
-    reset,
-    formState: { errors, isSubmitting },
-  } = useForm<Values>({
-    resolver: zodResolver(schema),
-    defaultValues: {
-      itemId: '',
-      desc: '',
-      categoryId: '',
-      supplierIds: [],
-      leadDays: 0,
-      threshold: 0,
-      nearExpiryThresholdDays: 30,
-    },
-  });
-
-  const supplierIds = watch('supplierIds');
-  const categoryId = watch('categoryId');
-
-  // Purchasing fields (suppliers, lead time, reorder + near-expiry) only apply to
-  // Purchased categories — a Product is built, not bought. Shown once a
-  // Purchased category is picked; hidden for Product / before a pick.
-  const selectedCategory = categories.find((c) => c.id === categoryId);
-  const showPurchasing = selectedCategory?.kind === 'purchased';
-
-  // ── Side effects ─────────────────────────────────────────────────────
-
-  // Load suppliers once when the dialog opens.
   React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    setSuppliersLoading(true);
-    setSuppliersError(null);
-    suppliersApi
-      .list({ activeOnly: true, signal: ctrl.signal })
-      .then((rows) => setSuppliers(rows))
-      .catch((err) => {
-        if ((err as DOMException)?.name === 'AbortError') return;
-        setSuppliersError(
-          err instanceof ApiError ? err.message : 'Failed to load suppliers.',
-        );
-      })
-      .finally(() => setSuppliersLoading(false));
-    return () => ctrl.abort();
+    if (open) setForm({ ...EMPTY });
   }, [open]);
 
-  // Load categories once when the dialog opens.
-  React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    categoriesApi
-      .list({ signal: ctrl.signal })
-      .then(setCategories)
-      .catch(() => {
-        /* surfaced via the empty dropdown */
-      });
-    return () => ctrl.abort();
-  }, [open]);
+  const patch = (p: Partial<typeof EMPTY>) => setForm((f) => ({ ...f, ...p }));
 
-  // Reset the form when the dialog closes.
-  React.useEffect(() => {
-    if (!open) {
-      reset({
-        itemId: '',
-        desc: '',
-        supplierIds: [],
-        leadDays: 0,
-        threshold: 0,
-        nearExpiryThresholdDays: 30,
-      });
-      setSubmitError(null);
-    }
-  }, [open, reset]);
+  const suffix = form.code_suffix.trim();
+  const fullSku = `${PREFIX}${suffix}`;
+  const valid = Boolean(suffix && form.item_name.trim() && form.unit_of_measure.trim());
 
-  // ── Submit ───────────────────────────────────────────────────────────
-
-  const onSubmit = async (data: Values): Promise<void> => {
-    setSubmitError(null);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!valid || saving) return;
+    setSaving(true);
     try {
-      const created = await createItem({
-        item_number: data.itemId,
-        description: data.desc,
-        category_id: data.categoryId,
-        supplier_ids: data.supplierIds,
-        avg_lead_days: data.leadDays,
-        reorder_threshold: data.threshold,
-        near_expiry_threshold_days: data.nearExpiryThresholdDays,
+      const created = await itemsApi.create({
+        item_code: fullSku,
+        item_name: form.item_name.trim(),
+        description: form.description.trim() || null,
+        tier: 'CR',
+        is_consumable: form.is_consumable,
+        unit_of_measure: form.unit_of_measure.trim(),
+        track_expiry: false,
       });
-      toast.success('Item created', {
-        description: `${created.id} · ${created.desc}`,
-      });
-      onCreated?.();
-      onOpenChange(false);
+      onCreated(created);
     } catch (err) {
-      if (err instanceof ApiError) {
-        if (err.code === 'item_number_conflict') {
-          setSubmitError(
-            `${data.itemId} is already in use. Re-open the dialog or pick a different number.`,
-          );
-          return;
-        }
-        if (err.code === 'request_invalid' || err.code === 'item_number_invalid') {
-          setSubmitError(err.message);
-          return;
-        }
-        setSubmitError(err.message);
-        return;
-      }
-      setSubmitError('Failed to create item. Please try again.');
+      toast.error(err instanceof ApiError ? err.message : 'Failed to create raw material.');
+    } finally {
+      setSaving(false);
     }
   };
 
-  // Local "is something in flight" — the dialog's button + cancel
-  // disabled state.
-  const busy = isSubmitting || createPending;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <form onSubmit={handleSubmit(onSubmit)}>
+      <DialogContent className="max-w-md">
+        <form onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>New inventory item</DialogTitle>
+            <DialogTitle>New Raw Material</DialogTitle>
+            <DialogDescription>
+              Create a new raw material (CR tier). SKU is auto-prefixed with CR-.
+            </DialogDescription>
           </DialogHeader>
-          <DialogBody className="space-y-5">
-            <div className="grid gap-4 sm:grid-cols-[160px_1fr]">
-              <Field id="ni-itemId" label="Item #" error={errors.itemId?.message}>
-                <Input
-                  id="ni-itemId"
-                  placeholder="e.g. UR-0001"
-                  className="font-mono"
-                  aria-invalid={Boolean(errors.itemId)}
-                  {...register('itemId')}
+          <DialogBody className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="item_code">SKU</Label>
+              <div className="flex items-stretch overflow-hidden rounded-md border border-border focus-within:ring-2 focus-within:ring-accent">
+                <span className="flex select-none items-center border-r border-border bg-surface-2 px-3 text-sm text-text-2">
+                  {PREFIX}
+                </span>
+                <input
+                  id="item_code"
+                  value={form.code_suffix}
+                  onChange={(e) => patch({ code_suffix: e.target.value })}
+                  placeholder="001"
+                  autoFocus
+                  className="w-full bg-transparent px-3 py-2 text-sm outline-none placeholder:text-text-3"
                 />
-              </Field>
-              <Field id="ni-desc" label="Description" error={errors.desc?.message}>
-                <Input
-                  id="ni-desc"
-                  placeholder="e.g. CryoStor CS10, 100 mL Bottle"
-                  aria-invalid={Boolean(errors.desc)}
-                  {...register('desc')}
-                />
-              </Field>
+              </div>
+              {suffix && (
+                <p className="text-xs text-text-3">
+                  Full SKU: <span className="font-mono">{fullSku}</span>
+                </p>
+              )}
             </div>
-
-            <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
-              <Select
-                value={categoryId}
-                onValueChange={(v) =>
-                  setValue('categoryId', v, { shouldValidate: true })
-                }
-              >
-                <SelectTrigger id="ni-category" aria-label="Category">
-                  <SelectValue placeholder="Pick a category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      <span className="flex items-center gap-2">
-                        <span className="truncate">{c.name}</span>
-                        <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
-                          {c.kind === 'built' ? 'Product' : 'Purchased'}
-                        </Badge>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-text-3">
-                The category decides whether this is a Product (can have a BOM) or
-                a Purchased item. Manage the BOM from the item&apos;s detail page.
-              </p>
-            </Field>
-
-            {showPurchasing && (
-              <>
-            <Field
-              id="ni-suppliers"
-              label="Suppliers"
-              error={errors.supplierIds?.message}
-            >
-              <SupplierMultiSelect
-                id="ni-suppliers"
-                modal
-                suppliers={suppliers}
-                value={supplierIds}
-                onChange={(next) =>
-                  setValue('supplierIds', next, { shouldValidate: true })
-                }
-                loading={suppliersLoading}
-                error={suppliersError}
+            <div className="space-y-1.5">
+              <Label htmlFor="item_name">Name</Label>
+              <Input
+                id="item_name"
+                value={form.item_name}
+                onChange={(e) => patch({ item_name: e.target.value })}
+                placeholder="Medical Tube, PVC 6mm"
               />
-              <p className="text-xs text-text-3">
-                Only these suppliers can be selected when receiving stock for this
-                item.
-              </p>
-            </Field>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
-                <Input
-                  id="ni-lead"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  {...register('leadDays')}
-                />
-              </Field>
-              <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
-                <Input
-                  id="ni-thr"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  placeholder="e.g. 5"
-                  {...register('threshold')}
-                />
-              </Field>
             </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field
-                id="ni-near-expiry"
-                label="Near expiry threshold (days)"
-                error={errors.nearExpiryThresholdDays?.message}
-              >
-                <Input
-                  id="ni-near-expiry"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  max={3650}
-                  step={1}
-                  placeholder="e.g. 30"
-                  {...register('nearExpiryThresholdDays')}
-                />
-              </Field>
+            <div className="space-y-1.5">
+              <Label htmlFor="item_desc">Description</Label>
+              <Textarea
+                id="item_desc"
+                value={form.description}
+                onChange={(e) => patch({ description: e.target.value })}
+                placeholder="Optional notes about this material"
+                rows={2}
+              />
             </div>
-              </>
-            )}
-
-            <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
-              {showPurchasing
-                ? 'After creating, you’ll be able to record the first unit in to bring the item into stock. The item is initially created with zero balance.'
-                : 'After creating, open the item’s detail page to define its bill of materials. The item is initially created with zero balance.'}
-            </p>
-
-            {submitError && (
-              <p
-                role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
-              >
-                {submitError}
-              </p>
-            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="uom">Unit</Label>
+              <Input
+                id="uom"
+                value={form.unit_of_measure}
+                onChange={(e) => patch({ unit_of_measure: e.target.value })}
+                placeholder="each, mL, box…"
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-md border border-border px-3 py-2.5">
+              <div>
+                <Label htmlFor="is_consumable" className="cursor-pointer">
+                  Consumable
+                </Label>
+                <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+              </div>
+              <Switch
+                id="is_consumable"
+                checked={form.is_consumable}
+                onCheckedChange={(v) => patch({ is_consumable: v })}
+              />
+            </div>
           </DialogBody>
           <DialogFooter>
-            <Button
-              type="button"
-              variant="default"
-              onClick={() => onOpenChange(false)}
-              disabled={busy}
-            >
+            <Button type="button" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" disabled={busy}>
-              {busy ? 'Creating…' : 'Create item'}
+            <Button type="submit" variant="primary" disabled={!valid || saving}>
+              {saving ? 'Creating…' : 'Create Raw Material'}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Field({
-  id,
-  label,
-  error,
-  children,
-}: {
-  id: string;
-  label: string;
-  error?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      {children}
-      {error && (
-        <p role="alert" className="text-xs text-danger">
-          {error}
-        </p>
-      )}
-    </div>
   );
 }

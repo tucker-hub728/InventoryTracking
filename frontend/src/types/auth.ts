@@ -1,41 +1,27 @@
-export type RoleId = 'admin' | 'editor' | 'viewer';
+/**
+ * RBAC types — Week-1 reset (2026-07-06).
+ *
+ * Roles are now exactly ``super_admin`` / ``admin`` / ``operator``.
+ * Permissions are a flat map of resource → action → boolean. The
+ * authoritative role → perms table lives in ``@/lib/permissions``.
+ */
+
+export type RoleId = 'super_admin' | 'admin' | 'operator';
 export type UserStatus = 'active' | 'suspended' | 'invited';
-export type ResourceKey = 'inventory' | 'users' | 'audit';
-export type InventoryAction = 'view' | 'create' | 'edit' | 'delete' | 'sign';
-export type UsersAction = 'view' | 'create' | 'edit' | 'delete';
-export type AuditAction = 'view' | 'export';
 
-export interface InventoryPerms {
-  view: boolean;
-  create: boolean;
-  edit: boolean;
-  delete: boolean;
-  sign: boolean;
-}
+/** Resources the UI gates visibility / affordances on. */
+export type ResourceKey = 'items' | 'locations' | 'transactions' | 'users';
 
-export interface UsersPerms {
-  view: boolean;
-  create: boolean;
-  edit: boolean;
-  delete: boolean;
-}
+/** Actions a role may hold against a resource. */
+export type Action = 'view' | 'create' | 'edit' | 'delete';
 
-export interface AuditPerms {
-  view: boolean;
-  export: boolean;
-}
-
-export interface RolePerms {
-  inventory: InventoryPerms;
-  users: UsersPerms;
-  audit: AuditPerms;
-}
+export type ResourcePerms = Record<Action, boolean>;
+export type RolePerms = Record<ResourceKey, ResourcePerms>;
 
 export interface Role {
   id: RoleId;
   name: string;
   description: string;
-  userCount: number;
   perms: RolePerms;
 }
 
@@ -52,13 +38,4 @@ export interface User {
 export interface AuthedUser extends User {
   roleName: string;
   perms: RolePerms;
-}
-
-export interface AuditEvent {
-  ts: string;
-  user: string;
-  action: string;
-  target: string;
-  detail: string;
-  severity: 'info' | 'warning' | 'danger';
 }

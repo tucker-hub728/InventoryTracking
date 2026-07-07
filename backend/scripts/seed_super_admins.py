@@ -53,14 +53,37 @@ from app.db.session import dispose_engine, get_sessionmaker
 from botocore.exceptions import ClientError
 
 # ── Users to seed ───────────────────────────────────────────────────────────
-# Edit this list to change who gets seeded. All are role=super_admin.
+# Edit this list to change who gets seeded. Each entry carries its own role
+# (``super_admin`` or ``admin``) plus a first / last name. The Week-1 reset
+# users table has first_name / last_name / role / is_active — no initials /
+# status columns anymore.
 _USERS: list[dict[str, str]] = [
-    {"email": "admin@cellready.dev", "password": "HzZcZuIA2kKWjusP_96"},
-    {"email": "admin@cellready.stage", "password": "HzZcZuIA2kKWjusP_96"},
-    {"email": "admin@cellready.prod", "password": "HzZcZuIA2kKWjusP_96"},
+    {
+        "email": "superadmin@cellready.local",
+        "password": "HzZcZuIA2kKWjusP_96",
+        "first_name": "Super",
+        "last_name": "Admin",
+        "role": "super_admin",
+    },
+    {
+        "email": "admin@cellready.local",
+        "password": "HzZcZuIA2kKWjusP_96",
+        "first_name": "Ops",
+        "last_name": "Admin",
+        "role": "admin",
+    },
+    {
+        "email": "operator@cellready.local",
+        "password": "HzZcZuIA2kKWjusP_96",
+        "first_name": "Line",
+        "last_name": "Operator",
+        "role": "operator",
+    },
 ]
 
-_ROLE = "super_admin"
+# Roles this seeder is allowed to write. Guards against a typo landing an
+# out-of-domain value that would trip the users.role enum.
+_ALLOWED_ROLES = frozenset({"super_admin", "admin", "operator"})
 
 
 def _weak_password_reason(password: str) -> str | None:
@@ -82,15 +105,9 @@ def _weak_password_reason(password: str) -> str | None:
     return "must contain " + ", ".join(missing) if missing else None
 
 
-def _full_name(email: str) -> str:
-    """`admin@cellready.dev` -> `Super Admin (dev)` for a readable display name."""
-    domain = email.split("@", 1)[-1]
-    suffix = domain.rsplit(".", 1)[-1] if "." in domain else domain
-    return f"Super Admin ({suffix})"
-
-
-def _initials(email: str) -> str:
-    return "SA"
+def _display_name(first_name: str, last_name: str) -> str:
+    """Cognito ``name`` attribute — the human label shown in Cognito tooling."""
+    return f"{first_name} {last_name}".strip()
 
 
 def _extract_sub(attributes: list[dict[str, str]]) -> str:
@@ -106,8 +123,8 @@ def _ensure_cognito_user(
     pool_id: str,
     email: str,
     password: str,
-    full_name: str,
-    initials: str,
+    display_name: str,
+    role: str,
 ) -> tuple[str, bool]:
     """Create (or find) the Cognito user and set a permanent password.
 
@@ -117,9 +134,8 @@ def _ensure_cognito_user(
     attributes = [
         {"Name": "email", "Value": email},
         {"Name": "email_verified", "Value": "true"},
-        {"Name": "name", "Value": full_name},
-        {"Name": "custom:role", "Value": _ROLE},
-        {"Name": "custom:initials", "Value": initials},
+        {"Name": "name", "Value": display_name},
+        {"Name": "custom:role", "Value": role},
     ]
     try:
         resp = client.admin_create_user(
@@ -155,8 +171,9 @@ async def _upsert_local_user(
     *,
     sub: str,
     email: str,
-    full_name: str,
-    initials: str,
+    first_name: str,
+    last_name: str,
+    role: str,
 ) -> tuple[Any, bool]:
     """Insert the ``app.users`` row if it isn't already mirrored. Caller commits."""
     existing = await users_repo.get_by_cognito_sub(session, sub)
@@ -166,9 +183,10 @@ async def _upsert_local_user(
         session,
         cognito_sub=sub,
         email=email,
-        full_name=full_name,
-        initials=initials,
-        role=_ROLE,
+        first_name=first_name,
+        last_name=last_name,
+        role=role,
+        is_active=True,
     )
     return user, True
 
@@ -203,6 +221,15 @@ async def main() -> int:
 
     is_prod = settings.app_env == Environment.production
 
+    # Fail fast on a mistyped role before touching Cognito or the DB.
+    bad_roles = sorted({u["role"] for u in _USERS} - _ALLOWED_ROLES)
+    if bad_roles:
+        print(
+            "REFUSING: _USERS contains role(s) this seeder won't write: "
+            f"{', '.join(bad_roles)} (allowed: {', '.join(sorted(_ALLOWED_ROLES))})."
+        )
+        return 1
+
     # ── Production gate: --yes is not enough; the pool id must be echoed back ─
     if is_prod and args.yes:
         if args.confirm_production != pool_id:
@@ -231,10 +258,10 @@ async def main() -> int:
     endpoint = str(settings.cognito_endpoint_url) if settings.cognito_endpoint_url else "AWS"
     print(f"Environment  : {settings.app_env.value}")
     print(f"Cognito pool : {pool_id}  (endpoint: {endpoint})")
-    print(f"Role         : {_ROLE}")
     print("Users        :")
     for u in _USERS:
-        print(f"  - {u['email']:<28} name={_full_name(u['email'])!r} initials={_initials(u['email'])}")
+        display = _display_name(u["first_name"], u["last_name"])
+        print(f"  - {u['email']:<28} name={display!r} role={u['role']}")
 
     if not args.yes:
         print("\nDRY RUN — nothing created. Re-run with --yes to execute.")
@@ -248,23 +275,23 @@ async def main() -> int:
         async with sessionmaker() as session:
             for u in _USERS:
                 email = u["email"]
-                full_name = _full_name(email)
-                initials = _initials(email)
+                display_name = _display_name(u["first_name"], u["last_name"])
                 try:
                     sub, cog_created = _ensure_cognito_user(
                         client,
                         pool_id=pool_id,
                         email=email,
                         password=u["password"],
-                        full_name=full_name,
-                        initials=initials,
+                        display_name=display_name,
+                        role=u["role"],
                     )
                     _, db_created = await _upsert_local_user(
                         session,
                         sub=sub,
                         email=email,
-                        full_name=full_name,
-                        initials=initials,
+                        first_name=u["first_name"],
+                        last_name=u["last_name"],
+                        role=u["role"],
                     )
                     cog = "created" if cog_created else "exists"
                     db = "created" if db_created else "exists"

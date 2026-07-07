@@ -1,13 +1,4 @@
-import {
-  Boxes,
-  Building2,
-  Contact,
-  History,
-  LineChart,
-  MapPin,
-  Tags,
-  Truck,
-} from 'lucide-react';
+import { ArrowLeftRight, Boxes, MapPin, Users } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import type { ResourceKey } from '@/types/auth';
@@ -21,10 +12,7 @@ export interface NavItem {
   resource?: ResourceKey;
   /** Show a "Soon" pill — feature isn't wired to a backend yet. */
   comingSoon?: boolean;
-  /** When true, the nav row renders muted, non-clickable, and exposes
-   *  ``disabledReason`` via title + tooltip. Use for modules whose
-   *  backend isn't ready yet (LN2, Kanban) — the link target stays in
-   *  the config so re-enabling is a one-line flip. */
+  /** Render the row muted + non-clickable with a tooltip reason. */
   disabled?: boolean;
   /** Short hover-text shown when ``disabled`` is true. */
   disabledReason?: string;
@@ -35,55 +23,32 @@ export interface NavSection {
   items: readonly NavItem[];
 }
 
+/**
+ * Week-1 nav — exactly four sections, gated by the new roles.
+ *
+ *  - Raw Materials / Locations / Transactions → operational (operators
+ *    see them; admins too).
+ *  - Users → admin-only (operators lack ``users:view``).
+ */
 export const navSections: readonly NavSection[] = [
   {
     title: 'Operations',
     items: [
-      { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
-      { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
-      { id: 'categories', label: 'Categories', href: '/categories', icon: Tags, resource: 'inventory' },
-      { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
-      { id: 'forecast', label: 'Forecast', href: '/forecast', icon: LineChart, resource: 'inventory' },
-      // Hidden for now — route stays wired; uncomment to restore.
-      // {
-      //   id: 'ln2',
-      //   label: 'LN2 Tanks',
-      //   href: '/ln2',
-      //   icon: Snowflake,
-      //   resource: 'inventory'
-      // },
-      { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'inventory' },
-      // {
-      //   id: 'kanban',
-      //   label: 'Kanban',
-      //   href: '/kanban',
-      //   icon: KanbanSquare,
-      //   resource: 'inventory',
-      //   disabled: true,
-      //   disabledReason:
-      //     'Kanban workflow is in active development — board state and card transitions are not yet wired to the backend.',
-      // },
+      { id: 'inventory', label: 'Raw Materials', href: '/inventory/cr', icon: Boxes, resource: 'items' },
+      { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'locations' },
+      {
+        id: 'transactions',
+        label: 'Transactions',
+        href: '/transactions',
+        icon: ArrowLeftRight,
+        resource: 'transactions',
+      },
     ],
   },
   {
     title: 'Administration',
     items: [
-      // {
-      //   id: 'users',
-      //   label: 'Users & Roles',
-      //   href: '/users',
-      //   icon: Users,
-      //   resource: 'users',
-      //   disabled: true,
-      //   disabledReason:
-      //     'Users & Roles management is in active development — invitations, role grants, and the audit trail are not yet wired to the backend.',
-      // },
-      // Master data — viewer can read; admin/editor can create.
-      // Page-level permission check enforces the write side.
-      { id: 'suppliers', label: 'Suppliers', href: '/suppliers', icon: Building2, resource: 'inventory' },
-      // { id: 'uoms', label: 'Units of measure', href: '/uoms', icon: Ruler, resource: 'inventory' },
-      // { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'inventory' },
-      { id: 'audit', label: 'Audit log', href: '/audit', icon: History, resource: 'audit' },
+      { id: 'users', label: 'Users', href: '/users', icon: Users, resource: 'users' },
     ],
   },
 ] as const;

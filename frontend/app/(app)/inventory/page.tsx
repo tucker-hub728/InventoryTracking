@@ -1,11 +1,7 @@
-import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 
-import { InventoryListClient } from '@/components/inventory/inventory-list-client';
-
-export const metadata: Metadata = {
-  title: 'Inventory',
-};
-
-export default function InventoryPage() {
-  return <InventoryListClient />;
+// Inventory is tier-scoped now (CR / AY / FG). The bare /inventory path
+// lands on the raw-material (CR) tier; old links/bookmarks keep working.
+export default function InventoryIndexPage() {
+  redirect('/inventory/cr');
 }

@@ -4,8 +4,7 @@ import { create } from 'zustand';
 
 import type { AuthedUser, RoleId } from '@/types/auth';
 import type { SessionUser } from '@/lib/auth/types';
-import { buildAuthedUser } from '@/lib/permissions';
-import { mockData } from '@/lib/mock-data';
+import { buildAuthedUser, ROLES } from '@/lib/permissions';
 
 /**
  * Auth store.
@@ -14,10 +13,6 @@ import { mockData } from '@/lib/mock-data';
  * NEVER touched by this code. The store only holds the projected
  * ``AuthedUser`` we display in the UI. Hydration runs once on mount via
  * ``hydrate()`` which calls ``GET /api/auth/me``.
- *
- * The ``switchRole`` action is a *display-only* demo affordance — it
- * rebinds permissions client-side but doesn't change the backend role.
- * It's preserved so the topbar role-switcher continues to work for QA.
  */
 
 interface AuthState {
@@ -36,9 +31,10 @@ interface AuthState {
   clear: () => void;
 }
 
+const DEFAULT_ROLE: RoleId = 'operator';
+
 function authedUserFromSession(session: SessionUser, roleId: RoleId): AuthedUser {
-  const role =
-    mockData.roles.find((r) => r.id === roleId) ?? mockData.roles[0]!;
+  const role = ROLES[roleId] ?? ROLES[DEFAULT_ROLE];
   return buildAuthedUser(
     {
       id: session.sub,
@@ -55,7 +51,7 @@ function authedUserFromSession(session: SessionUser, roleId: RoleId): AuthedUser
 
 export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
-  roleId: 'viewer',
+  roleId: DEFAULT_ROLE,
   hydrated: false,
 
   hydrate: async () => {
@@ -95,15 +91,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   switchRole: (roleId) => {
     const current = get().user;
     if (!current) return;
-    const role =
-      mockData.roles.find((r) => r.id === roleId) ?? mockData.roles[0]!;
+    const role = ROLES[roleId] ?? ROLES[DEFAULT_ROLE];
     set({
       user: buildAuthedUser({ ...current, role: roleId }, role),
       roleId,
     });
   },
 
-  clear: () => set({ user: null, roleId: 'viewer' }),
+  clear: () => set({ user: null, roleId: DEFAULT_ROLE }),
 }));
 
 export const selectUser = (s: AuthState) => s.user;
