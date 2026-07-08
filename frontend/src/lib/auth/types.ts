@@ -9,10 +9,11 @@ import type { RoleId } from '@/types/auth';
 /** Raw user identity as returned by the backend `/auth/me`. */
 export interface BackendMe {
   sub: string;
+  /** Cognito username — in prod this is the immutable UUID, NOT the email. */
   username: string;
   email: string | null;
-  full_name: string | null;
-  initials: string | null;
+  first_name: string | null;
+  last_name: string | null;
   role: string | null;
   /** Deactivated accounts (false) are treated as logged-out by the BFF. */
   is_active?: boolean;

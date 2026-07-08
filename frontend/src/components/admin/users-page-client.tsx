@@ -133,8 +133,16 @@ export function UsersPageClient() {
     return () => ctrl.abort();
   }, [load]);
 
-  const activeUsers = React.useMemo(() => users.filter((u) => u.is_active), [users]);
-  const inactiveUsers = React.useMemo(() => users.filter((u) => !u.is_active), [users]);
+  // Super admins are a fixed singleton and managed out-of-band — hide them from
+  // the member tables.
+  const activeUsers = React.useMemo(
+    () => users.filter((u) => u.is_active && u.role !== 'super_admin'),
+    [users],
+  );
+  const inactiveUsers = React.useMemo(
+    () => users.filter((u) => !u.is_active && u.role !== 'super_admin'),
+    [users],
+  );
 
   const openEdit = (u: ApiUser) => {
     setEditUser(u);

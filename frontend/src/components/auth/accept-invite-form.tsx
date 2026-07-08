@@ -55,6 +55,7 @@ export function AcceptInviteForm({ token, invitee }: Props) {
   const router = useRouter();
   const setSession = useAuthStore((s) => s.setSession);
   const [showPw, setShowPw] = React.useState(false);
+  const [showConfirm, setShowConfirm] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
   const {
@@ -162,10 +163,20 @@ export function AcceptInviteForm({ token, invitee }: Props) {
           <Label htmlFor="acc-pw2">Confirm password</Label>
           <Input
             id="acc-pw2"
-            type={showPw ? 'text' : 'password'}
+            type={showConfirm ? 'text' : 'password'}
             icon={Lock}
             aria-invalid={Boolean(errors.confirm)}
             autoComplete="new-password"
+            trailing={
+              <button
+                type="button"
+                onClick={() => setShowConfirm((v) => !v)}
+                aria-label={showConfirm ? 'Hide password' : 'Show password'}
+                className="text-text-3 transition-colors hover:text-text-2"
+              >
+                {showConfirm ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            }
             {...register('confirm')}
           />
           {errors.confirm && (
