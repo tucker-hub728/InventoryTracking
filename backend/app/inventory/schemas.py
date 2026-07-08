@@ -43,7 +43,7 @@ def _trim_non_blank(field: str):
     return _check
 
 
-def _trim_optional(field: str):
+def _trim_optional(field: str, *, max_length: int | None = None):
     def _check(v: str | None) -> str | None:
         if v is None:
             return None
@@ -52,6 +52,10 @@ def _trim_optional(field: str):
         v = v.strip()
         if not v:
             raise ValueError(f"{field} must not be blank")
+        # Length is enforced here (not via ``Field``) so the ``None`` branch
+        # never hits a string constraint (Field(max_length) would TypeError on None).
+        if max_length is not None and len(v) > max_length:
+            raise ValueError(f"{field} must be at most {max_length} characters")
         return v
 
     return _check
@@ -88,16 +92,18 @@ UnitOfMeasure = Annotated[
     str, BeforeValidator(_trim_non_blank("unit_of_measure")), Field(max_length=32)
 ]
 OptionalItemName = Annotated[
-    str | None, BeforeValidator(_trim_optional("item_name")), Field(max_length=200)
+    str | None, BeforeValidator(_trim_optional("item_name", max_length=200))
 ]
 OptionalUnitOfMeasure = Annotated[
-    str | None, BeforeValidator(_trim_optional("unit_of_measure")), Field(max_length=32)
+    str | None, BeforeValidator(_trim_optional("unit_of_measure", max_length=32))
 ]
 Description = Annotated[
     str | None, BeforeValidator(_blank_to_none("description", max_length=2000))
 ]
+# Blank/empty lot → None (an empty lot means "no lot"); length enforced in the
+# validator so a None lot never trips a Field(max_length) constraint.
 LotNumber = Annotated[
-    str | None, BeforeValidator(_trim_optional("lot_number")), Field(max_length=64)
+    str | None, BeforeValidator(_blank_to_none("lot_number", max_length=64))
 ]
 Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
 
