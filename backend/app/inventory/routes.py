@@ -410,7 +410,8 @@ def _txn_to_detail(txn: InventoryTransaction) -> TransactionDetailRead:
 )
 async def list_transactions(
     db: DBSession,
-    type: Annotated[str | None, Query()] = None,
+    # ``type_`` avoids shadowing the builtin; the query param stays ``?type=``.
+    type_: Annotated[str | None, Query(alias="type")] = None,
     item_id: Annotated[uuid.UUID | None, Query()] = None,
     location_id: Annotated[uuid.UUID | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -420,7 +421,7 @@ async def list_transactions(
         db,
         # Transaction types are stored upper-case (RECEIPT/TRANSFER/…); accept
         # any casing from the client so ``?type=receipt`` matches.
-        transaction_type=type.upper() if type else None,
+        transaction_type=type_.upper() if type_ else None,
         item_id=item_id,
         location_id=location_id,
         limit=limit,
