@@ -18,7 +18,7 @@ from app.auth import provisioning
 from app.auth import repository as users_repo
 from app.auth.cognito_client import get_user as cognito_get_user
 from app.auth.dependencies import CurrentUser, CurrentUserDep
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import AuthorizationError, NotFoundError
 from app.db.session import get_session
 from app.models.identity import User
 
@@ -33,21 +33,27 @@ async def resolve_db_user(
 
     Lazy-provisions on first call (same path as ``/auth/me``) so any
     protected route works for an admin-created user even before they've
-    hit ``/auth/me``.
+    hit ``/auth/me``. A deactivated account (``is_active=False``) is rejected
+    here so every protected route is locked out — the DB flag is the source of
+    truth even while the Cognito login may still succeed.
     """
-    existing = await users_repo.get_by_cognito_sub(db, current.sub)
-    if existing is not None:
-        return existing
-    # First call for an admin-created user — provision from Cognito attrs.
-    fresh = cognito_get_user(access_token=current.access_token)
-    user = await provisioning.provision_from_me(
-        db,
-        cognito_sub=current.sub,
-        cognito_attrs=fresh["attributes"],
-        username=fresh["username"],
-    )
-    if user is None:  # pragma: no cover — provisioning always returns
-        raise NotFoundError("User record not found")
+    user = await users_repo.get_by_cognito_sub(db, current.sub)
+    if user is None:
+        # First call for an admin-created user — provision from Cognito attrs.
+        fresh = cognito_get_user(access_token=current.access_token)
+        user = await provisioning.provision_from_me(
+            db,
+            cognito_sub=current.sub,
+            cognito_attrs=fresh["attributes"],
+            username=fresh["username"],
+        )
+        if user is None:  # pragma: no cover — provisioning always returns
+            raise NotFoundError("User record not found")
+    if not user.is_active:
+        raise AuthorizationError(
+            "This account has been deactivated.",
+            code="account_inactive",
+        )
     return user
 
 

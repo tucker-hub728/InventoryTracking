@@ -62,7 +62,8 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
         description: form.description.trim() || null,
         tier: 'CR',
         is_consumable: form.is_consumable,
-        unit_of_measure: form.unit_of_measure.trim(),
+        // Units are stored lower-case for consistency (e.g. "each", "ml", "box").
+        unit_of_measure: form.unit_of_measure.trim().toLowerCase(),
         track_expiry: false,
       });
       onCreated(created);

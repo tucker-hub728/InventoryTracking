@@ -141,6 +141,16 @@ class Settings(BaseSettings):
     # buckets — MinIO 404s on them.
     s3_force_path_style: bool = True
 
+    # ── User invitations ────────────────────────────────────────────────
+    # Public web origin used to build the accept-invite link the admin hands
+    # over (there is no email delivery — we generate a URL). Optional so the
+    # service can boot without it; the invite endpoint composes a relative
+    # path when it's unset and lets the frontend BFF supply the origin. In
+    # prod, set this to the CloudFront domain; in dev, http://localhost:3000.
+    frontend_base_url: OptionalHttpUrl = None
+    # How long an invite link stays valid before it is treated as expired.
+    invite_ttl_days: int = Field(default=7, ge=1, le=90)
+
     # ── API metadata ────────────────────────────────────────────────────
     api_v1_prefix: str = "/v1"
 
@@ -187,6 +197,21 @@ class Settings(BaseSettings):
             else f"https://cognito-idp.{self.aws_region}.amazonaws.com"
         )
         return f"{base}/{self.cognito_user_pool_id}"
+
+    def accept_invite_path(self, token: str) -> str:
+        """Relative path to the frontend accept-invite page for ``token``."""
+        return f"/accept-invite/{token}"
+
+    def accept_invite_url(self, token: str) -> str | None:
+        """Absolute accept-invite link, or None if no frontend origin is set.
+
+        When ``FRONTEND_BASE_URL`` is unset the caller falls back to the
+        relative path (the frontend BFF can prepend its own request origin).
+        """
+        if not self.frontend_base_url:
+            return None
+        base = str(self.frontend_base_url).rstrip("/")
+        return f"{base}{self.accept_invite_path(token)}"
 
     @property
     def effective_jwks_url(self) -> str | None:

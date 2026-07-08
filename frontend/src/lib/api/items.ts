@@ -32,6 +32,8 @@ export interface ApiItem {
 export interface ApiItemStockRow {
   location_id: string;
   location_name: string | null;
+  /** The location's category (for a shelf, its parent freezer's category). */
+  location_type: string | null;
   lot_number: string | null;
   expiry_date: string | null;
   quantity_available: string | number;

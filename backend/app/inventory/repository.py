@@ -88,9 +88,11 @@ async def get_item_with_aggregates(
 
 async def get_item_stock_rows(
     session: AsyncSession, item_id: uuid.UUID
-) -> list[Row[tuple[InventoryStock, str | None]]]:
+) -> list[Row[tuple[InventoryStock, str, str]]]:
+    # location_id is a non-null FK, so the join always matches — name/type are
+    # never NULL in practice.
     stmt = (
-        select(InventoryStock, Location.location_name)
+        select(InventoryStock, Location.location_name, Location.location_type)
         .outerjoin(Location, InventoryStock.location_id == Location.id)
         .where(
             InventoryStock.item_id == item_id,

@@ -19,6 +19,8 @@ from app.api.deps import DBSession
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.locations import repository as loc_repo
 from app.locations.schemas import (
+    LocationContentRow,
+    LocationContents,
     LocationCreate,
     LocationOverview,
     LocationRead,
@@ -35,9 +37,7 @@ def _parse_uuid(value: str, *, field: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except ValueError as exc:
-        raise ValidationError(
-            f"{field} is not a valid UUID", code=f"invalid_{field}"
-        ) from exc
+        raise ValidationError(f"{field} is not a valid UUID", code=f"invalid_{field}") from exc
 
 
 def _to_read(location: Location, parent_name: str | None) -> LocationRead:
@@ -46,9 +46,7 @@ def _to_read(location: Location, parent_name: str | None) -> LocationRead:
         location_name=location.location_name,
         location_type=location.location_type,
         parent_location_id=(
-            str(location.parent_location_id)
-            if location.parent_location_id
-            else None
+            str(location.parent_location_id) if location.parent_location_id else None
         ),
         parent_name=parent_name,
         is_active=location.is_active,
@@ -67,9 +65,7 @@ async def _resolve_parent(
     """
     parent_uuid = _parse_uuid(parent_location_id, field="parent_location_id")
     if child_id is not None and parent_uuid == child_id:
-        raise ValidationError(
-            "A location cannot be its own parent", code="invalid_parent"
-        )
+        raise ValidationError("A location cannot be its own parent", code="invalid_parent")
     parent = await loc_repo.get_location(db, parent_uuid)
     if parent is None:
         raise NotFoundError(f"Parent location {parent_location_id} not found")
@@ -154,6 +150,40 @@ async def locations_overview(db: DBSession) -> list[LocationOverview]:
             )
         )
     return overview
+
+
+@router.get(
+    "/{location_id}/contents",
+    response_model=LocationContents,
+    summary="Items and lots physically stored in a location (incl. its shelves)",
+    dependencies=[Depends(RequirePermission("locations", "view"))],
+)
+async def get_location_contents(
+    db: DBSession,
+    location_id: Annotated[uuid.UUID, Path()],
+) -> LocationContents:
+    loc = await loc_repo.get_location(db, location_id)
+    if loc is None:
+        raise NotFoundError(f"Location {location_id} not found")
+    # This location + its shelves — so a top-level card shows its whole holdings.
+    ids = [location_id, *await loc_repo.child_ids(db, location_id)]
+    rows = await loc_repo.location_contents(db, ids)
+    return LocationContents(
+        rows=[
+            LocationContentRow(
+                location_id=str(r.location_id),
+                location_name=r.location_name,
+                item_id=str(r.item_id),
+                item_code=r.item_code,
+                item_name=r.item_name,
+                lot_number=r.lot_number,
+                expiry_date=r.expiry_date,
+                quantity_available=r.quantity_available,
+                unit_of_measure=r.unit_of_measure,
+            )
+            for r in rows
+        ]
+    )
 
 
 @router.get(

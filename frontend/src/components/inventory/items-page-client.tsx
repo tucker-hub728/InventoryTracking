@@ -199,7 +199,6 @@ export function ItemsPageClient() {
                 <TableRow>
                   <TableHead>SKU</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Tier</TableHead>
                   <TableHead className="text-right">On-hand</TableHead>
                   <TableHead className="text-right">Locations</TableHead>
                   <TableHead className="text-right">Created</TableHead>
@@ -218,11 +217,6 @@ export function ItemsPageClient() {
                         <span className="truncate">{item.item_name}</span>
                         {item.is_consumable && <Badge tone="accent">Consumable</Badge>}
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge tone="warning" dot>
-                        {item.tier} · Raw Material
-                      </Badge>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {toNum(item.on_hand).toLocaleString()}{' '}

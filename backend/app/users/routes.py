@@ -15,9 +15,10 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path
 
 from app.api.deps import DBSession
+from app.auth import cognito_client
 from app.auth import repository as users_repo
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.identity import User
@@ -58,7 +59,7 @@ async def list_users(db: DBSession) -> list[UserRead]:
 @router.patch(
     "/{user_id}",
     response_model=UserRead,
-    summary="Switch a user's role and/or active flag",
+    summary="Edit a user's name, role, and/or active flag",
     dependencies=[Depends(RequirePermission("users", "edit"))],
 )
 async def update_user(
@@ -83,10 +84,24 @@ async def update_user(
                 code="last_super_admin",
             )
 
+    if "first_name" in data and data["first_name"] is not None:
+        user.first_name = data["first_name"].strip()
+    if "last_name" in data and data["last_name"] is not None:
+        user.last_name = data["last_name"].strip()
     if "role" in data and data["role"] is not None:
         user.role = data["role"]
+
+    active_changed = False
     if "is_active" in data and data["is_active"] is not None:
+        active_changed = data["is_active"] != user.is_active
         user.is_active = data["is_active"]
+
+    # Keep Cognito in lock-step so a deactivated user can't even mint a token
+    # (the resolve_db_user guard already blocks protected routes, but disabling
+    # the identity closes the login door too). Done before commit so a Cognito
+    # failure aborts the change.
+    if active_changed:
+        cognito_client.admin_set_user_enabled(email=user.email, enabled=user.is_active)
 
     await db.flush()
     await db.refresh(user)

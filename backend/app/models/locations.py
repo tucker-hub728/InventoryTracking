@@ -27,8 +27,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-# Controlled location categories (LOC-002). A fixed, native ``app.location_category``
-# enum. Extending it later requires a migration (ALTER TYPE ... ADD VALUE).
+# Controlled location categories (LOC-002). A native ``app.location_category``
+# enum. Extending it requires a migration (ALTER TYPE ... ADD VALUE) — keep this
+# tuple in lock-step with that migration and the frontend LOCATION_CATEGORIES.
+# 2026-07-08: added Analytical Lab / Sterility Lab / PD for the freezer import.
 LOCATION_CATEGORIES: tuple[str, ...] = (
     "Materials Management",
     "Lab",
@@ -36,6 +38,9 @@ LOCATION_CATEGORIES: tuple[str, ...] = (
     "Engineering",
     "PD Lab One",
     "PD Lab Two",
+    "Analytical Lab",
+    "Sterility Lab",
+    "PD",
 )
 
 # ``create_type=False`` — the migration owns the enum type; the ORM references it.

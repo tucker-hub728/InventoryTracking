@@ -9,7 +9,7 @@
 // Server-only by convention — uses serverEnv values that are not exposed
 // to the browser. Never import from a client component.
 import { serverEnv } from '@/env';
-import type { BackendMe, BackendTokens } from './types';
+import type { BackendInvitePublic, BackendMe, BackendTokens } from './types';
 
 export class BackendError extends Error {
   constructor(
@@ -74,5 +74,20 @@ export const backend = {
   me: (accessToken: string) =>
     call<BackendMe>('/auth/me', {
       headers: { Authorization: `Bearer ${accessToken}` },
+    }),
+
+  /** Public: resolve an invite link's non-sensitive details for the accept page.
+   * POST (token in body) so the raw token stays out of access logs. */
+  resolveInvite: (token: string) =>
+    call<BackendInvitePublic>('/invitations/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+
+  /** Public: accept an invite (set password) and receive a fresh token set. */
+  acceptInvite: (token: string, password: string) =>
+    call<BackendTokens>('/auth/accept-invite', {
+      method: 'POST',
+      body: JSON.stringify({ token, password }),
     }),
 };

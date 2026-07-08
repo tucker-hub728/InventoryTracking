@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ShieldCheck, Lock, Database } from 'lucide-react';
+import { Layers, ArrowLeftRight, MapPin } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { useUIStore } from '@/stores/ui.store';
@@ -39,7 +39,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
         </div>
       </div>
       <div className="hidden flex-col justify-center gap-8 border-l border-border bg-surface px-10 py-12 lg:flex">
-        <SecurityContextGrid />
+        <SystemHighlights />
       </div>
     </div>
   );
@@ -59,35 +59,36 @@ function BrandBlock() {
   );
 }
 
-function SecurityContextGrid() {
+function SystemHighlights() {
   const cards: Array<{ icon: LucideIcon; title: string; body: string }> = [
     {
-      icon: ShieldCheck,
-      title: '21 CFR Part 11',
-      body: 'Audit-grade electronic signatures, immutable logs, and role-restricted controls for every transaction.',
+      icon: Layers,
+      title: 'Three item tiers',
+      body: 'Raw materials, sub-assemblies, and finished goods — each tracked as its own inventory.',
     },
     {
-      icon: Lock,
-      title: 'Encrypted at rest',
-      body: 'AES-256 for data at rest, TLS 1.3 for data in transit. Session keys rotate every 30 days.',
+      icon: ArrowLeftRight,
+      title: 'Transactions',
+      body: 'Receive, transfer, kit, and ship, so stock actually enters and leaves the system.',
     },
     {
-      icon: Database,
-      title: 'Disaster recovery',
-      body: 'Cross-region snapshots with 15-minute RPO and 1-hour RTO targets, exercised quarterly.',
+      icon: MapPin,
+      title: 'Controlled locations',
+      body: 'A managed location list with shelves and stock transfers between them.',
     },
   ];
   return (
     <>
       <div className="max-w-md">
         <div className="text-xs font-semibold uppercase tracking-widest text-text-3">
-          Compliance environment
+          Inventory &amp; materials management
         </div>
         <h2 className="mt-2 text-2xl font-semibold tracking-tight">
-          Built for regulated cell-therapy operations
+          Track materials from receipt to finished goods
         </h2>
         <p className="mt-2 text-sm text-text-2">
-          Every action below is logged, attributed, and signable. Use only your personal credentials.
+          Manage raw materials, sub-assemblies, and finished goods across controlled locations, with
+          the transactions that move and consume stock.
         </p>
       </div>
       <ul className="grid max-w-md gap-3">

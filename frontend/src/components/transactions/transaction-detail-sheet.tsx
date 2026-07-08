@@ -1,12 +1,12 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 
 import {
   Sheet,
   SheetBody,
   SheetContent,
-  SheetDescription,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/table';
 import { ApiError } from '@/lib/api/client';
 import { transactionsApi, type ApiTransactionDetail } from '@/lib/api/transactions';
+import { transactionTypeLabel, transactionTypeTone } from '@/lib/transaction-display';
 import { toNum } from '@/lib/api/helpers';
 
 interface Props {
@@ -54,10 +55,10 @@ export function TransactionDetailSheet({ transactionId, onOpenChange }: Props) {
 
   return (
     <Sheet open={transactionId !== null} onOpenChange={onOpenChange}>
-      <SheetContent side="right">
+      {/* aria-describedby={undefined}: no description now that the UUID is gone. */}
+      <SheetContent side="right" aria-describedby={undefined}>
         <SheetHeader>
           <SheetTitle>{detail?.transaction_no ?? 'Transaction'}</SheetTitle>
-          <SheetDescription>{detail?.id ?? transactionId ?? ''}</SheetDescription>
         </SheetHeader>
         <SheetBody className="space-y-6">
           {loading ? (
@@ -68,10 +69,11 @@ export function TransactionDetailSheet({ transactionId, onOpenChange }: Props) {
             <>
               <dl className="grid grid-cols-2 gap-4 text-sm">
                 <Field label="Type">
-                  <Badge className="capitalize">{detail.transaction_type}</Badge>
+                  <Badge tone={transactionTypeTone(detail.transaction_type)}>
+                    {transactionTypeLabel(detail.transaction_type)}
+                  </Badge>
                 </Field>
                 <Field label="Date">{new Date(detail.transaction_date).toLocaleString()}</Field>
-                <Field label="Reference">{detail.reference_no ?? '—'}</Field>
                 <Field label="Created by">{detail.created_by_name ?? detail.created_by}</Field>
                 {detail.notes && (
                   <div className="col-span-2">
@@ -82,7 +84,7 @@ export function TransactionDetailSheet({ transactionId, onOpenChange }: Props) {
               </dl>
 
               <div>
-                <h3 className="mb-2 text-sm font-semibold">Lines</h3>
+                <h3 className="mb-2 text-sm font-semibold">Items</h3>
                 <div className="overflow-hidden rounded-lg border border-border">
                   <Table>
                     <TableHeader>
@@ -98,7 +100,12 @@ export function TransactionDetailSheet({ transactionId, onOpenChange }: Props) {
                       {detail.lines.map((line) => (
                         <TableRow key={line.id}>
                           <TableCell>
-                            <div className="font-mono text-xs">{line.item_code ?? line.item_id}</div>
+                            <Link
+                              href={`/inventory/cr/${line.item_id}`}
+                              className="font-mono text-xs text-accent hover:underline"
+                            >
+                              {line.item_code ?? line.item_id}
+                            </Link>
                             {line.item_name && (
                               <div className="text-xs text-text-3">{line.item_name}</div>
                             )}

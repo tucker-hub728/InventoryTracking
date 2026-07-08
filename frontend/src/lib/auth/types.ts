@@ -14,6 +14,8 @@ export interface BackendMe {
   full_name: string | null;
   initials: string | null;
   role: string | null;
+  /** Deactivated accounts (false) are treated as logged-out by the BFF. */
+  is_active?: boolean;
 }
 
 /** Tokens as returned by `/auth/login` and `/auth/refresh`. */
@@ -23,6 +25,15 @@ export interface BackendTokens {
   refresh_token: string | null;
   expires_in: number;
   token_type: string;
+}
+
+/** Non-sensitive invite details from `GET /invitations/token/{token}`. */
+export interface BackendInvitePublic {
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: string;
+  expires_at: string;
 }
 
 /** Public session info — safe to ship to the client. Never includes tokens. */

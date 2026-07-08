@@ -50,6 +50,9 @@ export async function readSession(): Promise<ReadSessionResult> {
   if (at) {
     try {
       const me = await backend.me(at);
+      // A since-deactivated account still has valid tokens but must be treated
+      // as logged out so the app-shell bounces them to /login.
+      if (me.is_active === false) return { user: null };
       return { user: toSessionUser(me) };
     } catch (err) {
       if (!(err instanceof BackendError) || err.status !== 401) throw err;
@@ -67,6 +70,7 @@ export async function readSession(): Promise<ReadSessionResult> {
     throw err;
   }
   const me = await backend.me(fresh.access_token);
+  if (me.is_active === false) return { user: null };
   return { user: toSessionUser(me), refreshedTokens: fresh };
 }
 

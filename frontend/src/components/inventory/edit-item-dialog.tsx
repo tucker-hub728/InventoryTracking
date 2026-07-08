@@ -50,7 +50,8 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
       const updated = await itemsApi.update(item.id, {
         item_name: name.trim(),
         description: description.trim() || null,
-        unit_of_measure: uom.trim(),
+        // Units are stored lower-case for consistency.
+        unit_of_measure: uom.trim().toLowerCase(),
         is_consumable: consumable,
       });
       onSaved(updated);
@@ -87,10 +88,16 @@ export function EditItemDialog({ open, onOpenChange, item, onSaved }: Props) {
               <Input id="edit_uom" value={uom} onChange={(e) => setUom(e.target.value)} />
             </div>
             <div className="flex items-center justify-between rounded-md border border-border px-3 py-2.5">
-              <Label htmlFor="edit_consumable" className="cursor-pointer">
-                Consumable
-              </Label>
-              <Switch id="edit_consumable" checked={consumable} onCheckedChange={setConsumable} />
+              <div>
+                <Label htmlFor="edit_consumable">Consumable</Label>
+                <p className="text-xs text-text-3">Can’t be changed after creation.</p>
+              </div>
+              <Switch
+                id="edit_consumable"
+                checked={consumable}
+                onCheckedChange={setConsumable}
+                disabled
+              />
             </div>
           </DialogBody>
           <DialogFooter>

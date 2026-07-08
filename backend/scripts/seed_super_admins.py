@@ -1,4 +1,8 @@
-"""Seed Super Admin users into Cognito + the local ``app.users`` mirror.
+"""Seed the single Super Admin user into Cognito + the local ``app.users`` mirror.
+
+Only the super admin is seeded here — the fixed singleton that bootstraps the
+system. Every other user (admin / operator) is onboarded through the in-app
+invite flow, never this script.
 
 A user in this system is a Cognito identity with a local mirror row:
   * Cognito owns the password / MFA (created via admin APIs here).
@@ -16,10 +20,9 @@ pass, idempotently:
 Re-running is safe: an existing Cognito user is looked up (password re-applied),
 and an existing local row for that ``sub`` is left as-is.
 
-NOTE ON THE THREE EMAILS: ``.dev`` / ``.stage`` / ``.prod`` here are just label
-suffixes on the address — all seed into whatever pool + database the current
-environment points at. This is not a cross-environment seeder; run it once per
-environment against that environment's config.
+This is not a cross-environment seeder — it seeds into whatever Cognito pool +
+database the current environment points at. Run it once per environment against
+that environment's config.
 
 Safety:
   * Dry-run by default — prints the plan and exits. Pass ``--yes`` to execute.
@@ -34,7 +37,7 @@ Safety:
 
 Usage (from ``backend/``):
     python -m scripts.seed_super_admins            # dry run — show the plan
-    python -m scripts.seed_super_admins --yes      # create the users (dev/staging)
+    python -m scripts.seed_super_admins --yes      # create the super admin (dev/staging)
     # Production also needs the pool id echoed back:
     python -m scripts.seed_super_admins --yes --confirm-production us-east-1_ABC123
 """
@@ -52,11 +55,11 @@ from app.core.config import Environment, get_settings
 from app.db.session import dispose_engine, get_sessionmaker
 from botocore.exceptions import ClientError
 
-# ── Users to seed ───────────────────────────────────────────────────────────
-# Edit this list to change who gets seeded. Each entry carries its own role
-# (``super_admin`` or ``admin``) plus a first / last name. The Week-1 reset
-# users table has first_name / last_name / role / is_active — no initials /
-# status columns anymore.
+# ── User to seed ────────────────────────────────────────────────────────────
+# This seeder creates ONLY the single super admin (the fixed singleton). Every
+# other user — admin or operator — is onboarded through the in-app invite flow,
+# not here. Change the email/name below and set a strong, unique password
+# (ideally from a secret store) before seeding a real environment.
 _USERS: list[dict[str, str]] = [
     {
         "email": "superadmin@cellready.local",
@@ -65,25 +68,11 @@ _USERS: list[dict[str, str]] = [
         "last_name": "Admin",
         "role": "super_admin",
     },
-    {
-        "email": "admin@cellready.local",
-        "password": "HzZcZuIA2kKWjusP_96",
-        "first_name": "Ops",
-        "last_name": "Admin",
-        "role": "admin",
-    },
-    {
-        "email": "operator@cellready.local",
-        "password": "HzZcZuIA2kKWjusP_96",
-        "first_name": "Line",
-        "last_name": "Operator",
-        "role": "operator",
-    },
 ]
 
-# Roles this seeder is allowed to write. Guards against a typo landing an
-# out-of-domain value that would trip the users.role enum.
-_ALLOWED_ROLES = frozenset({"super_admin", "admin", "operator"})
+# This seeder writes ONLY super_admin — admins/operators come via the invite
+# flow. Any other role in _USERS is refused before anything is created.
+_ALLOWED_ROLES = frozenset({"super_admin"})
 
 
 def _weak_password_reason(password: str) -> str | None:

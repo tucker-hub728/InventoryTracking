@@ -40,6 +40,23 @@ export interface ApiLocationOverview {
   children: ApiShelfOverview[];
 }
 
+/** One item/lot physically stored at a specific (sub-)location. */
+export interface ApiLocationContentRow {
+  location_id: string;
+  location_name: string;
+  item_id: string;
+  item_code: string;
+  item_name: string;
+  lot_number: string | null;
+  expiry_date: string | null;
+  quantity_available: string | number;
+  unit_of_measure: string;
+}
+
+export interface ApiLocationContents {
+  rows: ApiLocationContentRow[];
+}
+
 export interface ListLocationsParams {
   active?: boolean;
   parent_id?: string | null;
@@ -75,6 +92,10 @@ export const locationsApi = {
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiLocation>(`/locations/${id}`, { signal: opts?.signal }),
+
+  /** Items + lots physically stored in a location (and its shelves). */
+  contents: (id: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiLocationContents>(`/locations/${id}/contents`, { signal: opts?.signal }),
 
   create: (input: LocationCreateInput) =>
     api.post<ApiLocation>('/locations', { json: input }),

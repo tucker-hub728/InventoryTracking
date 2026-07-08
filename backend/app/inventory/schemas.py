@@ -152,6 +152,9 @@ class ItemListRead(BaseModel):
 class ItemStockRow(BaseModel):
     location_id: str
     location_name: str | None = None
+    # The location's category (app.location_category) — for a shelf this is its
+    # parent freezer's category.
+    location_type: str | None = None
     lot_number: str | None = None
     expiry_date: date | None = None
     quantity_available: Decimal

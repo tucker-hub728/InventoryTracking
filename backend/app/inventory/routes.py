@@ -138,12 +138,13 @@ async def get_item(
             ItemStockRow(
                 location_id=str(stock.location_id),
                 location_name=location_name,
+                location_type=location_type,
                 lot_number=stock.lot_number,
                 expiry_date=stock.expiry_date,
                 quantity_available=stock.quantity_available,
                 unit_of_measure=stock.unit_of_measure,
             )
-            for stock, location_name in stock_rows
+            for stock, location_name, location_type in stock_rows
         ],
     )
 
@@ -293,12 +294,13 @@ async def update_item(
             ItemStockRow(
                 location_id=str(stock.location_id),
                 location_name=location_name,
+                location_type=location_type,
                 lot_number=stock.lot_number,
                 expiry_date=stock.expiry_date,
                 quantity_available=stock.quantity_available,
                 unit_of_measure=stock.unit_of_measure,
             )
-            for stock, location_name in stock_rows
+            for stock, location_name, location_type in stock_rows
         ],
     )
     await db.commit()
@@ -416,7 +418,9 @@ async def list_transactions(
 ) -> list[TransactionListRead]:
     rows = await inv_repo.list_transactions(
         db,
-        transaction_type=type,
+        # Transaction types are stored upper-case (RECEIPT/TRANSFER/…); accept
+        # any casing from the client so ``?type=receipt`` matches.
+        transaction_type=type.upper() if type else None,
         item_id=item_id,
         location_id=location_id,
         limit=limit,

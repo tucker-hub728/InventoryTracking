@@ -1,14 +1,23 @@
 'use client';
 
 import * as React from 'react';
-import { MapPin, Plus, Pencil, Trash2, Layers } from 'lucide-react';
+import { MapPin, Plus, Pencil, Trash2, Layers, Eye, Search } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useConfirm } from '@/components/ui/confirm-dialog';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { usePermission } from '@/hooks/use-permission';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -20,6 +29,9 @@ import {
 import { toNum } from '@/lib/api/helpers';
 import { LOCATION_CATEGORIES } from '@/lib/location-categories';
 import { LocationFormDialog } from './location-form-dialog';
+import { LocationDetailSheet } from './location-detail-sheet';
+
+const ALL_CATEGORIES = '__all__';
 
 type DialogState =
   | { kind: 'add' }
@@ -38,6 +50,10 @@ export function LocationsPageClient() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [dialog, setDialog] = React.useState<DialogState>(null);
+  const [detailLoc, setDetailLoc] = React.useState<ApiLocationOverview | null>(null);
+  const [rawSearch, setRawSearch] = React.useState('');
+  const search = useDebouncedValue(rawSearch, 200);
+  const [categoryFilter, setCategoryFilter] = React.useState(ALL_CATEGORIES);
   // The full-page spinner shows only on first load; create/update/delete do a
   // silent background refresh so the cards update in place.
   const initialized = React.useRef(false);
@@ -83,6 +99,20 @@ export function LocationsPageClient() {
     const ordered = [...LOCATION_CATEGORIES.filter((c) => byCat.has(c)), ...[...byCat.keys()].filter((c) => !LOCATION_CATEGORIES.includes(c as never))];
     return ordered.map((cat) => ({ category: cat, locations: byCat.get(cat)! }));
   }, [overview]);
+
+  // Apply the category filter + name search over the grouped cards.
+  const filteredGrouped = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return grouped
+      .filter((g) => categoryFilter === ALL_CATEGORIES || g.category === categoryFilter)
+      .map((g) => ({
+        category: g.category,
+        locations: q
+          ? g.locations.filter((l) => l.location_name.toLowerCase().includes(q))
+          : g.locations,
+      }))
+      .filter((g) => g.locations.length > 0);
+  }, [grouped, search, categoryFilter]);
 
   const handleDelete = async (id: string, name: string, blocked: boolean, blockReason?: string) => {
     if (blocked) {
@@ -156,34 +186,75 @@ export function LocationsPageClient() {
         ) : overview.length === 0 ? (
           <EmptyState icon={MapPin} title="No locations" hint="Add your first location." />
         ) : (
-          <div className="space-y-8">
-            {grouped.map(({ category, locations }) => (
-              <section key={category}>
-                <div className="mb-3 flex items-center gap-2">
-                  <span className="size-2 rounded-full bg-accent" aria-hidden />
-                  <h2 className="text-sm font-semibold">{category}</h2>
-                </div>
-                <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-                  {locations.map((loc) => (
-                    <LocationCard
-                      key={loc.id}
-                      loc={loc}
-                      canEdit={canEdit}
-                      canCreate={canCreate}
-                      canDelete={canDelete}
-                      onEdit={(id) => setDialog({ kind: 'edit', id })}
-                      onAddSub={(parentId) => setDialog({ kind: 'add-sub', parentId })}
-                      onDelete={handleDelete}
-                    />
-                  ))}
-                </div>
-              </section>
-            ))}
+          <div className="space-y-6">
+            {/* Search + category filter */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <div className="w-full sm:max-w-xs">
+                <Input
+                  icon={Search}
+                  value={rawSearch}
+                  onChange={(e) => setRawSearch(e.target.value)}
+                  placeholder="Search location name…"
+                  aria-label="Search locations"
+                />
+              </div>
+              <div className="w-full sm:w-56">
+                <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+                  <SelectTrigger aria-label="Filter by category">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ALL_CATEGORIES}>All categories</SelectItem>
+                    {LOCATION_CATEGORIES.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {c}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {filteredGrouped.length === 0 ? (
+              <EmptyState title="No matches" hint="Try a different search or category." />
+            ) : (
+              <div className="space-y-8">
+                {filteredGrouped.map(({ category, locations }) => (
+                  <section key={category}>
+                    <div className="mb-3 flex items-center gap-2">
+                      <span className="size-2 rounded-full bg-accent" aria-hidden />
+                      <h2 className="text-sm font-semibold">{category}</h2>
+                    </div>
+                    <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+                      {locations.map((loc) => (
+                        <LocationCard
+                          key={loc.id}
+                          loc={loc}
+                          canEdit={canEdit}
+                          canCreate={canCreate}
+                          canDelete={canDelete}
+                          onView={setDetailLoc}
+                          onEdit={(id) => setDialog({ kind: 'edit', id })}
+                          onAddSub={(parentId) => setDialog({ kind: 'add-sub', parentId })}
+                          onDelete={handleDelete}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {dialogNode}
+      <LocationDetailSheet
+        location={detailLoc}
+        onOpenChange={(o) => {
+          if (!o) setDetailLoc(null);
+        }}
+      />
       {confirmDialog}
     </div>
   );
@@ -194,6 +265,7 @@ function LocationCard({
   canEdit,
   canCreate,
   canDelete,
+  onView,
   onEdit,
   onAddSub,
   onDelete,
@@ -202,6 +274,7 @@ function LocationCard({
   canEdit: boolean;
   canCreate: boolean;
   canDelete: boolean;
+  onView: (loc: ApiLocationOverview) => void;
   onEdit: (id: string) => void;
   onAddSub: (parentId: string) => void;
   onDelete: (id: string, code: string, blocked: boolean, reason?: string) => void;
@@ -248,6 +321,9 @@ function LocationCard({
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="secondary" onClick={() => onView(loc)}>
+          <Eye size={13} /> View
+        </Button>
         {canEdit && (
           <Button size="sm" variant="secondary" onClick={() => onEdit(loc.id)}>
             <Pencil size={13} /> Edit

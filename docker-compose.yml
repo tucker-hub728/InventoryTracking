@@ -114,6 +114,11 @@ services:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required (see .env.example)}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cellready}:${POSTGRES_PASSWORD:-cellready_dev_only}@postgres:5432/${POSTGRES_DB:-cellready_ims}
       CORS_ALLOW_ORIGINS: http://localhost:${FRONTEND_HOST_PORT:-3000}
+      # Public web origin used to build the accept-invite link the API returns
+      # (there is no invite email — the admin hands over the URL). Defaults to
+      # the dev frontend; set to the CloudFront domain in prod.
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:${FRONTEND_HOST_PORT:-3000}}
+      INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-console}
       SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@cellready.local}

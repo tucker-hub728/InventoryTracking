@@ -14,6 +14,7 @@ from fastapi import APIRouter
 
 from app.api.v1.routes import auth, health
 from app.inventory.routes import items_router, stock_router, transactions_router
+from app.invitations.routes import router as invitations_router
 from app.locations.routes import router as locations_router
 from app.users.routes import router as users_router
 
@@ -25,3 +26,4 @@ api_router.include_router(items_router)
 api_router.include_router(stock_router)
 api_router.include_router(transactions_router)
 api_router.include_router(users_router)
+api_router.include_router(invitations_router)

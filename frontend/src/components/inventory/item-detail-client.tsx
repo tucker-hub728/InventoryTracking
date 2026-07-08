@@ -2,20 +2,22 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-import { Pencil, Download, ArrowLeftRight, Trash2, Hash, ArrowRight, ArrowDownToLine } from 'lucide-react';
+import { Pencil, Download, ArrowLeftRight, Hash, ArrowRight, ArrowDownToLine, Search } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
-import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { TransactionDetailSheet } from '@/components/transactions/transaction-detail-sheet';
 import { usePermission } from '@/hooks/use-permission';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItemDetail, type ApiItemLedgerEntry } from '@/lib/api/items';
 import { locationsApi, type ApiLocation } from '@/lib/api/locations';
 import { toNum } from '@/lib/api/helpers';
+import { transactionTypeLabel, transactionTypeTone } from '@/lib/transaction-display';
 import { EditItemDialog } from './edit-item-dialog';
 import { ReceiveMaterialDialog } from './receive-material-dialog';
 import { TransferMaterialDialog } from './transfer-material-dialog';
@@ -23,7 +25,6 @@ import { TransferMaterialDialog } from './transfer-material-dialog';
 export function ItemDetailClient({ itemId }: { itemId: string }) {
   const router = useRouter();
   const canEdit = usePermission('items', 'edit');
-  const canDelete = usePermission('items', 'delete');
   const canTransact = usePermission('transactions', 'create');
 
   const [item, setItem] = React.useState<ApiItemDetail | null>(null);
@@ -35,7 +36,22 @@ export function ItemDetailClient({ itemId }: { itemId: string }) {
   const [editOpen, setEditOpen] = React.useState(false);
   const [receiveOpen, setReceiveOpen] = React.useState(false);
   const [transferOpen, setTransferOpen] = React.useState(false);
-  const [deleteOpen, setDeleteOpen] = React.useState(false);
+  // Selected transaction to show in the side sheet (from Recent transactions).
+  const [detailTxnId, setDetailTxnId] = React.useState<string | null>(null);
+  // Client-side search over the "Inventory by location" rows.
+  const [stockSearch, setStockSearch] = React.useState('');
+
+  const filteredStock = React.useMemo(() => {
+    const rows = item?.stock ?? [];
+    const q = stockSearch.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        (r.location_name ?? '').toLowerCase().includes(q) ||
+        (r.location_type ?? '').toLowerCase().includes(q) ||
+        (r.lot_number ?? '').toLowerCase().includes(q),
+    );
+  }, [item?.stock, stockSearch]);
 
   const load = React.useCallback(
     async (signal?: AbortSignal) => {
@@ -141,11 +157,6 @@ export function ItemDetailClient({ itemId }: { itemId: string }) {
                 <Pencil size={14} /> Edit
               </Button>
             )}
-            {canDelete && (
-              <Button variant="danger" onClick={() => setDeleteOpen(true)}>
-                <Trash2 size={14} /> Delete
-              </Button>
-            )}
           </div>
         }
       />
@@ -173,35 +184,57 @@ export function ItemDetailClient({ itemId }: { itemId: string }) {
             {item.stock.length === 0 ? (
               <EmptyState title="No stock on hand" hint="Receive this item to add stock." />
             ) : (
-              <div className="grid gap-2">
-                {item.stock.map((row, i) => (
-                  <div
-                    key={`${row.location_id}-${row.lot_number ?? 'nolot'}-${i}`}
-                    className="flex items-center justify-between rounded-lg border border-border bg-bg-elev px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
-                        {row.location_name ?? row.location_id}
-                      </div>
-                      <div className="mt-0.5 text-xs text-text-3">
-                        {row.lot_number ? (
-                          <>Lot <span className="font-mono">{row.lot_number}</span></>
-                        ) : (
-                          'No lot'
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <ExpiryPill iso={row.expiry_date} />
-                      <div className="text-right tabular-nums">
-                        <span className="text-sm font-semibold">
-                          {toNum(row.quantity_available).toLocaleString()}
-                        </span>{' '}
-                        <span className="text-xs text-text-3">{row.unit_of_measure}</span>
-                      </div>
-                    </div>
+              <div className="space-y-3">
+                <div className="w-full sm:max-w-xs">
+                  <Input
+                    icon={Search}
+                    value={stockSearch}
+                    onChange={(e) => setStockSearch(e.target.value)}
+                    placeholder="Search location, category or lot…"
+                    aria-label="Search stock by location"
+                  />
+                </div>
+
+                {filteredStock.length === 0 ? (
+                  <div className="rounded-lg border border-border py-10 text-center text-sm text-text-3">
+                    No matching locations.
                   </div>
-                ))}
+                ) : (
+                  <div className="grid gap-2">
+                    {filteredStock.map((row, i) => (
+                      <div
+                        key={`${row.location_id}-${row.lot_number ?? 'nolot'}-${i}`}
+                        className="flex items-center justify-between rounded-lg border border-border bg-bg-elev px-4 py-3"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">
+                            {row.location_name ?? row.location_id}
+                          </div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-text-3">
+                            {row.location_type && <span>{row.location_type}</span>}
+                            {row.location_type && <span aria-hidden>·</span>}
+                            <span>
+                              {row.lot_number ? (
+                                <>Lot <span className="font-mono">{row.lot_number}</span></>
+                              ) : (
+                                'No lot'
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <ExpiryPill iso={row.expiry_date} />
+                          <div className="text-right tabular-nums">
+                            <span className="text-sm font-semibold">
+                              {toNum(row.quantity_available).toLocaleString()}
+                            </span>{' '}
+                            <span className="text-xs text-text-3">{row.unit_of_measure}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </TabsContent>
@@ -213,7 +246,11 @@ export function ItemDetailClient({ itemId }: { itemId: string }) {
             ) : (
               <div className="grid gap-2">
                 {txns.map((t) => (
-                  <LedgerRow key={t.transaction_id} t={t} />
+                  <LedgerRow
+                    key={t.transaction_id}
+                    t={t}
+                    onClick={() => setDetailTxnId(t.transaction_id)}
+                  />
                 ))}
               </div>
             )}
@@ -253,36 +290,37 @@ export function ItemDetailClient({ itemId }: { itemId: string }) {
           refresh();
         }}
       />
-      <ConfirmDialog
-        open={deleteOpen}
-        onOpenChange={setDeleteOpen}
-        title={`Delete ${item.item_code}?`}
-        description="This deactivates the raw material. Its stock balances and transaction history are preserved, and it's removed from the active list."
-        confirmLabel="Delete"
-        variant="danger"
-        onConfirm={async () => {
-          try {
-            await itemsApi.remove(item.id);
-            toast.success(`${item.item_code} deleted`);
-            router.push('/inventory/cr');
-          } catch (err) {
-            toast.error(err instanceof ApiError ? err.message : 'Failed to delete item.');
-            throw err;
-          }
+      <TransactionDetailSheet
+        transactionId={detailTxnId}
+        onOpenChange={(o) => {
+          if (!o) setDetailTxnId(null);
         }}
       />
     </div>
   );
 }
 
-function LedgerRow({ t }: { t: ApiItemLedgerEntry }) {
+function LedgerRow({ t, onClick }: { t: ApiItemLedgerEntry; onClick: () => void }) {
   const isReceipt = t.transaction_type === 'RECEIPT';
   const isTransfer = t.transaction_type === 'TRANSFER';
   return (
-    <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-bg-elev px-4 py-3">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-border bg-bg-elev px-4 py-3 transition-colors hover:border-accent/50 hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <Badge tone={isReceipt ? 'success' : 'accent'}>{titleCase(t.transaction_type)}</Badge>
+          <Badge tone={transactionTypeTone(t.transaction_type)}>
+            {transactionTypeLabel(t.transaction_type)}
+          </Badge>
           <span className="text-sm font-semibold tabular-nums">
             {isReceipt ? '+' : ''}
             {toNum(t.quantity).toLocaleString()}{' '}
@@ -308,11 +346,12 @@ function LedgerRow({ t }: { t: ApiItemLedgerEntry }) {
             </span>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-text-3">
-          <span className="font-mono">{t.transaction_no}</span>
-          {t.reference_no ? <span>· {t.reference_no}</span> : null}
-          {t.notes ? <span className="italic">· {t.notes}</span> : null}
-        </div>
+        {(t.reference_no || t.notes) && (
+          <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-text-3">
+            {t.reference_no ? <span>Ref {t.reference_no}</span> : null}
+            {t.notes ? <span className="italic">{t.notes}</span> : null}
+          </div>
+        )}
       </div>
       <div className="shrink-0 text-right text-xs text-text-3">{t.created_by_name ?? '—'}</div>
     </div>
@@ -339,10 +378,6 @@ function ExpiryPill({ iso }: { iso: string | null }) {
   if (days < 0) return <Badge tone="danger">Expired</Badge>;
   if (days <= 30) return <Badge tone="warning">Expires in {days}d</Badge>;
   return <span className="text-xs text-text-3">Exp {d.toLocaleDateString()}</span>;
-}
-
-function titleCase(s: string): string {
-  return s.charAt(0) + s.slice(1).toLowerCase();
 }
 
 function relativeTime(iso: string): string {

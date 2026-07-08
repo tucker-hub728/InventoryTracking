@@ -1,0 +1,192 @@
+'use client';
+
+import * as React from 'react';
+import { toast } from 'sonner';
+
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { ApiError } from '@/lib/api/client';
+import type { RoleId } from '@/lib/api/users';
+import { acceptUrlFor, invitationsApi, type InviteResult } from '@/lib/api/invitations';
+import { CopyableLink } from './copyable-link';
+
+interface Props {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Called after a successful invite so the caller can refresh its list. */
+  onInvited: () => void;
+}
+
+// super_admin is a fixed singleton — only admin/operator can be invited.
+const ROLE_OPTIONS: { value: RoleId; label: string; hint: string }[] = [
+  { value: 'operator', label: 'Operator', hint: 'View inventory, record receive / transfer' },
+  { value: 'admin', label: 'Admin', hint: 'Items, transactions and user roles' },
+];
+
+const EMPTY = { email: '', first_name: '', last_name: '', role: 'operator' as RoleId };
+
+// Simple client-side format check; the backend + Cognito validate for real.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function InviteUserDialog({ open, onOpenChange, onInvited }: Props) {
+  const [form, setForm] = React.useState({ ...EMPTY });
+  const [saving, setSaving] = React.useState(false);
+  const [result, setResult] = React.useState<InviteResult | null>(null);
+
+  // Reset both the form and any prior success state each time the dialog opens.
+  React.useEffect(() => {
+    if (open) {
+      setForm({ ...EMPTY });
+      setResult(null);
+    }
+  }, [open]);
+
+  const patch = (p: Partial<typeof EMPTY>) => setForm((f) => ({ ...f, ...p }));
+
+  const email = form.email.trim();
+  const valid =
+    EMAIL_RE.test(email) && Boolean(form.first_name.trim()) && Boolean(form.last_name.trim());
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!valid || saving) return;
+    setSaving(true);
+    try {
+      const invite = await invitationsApi.create({
+        email,
+        first_name: form.first_name.trim(),
+        last_name: form.last_name.trim(),
+        role: form.role,
+      });
+      setResult(invite);
+      onInvited();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to create invitation.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const link = result ? acceptUrlFor(result) : '';
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        {result ? (
+          // ── Success: show the one-time accept link to hand over ──────────
+          <>
+            <DialogHeader>
+              <DialogTitle>Invitation ready</DialogTitle>
+              <DialogDescription>
+                Send this one-time link to <strong className="text-text">{result.email}</strong>.
+                It expires {new Date(result.expires_at).toLocaleDateString()} and can only be used
+                once. No email is sent automatically.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogBody className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="invite-link">Accept link</Label>
+                <CopyableLink id="invite-link" value={link} />
+                <p className="text-xs text-text-3">
+                  If you lose this link you can’t see it again — use “Resend” to issue a new one.
+                </p>
+              </div>
+            </DialogBody>
+            <DialogFooter>
+              <Button type="button" variant="primary" onClick={() => onOpenChange(false)}>
+                Done
+              </Button>
+            </DialogFooter>
+          </>
+        ) : (
+          // ── Form ─────────────────────────────────────────────────────────
+          <form onSubmit={submit}>
+            <DialogHeader>
+              <DialogTitle>Invite user</DialogTitle>
+              <DialogDescription>
+                Create an account and generate a link the new user opens to set their password.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogBody className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="inv-email">Work email</Label>
+                <Input
+                  id="inv-email"
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => patch({ email: e.target.value })}
+                  placeholder="new.person@cellready.com"
+                  autoComplete="off"
+                  autoFocus
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="inv-first">First name</Label>
+                  <Input
+                    id="inv-first"
+                    value={form.first_name}
+                    onChange={(e) => patch({ first_name: e.target.value })}
+                    placeholder="Alex"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="inv-last">Last name</Label>
+                  <Input
+                    id="inv-last"
+                    value={form.last_name}
+                    onChange={(e) => patch({ last_name: e.target.value })}
+                    placeholder="Rivera"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="inv-role">Role</Label>
+                <Select value={form.role} onValueChange={(v) => patch({ role: v as RoleId })}>
+                  <SelectTrigger id="inv-role" aria-label="Role">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ROLE_OPTIONS.map((r) => (
+                      <SelectItem key={r.value} value={r.value}>
+                        {r.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-text-3">
+                  {ROLE_OPTIONS.find((r) => r.value === form.role)?.hint}
+                </p>
+              </div>
+            </DialogBody>
+            <DialogFooter>
+              <Button type="button" onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" disabled={!valid || saving}>
+                {saving ? 'Creating…' : 'Create invitation'}
+              </Button>
+            </DialogFooter>
+          </form>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}

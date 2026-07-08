@@ -80,20 +80,6 @@ export function LocationFormDialog({
   // Category is fixed for a preset shelf, for an existing shelf (must match its
   // parent), and for a top-level that already has shelves (would orphan them).
   const categoryLocked = Boolean(presetParent) || isShelf || hasChildren;
-  // Parent can't be changed for a preset or an existing shelf.
-  const parentLocked = Boolean(presetParent) || isShelf;
-
-  // Parent options: top-level locations in the chosen category, minus self.
-  const parentOptions = React.useMemo(
-    () =>
-      allLocations.filter(
-        (l) =>
-          l.parent_location_id === null &&
-          l.location_type === category &&
-          l.id !== location?.id,
-      ),
-    [allLocations, category, location?.id],
-  );
 
   const onCategoryChange = (next: string) => {
     setCategory(next);
@@ -157,7 +143,9 @@ export function LocationFormDialog({
             <DialogDescription>
               {presetParent
                 ? `Shelf under ${presetParent.location_name} · ${presetParent.location_type}.`
-                : 'Create a new controlled location. Categories are pre-defined.'}
+                : mode === 'edit'
+                  ? 'Update this location. Categories are pre-defined.'
+                  : 'Create a new controlled location. Categories are pre-defined.'}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -188,33 +176,9 @@ export function LocationFormDialog({
               </Select>
             </div>
 
-            {!parentLocked && (
-              <div className="space-y-1.5">
-                <Label htmlFor="loc_parent">
-                  Parent location <span className="text-text-3">(optional)</span>
-                </Label>
-                <Select
-                  value={parentId}
-                  onValueChange={setParentId}
-                  disabled={!category || hasChildren}
-                >
-                  <SelectTrigger id="loc_parent" aria-label="Parent location">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NO_PARENT}>No parent (top-level)</SelectItem>
-                    {parentOptions.map((l) => (
-                      <SelectItem key={l.id} value={l.id}>
-                        {l.location_name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-text-3">
-                  Shelf sub-locations stay in the same category as their parent.
-                </p>
-              </div>
-            )}
+            {/* Parent is not editable here — a location is top-level, and shelves
+                are created via "Add Sub-Location" (which sets the parent). An
+                existing shelf keeps its parent unchanged. */}
           </DialogBody>
           <DialogFooter>
             <Button type="button" onClick={() => onOpenChange(false)}>

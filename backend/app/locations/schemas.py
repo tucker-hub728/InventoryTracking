@@ -7,15 +7,15 @@ sub-location under one. ``location_type`` is free text.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
-# The six fixed location categories, mirrored from the ``app.location_category``
-# enum. Kept as a Literal so the API rejects an out-of-domain value with a 422
-# instead of a raw DB error.
+# The location categories, mirrored from the ``app.location_category`` enum and
+# ``app.models.locations.LOCATION_CATEGORIES``. Kept as a Literal so the API
+# rejects an out-of-domain value with a 422 instead of a raw DB error.
 LocationCategory = Literal[
     "Materials Management",
     "Lab",
@@ -23,6 +23,9 @@ LocationCategory = Literal[
     "Engineering",
     "PD Lab One",
     "PD Lab Two",
+    "Analytical Lab",
+    "Sterility Lab",
+    "PD",
 ]
 
 
@@ -114,3 +117,26 @@ class LocationOverview(BaseModel):
     on_hand: Decimal
     distinct_lots: int
     children: list[ShelfOverview] = Field(default_factory=list)
+
+
+# ── Contents (actual items + lots physically stored in a location) ──────────
+
+
+class LocationContentRow(BaseModel):
+    """One stock bucket: an item + lot at a specific (sub-)location."""
+
+    location_id: str
+    location_name: str
+    item_id: str
+    item_code: str
+    item_name: str
+    lot_number: str | None = None
+    expiry_date: date | None = None
+    quantity_available: Decimal
+    unit_of_measure: str
+
+
+class LocationContents(BaseModel):
+    """Everything stored in a location AND its shelves, one row per item/lot."""
+
+    rows: list[LocationContentRow] = Field(default_factory=list)

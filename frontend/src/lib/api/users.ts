@@ -14,11 +14,15 @@ export interface ApiUser {
   id: string;
   email: string;
   full_name: string | null;
+  first_name: string;
+  last_name: string;
   role: string;
   is_active: boolean;
 }
 
 export interface UserUpdateInput {
+  first_name?: string;
+  last_name?: string;
   role?: RoleId;
   is_active?: boolean;
 }

@@ -8,13 +8,14 @@ touches the (async-unsafe) lazy ``parent`` relationship inside a serializer.
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models.inventory import InventoryStock, InventoryTransactionLine
+from app.models.inventory import InventoryStock, InventoryTransactionLine, Item
 from app.models.locations import Location
 
 # A row shape of (Location, parent_name) — parent_name is NULL for roots.
@@ -41,9 +42,7 @@ async def list_locations(
     return list((await session.execute(stmt)).all())
 
 
-async def get_location_row(
-    session: AsyncSession, location_id: uuid.UUID
-) -> LocationRow | None:
+async def get_location_row(session: AsyncSession, location_id: uuid.UUID) -> LocationRow | None:
     """Fetch one location plus its parent's name."""
     parent = aliased(Location)
     stmt = (
@@ -54,9 +53,7 @@ async def get_location_row(
     return (await session.execute(stmt)).one_or_none()
 
 
-async def get_location(
-    session: AsyncSession, location_id: uuid.UUID
-) -> Location | None:
+async def get_location(session: AsyncSession, location_id: uuid.UUID) -> Location | None:
     """Fetch a bare location row (no parent name) for validation paths."""
     stmt = select(Location).where(Location.id == location_id)
     return (await session.execute(stmt)).scalar_one_or_none()
@@ -82,27 +79,59 @@ async def all_stock_min(session: AsyncSession) -> list[StockMinRow]:
     return list((await session.execute(stmt)).all())
 
 
+async def child_ids(session: AsyncSession, location_id: uuid.UUID) -> list[uuid.UUID]:
+    """The ids of a location's shelf sub-locations."""
+    stmt = select(Location.id).where(Location.parent_location_id == location_id)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+# (location_id, location_name, item_id, item_code, item_name, lot, expiry, qty, uom)
+ContentRow = Row[
+    tuple[uuid.UUID, str, uuid.UUID, str, str, str | None, date | None, Decimal, str]
+]
+
+
+async def location_contents(
+    session: AsyncSession, location_ids: list[uuid.UUID]
+) -> list[ContentRow]:
+    """Every non-empty stock bucket at the given locations, joined with the
+    item's code/name and the (sub-)location's name. Ordered by item then lot."""
+    stmt = (
+        select(
+            InventoryStock.location_id,
+            Location.location_name,
+            InventoryStock.item_id,
+            Item.item_code,
+            Item.item_name,
+            InventoryStock.lot_number,
+            InventoryStock.expiry_date,
+            InventoryStock.quantity_available,
+            InventoryStock.unit_of_measure,
+        )
+        .join(Item, InventoryStock.item_id == Item.id)
+        .join(Location, InventoryStock.location_id == Location.id)
+        .where(InventoryStock.location_id.in_(location_ids))
+        .where(InventoryStock.quantity_available > 0)
+        .order_by(Item.item_code, InventoryStock.lot_number)
+    )
+    return list((await session.execute(stmt)).all())
+
+
 async def count_children(session: AsyncSession, location_id: uuid.UUID) -> int:
     stmt = (
-        select(func.count())
-        .select_from(Location)
-        .where(Location.parent_location_id == location_id)
+        select(func.count()).select_from(Location).where(Location.parent_location_id == location_id)
     )
     return int((await session.execute(stmt)).scalar_one())
 
 
 async def location_has_stock(session: AsyncSession, location_id: uuid.UUID) -> bool:
     stmt = select(
-        select(InventoryStock.id)
-        .where(InventoryStock.location_id == location_id)
-        .exists()
+        select(InventoryStock.id).where(InventoryStock.location_id == location_id).exists()
     )
     return bool((await session.execute(stmt)).scalar_one())
 
 
-async def location_has_txn_lines(
-    session: AsyncSession, location_id: uuid.UUID
-) -> bool:
+async def location_has_txn_lines(session: AsyncSession, location_id: uuid.UUID) -> bool:
     stmt = select(
         select(InventoryTransactionLine.id)
         .where(
