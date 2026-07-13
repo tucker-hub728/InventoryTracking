@@ -33,14 +33,14 @@ log = get_logger(__name__)
 
 # The four canonical role codes — duplicated here from the migration's
 # seed so a misconfigured Cognito ``custom:role`` falls back safely to
-# ``viewer`` instead of taking down /me with a FK violation.
+# ``read_only`` instead of taking down /me with a FK violation.
 _VALID_ROLES: frozenset[str] = frozenset(
-    {"super_admin", "admin", "editor", "viewer"},
+    {"super_admin", "admin", "operator", "read_only"},
 )
 
 
 def _safe_role(raw: str | None) -> str:
-    return raw if raw in _VALID_ROLES else "viewer"
+    return raw if raw in _VALID_ROLES else "read_only"
 
 
 def _safe_initials(raw: str | None, fallback_email: str) -> str:

@@ -13,6 +13,7 @@ from __future__ import annotations
 from app.models.audit import AuditEvent, ReauthConsumption, ReauthEvent
 from app.models.forecast import ForecastEntry
 from app.models.identity import Role, User
+from app.models.invitations import Invitation
 from app.models.inventory import (
     BomLine,
     Item,
@@ -39,6 +40,7 @@ __all__ = [
     "Customer",
     "CustomerItem",
     "ForecastEntry",
+    "Invitation",
     "Item",
     "ItemCategory",
     "ItemStock",

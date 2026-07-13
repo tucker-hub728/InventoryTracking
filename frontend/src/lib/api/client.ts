@@ -79,6 +79,12 @@ async function request<T>(
 
   if (!resp.ok) {
     const err = (body as ApiErrorBody) ?? {};
+    // A user deactivated mid-session gets 403 ``account_disabled`` on every
+    // call. The BFF has already cleared the token cookies; bounce them to the
+    // login screen with a notice so they can't keep clicking a dead session.
+    if (err.code === 'account_disabled' && typeof window !== 'undefined') {
+      window.location.href = '/login?reason=deactivated';
+    }
     throw new ApiError(
       resp.status,
       err.code ?? 'unknown_error',

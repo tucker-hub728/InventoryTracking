@@ -20,12 +20,16 @@ from app.inventory.routes import (
     receiving_router,
     suppliers_router,
 )
+from app.invitations.routes import router as invitations_router
 from app.locations.routes import alloc_router, nodes_router
 from app.products.routes import customers_router
+from app.users.routes import router as users_router
 
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
+api_router.include_router(invitations_router)
+api_router.include_router(users_router)
 api_router.include_router(uploads.router)
 api_router.include_router(items_router)
 api_router.include_router(suppliers_router)

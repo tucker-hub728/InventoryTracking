@@ -32,9 +32,29 @@ from app.auth.schemas import (
     RefreshRequest,
     TokenResponse,
 )
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import AuthenticationError, AuthorizationError, NotFoundError
+from app.invitations import service as invitations_service
+from app.invitations.schemas import AcceptInviteRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Shown to a deactivated user on login and on any protected request. The code
+# ``account_disabled`` is what the frontend keys off to end the session.
+_DEACTIVATED_MESSAGE = "Your account has been deactivated. Please contact an administrator."
+
+
+async def _reject_if_deactivated(db: DBSession, email: str) -> None:
+    """Raise ``AuthorizationError('account_disabled')`` if a local user with
+    ``email`` exists and is not active.
+
+    This enforces deactivation at login in EVERY environment: real Cognito
+    already blocks a disabled identity at ``sign_in`` (but with a generic error),
+    and ``cognito-local`` doesn't enforce the disabled flag at all — so the
+    local mirror's status is the authoritative gate, with a precise message.
+    """
+    user = await users_repo.get_by_email(db, email)
+    if user is not None and user.status != "active":
+        raise AuthorizationError(_DEACTIVATED_MESSAGE, code="account_disabled")
 
 
 def _client_ip(request: Request) -> str | None:
@@ -60,8 +80,17 @@ def _client_ip(request: Request) -> str | None:
     response_model=TokenResponse,
     summary="Exchange email + password for tokens",
 )
-async def login(payload: LoginRequest) -> TokenResponse:
-    result = cognito_client.sign_in(email=payload.email, password=payload.password)
+async def login(payload: LoginRequest, db: DBSession) -> TokenResponse:
+    try:
+        result = cognito_client.sign_in(email=payload.email, password=payload.password)
+    except AuthenticationError:
+        # Real Cognito rejects a disabled identity here (indistinguishable from a
+        # bad password). If we know the local account is deactivated, surface the
+        # precise message; otherwise re-raise the generic auth error.
+        await _reject_if_deactivated(db, payload.email)
+        raise
+    # cognito-local doesn't enforce the disabled flag, so gate on local status.
+    await _reject_if_deactivated(db, payload.email)
     return TokenResponse(**result)
 
 
@@ -72,6 +101,23 @@ async def login(payload: LoginRequest) -> TokenResponse:
 )
 async def refresh(payload: RefreshRequest) -> TokenResponse:
     result = cognito_client.refresh_token(refresh=payload.refresh_token)
+    return TokenResponse(**result)
+
+
+@router.post(
+    "/accept-invite",
+    response_model=TokenResponse,
+    summary="Accept an invitation: set a password via the link token, then sign in",
+)
+async def accept_invite(payload: AcceptInviteRequest, db: DBSession) -> TokenResponse:
+    """Public — the invitee has no session yet. The single-use link token is the
+    credential; sets the chosen password, materialises the local user, consumes
+    the invite, and returns a fresh token set for auto-login."""
+    result = await invitations_service.accept_invitation(
+        db,
+        raw_token=payload.token,
+        password=payload.password,
+    )
     return TokenResponse(**result)
 
 
@@ -137,6 +183,11 @@ async def me(current: CurrentUserDep, db: DBSession) -> MeResponse:
     )
     if user is None:  # pragma: no cover — provision_from_me always returns
         raise NotFoundError("User record not found")
+
+    # A deactivated user must not keep a live session, even on the identity
+    # endpoint — mirrors the guard on every other protected route.
+    if user.status != "active":
+        raise AuthorizationError(_DEACTIVATED_MESSAGE, code="account_disabled")
 
     # Cheap "last seen" stamp. Outside the provisioning path so we don't
     # bump it during the initial insert (which already sets created_at).

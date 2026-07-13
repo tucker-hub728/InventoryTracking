@@ -167,6 +167,17 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
       accessMaxAgeSeconds: refreshed.expires_in,
     });
   }
+  // A deactivated user (disabled mid-session) gets 403 ``account_disabled`` on
+  // every protected call. Kill the session server-side so the token cookies
+  // can't be reused — the client then bounces them to /login (see api client).
+  if (upstream.status === 403 && upstreamBody) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(upstreamBody)) as { code?: string };
+      if (parsed?.code === 'account_disabled') clearAuthCookies(res);
+    } catch {
+      // Non-JSON 403 — leave the session as-is.
+    }
+  }
   return res;
 }
 

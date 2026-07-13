@@ -60,6 +60,29 @@ async def create(
     return user
 
 
+async def get_by_id(session: AsyncSession, user_id: uuid.UUID) -> User | None:
+    """Return the (non-deleted) user with ``user_id``, or None."""
+    stmt = select(User).where(User.id == user_id, User.deleted_at.is_(None))
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def hard_delete(session: AsyncSession, user: User) -> None:
+    """Permanently remove a user row. Caller commits. Used when an admin revokes
+    an invitation whose reserved identity had already materialised a mirror."""
+    await session.delete(user)
+    await session.flush()
+
+
+async def list_users(session: AsyncSession) -> list[User]:
+    """All non-deleted users, newest first — backs the admin user directory."""
+    stmt = (
+        select(User)
+        .where(User.deleted_at.is_(None))
+        .order_by(User.created_at.desc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def touch_last_active(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Record that ``user_id`` made a request right now. Caller commits.
 

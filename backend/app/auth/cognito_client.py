@@ -24,6 +24,7 @@ from app.core.exceptions import (
     AuthenticationError,
     ConflictError,
     DomainError,
+    IntegrationError,
     NotFoundError,
     ValidationError,
 )
@@ -219,3 +220,187 @@ def get_user(*, access_token: str) -> dict[str, Any]:
 
     attrs = {a["Name"]: a["Value"] for a in resp.get("UserAttributes", [])}
     return {"username": resp["Username"], "attributes": attrs}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin surface
+#
+# These call Cognito's ``admin_*`` APIs (require AWS admin credentials, or
+# cognito-local in dev). They back the user-invite flow: an admin reserves a
+# Cognito identity at invite time (in FORCE_CHANGE_PASSWORD) and the invitee
+# sets a real password at accept time. Same contract as the request-serving fns
+# above — keyword args, domain exceptions, plain dicts, no boto3 types leaked.
+#
+# Email delivery is environment-gated (see ``admin_create_user``): in production
+# Cognito sends its own invitation email (its built-in email, no SES); in local
+# dev the message is SUPPRESSED and the app emails the temporary password to
+# maildev over SMTP. The accept flow (temp password → new password) is identical
+# in both environments, so promoting to prod needs no code change.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _pool_id() -> str:
+    settings = get_settings()
+    # ``_ensure_configured`` already verified this is set; assert for the type
+    # checker and to fail loudly if the invariant is ever broken.
+    pool_id = settings.cognito_user_pool_id
+    assert pool_id is not None
+    return pool_id
+
+
+def _extract_sub(attributes: list[Any]) -> str:
+    for a in attributes:
+        if a.get("Name") == "sub":
+            return str(a["Value"])
+    # Every Cognito user has a ``sub``; its absence means an unexpected shape.
+    raise IntegrationError("Cognito returned no 'sub' for the user")
+
+
+def admin_create_user(*, email: str, name: str, role: str) -> str:
+    """Reserve a Cognito identity for an invitee and return its ``sub``.
+
+    The account lands in ``FORCE_CHANGE_PASSWORD`` with NO password set, so it
+    is unusable until the invitee sets a real password at accept time (proven by
+    the single-use invite token, not a Cognito temp password). Email is marked
+    verified and ``custom:role`` seeds the role.
+
+    Cognito's own invitation email is always SUPPRESSED — the app owns the invite
+    email and delivers a single-use accept link (the token is the credential).
+
+    Raises :class:`ConflictError` if the email already exists in the pool.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    try:
+        resp = client.admin_create_user(
+            UserPoolId=_pool_id(),
+            Username=email,
+            MessageAction="SUPPRESS",
+            UserAttributes=[
+                {"Name": "email", "Value": email},
+                {"Name": "email_verified", "Value": "true"},
+                {"Name": "name", "Value": name},
+                {"Name": "custom:role", "Value": role},
+            ],
+        )
+    except ClientError as exc:
+        err = exc.response.get("Error", {}) if hasattr(exc, "response") else {}
+        code = str(err.get("Code", ""))
+        msg = str(err.get("Message", ""))
+        log.info("auth.cognito.admin_create_failed", cognito_code=code)
+        # "Email already exists" must be a ConflictError so the invite flow can
+        # recover the existing identity (idempotent re-invite). Real Cognito
+        # reports the typed ``UsernameExistsException``; cognito-local puts an
+        # HTTP status ("400") in the Code slot but keeps the human message, so
+        # match on either signal (fail-closed _translate would mislabel it 401).
+        if code in _CONFLICT or "already exists" in msg.lower():
+            raise ConflictError(
+                msg or "A user with this email already exists.",
+                details={"cognito_code": code, "cognito_message": msg},
+            ) from exc
+        raise _translate(exc) from exc
+    return _extract_sub(resp["User"]["Attributes"])
+
+
+def admin_get_user(*, email: str) -> dict[str, Any] | None:
+    """Return ``{sub, enabled, status, attributes}`` for ``email``, or None.
+
+    A missing user (``UserNotFoundException``) returns None rather than
+    raising, so callers can branch on existence without catching. Any other
+    Cognito error still surfaces as a domain exception.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    try:
+        resp = client.admin_get_user(UserPoolId=_pool_id(), Username=email)
+    except ClientError as exc:
+        translated = _translate(exc)
+        if isinstance(translated, NotFoundError):
+            return None
+        raise translated from exc
+
+    attrs = {a["Name"]: a["Value"] for a in resp.get("UserAttributes", [])}
+    return {
+        "sub": attrs.get("sub"),
+        "enabled": resp.get("Enabled", True),
+        "status": resp.get("UserStatus"),
+        "attributes": attrs,
+    }
+
+
+def admin_set_user_password(*, email: str, password: str, permanent: bool = True) -> None:
+    """Set (and by default make permanent) a user's password.
+
+    Called at accept time with the invitee's chosen password. ``Permanent``
+    confirms the account so ``USER_PASSWORD_AUTH`` works on first login with
+    no ``NEW_PASSWORD_REQUIRED`` challenge. A password that fails the pool's
+    policy surfaces as :class:`ValidationError`.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    try:
+        client.admin_set_user_password(
+            UserPoolId=_pool_id(),
+            Username=email,
+            Password=password,
+            Permanent=permanent,
+        )
+    except ClientError as exc:
+        err = exc.response.get("Error", {}) if hasattr(exc, "response") else {}
+        code = str(err.get("Code", ""))
+        msg = str(err.get("Message", ""))
+        # A password that fails the pool policy must surface as a 422 the user
+        # can act on — not a fail-closed 401. Real Cognito reports the typed
+        # ``InvalidPasswordException``; cognito-local puts an HTTP status
+        # ("400") in the Code slot but keeps the human message, so match on
+        # either signal.
+        if code in ("InvalidPasswordException", "InvalidParameterException") or (
+            "password" in msg.lower()
+        ):
+            raise ValidationError(
+                "Password does not meet the security requirements "
+                "(at least 12 characters with uppercase, lowercase, a number "
+                "and a symbol).",
+                code="invalid_password",
+                details={"cognito_message": msg},
+            ) from exc
+        raise _translate(exc) from exc
+
+
+def admin_set_user_enabled(*, email: str, enabled: bool) -> None:
+    """Enable or disable a Cognito user (reversible revoke / reactivate).
+
+    A missing user is treated as a no-op — the caller's DB state is the
+    source of truth for the invite lifecycle.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    try:
+        if enabled:
+            client.admin_enable_user(UserPoolId=_pool_id(), Username=email)
+        else:
+            client.admin_disable_user(UserPoolId=_pool_id(), Username=email)
+    except ClientError as exc:
+        translated = _translate(exc)
+        if isinstance(translated, NotFoundError):
+            return
+        raise translated from exc
+
+
+def admin_delete_user(*, email: str) -> None:
+    """Permanently delete a Cognito user. Used when an admin revokes a pending
+    invitation — the reserved identity is destroyed so the email is free to be
+    re-invited cleanly.
+
+    A missing user is a no-op (idempotent): the desired end state — no such
+    identity — already holds.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    try:
+        client.admin_delete_user(UserPoolId=_pool_id(), Username=email)
+    except ClientError as exc:
+        translated = _translate(exc)
+        if isinstance(translated, NotFoundError):
+            return
+        raise translated from exc

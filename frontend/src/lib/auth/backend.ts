@@ -75,4 +75,30 @@ export const backend = {
     call<BackendMe>('/auth/me', {
       headers: { Authorization: `Bearer ${accessToken}` },
     }),
+
+  /** Public — validate an invite link and return the invitee's display info
+   * for the accept page. Throws BackendError (422) for a bad/expired token. */
+  resolveInvite: (token: string) =>
+    call<InvitePublicView>('/invitations/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+
+  /** Public — complete an invitation. The single-use link ``token`` is the
+   * credential; ``password`` is the invitee's chosen password. Returns a fresh
+   * token set so the BFF can mint a session, same as login. */
+  acceptInvite: (input: { token: string; password: string }) =>
+    call<BackendTokens>('/auth/accept-invite', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 };
+
+/** Non-sensitive invite details for the public accept page. */
+export interface InvitePublicView {
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: string;
+  expires_at: string;
+}

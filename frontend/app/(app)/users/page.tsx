@@ -1,9 +1,9 @@
 import type { Metadata } from 'next';
 
-import { UsersPageClient } from '@/components/users/users-page-client';
+import { UsersPageClient } from '@/components/admin/users-page-client';
 
 export const metadata: Metadata = {
-  title: 'Users & Roles',
+  title: 'Users',
 };
 
 export default function UsersPage() {

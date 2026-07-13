@@ -21,11 +21,11 @@ PERM_MATRIX: dict[str, dict[str, frozenset[str]]] = {
         "users": frozenset({"view", "create", "edit", "delete"}),
         "audit": frozenset({"view", "export"}),
     },
-    "editor": {
+    "operator": {
         "inventory": frozenset({"view", "create", "edit", "sign"}),
         "audit": frozenset({"view"}),
     },
-    "viewer": {
+    "read_only": {
         "inventory": frozenset({"view"}),
         "audit": frozenset({"view"}),
     },

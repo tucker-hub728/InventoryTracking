@@ -92,6 +92,30 @@ services:
     networks:
       - ims
 
+  # ── Maildev / Mailpit (SMTP catcher) ──────────────────────────────────────
+  # Local stand-in for an email provider. cognito-local can't send email, so in
+  # development the backend sends the invitation email here over SMTP (:1025)
+  # and it's viewable in the web UI (:8025). In production this container does
+  # not exist; point SMTP_* at a real provider for production email.
+  maildev:
+    image: axllent/mailpit:latest
+    container_name: cellready-mailpit
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "${MAILDEV_SMTP_HOST_PORT:-1025}:1025"
+      - "${MAILDEV_UI_HOST_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8025/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    networks:
+      - ims
+
   # ── Backend (FastAPI) ─────────────────────────────────────────────────────
   backend:
     build:
@@ -105,6 +129,8 @@ services:
       cognito:
         condition: service_started
       minio:
+        condition: service_started
+      maildev:
         condition: service_started
     environment:
       APP_ENV: development
@@ -130,6 +156,18 @@ services:
       JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES:-60}
       JWT_ID_TOKEN_TTL_MINUTES: ${JWT_ID_TOKEN_TTL_MINUTES:-60}
       JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS:-30}
+      # ── Invitations / email ────────────────────────────────────────────
+      # Web origin used to build the accept-invite link in the email.
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:${FRONTEND_HOST_PORT:-3000}}
+      INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
+      # The app always emails the invitee a single-use accept LINK over SMTP.
+      # Dev points SMTP at maildev; prod points it at any provider (SES,
+      # Mailgun, …). If SMTP is unreachable the invite still succeeds and the
+      # admin can copy the accept link from the UI.
+      SMTP_HOST: ${SMTP_HOST:-maildev}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      EMAIL_FROM: ${EMAIL_FROM:-CellReady IMS <no-reply@cellready.local>}
       # ── S3 / MinIO ─────────────────────────────────────────────────────
       # In prod the backend hits real S3 — leave ``S3_ENDPOINT_URL``
       # unset and rely on IAM role creds + region. In dev we point at

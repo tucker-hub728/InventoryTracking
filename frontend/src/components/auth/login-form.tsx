@@ -37,8 +37,16 @@ export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
   const setSession = useAuthStore((s) => s.setSession);
+  const clearSession = useAuthStore((s) => s.clear);
   const [showPw, setShowPw] = React.useState(false);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
+
+  // Bounced here because the account was deactivated mid-session — clear any
+  // stale client state and explain why they were signed out.
+  const deactivated = params.get('reason') === 'deactivated';
+  React.useEffect(() => {
+    if (deactivated) clearSession();
+  }, [deactivated, clearSession]);
 
   const {
     register,
@@ -90,6 +98,16 @@ export function LoginForm() {
           Use your CellReady credentials.
         </p>
       </div>
+
+      {deactivated && !submitError && (
+        <p
+          role="alert"
+          className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning"
+        >
+          You were signed out because your account has been deactivated. Please contact an
+          administrator.
+        </p>
+      )}
 
       <div className="space-y-1.5">
         <Label htmlFor="login-email">Work email</Label>

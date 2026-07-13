@@ -141,6 +141,27 @@ class Settings(BaseSettings):
     # buckets — MinIO 404s on them.
     s3_force_path_style: bool = True
 
+    # ── Invitations ─────────────────────────────────────────────────────
+    # Public web origin used to build the accept-invite link. Optional so the
+    # service can boot without it; the invite endpoint then returns a relative
+    # path and the frontend composes the origin itself.
+    frontend_base_url: OptionalHttpUrl = None
+    # How long an invite link / temporary password stays valid.
+    invite_ttl_days: int = Field(default=7, ge=1, le=90)
+
+    # ── Email delivery ──────────────────────────────────────────────────
+    # The app always owns the invitation email: it delivers a single-use accept
+    # LINK (the token is the credential) over SMTP. Cognito's own email is always
+    # suppressed. In dev SMTP points at maildev; in prod point it at any provider
+    # (SES, Mailgun, …). If SMTP is unreachable the invite still succeeds — the
+    # admin can copy the accept link from the API response / UI and share it.
+    smtp_host: str = "maildev"
+    smtp_port: int = 1025
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_use_tls: bool = False
+    email_from: str = "CellReady IMS <no-reply@cellready.local>"
+
     # ── API metadata ────────────────────────────────────────────────────
     api_v1_prefix: str = "/v1"
 
@@ -166,6 +187,21 @@ class Settings(BaseSettings):
     def database_url_sync(self) -> str:
         """Sync DSN — used by Alembic, which doesn't speak asyncpg."""
         return str(self.database_url).replace("+asyncpg", "+psycopg2")
+
+    def accept_invite_path(self, token: str) -> str:
+        """Relative path to the frontend accept-invite page for ``token``."""
+        return f"/accept-invite/{token}"
+
+    def accept_invite_url(self, token: str) -> str | None:
+        """Absolute accept-invite link, or None if no frontend origin is set.
+
+        The frontend can fall back to composing the URL from
+        :meth:`accept_invite_path` + its own origin when this returns None.
+        """
+        if not self.frontend_base_url:
+            return None
+        base = str(self.frontend_base_url).rstrip("/")
+        return f"{base}{self.accept_invite_path(token)}"
 
     @property
     def effective_cognito_issuer(self) -> str | None:

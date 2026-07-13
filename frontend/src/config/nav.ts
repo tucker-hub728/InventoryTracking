@@ -7,6 +7,7 @@ import {
   MapPin,
   Tags,
   Truck,
+  Users,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -43,7 +44,16 @@ export const navSections: readonly NavSection[] = [
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
       { id: 'categories', label: 'Categories', href: '/categories', icon: Tags, resource: 'inventory' },
       { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
-      { id: 'forecast', label: 'Forecast', href: '/forecast', icon: LineChart, resource: 'inventory' },
+      {
+        id: 'forecast',
+        label: 'Forecast',
+        href: '/forecast',
+        icon: LineChart,
+        resource: 'inventory',
+        disabled: true,
+        disabledReason:
+          'Forecasting is a work in progress — demand projections and reorder signals are not yet wired to the backend.',
+      },
       // Hidden for now — route stays wired; uncomment to restore.
       // {
       //   id: 'ln2',
@@ -68,16 +78,10 @@ export const navSections: readonly NavSection[] = [
   {
     title: 'Administration',
     items: [
-      // {
-      //   id: 'users',
-      //   label: 'Users & Roles',
-      //   href: '/users',
-      //   icon: Users,
-      //   resource: 'users',
-      //   disabled: true,
-      //   disabledReason:
-      //     'Users & Roles management is in active development — invitations, role grants, and the audit trail are not yet wired to the backend.',
-      // },
+      // Users & Roles — invite users, change roles, enable/disable (super_admin
+      // + admin per the `users` permission bucket). The invite dialog is wired
+      // to the backend; the directory list is the next wiring step.
+      { id: 'users', label: 'Users & Roles', href: '/users', icon: Users, resource: 'users' },
       // Master data — viewer can read; admin/editor can create.
       // Page-level permission check enforces the write side.
       { id: 'suppliers', label: 'Suppliers', href: '/suppliers', icon: Building2, resource: 'inventory' },

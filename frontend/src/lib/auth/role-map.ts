@@ -9,11 +9,14 @@
 
 import type { RoleId } from '@/types/auth';
 
+// Backend roles: super_admin / admin / operator / read_only. The frontend's
+// permission buckets are admin / editor / viewer, so operator maps to the
+// editor bucket and read_only to the viewer bucket.
 const KNOWN: Record<string, RoleId> = {
   super_admin: 'admin',
   admin: 'admin',
-  editor: 'editor',
-  viewer: 'viewer',
+  operator: 'editor',
+  read_only: 'viewer',
 };
 
 export function mapBackendRoleToRoleId(raw: string | null | undefined): RoleId {
