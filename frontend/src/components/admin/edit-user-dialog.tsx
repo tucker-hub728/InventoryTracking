@@ -46,9 +46,17 @@ interface Props {
   onSaved: (updated: ApiUser) => void;
 }
 
+/** Split a stored display name into first / last, mirroring the invite fields:
+ * the first word is the first name, everything after it is the last name. */
+function splitName(fullName: string): { first: string; last: string } {
+  const parts = fullName.trim().split(/\s+/);
+  return { first: parts[0] ?? '', last: parts.slice(1).join(' ') };
+}
+
 export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
   const { confirm, confirmDialog } = useConfirm();
-  const [fullName, setFullName] = React.useState('');
+  const [firstName, setFirstName] = React.useState('');
+  const [lastName, setLastName] = React.useState('');
   const [role, setRole] = React.useState<AssignableRole>('read_only');
   const [active, setActive] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -56,7 +64,9 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
   // Seed the form from the selected user each time the dialog opens.
   React.useEffect(() => {
     if (open && user) {
-      setFullName(user.full_name);
+      const { first, last } = splitName(user.full_name);
+      setFirstName(first);
+      setLastName(last);
       setRole((user.role as AssignableRole) ?? 'read_only');
       setActive(user.is_active);
     }
@@ -66,14 +76,15 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
 
   // Super admins keep their role + status here — only their name is editable.
   const isSuperAdmin = user.role === 'super_admin';
-  const nameValid = Boolean(fullName.trim());
+  const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+  const nameValid = Boolean(firstName.trim()) && Boolean(lastName.trim());
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nameValid || saving) return;
 
     const changes: UserUpdateInput = {};
-    if (fullName.trim() !== user.full_name) changes.full_name = fullName.trim();
+    if (fullName !== user.full_name) changes.full_name = fullName;
     if (!isSuperAdmin) {
       if (role !== user.role) changes.role = role;
       if (active !== user.is_active) changes.is_active = active;
@@ -121,14 +132,26 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
               </DialogDescription>
             </DialogHeader>
             <DialogBody className="space-y-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="edit-name">Full name</Label>
-                <Input
-                  id="edit-name"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  autoFocus
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="edit-first">First name</Label>
+                  <Input
+                    id="edit-first"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    placeholder="Alex"
+                    autoFocus
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="edit-last">Last name</Label>
+                  <Input
+                    id="edit-last"
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    placeholder="Rivera"
+                  />
+                </div>
               </div>
 
               <div className="space-y-1.5">

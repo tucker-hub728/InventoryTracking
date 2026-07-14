@@ -18,7 +18,10 @@ PERM_MATRIX: dict[str, dict[str, frozenset[str]]] = {
     "super_admin": {"*": frozenset({"*"})},
     "admin": {
         "inventory": frozenset({"view", "create", "edit", "delete", "sign"}),
-        "users": frozenset({"view", "create", "edit", "delete"}),
+        # Editing an existing member (name / role / active flag) is super-admin-
+        # only — admins may view the directory and manage invitations but not
+        # change members.
+        "users": frozenset({"view", "create", "delete"}),
         "audit": frozenset({"view", "export"}),
     },
     "operator": {

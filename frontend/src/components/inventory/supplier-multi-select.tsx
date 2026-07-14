@@ -107,11 +107,16 @@ export function SupplierMultiSelect({
             )}
           >
             <span
-              className={cn('truncate', selectedNames.length === 0 && 'text-text-3')}
+              className={cn(
+                'min-w-0 flex-1 truncate text-left',
+                selectedNames.length === 0 && 'text-text-3',
+              )}
             >
               {selectedNames.length === 0
                 ? 'Select suppliers…'
-                : selectedNames.join(', ')}
+                : selectedNames.length <= 2
+                  ? selectedNames.join(', ')
+                  : `${selectedNames.length} suppliers selected`}
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
               {selectedNames.length > 0 && (
