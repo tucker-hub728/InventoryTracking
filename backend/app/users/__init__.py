@@ -1,1 +1,1 @@
-"""User administration — list users and switch roles (super_admin / admin)."""
+"""User administration — directory, role edits, and enable/disable."""

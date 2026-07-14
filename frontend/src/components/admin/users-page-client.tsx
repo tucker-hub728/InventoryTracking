@@ -18,17 +18,10 @@ import {
 import { Pagination, usePagination } from '@/components/ui/pagination';
 import { usePermission } from '@/hooks/use-permission';
 import { ApiError } from '@/lib/api/client';
-import { usersApi, type ApiUser } from '@/lib/api/users';
+import { usersApi, roleLabel, type ApiUser } from '@/lib/api/users';
 import { EditUserDialog } from './edit-user-dialog';
 import { InviteUserDialog } from './invite-user-dialog';
 import { InvitationsPanel } from './invitations-panel';
-
-const ROLE_LABEL: Record<string, string> = {
-  super_admin: 'Super Admin',
-  admin: 'Admin',
-  operator: 'Operator',
-};
-const roleLabel = (role: string) => ROLE_LABEL[role] ?? role;
 
 const PANEL = 'overflow-hidden rounded-lg border border-border bg-bg-elev';
 
@@ -74,7 +67,7 @@ function UsersTable({
           {pg.pageItems.map((u) => (
             <TableRow key={u.id}>
               <TableCell>{u.email}</TableCell>
-              <TableCell>{u.full_name ?? '—'}</TableCell>
+              <TableCell>{u.full_name || '—'}</TableCell>
               <TableCell>{roleLabel(u.role)}</TableCell>
               {canEdit && (
                 <TableCell className="text-right">
@@ -211,12 +204,7 @@ export function UsersPageClient() {
         </Tabs>
       </div>
 
-      <EditUserDialog
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        user={editUser}
-        onSaved={onSaved}
-      />
+      <EditUserDialog open={editOpen} onOpenChange={setEditOpen} user={editUser} onSaved={onSaved} />
 
       {canInvite && (
         <InviteUserDialog

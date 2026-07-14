@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 
-// Inventory is tier-scoped now (CR / AY / FG). The bare /inventory path
-// lands on the raw-material (CR) tier; old links/bookmarks keep working.
-export default function InventoryIndexPage() {
+// The combined inventory list is disabled — items are managed per tier now
+// (e.g. Raw Materials at /inventory/cr). Anyone landing on the old index is
+// forwarded to the Raw Materials section.
+export default function InventoryPage() {
   redirect('/inventory/cr');
 }

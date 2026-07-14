@@ -7,22 +7,22 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Mirrors the ``app.user_role`` enum / ``app.models.identity.ROLES``.
-RoleLiteral = Literal["super_admin", "admin", "operator"]
+# Mirrors the seeded ``app.roles`` codes.
+RoleLiteral = Literal["super_admin", "admin", "operator", "read_only"]
 
 # Roles that may be *assigned* via invite or edit. ``super_admin`` is a fixed
 # singleton (seeded once) and is deliberately NOT assignable — you can neither
 # invite nor promote anyone to it, and the last one can't be demoted.
-AssignableRole = Literal["admin", "operator"]
+AssignableRole = Literal["admin", "operator", "read_only"]
 
 
 class UserRead(BaseModel):
     id: str
     email: str
-    full_name: str | None = None
-    first_name: str
-    last_name: str
+    full_name: str
+    initials: str
     role: str
+    status: str
     is_active: bool
     created_at: datetime
 
@@ -33,8 +33,7 @@ class UserUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    first_name: str | None = Field(default=None, min_length=1, max_length=100)
-    last_name: str | None = Field(default=None, min_length=1, max_length=100)
-    # Only admin/operator are assignable — no promoting anyone to super_admin.
+    full_name: str | None = Field(default=None, min_length=1, max_length=200)
+    # Only admin/editor/viewer are assignable — no promoting anyone to super_admin.
     role: AssignableRole | None = None
     is_active: bool | None = None

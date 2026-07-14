@@ -4,34 +4,58 @@ Importing this package re-exports every model that Alembic should know
 about. ``alembic/env.py`` does ``from app import models`` so that
 ``Base.metadata`` is populated by the time ``--autogenerate`` runs.
 
-Week-1 reset (2026-07-06): six tables only — users, locations, items,
-inventory_stock, inventory_transactions, inventory_transaction_lines.
+Add new modules here as they ship — Alembic won't see a model that
+nothing imports.
 """
 
 from __future__ import annotations
 
-from app.models.identity import ROLES, User
+from app.models.audit import AuditEvent, ReauthConsumption, ReauthEvent
+from app.models.forecast import ForecastEntry
+from app.models.identity import Role, User
 from app.models.inventory import (
-    ITEM_TIERS,
-    TRANSACTION_TYPES,
-    InventoryStock,
-    InventoryTransaction,
-    InventoryTransactionLine,
+    BomLine,
     Item,
+    ItemCategory,
+    ItemStock,
+    ItemSupplier,
+    Lot,
+    ReceiptEvent,
+    ReceiptEventLine,
+    ReceiptTransaction,
+    ReceiptTransactionLine,
+    StockMovement,
+    Supplier,
 )
-from app.models.invitations import INVITE_STATUSES, Invitation
-from app.models.locations import Location
+from app.models.invitations import Invitation
+from app.models.locations import (
+    LocationNode,
+    LotAllocation,
+)
+from app.models.products import Customer, CustomerItem
 
 __all__ = [
-    "INVITE_STATUSES",
-    "ITEM_TIERS",
-    "ROLES",
-    "TRANSACTION_TYPES",
-    "InventoryStock",
-    "InventoryTransaction",
-    "InventoryTransactionLine",
+    "AuditEvent",
+    "BomLine",
+    "Customer",
+    "CustomerItem",
+    "ForecastEntry",
     "Invitation",
     "Item",
-    "Location",
+    "ItemCategory",
+    "ItemStock",
+    "ItemSupplier",
+    "LocationNode",
+    "Lot",
+    "LotAllocation",
+    "ReauthConsumption",
+    "ReauthEvent",
+    "ReceiptEvent",
+    "ReceiptEventLine",
+    "ReceiptTransaction",
+    "ReceiptTransactionLine",
+    "Role",
+    "StockMovement",
+    "Supplier",
     "User",
 ]

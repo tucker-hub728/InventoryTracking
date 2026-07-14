@@ -13,8 +13,9 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 
 import { backend, BackendError } from '@/lib/auth/backend';
-import { setAuthCookies } from '@/lib/auth/cookies';
+import { setAuthCookies, setChallengeCookie } from '@/lib/auth/cookies';
 import { toSessionUser } from '@/lib/auth/session';
+import { isNewPasswordChallenge } from '@/lib/auth/types';
 
 const bodySchema = z.object({
   email: z.string().email(),
@@ -32,14 +33,27 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const tokens = await backend.login(parsed.data.email, parsed.data.password);
-    const me = await backend.me(tokens.access_token);
+    const result = await backend.login(parsed.data.email, parsed.data.password);
+
+    // Invited user's first sign-in with the temporary password: stash the
+    // challenge server-side and tell the client to go set a real password. No
+    // session is minted yet.
+    if (isNewPasswordChallenge(result)) {
+      const res = NextResponse.json({
+        challenge: 'NEW_PASSWORD_REQUIRED' as const,
+        email: result.email,
+      });
+      setChallengeCookie(res, { session: result.session, email: result.email });
+      return res;
+    }
+
+    const me = await backend.me(result.access_token);
 
     const res = NextResponse.json({ user: toSessionUser(me) });
     setAuthCookies(res, {
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      accessMaxAgeSeconds: tokens.expires_in,
+      accessToken: result.access_token,
+      refreshToken: result.refresh_token,
+      accessMaxAgeSeconds: result.expires_in,
     });
     return res;
   } catch (err) {

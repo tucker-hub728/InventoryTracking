@@ -1,14 +1,13 @@
 /**
  * Invitations API — wraps ``/v1/invitations`` (via the BFF proxy).
  *
- * Admin (super-admin) surface: create / list / revoke / resend. The public
- * accept + resolve endpoints are NOT here — they run server-side through the
- * BFF (see ``lib/auth/backend.ts`` + ``app/api/auth/accept-invite``) because
- * the invitee has no session.
+ * Admin (super-admin) surface: create / list / revoke / resend. Cognito emails
+ * the invitee a temporary password; onboarding is completed by the invitee via
+ * the login → set-password flow, so there is no public accept endpoint here.
  */
 
 import { api } from './client';
-import type { RoleId } from './users';
+import type { AssignableRole } from './users';
 
 export type InviteStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
 
@@ -16,10 +15,12 @@ export interface InviteInput {
   email: string;
   first_name: string;
   last_name: string;
-  role: RoleId;
+  role: AssignableRole;
 }
 
-/** Returned on create/resend — carries the one-time link token. */
+/** Returned on create/resend. ``temporary_password`` is populated only in local
+ * dev (cognito-local can't deliver mail, so the admin UI shows it for testing);
+ * it is always null in production, where Cognito emails it. */
 export interface InviteResult {
   id: string;
   email: string;
@@ -28,9 +29,7 @@ export interface InviteResult {
   role: string;
   status: InviteStatus;
   expires_at: string;
-  token: string;
-  accept_path: string;
-  accept_url: string | null;
+  temporary_password: string | null;
 }
 
 /** Directory view of an invitation. */
@@ -47,14 +46,6 @@ export interface Invitation {
   created_at: string;
 }
 
-/** Compose the absolute accept link, falling back to the current origin when
- * the backend has no FRONTEND_BASE_URL configured (dev). */
-export function acceptUrlFor(result: InviteResult): string {
-  if (result.accept_url) return result.accept_url;
-  const origin = typeof window === 'undefined' ? '' : window.location.origin;
-  return `${origin}${result.accept_path}`;
-}
-
 export const invitationsApi = {
   create: (input: InviteInput) => api.post<InviteResult>('/invitations', { json: input }),
 
@@ -64,7 +55,8 @@ export const invitationsApi = {
       signal: opts?.signal,
     }),
 
-  revoke: (id: string) => api.post<Invitation>(`/invitations/${id}/revoke`),
+  /** Hard-deletes the invitation + reserved identity (204 No Content). */
+  revoke: (id: string) => api.post<void>(`/invitations/${id}/revoke`),
 
   resend: (id: string) => api.post<InviteResult>(`/invitations/${id}/resend`),
 };

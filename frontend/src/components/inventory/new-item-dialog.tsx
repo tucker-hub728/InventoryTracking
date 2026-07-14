@@ -1,7 +1,9 @@
 'use client';
 
 import * as React from 'react';
-import { toast } from 'sonner';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
 
 import {
   Dialog,
@@ -15,149 +17,499 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
+import { toast } from '@/components/ui/sonner';
+import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
-import { itemsApi, type ApiItem } from '@/lib/api/items';
+import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
+import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
+
+import { SupplierMultiSelect } from './supplier-multi-select';
+
+/** Strip a re-typed category prefix off the SKU tail (so "CR-001" → "001",
+ *  not "CR-CR-001"). Prefixes are alphanumeric, safe to inline in the regex. */
+function skuTail(prefix: string, raw: string): string {
+  return raw.trim().replace(new RegExp(`^${prefix}-?`, 'i'), '');
+}
+
+// ── Form schema ────────────────────────────────────────────────────────
+
+const schema = z.object({
+  // Free-form item number — any non-blank code the operator issues
+  // (e.g. CM-0001, CM-0001A, REF-017). Per docs/modules/inventory.md §3.1
+  // the only backend rule is uniqueness, so we just trim, require non-blank
+  // and cap the length to match the server contract.
+  itemId: z
+    .string()
+    .trim()
+    .min(1, 'Item # is required')
+    .max(64, 'Item # must be at most 64 characters'),
+  desc: z.string().min(3, 'Description is required'),
+  // Required category — governs whether the item is a Product (built) or
+  // Purchased, and thus BOM eligibility.
+  categoryId: z.string().min(1, 'Category is required'),
+  // Free-text unit of measure (each, mL, box …). Optional.
+  uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
+  // Blind-consumed, no per-lot traceability.
+  isConsumable: z.boolean().default(false),
+  // Assigned suppliers — zero-or-more. The only suppliers this item can later be
+  // received against. Optional: an item may start with none and add later.
+  supplierIds: z.array(z.string()).default([]),
+  leadDays: z.coerce.number().int().nonnegative('Must be ≥ 0'),
+  threshold: z.coerce.number().int().nonnegative('Must be ≥ 0'),
+  nearExpiryThresholdDays: z.coerce
+    .number()
+    .int()
+    .nonnegative('Must be ≥ 0')
+    .max(3650, 'Must be ≤ 3650'),
+});
+
+type Values = z.infer<typeof schema>;
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: (item: ApiItem) => void;
+  /** Called after a successful create (in addition to the toast). Lets a
+   *  host list refresh itself — the inventory list relies on the store
+   *  refetch instead and omits this. */
+  onCreated?: () => void;
+  /** When set, the category is fixed to this one and the picker is read-only.
+   *  Used by the per-tier sections (e.g. Raw Materials) where the category is
+   *  implied by the page, not chosen by the operator. */
+  lockedCategory?: ApiCategory | null;
+  /** Dialog title override (defaults to "New inventory item"). */
+  title?: string;
+  /** Short line under the title (e.g. the SKU-prefix hint on a tier page). */
+  description?: React.ReactNode;
+  /** Submit-button label override (defaults to "Create item"). */
+  submitLabel?: string;
 }
 
-const EMPTY = {
-  code_suffix: '',
-  item_name: '',
-  description: '',
-  unit_of_measure: '',
-  is_consumable: false,
-};
+export function NewItemDialog({
+  open,
+  onOpenChange,
+  onCreated,
+  lockedCategory,
+  title,
+  description,
+  submitLabel,
+}: Props) {
+  // Store actions — the only thing this component does for I/O.
+  const createItem = useInventoryStore((s) => s.create);
+  const createPending = useInventoryStore((s) => s.createPending);
 
-/** SKU is always CR-prefixed for the raw-material tier. */
-const PREFIX = 'CR-';
+  // Supplier dropdown source. Loaded once when the dialog opens — the
+  // master-data list is small (≤ ~100 rows) and changes rarely, so a
+  // simple on-open fetch beats wiring it into the store.
+  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
+  const [suppliersLoading, setSuppliersLoading] = React.useState(false);
+  const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
 
-export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
-  const [form, setForm] = React.useState({ ...EMPTY });
-  const [saving, setSaving] = React.useState(false);
+  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
 
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
+
+  const {
+    register,
+    handleSubmit,
+    setValue,
+    watch,
+    reset,
+    formState: { errors, isSubmitting },
+  } = useForm<Values>({
+    resolver: zodResolver(schema),
+    defaultValues: {
+      itemId: '',
+      desc: '',
+      categoryId: lockedCategory?.id ?? '',
+      uom: '',
+      isConsumable: false,
+      supplierIds: [],
+      leadDays: 0,
+      threshold: 0,
+      nearExpiryThresholdDays: 30,
+    },
+  });
+
+  const supplierIds = watch('supplierIds');
+  const categoryId = watch('categoryId');
+  const isConsumable = watch('isConsumable');
+  const itemId = watch('itemId');
+
+  // When the category is locked (e.g. Raw Materials), the SKU is always
+  // prefixed with the category prefix; the operator only types the tail.
+  const skuPrefix = lockedCategory?.prefix ?? '';
+  const fullSku = lockedCategory
+    ? `${skuPrefix}-${skuTail(skuPrefix, itemId)}`
+    : itemId;
+
+  // Purchasing fields (suppliers, lead time, reorder + near-expiry) only apply to
+  // Purchased categories — a Product is built, not bought. Shown once a
+  // Purchased category is picked; hidden for Product / before a pick.
+  const selectedCategory =
+    lockedCategory ?? categories.find((c) => c.id === categoryId);
+  const showPurchasing = selectedCategory?.kind === 'purchased';
+
+  // ── Side effects ─────────────────────────────────────────────────────
+
+  // Load suppliers once when the dialog opens.
   React.useEffect(() => {
-    if (open) setForm({ ...EMPTY });
+    if (!open) return;
+    const ctrl = new AbortController();
+    setSuppliersLoading(true);
+    setSuppliersError(null);
+    suppliersApi
+      .list({ activeOnly: true, signal: ctrl.signal })
+      .then((rows) => setSuppliers(rows))
+      .catch((err) => {
+        if ((err as DOMException)?.name === 'AbortError') return;
+        setSuppliersError(
+          err instanceof ApiError ? err.message : 'Failed to load suppliers.',
+        );
+      })
+      .finally(() => setSuppliersLoading(false));
+    return () => ctrl.abort();
   }, [open]);
 
-  const patch = (p: Partial<typeof EMPTY>) => setForm((f) => ({ ...f, ...p }));
-
-  const suffix = form.code_suffix.trim();
-  const fullSku = `${PREFIX}${suffix}`;
-  const valid = Boolean(suffix && form.item_name.trim() && form.unit_of_measure.trim());
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!valid || saving) return;
-    setSaving(true);
-    try {
-      const created = await itemsApi.create({
-        item_code: fullSku,
-        item_name: form.item_name.trim(),
-        description: form.description.trim() || null,
-        tier: 'CR',
-        is_consumable: form.is_consumable,
-        // Units are stored lower-case for consistency (e.g. "each", "ml", "box").
-        unit_of_measure: form.unit_of_measure.trim().toLowerCase(),
-        track_expiry: false,
+  // Load categories once when the dialog opens — skipped when the category is
+  // fixed by the host page (no picker to populate).
+  React.useEffect(() => {
+    if (!open || lockedCategory) return;
+    const ctrl = new AbortController();
+    categoriesApi
+      .list({ signal: ctrl.signal })
+      .then(setCategories)
+      .catch(() => {
+        /* surfaced via the empty dropdown */
       });
-      onCreated(created);
+    return () => ctrl.abort();
+  }, [open, lockedCategory]);
+
+  // Keep the locked category selected while the dialog is open.
+  React.useEffect(() => {
+    if (open && lockedCategory) {
+      setValue('categoryId', lockedCategory.id, { shouldValidate: true });
+    }
+  }, [open, lockedCategory, setValue]);
+
+  // Reset the form when the dialog closes.
+  React.useEffect(() => {
+    if (!open) {
+      reset({
+        itemId: '',
+        desc: '',
+        categoryId: lockedCategory?.id ?? '',
+        uom: '',
+        isConsumable: false,
+        supplierIds: [],
+        leadDays: 0,
+        threshold: 0,
+        nearExpiryThresholdDays: 30,
+      });
+      setSubmitError(null);
+    }
+  }, [open, reset, lockedCategory]);
+
+  // ── Submit ───────────────────────────────────────────────────────────
+
+  const onSubmit = async (data: Values): Promise<void> => {
+    setSubmitError(null);
+    try {
+      const created = await createItem({
+        item_number: lockedCategory
+          ? `${skuPrefix}-${skuTail(skuPrefix, data.itemId)}`
+          : data.itemId,
+        description: data.desc,
+        category_id: data.categoryId,
+        uom: data.uom ? data.uom : null,
+        is_consumable: data.isConsumable,
+        supplier_ids: data.supplierIds,
+        avg_lead_days: data.leadDays,
+        reorder_threshold: data.threshold,
+        near_expiry_threshold_days: data.nearExpiryThresholdDays,
+      });
+      toast.success(lockedCategory ? 'Raw material created' : 'Item created', {
+        description: `${created.id} · ${created.desc}`,
+      });
+      onCreated?.();
+      onOpenChange(false);
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Failed to create raw material.');
-    } finally {
-      setSaving(false);
+      if (err instanceof ApiError) {
+        if (err.code === 'item_number_conflict') {
+          setSubmitError(
+            `${data.itemId} is already in use. Re-open the dialog or pick a different number.`,
+          );
+          return;
+        }
+        if (err.code === 'request_invalid' || err.code === 'item_number_invalid') {
+          setSubmitError(err.message);
+          return;
+        }
+        setSubmitError(err.message);
+        return;
+      }
+      setSubmitError('Failed to create item. Please try again.');
     }
   };
 
+  // Local "is something in flight" — the dialog's button + cancel
+  // disabled state.
+  const busy = isSubmitting || createPending;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <form onSubmit={submit}>
+      <DialogContent className="max-w-2xl">
+        <form onSubmit={handleSubmit(onSubmit)}>
           <DialogHeader>
-            <DialogTitle>New Raw Material</DialogTitle>
-            <DialogDescription>
-              Create a new raw material (CR tier). SKU is auto-prefixed with CR-.
-            </DialogDescription>
+            <DialogTitle>{title ?? 'New inventory item'}</DialogTitle>
+            {description && <DialogDescription>{description}</DialogDescription>}
           </DialogHeader>
-          <DialogBody className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="item_code">SKU</Label>
-              <div className="flex items-stretch overflow-hidden rounded-md border border-border focus-within:ring-2 focus-within:ring-accent">
-                <span className="flex select-none items-center border-r border-border bg-surface-2 px-3 text-sm text-text-2">
-                  {PREFIX}
-                </span>
-                <input
-                  id="item_code"
-                  value={form.code_suffix}
-                  onChange={(e) => patch({ code_suffix: e.target.value })}
-                  placeholder="001"
-                  autoFocus
-                  className="w-full bg-transparent px-3 py-2 text-sm outline-none placeholder:text-text-3"
+          <DialogBody className="space-y-5">
+            {lockedCategory && (
+              <div>
+                <Badge tone="neutral">{lockedCategory.name}</Badge>
+              </div>
+            )}
+            <div
+              className={
+                lockedCategory
+                  ? 'space-y-5'
+                  : 'grid gap-4 sm:grid-cols-[200px_1fr]'
+              }
+            >
+              <Field
+                id="ni-itemId"
+                label={lockedCategory ? 'SKU' : 'Item #'}
+                error={errors.itemId?.message}
+              >
+                {lockedCategory ? (
+                  <>
+                    <div className="flex">
+                      <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
+                        {skuPrefix}-
+                      </span>
+                      <Input
+                        id="ni-itemId"
+                        placeholder="001"
+                        className="rounded-l-none font-mono"
+                        aria-invalid={Boolean(errors.itemId)}
+                        {...register('itemId')}
+                      />
+                    </div>
+                    <p className="text-xs text-text-3">
+                      Full SKU: <span className="font-mono text-text-2">{fullSku}</span>
+                    </p>
+                  </>
+                ) : (
+                  <Input
+                    id="ni-itemId"
+                    placeholder={
+                      selectedCategory
+                        ? `e.g. ${selectedCategory.prefix}-0001`
+                        : 'e.g. UR-0001'
+                    }
+                    className="font-mono"
+                    aria-invalid={Boolean(errors.itemId)}
+                    {...register('itemId')}
+                  />
+                )}
+              </Field>
+              <Field
+                id="ni-desc"
+                label={lockedCategory ? 'Name' : 'Description'}
+                error={errors.desc?.message}
+              >
+                <Input
+                  id="ni-desc"
+                  placeholder="e.g. Medical Tube, PVC 6mm"
+                  aria-invalid={Boolean(errors.desc)}
+                  {...register('desc')}
+                />
+              </Field>
+            </div>
+
+            {!lockedCategory && (
+              <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
+                <Select
+                  value={categoryId}
+                  onValueChange={(v) =>
+                    setValue('categoryId', v, { shouldValidate: true })
+                  }
+                >
+                  <SelectTrigger id="ni-category" aria-label="Category">
+                    <SelectValue placeholder="Pick a category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {categories.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        <span className="flex items-center gap-2">
+                          <span className="truncate">{c.name}</span>
+                          <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
+                            {c.kind === 'built' ? 'Product' : 'Purchased'}
+                          </Badge>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-text-3">
+                  The category decides whether this is a Product (can have a BOM) or
+                  a Purchased item. Manage the BOM from the item&apos;s detail page.
+                </p>
+              </Field>
+            )}
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
+                <Input
+                  id="ni-uom"
+                  placeholder="each, mL, box…"
+                  aria-invalid={Boolean(errors.uom)}
+                  {...register('uom')}
+                />
+              </Field>
+              <div className="flex items-center justify-between gap-4 self-end rounded-md border border-border bg-surface px-3 py-2">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ni-consumable">Consumable</Label>
+                  <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+                </div>
+                <Switch
+                  id="ni-consumable"
+                  checked={isConsumable}
+                  onCheckedChange={(v) => setValue('isConsumable', v)}
                 />
               </div>
-              {suffix && (
-                <p className="text-xs text-text-3">
-                  Full SKU: <span className="font-mono">{fullSku}</span>
-                </p>
-              )}
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="item_name">Name</Label>
-              <Input
-                id="item_name"
-                value={form.item_name}
-                onChange={(e) => patch({ item_name: e.target.value })}
-                placeholder="Medical Tube, PVC 6mm"
+
+            {showPurchasing && (
+              <>
+            <Field
+              id="ni-suppliers"
+              label="Suppliers"
+              error={errors.supplierIds?.message}
+            >
+              <SupplierMultiSelect
+                id="ni-suppliers"
+                modal
+                suppliers={suppliers}
+                value={supplierIds}
+                onChange={(next) =>
+                  setValue('supplierIds', next, { shouldValidate: true })
+                }
+                loading={suppliersLoading}
+                error={suppliersError}
               />
+              <p className="text-xs text-text-3">
+                Only these suppliers can be selected when receiving stock for this
+                item.
+              </p>
+            </Field>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
+                <Input
+                  id="ni-lead"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  {...register('leadDays')}
+                />
+              </Field>
+              <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
+                <Input
+                  id="ni-thr"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  placeholder="e.g. 5"
+                  {...register('threshold')}
+                />
+              </Field>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="item_desc">Description</Label>
-              <Textarea
-                id="item_desc"
-                value={form.description}
-                onChange={(e) => patch({ description: e.target.value })}
-                placeholder="Optional notes about this material"
-                rows={2}
-              />
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field
+                id="ni-near-expiry"
+                label="Near expiry threshold (days)"
+                error={errors.nearExpiryThresholdDays?.message}
+              >
+                <Input
+                  id="ni-near-expiry"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={3650}
+                  step={1}
+                  placeholder="e.g. 30"
+                  {...register('nearExpiryThresholdDays')}
+                />
+              </Field>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="uom">Unit</Label>
-              <Input
-                id="uom"
-                value={form.unit_of_measure}
-                onChange={(e) => patch({ unit_of_measure: e.target.value })}
-                placeholder="each, mL, box…"
-              />
-            </div>
-            <div className="flex items-center justify-between rounded-md border border-border px-3 py-2.5">
-              <div>
-                <Label htmlFor="is_consumable" className="cursor-pointer">
-                  Consumable
-                </Label>
-                <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
-              </div>
-              <Switch
-                id="is_consumable"
-                checked={form.is_consumable}
-                onCheckedChange={(v) => patch({ is_consumable: v })}
-              />
-            </div>
+              </>
+            )}
+
+            <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
+              {showPurchasing
+                ? 'After creating, you’ll be able to record the first unit in to bring the item into stock. The item is initially created with zero balance.'
+                : 'After creating, open the item’s detail page to define its bill of materials. The item is initially created with zero balance.'}
+            </p>
+
+            {submitError && (
+              <p
+                role="alert"
+                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
+              >
+                {submitError}
+              </p>
+            )}
           </DialogBody>
           <DialogFooter>
-            <Button type="button" onClick={() => onOpenChange(false)}>
+            <Button
+              type="button"
+              variant="default"
+              onClick={() => onOpenChange(false)}
+              disabled={busy}
+            >
               Cancel
             </Button>
-            <Button type="submit" variant="primary" disabled={!valid || saving}>
-              {saving ? 'Creating…' : 'Create Raw Material'}
+            <Button type="submit" variant="primary" disabled={busy}>
+              {busy ? 'Creating…' : (submitLabel ?? 'Create item')}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function Field({
+  id,
+  label,
+  error,
+  children,
+}: {
+  id: string;
+  label: string;
+  error?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      {children}
+      {error && (
+        <p role="alert" className="text-xs text-danger">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }

@@ -4,7 +4,8 @@ import { create } from 'zustand';
 
 import type { AuthedUser, RoleId } from '@/types/auth';
 import type { SessionUser } from '@/lib/auth/types';
-import { buildAuthedUser, ROLES } from '@/lib/permissions';
+import { buildAuthedUser } from '@/lib/permissions';
+import { mockData } from '@/lib/mock-data';
 
 /**
  * Auth store.
@@ -13,6 +14,10 @@ import { buildAuthedUser, ROLES } from '@/lib/permissions';
  * NEVER touched by this code. The store only holds the projected
  * ``AuthedUser`` we display in the UI. Hydration runs once on mount via
  * ``hydrate()`` which calls ``GET /api/auth/me``.
+ *
+ * The ``switchRole`` action is a *display-only* demo affordance — it
+ * rebinds permissions client-side but doesn't change the backend role.
+ * It's preserved so the topbar role-switcher continues to work for QA.
  */
 
 interface AuthState {
@@ -31,10 +36,9 @@ interface AuthState {
   clear: () => void;
 }
 
-const DEFAULT_ROLE: RoleId = 'operator';
-
 function authedUserFromSession(session: SessionUser, roleId: RoleId): AuthedUser {
-  const role = ROLES[roleId] ?? ROLES[DEFAULT_ROLE];
+  const role =
+    mockData.roles.find((r) => r.id === roleId) ?? mockData.roles[0]!;
   return buildAuthedUser(
     {
       id: session.sub,
@@ -51,7 +55,7 @@ function authedUserFromSession(session: SessionUser, roleId: RoleId): AuthedUser
 
 export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
-  roleId: DEFAULT_ROLE,
+  roleId: 'viewer',
   hydrated: false,
 
   hydrate: async () => {
@@ -91,14 +95,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   switchRole: (roleId) => {
     const current = get().user;
     if (!current) return;
-    const role = ROLES[roleId] ?? ROLES[DEFAULT_ROLE];
+    const role =
+      mockData.roles.find((r) => r.id === roleId) ?? mockData.roles[0]!;
     set({
       user: buildAuthedUser({ ...current, role: roleId }, role),
       roleId,
     });
   },
 
-  clear: () => set({ user: null, roleId: DEFAULT_ROLE }),
+  clear: () => set({ user: null, roleId: 'viewer' }),
 }));
 
 export const selectUser = (s: AuthState) => s.user;

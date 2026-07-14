@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { RotateCw, Ban } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/components/ui/sonner';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -29,7 +29,6 @@ import { Pagination, usePagination } from '@/components/ui/pagination';
 import type { BadgeTone } from '@/types/ui';
 import { ApiError } from '@/lib/api/client';
 import {
-  acceptUrlFor,
   invitationsApi,
   type Invitation,
   type InviteStatus,
@@ -40,6 +39,7 @@ const ROLE_LABEL: Record<string, string> = {
   super_admin: 'Super Admin',
   admin: 'Admin',
   operator: 'Operator',
+  read_only: 'Read-Only',
 };
 
 const STATUS_TONE: Record<InviteStatus, BadgeTone> = {
@@ -64,14 +64,18 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
-  const [revealed, setRevealed] = React.useState<{ email: string; link: string } | null>(null);
+  const [revealed, setRevealed] = React.useState<{ email: string; tempPassword: string } | null>(
+    null,
+  );
   const pg = usePagination(invites, 10);
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
     try {
-      setInvites(await invitationsApi.list({ signal }));
+      // Only pending invitations belong here — accepted users appear under
+      // Active Members, and revoked ones are hard-deleted.
+      setInvites(await invitationsApi.list({ status: 'pending', signal }));
     } catch (err) {
       if ((err as DOMException)?.name === 'AbortError') return;
       setError(err instanceof ApiError ? err.message : 'Failed to load invitations.');
@@ -90,7 +94,11 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
     setBusyId(invite.id);
     try {
       const result = await invitationsApi.resend(invite.id);
-      setRevealed({ email: result.email, link: acceptUrlFor(result) });
+      // In dev the temp password comes back for testing; in prod Cognito emails it.
+      if (result.temporary_password) {
+        setRevealed({ email: result.email, tempPassword: result.temporary_password });
+      }
+      toast.success(`A fresh temporary password was sent to ${result.email}.`);
       await load();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Failed to resend invitation.');
@@ -102,15 +110,16 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
   const revoke = async (invite: Invitation) => {
     const ok = await confirm({
       title: 'Revoke invitation?',
-      description: `${invite.email} will no longer be able to use their link. You can invite them again later.`,
+      description: `This deletes ${invite.email}'s reserved account and their invite. You can invite them again later.`,
       confirmLabel: 'Revoke',
       destructive: true,
     });
     if (!ok) return;
     setBusyId(invite.id);
     try {
-      const updated = await invitationsApi.revoke(invite.id);
-      setInvites((list) => list.map((i) => (i.id === invite.id ? updated : i)));
+      await invitationsApi.revoke(invite.id);
+      // Revoke hard-deletes the invitation, so drop it from the list.
+      setInvites((list) => list.filter((i) => i.id !== invite.id));
       toast.success(`Invitation for ${invite.email} revoked`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Failed to revoke invitation.');
@@ -127,11 +136,7 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
     return <div className="px-5 py-10 text-center text-sm text-danger">{error}</div>;
   }
   if (invites.length === 0) {
-    return (
-      <div className="px-5 py-10 text-center text-sm text-text-3">
-        No invitations yet.
-      </div>
-    );
+    return <div className="px-5 py-10 text-center text-sm text-text-3">No invitations yet.</div>;
   }
 
   return (
@@ -209,21 +214,21 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
         noun="invitation"
       />
 
-      {/* Fresh link reveal after a resend. */}
+      {/* Fresh temp-password reveal after a resend (dev only). */}
       <Dialog open={revealed !== null} onOpenChange={(o) => !o && setRevealed(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>New link ready</DialogTitle>
+            <DialogTitle>New temporary password</DialogTitle>
             <DialogDescription>
-              Send this new one-time link to{' '}
-              <strong className="text-text">{revealed?.email}</strong>. The previous link no longer
-              works.
+              A fresh temporary password was sent to{' '}
+              <strong className="text-text">{revealed?.email}</strong>. The previous one no longer
+              works. Shown here only in development, where email isn’t delivered.
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
             <div className="space-y-1.5">
-              <Label htmlFor="resend-link">Accept link</Label>
-              {revealed && <CopyableLink id="resend-link" value={revealed.link} />}
+              <Label htmlFor="resend-temp-pw">Temporary password</Label>
+              {revealed && <CopyableLink id="resend-temp-pw" value={revealed.tempPassword} />}
             </div>
           </DialogBody>
           <DialogFooter>

@@ -1,11 +1,11 @@
 import type { Metadata } from 'next';
 
-import { ItemsPageClient } from '@/components/inventory/items-page-client';
+import { RawMaterialListClient } from '@/components/inventory/raw-material-list-client';
 
 export const metadata: Metadata = {
-  title: 'Raw Material Inventory (CR)',
+  title: 'Raw Materials',
 };
 
-export default function CrInventoryPage() {
-  return <ItemsPageClient />;
+export default function RawMaterialsPage() {
+  return <RawMaterialListClient />;
 }

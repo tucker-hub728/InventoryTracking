@@ -75,7 +75,7 @@ export function Sidebar() {
             )}
             <ul className="space-y-0.5">
               {section.items.map((item) => {
-                if (item.resource && !can(user, item.resource, 'view')) {
+                if (item.resource && !can(user, item.resource as 'inventory', 'view')) {
                   return null;
                 }
                 const active =

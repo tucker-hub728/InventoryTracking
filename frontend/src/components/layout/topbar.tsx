@@ -8,6 +8,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Shield,
   Sun,
 } from 'lucide-react';
 
@@ -19,10 +20,7 @@ import { useAuthStore } from '@/stores/auth.store';
 import { useUIStore } from '@/stores/ui.store';
 import { useNotificationsStore, selectUnreadCount } from '@/stores/notifications.store';
 import { useNotificationsFeed } from '@/hooks/use-notifications-feed';
-
-// Theme toggle, notifications, and sign-out are hidden from the topbar for now
-// (sign-out remains available from the sidebar user menu). Flip to restore.
-const SHOW_TOPBAR_ACTIONS = false;
+import { env } from '@/env';
 
 export function Topbar() {
   useNotificationsFeed();
@@ -70,9 +68,12 @@ export function Topbar() {
             {sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           </TooltipContent>
         </Tooltip>
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-text-3">
+          <Shield size={13} aria-hidden />
+          <span className="truncate">{env.ENV_LABEL}</span>
+        </span>
       </div>
 
-      {SHOW_TOPBAR_ACTIONS && (
       <div className="flex items-center gap-1.5">
         {/* Theme toggle */}
         <Tooltip>
@@ -138,7 +139,6 @@ export function Topbar() {
           </Tooltip>
         )}
       </div>
-      )}
     </header>
   );
 }

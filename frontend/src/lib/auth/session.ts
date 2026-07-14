@@ -18,22 +18,11 @@ import { mapBackendRoleToRoleId } from './role-map';
 import type { BackendMe, BackendTokens, SessionUser } from './types';
 
 export function toSessionUser(me: BackendMe): SessionUser {
-  // Build the display name from first/last, then email — never the Cognito
-  // username (which is the UUID in prod).
-  const fullName =
-    `${me.first_name ?? ''} ${me.last_name ?? ''}`.trim() || me.email || me.username;
-  const initials =
-    fullName
-      .split(/\s+/)
-      .map((part) => part[0] ?? '')
-      .slice(0, 2)
-      .join('')
-      .toUpperCase() || fullName.slice(0, 2).toUpperCase();
   return {
     sub: me.sub,
     email: me.email ?? me.username,
-    fullName,
-    initials,
+    fullName: me.full_name ?? me.username,
+    initials: (me.initials ?? me.username.slice(0, 2)).toUpperCase(),
     rawRole: me.role ?? 'viewer',
     roleId: mapBackendRoleToRoleId(me.role),
   };
@@ -61,9 +50,6 @@ export async function readSession(): Promise<ReadSessionResult> {
   if (at) {
     try {
       const me = await backend.me(at);
-      // A since-deactivated account still has valid tokens but must be treated
-      // as logged out so the app-shell bounces them to /login.
-      if (me.is_active === false) return { user: null };
       return { user: toSessionUser(me) };
     } catch (err) {
       if (!(err instanceof BackendError) || err.status !== 401) throw err;
@@ -81,7 +67,6 @@ export async function readSession(): Promise<ReadSessionResult> {
     throw err;
   }
   const me = await backend.me(fresh.access_token);
-  if (me.is_active === false) return { user: null };
   return { user: toSessionUser(me), refreshedTokens: fresh };
 }
 

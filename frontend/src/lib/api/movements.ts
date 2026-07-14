@@ -1,0 +1,127 @@
+/**
+ * Movements API — read-only view of the GxP ledger (``/api/v1/movements``
+ * and the per-item ``/items/{id}/ledger``).
+ *
+ * Quantity movements (unit-IN / transfer / unit-OUT) are written by the
+ * Location System (``location-nodes.ts``: place / transfer / consume); this
+ * client only reads the resulting ledger rows for the audit / ledger views.
+ *
+ * Numeric fields are JSON strings (Postgres NUMERIC); the per-row adapter
+ * (``movements-adapter.ts``) turns them into numbers before the table renders.
+ */
+
+import { api } from './client';
+
+export type MovementType =
+  | 'receipt'
+  | 'dispense'
+  | 'adjustment'
+  | 'discard'
+  | 'transfer_out'
+  | 'transfer_in';
+
+/** Display labels — keep aligned with the backend ``MovementType`` enum. */
+export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
+  receipt: 'Unit in',
+  dispense: 'Unit out',
+  adjustment: 'Adjustment',
+  discard: 'Discard',
+  transfer_out: 'Transfer out',
+  transfer_in: 'Transfer in',
+};
+
+/** Sign of the qty_delta enforced by each type — useful for colouring the row. */
+export const MOVEMENT_TYPE_SIGN: Record<MovementType, 'in' | 'out' | 'signed'> = {
+  receipt: 'in',
+  transfer_in: 'in',
+  dispense: 'out',
+  discard: 'out',
+  transfer_out: 'out',
+  adjustment: 'signed',
+};
+
+export interface ApiMovement {
+  id: string;
+  item_id: string;
+  item_number: string | null;
+  item_description: string | null;
+
+  lot_id: string | null;
+  lot_number: string | null;
+  /** Lot expiry (ISO date) — surfaced in the ledger's Expiry column. */
+  lot_expiration_date: string | null;
+
+  /** Location System node references + resolved name / breadcrumb path. */
+  from_location_node_id: string | null;
+  from_location_node_name: string | null;
+  from_location_node_path: string | null;
+  to_location_node_id: string | null;
+  to_location_node_name: string | null;
+  to_location_node_path: string | null;
+
+  movement_type: MovementType;
+  /** Signed integer — ``+50`` / ``-3``. */
+  qty_delta: number;
+  /** Unsigned integer — what the operator entered. */
+  qty_abs: number;
+
+  /** Mandatory §3 comment. */
+  notes: string | null;
+
+  /** FK into ``audit.reauth_events`` — the audit viewer fetches the
+   *  signature image via ``signatureImageUrl(reauth_evidence_id)``. */
+  reauth_evidence_id: string | null;
+
+  performed_by_user_id: string;
+  performed_by_user_name: string | null;
+  performed_by_user_email: string | null;
+  performed_at: string;
+  created_at: string;
+}
+
+export interface ApiMovementListResponse {
+  items: ApiMovement[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ListMovementsParams {
+  itemId?: string;
+  lotId?: string;
+  /** Filter to movements touching a storage node (from OR to). */
+  locationNodeId?: string;
+  type?: MovementType;
+  limit?: number;
+  offset?: number;
+}
+
+export const movementsApi = {
+  list: (params: ListMovementsParams = {}, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiMovementListResponse>('/movements', {
+      query: {
+        item_id: params.itemId,
+        lot_id: params.lotId,
+        location_node_id: params.locationNodeId,
+        type: params.type,
+        limit: params.limit,
+        offset: params.offset,
+      },
+      signal: opts?.signal,
+    }),
+
+  /**
+   * Per-item ledger. The backend 404s when the item doesn't exist
+   * (instead of returning an empty list), so callers can distinguish
+   * "no movements yet" from "wrong item ID."
+   */
+  listForItem: (
+    itemId: string,
+    params: { limit?: number; offset?: number } = {},
+    opts?: { signal?: AbortSignal },
+  ) =>
+    api.get<ApiMovementListResponse>(`/items/${itemId}/ledger`, {
+      query: { limit: params.limit, offset: params.offset },
+      signal: opts?.signal,
+    }),
+};

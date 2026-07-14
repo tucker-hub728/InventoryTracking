@@ -9,7 +9,7 @@
 // Server-only by convention — uses serverEnv values that are not exposed
 // to the browser. Never import from a client component.
 import { serverEnv } from '@/env';
-import type { BackendInvitePublic, BackendMe, BackendTokens } from './types';
+import type { BackendLoginResult, BackendMe, BackendTokens } from './types';
 
 export class BackendError extends Error {
   constructor(
@@ -59,8 +59,10 @@ async function call<T>(
 }
 
 export const backend = {
+  /** Returns tokens on success, or a NEW_PASSWORD_REQUIRED challenge when an
+   * invited user signs in with their temporary password. */
   login: (email: string, password: string) =>
-    call<BackendTokens>('/auth/login', {
+    call<BackendLoginResult>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
@@ -76,18 +78,12 @@ export const backend = {
       headers: { Authorization: `Bearer ${accessToken}` },
     }),
 
-  /** Public: resolve an invite link's non-sensitive details for the accept page.
-   * POST (token in body) so the raw token stays out of access logs. */
-  resolveInvite: (token: string) =>
-    call<BackendInvitePublic>('/invitations/resolve', {
+  /** Public — complete the first-login NEW_PASSWORD_REQUIRED challenge. ``session``
+   * is the challenge token from login; ``password`` is the invitee's chosen one.
+   * Returns a fresh token set so the BFF can mint a session, same as login. */
+  setPassword: (input: { email: string; session: string; password: string }) =>
+    call<BackendTokens>('/auth/set-password', {
       method: 'POST',
-      body: JSON.stringify({ token }),
-    }),
-
-  /** Public: accept an invite (set password) and receive a fresh token set. */
-  acceptInvite: (token: string, password: string) =>
-    call<BackendTokens>('/auth/accept-invite', {
-      method: 'POST',
-      body: JSON.stringify({ token, password }),
+      body: JSON.stringify(input),
     }),
 };

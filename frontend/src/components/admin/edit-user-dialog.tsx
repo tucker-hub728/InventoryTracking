@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { toast } from 'sonner';
+import { toast } from '@/components/ui/sonner';
 
 import {
   Dialog,
@@ -25,12 +25,13 @@ import {
 } from '@/components/ui/select';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import { ApiError } from '@/lib/api/client';
-import { usersApi, type ApiUser, type RoleId, type UserUpdateInput } from '@/lib/api/users';
+import { usersApi, type ApiUser, type AssignableRole, type UserUpdateInput } from '@/lib/api/users';
 
-// Only admin/operator are assignable — super_admin is a fixed singleton.
-const ROLE_OPTIONS: { value: RoleId; label: string }[] = [
+// Only admin/operator/read_only are assignable — super_admin is a fixed singleton.
+const ROLE_OPTIONS: { value: AssignableRole; label: string }[] = [
   { value: 'admin', label: 'Admin' },
   { value: 'operator', label: 'Operator' },
+  { value: 'read_only', label: 'Read-Only' },
 ];
 
 const roleLabel = (role: string) =>
@@ -47,18 +48,16 @@ interface Props {
 
 export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
   const { confirm, confirmDialog } = useConfirm();
-  const [firstName, setFirstName] = React.useState('');
-  const [lastName, setLastName] = React.useState('');
-  const [role, setRole] = React.useState<RoleId>('operator');
+  const [fullName, setFullName] = React.useState('');
+  const [role, setRole] = React.useState<AssignableRole>('read_only');
   const [active, setActive] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
 
   // Seed the form from the selected user each time the dialog opens.
   React.useEffect(() => {
     if (open && user) {
-      setFirstName(user.first_name);
-      setLastName(user.last_name);
-      setRole(user.role as RoleId);
+      setFullName(user.full_name);
+      setRole((user.role as AssignableRole) ?? 'read_only');
       setActive(user.is_active);
     }
   }, [open, user]);
@@ -67,15 +66,14 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
 
   // Super admins keep their role + status here — only their name is editable.
   const isSuperAdmin = user.role === 'super_admin';
-  const nameValid = Boolean(firstName.trim() && lastName.trim());
+  const nameValid = Boolean(fullName.trim());
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nameValid || saving) return;
 
     const changes: UserUpdateInput = {};
-    if (firstName.trim() !== user.first_name) changes.first_name = firstName.trim();
-    if (lastName.trim() !== user.last_name) changes.last_name = lastName.trim();
+    if (fullName.trim() !== user.full_name) changes.full_name = fullName.trim();
     if (!isSuperAdmin) {
       if (role !== user.role) changes.role = role;
       if (active !== user.is_active) changes.is_active = active;
@@ -123,24 +121,14 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
               </DialogDescription>
             </DialogHeader>
             <DialogBody className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="edit-first">First name</Label>
-                  <Input
-                    id="edit-first"
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    autoFocus
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="edit-last">Last name</Label>
-                  <Input
-                    id="edit-last"
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                  />
-                </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-name">Full name</Label>
+                <Input
+                  id="edit-name"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  autoFocus
+                />
               </div>
 
               <div className="space-y-1.5">
@@ -155,7 +143,7 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
                   // The single super admin's role can't be changed here.
                   <Input id="edit-role" value="Super Admin" disabled readOnly />
                 ) : (
-                  <Select value={role} onValueChange={(v) => setRole(v as RoleId)}>
+                  <Select value={role} onValueChange={(v) => setRole(v as AssignableRole)}>
                     <SelectTrigger id="edit-role" aria-label="Role">
                       <SelectValue />
                     </SelectTrigger>
@@ -178,7 +166,7 @@ export function EditUserDialog({ open, onOpenChange, user, onSaved }: Props) {
                   <p className="text-xs text-text-3">
                     {isSuperAdmin
                       ? 'Super admins can’t be deactivated here.'
-                      : 'Inactive users can’t sign in or use the app.'}
+                      : 'Inactive users can’t sign in or use the app (disabled in Cognito).'}
                   </p>
                 </div>
                 <Switch

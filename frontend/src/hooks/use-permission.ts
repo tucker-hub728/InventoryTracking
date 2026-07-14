@@ -2,10 +2,13 @@
 
 import { useAuthStore } from '@/stores/auth.store';
 import { can } from '@/lib/permissions';
-import type { Action, ResourceKey } from '@/types/auth';
+import type { AuditAction, InventoryAction, ResourceKey, UsersAction } from '@/types/auth';
 
-/** Reactive permission check bound to the current session user. */
-export function usePermission(resource: ResourceKey, action: Action): boolean {
+export function usePermission(resource: 'inventory', action: InventoryAction): boolean;
+export function usePermission(resource: 'users', action: UsersAction): boolean;
+export function usePermission(resource: 'audit', action: AuditAction): boolean;
+export function usePermission(resource: ResourceKey, action: string): boolean {
   const user = useAuthStore((s) => s.user);
-  return can(user, resource, action);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return can(user as any, resource as any, action as any);
 }

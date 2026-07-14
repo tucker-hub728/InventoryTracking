@@ -113,9 +113,26 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub '${ProjectName}-${EnvName}'
-      # Admins create users (admin-create-user); no public self sign-up.
+      # No EmailConfiguration block => Cognito uses its built-in default email
+      # sender (COGNITO_DEFAULT), NOT Amazon SES. That is the intended prod
+      # transport for invitation emails — see backend EMAIL_VIA_APP (false in
+      # prod: Cognito sends the invite; true in local dev: the app sends it to
+      # maildev because cognito-local can't email).
+      #
+      # Admins create users (admin-create-user); no public self sign-up. The
+      # invite message template carries the one-time temporary password the
+      # invitee uses to complete the standard Accept Invitation flow (sign in
+      # with the temp password, then set a new one).
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: "You've been invited to CellReady IMS"
+          EmailMessage: |
+            <p>Hi,</p>
+            <p>You've been invited to CellReady IMS. To finish setting up your account, sign in with your email and the temporary password below, then choose a new password when prompted.</p>
+            <p><strong>Email:</strong> {username}<br/>
+            <strong>Temporary password:</strong> {####}</p>
+            <p>If you weren't expecting this invitation you can ignore this email.</p>
       UsernameAttributes:
         - email
       AutoVerifiedAttributes:

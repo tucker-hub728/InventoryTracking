@@ -25,6 +25,21 @@ from app.models.identity import User
 DBSession = Annotated[AsyncSession, Depends(get_session)]
 
 
+def _assert_active(user: User) -> None:
+    """Block a deactivated (suspended) member from any protected route.
+
+    Disabling a user also disables their Cognito identity, so on real Cognito
+    they can't even mint a token. This is defence in depth for that — and the
+    effective block in local dev, where cognito-local doesn't enforce the
+    disabled flag on ``USER_PASSWORD_AUTH``.
+    """
+    if user.status != "active":
+        raise AuthorizationError(
+            "Your account has been deactivated. Please contact an administrator.",
+            code="account_disabled",
+        )
+
+
 async def resolve_db_user(
     current: CurrentUser,
     db: AsyncSession,
@@ -33,27 +48,22 @@ async def resolve_db_user(
 
     Lazy-provisions on first call (same path as ``/auth/me``) so any
     protected route works for an admin-created user even before they've
-    hit ``/auth/me``. A deactivated account (``is_active=False``) is rejected
-    here so every protected route is locked out — the DB flag is the source of
-    truth even while the Cognito login may still succeed.
+    hit ``/auth/me``.
     """
-    user = await users_repo.get_by_cognito_sub(db, current.sub)
-    if user is None:
-        # First call for an admin-created user — provision from Cognito attrs.
-        fresh = cognito_get_user(access_token=current.access_token)
-        user = await provisioning.provision_from_me(
-            db,
-            cognito_sub=current.sub,
-            cognito_attrs=fresh["attributes"],
-            username=fresh["username"],
-        )
-        if user is None:  # pragma: no cover — provisioning always returns
-            raise NotFoundError("User record not found")
-    if not user.is_active:
-        raise AuthorizationError(
-            "This account has been deactivated.",
-            code="account_inactive",
-        )
+    existing = await users_repo.get_by_cognito_sub(db, current.sub)
+    if existing is not None:
+        _assert_active(existing)
+        return existing
+    # First call for an admin-created user — provision from Cognito attrs.
+    fresh = cognito_get_user(access_token=current.access_token)
+    user = await provisioning.provision_from_me(
+        db,
+        cognito_sub=current.sub,
+        cognito_attrs=fresh["attributes"],
+        username=fresh["username"],
+    )
+    if user is None:  # pragma: no cover — provisioning always returns
+        raise NotFoundError("User record not found")
     return user
 
 

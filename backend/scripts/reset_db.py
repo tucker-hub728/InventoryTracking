@@ -1,14 +1,13 @@
 """Wipe all data from the database while keeping the schema intact.
 
-Post the Week-1 reset the app keeps its tables in the ``app`` schema, with
-only ``alembic_version`` + extensions in ``public``. Both modes below are
-schema-aware and discover schemas dynamically, so any additional module
-schema is still picked up automatically:
+This app spreads its tables across several schemas (``app``, ``meta``,
+``audit``) with only ``alembic_version`` + extensions in ``public``. Both
+modes below are schema-aware and discover schemas dynamically:
 
   * default (TRUNCATE): empties every table across all application schemas
     (RESTART IDENTITY, CASCADE) but leaves ``alembic_version`` alone, so the
     Alembic history stays valid and you do NOT re-run migrations.
-  * ``--schema``: DROPs the application schemas outright (e.g. ``app``) and
+  * ``--schema``: DROPs the application schemas outright (app/meta/audit) and
     resets ``public`` (clearing ``alembic_version``). Extensions are recreated
     idempotently by the first migration, so pair it with ``--migrate`` (or run
     ``alembic upgrade head`` yourself) to rebuild everything from scratch.
@@ -52,8 +51,8 @@ from sqlalchemy import text
 # DB at an unknown migration state and force a full re-migrate.
 _PROTECTED_TABLES = {"alembic_version"}
 
-# Schemas Postgres owns — never dropped/truncated. Everything else (app,
-# public, …) is application-owned and fair game. Discovered dynamically
+# Schemas Postgres owns — never dropped/truncated. Everything else (app, meta,
+# audit, public, …) is application-owned and fair game. Discovered dynamically
 # so new module schemas are picked up automatically.
 _SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
 # Safe to inline: fixed constant of known identifiers, never user input.
@@ -150,7 +149,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schema",
         action="store_true",
-        help="DROP the application schemas (e.g. app) + reset public "
+        help="DROP the application schemas (app/meta/audit) + reset public "
         "instead of TRUNCATE. Wipes alembic_version — pair with --migrate.",
     )
     parser.add_argument(

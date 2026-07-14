@@ -19,13 +19,13 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { AUTH_COOKIES } from '@/lib/auth/cookies';
 
-// Public routes — no auth required.
-const PUBLIC_PATHS = new Set<string>(['/login', '/accept-invite', '/forgot-password']);
+// Public routes — no auth required. ``/set-password`` is where an invited user
+// lands after their first sign-in with a temporary password (they hold the
+// challenge cookie, not a session yet).
+const PUBLIC_PATHS = new Set<string>(['/login', '/set-password', '/forgot-password']);
 
 function isPublic(pathname: string): boolean {
-  if (PUBLIC_PATHS.has(pathname)) return true;
-  // accept-invite uses dynamic segments
-  return pathname.startsWith('/accept-invite/');
+  return PUBLIC_PATHS.has(pathname);
 }
 
 export function middleware(req: NextRequest) {

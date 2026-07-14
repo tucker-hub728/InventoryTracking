@@ -114,11 +114,6 @@ services:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required (see .env.example)}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cellready}:${POSTGRES_PASSWORD:-cellready_dev_only}@postgres:5432/${POSTGRES_DB:-cellready_ims}
       CORS_ALLOW_ORIGINS: http://localhost:${FRONTEND_HOST_PORT:-3000}
-      # Public web origin used to build the accept-invite link the API returns
-      # (there is no invite email — the admin hands over the URL). Defaults to
-      # the dev frontend; set to the CloudFront domain in prod.
-      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:${FRONTEND_HOST_PORT:-3000}}
-      INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-console}
       SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@cellready.local}
@@ -135,6 +130,13 @@ services:
       JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES:-60}
       JWT_ID_TOKEN_TTL_MINUTES: ${JWT_ID_TOKEN_TTL_MINUTES:-60}
       JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS:-30}
+      # ── Invitations ────────────────────────────────────────────────────
+      # Cognito emails the invitee a temporary password (delivered via Amazon
+      # SES when the pool is configured for it in prod). cognito-local can't
+      # send mail, so in dev the temp password is logged and shown in the admin
+      # UI. The backend sends no email of its own — no SMTP config needed.
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:${FRONTEND_HOST_PORT:-3000}}
+      INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
       # ── S3 / MinIO ─────────────────────────────────────────────────────
       # In prod the backend hits real S3 — leave ``S3_ENDPOINT_URL``
       # unset and rely on IAM role creds + region. In dev we point at

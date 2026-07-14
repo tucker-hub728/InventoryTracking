@@ -13,24 +13,21 @@ from __future__ import annotations
 
 from app.core.exceptions import AuthorizationError
 
-# Resource → set of allowed actions, per role. Three roles only after the
-# Week-1 reset (2026-07-06); mirrors ``app.models.identity.ROLES``.
+# Resource → set of allowed actions, per role. Mirrors the v1 doc §3.
 PERM_MATRIX: dict[str, dict[str, frozenset[str]]] = {
     "super_admin": {"*": frozenset({"*"})},
     "admin": {
-        "inventory": frozenset({"view", "create", "edit", "delete"}),
-        # Locations are super-admin-managed: admin is view-only (still enough
-        # to receive / transfer, which are ``transactions``).
-        "locations": frozenset({"view"}),
-        "transactions": frozenset({"view", "create"}),
-        # Admins can view the user directory but NOT change roles — role
-        # switching is super-admin-only.
-        "users": frozenset({"view"}),
+        "inventory": frozenset({"view", "create", "edit", "delete", "sign"}),
+        "users": frozenset({"view", "create", "edit", "delete"}),
+        "audit": frozenset({"view", "export"}),
     },
     "operator": {
+        "inventory": frozenset({"view", "create", "edit", "sign"}),
+        "audit": frozenset({"view"}),
+    },
+    "read_only": {
         "inventory": frozenset({"view"}),
-        "locations": frozenset({"view"}),
-        "transactions": frozenset({"view", "create"}),
+        "audit": frozenset({"view"}),
     },
 }
 
