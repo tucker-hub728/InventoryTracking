@@ -33,13 +33,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from sqlalchemy import func, select, update
-
 from app.db.session import get_sessionmaker
 from app.locations import repository as loc_repo
 from app.models.locations import LocationNode
-
 from scripts.seed_freezers import FREEZERS, _creator_id
+from sqlalchemy import func, select, update
 
 FREEZER_TYPES = ("room", "room_location", "sub_location")
 

@@ -1,9 +1,8 @@
 'use client';
 
 import * as React from 'react';
-import { Download, Search } from 'lucide-react';
+import { Search } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -32,7 +31,9 @@ const STATUS_FILTER_OPTIONS: readonly InventoryStatus[] = [
   'Out of stock',
 ] as const;
 
-export function InventoryFilters({ onExport }: InventoryFiltersProps) {
+// `onExport` is wired through from the parent for the Export button below
+// (currently disabled); prefixed with `_` to mark it intentionally unused.
+export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps) {
   const query = useInventoryStore((s) => s.query);
   const status = useInventoryStore((s) => s.status);
   const categoryId = useInventoryStore((s) => s.categoryId);
