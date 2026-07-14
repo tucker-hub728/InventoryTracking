@@ -22,9 +22,8 @@ import type { ReauthResponse } from '@/lib/api/auth';
 import { locationNodesApi, type Allocation } from '@/lib/api/location-nodes';
 import {
   ReceiveLocationPicker,
-  collectLeaves,
   placementComplete,
-  type AreaLeaves,
+  type AreaTrees,
   type PlacementValue,
 } from '@/components/inventory/receipt-admin/receive-location-picker';
 
@@ -53,7 +52,7 @@ export function TransferDialog({
   const maxQty = allocation?.qty ?? 0;
   const [qty, setQty] = React.useState('1');
   const [placement, setPlacement] = React.useState<PlacementValue | null>(null);
-  const [leaves, setLeaves] = React.useState<AreaLeaves | null>(null);
+  const [trees, setTrees] = React.useState<AreaTrees | null>(null);
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -76,11 +75,7 @@ export function TransferDialog({
       locationNodesApi.warehouseTree({ signal: ctrl.signal }),
     ])
       .then(([ln2, freezer, warehouse]) =>
-        setLeaves({
-          ln2: collectLeaves(ln2),
-          freezer: collectLeaves(freezer),
-          warehouse: collectLeaves(warehouse),
-        }),
+        setTrees({ ln2, freezer, warehouse }),
       )
       .catch(() => {});
     return () => ctrl.abort();
@@ -190,10 +185,10 @@ export function TransferDialog({
 
             <div className="space-y-1.5">
               <Label>Destination</Label>
-              {leaves ? (
+              {trees ? (
                 <ReceiveLocationPicker
                   qty={qtyValid ? qtyNum : 0}
-                  leaves={leaves}
+                  trees={trees}
                   value={placement}
                   onChange={setPlacement}
                 />

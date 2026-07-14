@@ -29,9 +29,8 @@ import {
 } from '@/lib/api/receiving';
 import {
   ReceiveLocationPicker,
-  collectLeaves,
   placementComplete,
-  type AreaLeaves,
+  type AreaTrees,
   type PlacementValue,
 } from './receive-location-picker';
 
@@ -83,7 +82,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
-  const [leaves, setLeaves] = React.useState<AreaLeaves | null>(null);
+  const [trees, setTrees] = React.useState<AreaTrees | null>(null);
 
   const outstandingLines = React.useMemo(
     () => (order?.lines ?? []).filter((l) => l.outstanding_qty > 0),
@@ -114,11 +113,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       locationNodesApi.warehouseTree({ signal: ctrl.signal }),
     ])
       .then(([ln2, freezer, warehouse]) =>
-        setLeaves({
-          ln2: collectLeaves(ln2),
-          freezer: collectLeaves(freezer),
-          warehouse: collectLeaves(warehouse),
-        }),
+        setTrees({ ln2, freezer, warehouse }),
       )
       .catch(() => {
         /* the picker shows an empty state if targets can't load */
@@ -400,10 +395,10 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       <Label>
                         Destination — unit in <span className="text-danger">*</span>
                       </Label>
-                      {leaves ? (
+                      {trees ? (
                         <ReceiveLocationPicker
                           qty={Number(d.qty_received) || 0}
-                          leaves={leaves}
+                          trees={trees}
                           value={d.placement}
                           onChange={(v) => patch(line.id, { placement: v })}
                         />

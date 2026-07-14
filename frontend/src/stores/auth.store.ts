@@ -23,6 +23,10 @@ import { mockData } from '@/lib/mock-data';
 interface AuthState {
   user: AuthedUser | null;
   roleId: RoleId;
+  /** The real backend role code (e.g. ``super_admin``), before it collapses to
+   * an RBAC bucket. Needed where ``super_admin`` and ``admin`` must be told
+   * apart (they share the ``admin`` bucket). */
+  rawRole: string | null;
   /** True after the first /me round-trip completes (success or failure). */
   hydrated: boolean;
 
@@ -56,6 +60,7 @@ function authedUserFromSession(session: SessionUser, roleId: RoleId): AuthedUser
 export const useAuthStore = create<AuthState>()((set, get) => ({
   user: null,
   roleId: 'viewer',
+  rawRole: null,
   hydrated: false,
 
   hydrate: async () => {
@@ -74,14 +79,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({
           user: authedUserFromSession(body.user, body.user.roleId),
           roleId: body.user.roleId,
+          rawRole: body.user.rawRole,
           hydrated: true,
         });
       } else {
-        set({ user: null, hydrated: true });
+        set({ user: null, rawRole: null, hydrated: true });
       }
     } catch {
       // Network / parse failure — treat as logged out so the guard kicks in.
-      set({ user: null, hydrated: true });
+      set({ user: null, rawRole: null, hydrated: true });
     }
   },
 
@@ -89,6 +95,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     set({
       user: authedUserFromSession(session, session.roleId),
       roleId: session.roleId,
+      rawRole: session.rawRole,
       hydrated: true,
     }),
 
@@ -103,8 +110,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     });
   },
 
-  clear: () => set({ user: null, roleId: 'viewer' }),
+  clear: () => set({ user: null, roleId: 'viewer', rawRole: null }),
 }));
 
 export const selectUser = (s: AuthState) => s.user;
 export const selectIsAuthed = (s: AuthState) => s.user !== null;
+/** True only for the real ``super_admin`` (not the collapsed ``admin`` bucket). */
+export const selectIsSuperAdmin = (s: AuthState) => s.rawRole === 'super_admin';

@@ -36,6 +36,16 @@ def _is_active(user: User) -> bool:
     return user.status == "active"
 
 
+def _initials_from_name(full_name: str) -> str:
+    """Two-letter initials from a display name, matching the invite flow
+    (first letter of the first and last word; falls back for one-word names)."""
+    parts = full_name.split()
+    if not parts:
+        return "?"
+    letters = parts[0][:1] + (parts[-1][:1] if len(parts) > 1 else parts[0][1:2])
+    return letters.upper()[:8] or "?"
+
+
 def _to_read(user: User) -> UserRead:
     return UserRead(
         id=str(user.id),
@@ -89,6 +99,8 @@ async def update_user(
 
     if "full_name" in data and data["full_name"] is not None:
         user.full_name = data["full_name"].strip()
+        # Keep initials (used for the avatar) in sync with the new name.
+        user.initials = _initials_from_name(user.full_name)
     if "role" in data and data["role"] is not None:
         user.role = data["role"]
 
