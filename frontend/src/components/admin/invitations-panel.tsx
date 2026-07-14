@@ -29,7 +29,6 @@ import { Pagination, usePagination } from '@/components/ui/pagination';
 import type { BadgeTone } from '@/types/ui';
 import { ApiError } from '@/lib/api/client';
 import {
-  acceptUrlFor,
   invitationsApi,
   type Invitation,
   type InviteStatus,
@@ -65,7 +64,9 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
-  const [revealed, setRevealed] = React.useState<{ email: string; link: string } | null>(null);
+  const [revealed, setRevealed] = React.useState<{ email: string; tempPassword: string } | null>(
+    null,
+  );
   const pg = usePagination(invites, 10);
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
@@ -93,8 +94,11 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
     setBusyId(invite.id);
     try {
       const result = await invitationsApi.resend(invite.id);
-      setRevealed({ email: result.email, link: acceptUrlFor(result) });
-      toast.success(`A fresh invitation was sent to ${result.email}.`);
+      // In dev the temp password comes back for testing; in prod Cognito emails it.
+      if (result.temporary_password) {
+        setRevealed({ email: result.email, tempPassword: result.temporary_password });
+      }
+      toast.success(`A fresh temporary password was sent to ${result.email}.`);
       await load();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Failed to resend invitation.');
@@ -210,21 +214,21 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
         noun="invitation"
       />
 
-      {/* Fresh link reveal after a resend. */}
+      {/* Fresh temp-password reveal after a resend (dev only). */}
       <Dialog open={revealed !== null} onOpenChange={(o) => !o && setRevealed(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>New link ready</DialogTitle>
+            <DialogTitle>New temporary password</DialogTitle>
             <DialogDescription>
-              A fresh invitation email was sent to{' '}
-              <strong className="text-text">{revealed?.email}</strong>. You can also share the new
-              one-time link below. The previous link no longer works.
+              A fresh temporary password was sent to{' '}
+              <strong className="text-text">{revealed?.email}</strong>. The previous one no longer
+              works. Shown here only in development, where email isn’t delivered.
             </DialogDescription>
           </DialogHeader>
           <DialogBody>
             <div className="space-y-1.5">
-              <Label htmlFor="resend-link">Accept link</Label>
-              {revealed && <CopyableLink id="resend-link" value={revealed.link} />}
+              <Label htmlFor="resend-temp-pw">Temporary password</Label>
+              {revealed && <CopyableLink id="resend-temp-pw" value={revealed.tempPassword} />}
             </div>
           </DialogBody>
           <DialogFooter>

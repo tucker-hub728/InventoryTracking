@@ -29,6 +29,12 @@ interface LoginErrorBody {
   message?: string;
 }
 
+interface LoginOkBody {
+  user?: SessionUser;
+  challenge?: 'NEW_PASSWORD_REQUIRED';
+  email?: string;
+}
+
 // Password reset isn't wired up yet — hide the "Forgot?" link for now.
 // Flip to true to re-enable.
 const SHOW_FORGOT_PASSWORD = false;
@@ -80,9 +86,22 @@ export function LoginForm() {
       return;
     }
 
-    const { user } = (await resp.json()) as { user: SessionUser };
-    setSession(user);
-    toast.success('Signed in', { description: `Welcome back, ${user.fullName}.` });
+    const body = (await resp.json()) as LoginOkBody;
+
+    // First sign-in with a temporary password: no session yet — go set a real
+    // one. The challenge itself is held server-side in an httpOnly cookie.
+    if (body.challenge === 'NEW_PASSWORD_REQUIRED') {
+      const email = body.email ?? data.email;
+      router.replace(`/set-password?email=${encodeURIComponent(email)}`);
+      return;
+    }
+
+    if (!body.user) {
+      setSubmitError('Sign-in failed. Please try again.');
+      return;
+    }
+    setSession(body.user);
+    toast.success('Signed in', { description: `Welcome back, ${body.user.fullName}.` });
 
     const next = params.get('next');
     router.replace(next && next.startsWith('/') ? next : '/inventory');

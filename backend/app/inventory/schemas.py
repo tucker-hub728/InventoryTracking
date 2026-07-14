@@ -16,7 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 # ``item_number`` is free-form and user-supplied. Per
 # docs/modules/inventory.md §3.1 / §4.1 / §9.2 the *only* backend rule is
@@ -150,6 +150,13 @@ class ItemCreate(BaseModel):
     # Required: every item is categorised (requirements v2 §6). The category's
     # kind (purchased/built) decides whether the item may carry a BOM.
     category_id: str = Field(min_length=1)
+    # Free-text unit of measure (each, mL, box …). Optional.
+    uom: Annotated[str | None, _trimmed_non_blank("uom")] = Field(
+        default=None, max_length=32
+    )
+    # Consumables are blind-consumed with no per-lot traceability
+    # (REQ-2026-07-01-TRX-003). Defaults to a traceable, one-for-one material.
+    is_consumable: bool = False
     supplier_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
@@ -175,6 +182,10 @@ class ItemUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str | None = Field(default=None, min_length=1, max_length=512)
+    uom: Annotated[str | None, _trimmed_non_blank("uom")] = Field(
+        default=None, max_length=32
+    )
+    is_consumable: bool | None = None
     # Re-categorise an item. The new category's kind still governs BOM
     # eligibility (the route blocks moving a BOM-bearing item to a purchased
     # category).
@@ -199,6 +210,10 @@ class ItemRead(BaseModel):
     id: str
     item_number: str
     description: str
+    # Free-text unit of measure (each, mL, box …). ``None`` when unset.
+    uom: str | None = None
+    # Blind-consumed (no per-lot traceability) when true.
+    is_consumable: bool = False
     # Category (requirements v2 §6). ``category_kind`` drives the UI "Type"
     # column: built → "Product" (may have a BOM), purchased → bought as-is.
     category_id: str
@@ -487,12 +502,48 @@ class OrderActionRequest(BaseModel):
     evidence_id: str
 
 
+class PlacementCell(BaseModel):
+    """One box-grid cell (1-based) targeted by a placement (one unit each)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grid_row: int = Field(ge=1, le=400)
+    grid_col: int = Field(ge=1, le=400)
+
+
+class ReceivePlacement(BaseModel):
+    """Where a received lot is placed (unit-in) — the destination for this draw.
+
+    Single destination, exactly ``qty_received`` units:
+
+    * **Box** (LN2 grid): ``cells`` lists exactly ``qty_received`` distinct empty
+      cells, one unit each.
+    * **Free leaf** (freezer sub-location / warehouse shelf): ``cells`` is empty;
+      all ``qty_received`` units land on the node.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    cells: list[PlacementCell] = Field(default_factory=list, max_length=400)
+
+    @model_validator(mode="after")
+    def _distinct_cells(self) -> ReceivePlacement:
+        seen = {(c.grid_row, c.grid_col) for c in self.cells}
+        if len(seen) != len(self.cells):
+            raise ValueError("Placement cells must be distinct")
+        return self
+
+
 class ReceiveEventLineInput(BaseModel):
     """The quantity received for one Order line in a receive event.
 
     Creates one lot — ``lot_number`` is required and unique per item. Dates /
     price are captured here (at receive). Over-receipt (``qty_received`` beyond
     the line's outstanding quantity) is allowed and needs no reason.
+
+    ``placement`` puts the received units into a location in the same signed
+    step (unit-in happens only here, from Receipt Admin).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -504,6 +555,9 @@ class ReceiveEventLineInput(BaseModel):
     expiration_date: date | None = None
     # Optional override of the line's unit price for this lot.
     unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
+    # Destination for the received units (unit-in), placed under the receive's
+    # single e-signature.
+    placement: ReceivePlacement
 
 
 class ReceiveEventRequest(BaseModel):

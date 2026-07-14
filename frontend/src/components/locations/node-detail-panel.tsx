@@ -9,7 +9,6 @@ import {
   ChevronRight,
   Container,
   Maximize2,
-  Minus,
   Package,
   Plus,
   Search,
@@ -77,10 +76,22 @@ export const NODE_ICON: Record<NodeType, LucideIcon> = {
   cassette: Container,
   cryo_box_rack: Boxes,
   box: Box,
+  // Freezer / warehouse nodes don't render in this (LN2) panel, but the map
+  // must cover every NodeType.
+  room: Container,
+  room_location: Container,
+  sub_location: Box,
+  warehouse: Package,
+  shelf: Box,
   flat: Package,
   cassette_rack: Container,
   sub_slot: Box,
 };
+
+// Unit-in (placing stock into an LN2 box cell) is disabled here — units are
+// placed only from Receipt Admin (at receive). Empty cells are inert and the
+// placement panel is hidden. Flip to re-enable the in-page placement flow.
+const LN2_UNIT_IN_ENABLED = false;
 
 /** Plural noun for a node's children, used in the "N boxes" header. */
 function childUnit(nodeType: NodeType, n: number): string {
@@ -302,11 +313,12 @@ export function NodeDetailPanel({
       setSelectedOccupied(next);
       setBatchLotId(c.occupant.lot_id);
     } else {
-      // Switching to placement mode — drop any unit-out selection.
+      // Empty cell: unit-in is done only from Receipt Admin, so LN2 cells are
+      // not selectable for placement here. Clear any unit-out selection only.
       setSelectedOccupied(new Set());
       setBatchLotId(null);
       setPlaceLot('');
-      toggleCell(c.row, c.col);
+      if (LN2_UNIT_IN_ENABLED) toggleCell(c.row, c.col);
     }
   };
 
@@ -537,7 +549,7 @@ export function NodeDetailPanel({
                 Unit map · {gridRows}×{gridCols}
               </p>
               <span className="text-xs text-text-3">
-                Click empty cells to select · click a unit to move/consume
+                Click a unit to move
               </span>
             </div>
             <BoxGrid
@@ -570,8 +582,9 @@ export function NodeDetailPanel({
                 />
               </div>
             )}
-            {/* Batch placement into one or more selected empty cells. */}
-            {canWrite && selectedCells.size > 0 && (
+            {/* Batch placement into empty cells — disabled: unit-in is done
+                only from Receipt Admin. */}
+            {canWrite && LN2_UNIT_IN_ENABLED && selectedCells.size > 0 && (
               <div className="mt-3 rounded-md border border-border bg-surface p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium text-text-2">
@@ -1312,16 +1325,6 @@ function AllocationActions({
           >
             <ArrowRightLeft size={13} /> Transfer
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setQty(String(available));
-              setMode('consume');
-            }}
-          >
-            <Minus size={13} /> Consume
-          </Button>
         </div>
       </div>
     );
@@ -1532,9 +1535,6 @@ function BatchOutPanel({
         <div className="flex gap-1">
           <Button size="sm" variant="ghost" onClick={() => setMode('transfer')}>
             <ArrowRightLeft size={13} /> Transfer
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setMode('consume')}>
-            <Minus size={13} /> Consume
           </Button>
         </div>
       ) : (

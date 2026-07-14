@@ -14,6 +14,10 @@ export interface InventoryItem {
   /** Backend UUID. Needed for endpoints that take an item_id (ledger, …). */
   uuid: string;
   desc: string;
+  /** Free-text unit of measure (each, mL, box …). Empty string when unset. */
+  uom: string;
+  /** Blind-consumed with no per-lot traceability when true. */
+  isConsumable: boolean;
   /** Category (requirements v2 §6). ``categoryKind`` drives the Type column. */
   categoryId: string;
   categoryName: string;

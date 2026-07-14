@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/select';
 import { ApiError } from '@/lib/api/client';
 import type { AssignableRole } from '@/lib/api/users';
-import { acceptUrlFor, invitationsApi, type InviteResult } from '@/lib/api/invitations';
+import { invitationsApi, type InviteResult } from '@/lib/api/invitations';
 import { CopyableLink } from './copyable-link';
 
 interface Props {
@@ -78,7 +78,7 @@ export function InviteUserDialog({ open, onOpenChange, onInvited }: Props) {
       });
       setResult(invite);
       onInvited();
-      toast.success(`Invitation created for ${invite.email}. An accept link was emailed to them.`);
+      toast.success(`Invitation created for ${invite.email}. A temporary password was emailed to them.`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : 'Failed to create invitation.');
     } finally {
@@ -86,31 +86,32 @@ export function InviteUserDialog({ open, onOpenChange, onInvited }: Props) {
     }
   };
 
-  const link = result ? acceptUrlFor(result) : '';
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         {result ? (
-          // ── Success: show the one-time accept link to hand over ──────────
+          // ── Success: confirm the emailed temp password (+ reveal it in dev) ──
           <>
             <DialogHeader>
-              <DialogTitle>Invitation ready</DialogTitle>
+              <DialogTitle>Invitation sent</DialogTitle>
               <DialogDescription>
-                A secure accept link was emailed to{' '}
-                <strong className="text-text">{result.email}</strong>. It expires{' '}
-                {new Date(result.expires_at).toLocaleDateString()} and can be used once. You can also
-                copy the link below to share it directly.
+                A temporary password was emailed to{' '}
+                <strong className="text-text">{result.email}</strong>. They’ll be asked to set their
+                own password the first time they sign in. It expires{' '}
+                {new Date(result.expires_at).toLocaleDateString()}.
               </DialogDescription>
             </DialogHeader>
             <DialogBody className="space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="invite-link">Accept link</Label>
-                <CopyableLink id="invite-link" value={link} />
-                <p className="text-xs text-text-3">
-                  If you lose this link you can’t see it again — use “Resend” to issue a new one.
-                </p>
-              </div>
+              {result.temporary_password && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="invite-temp-pw">Temporary password (dev)</Label>
+                  <CopyableLink id="invite-temp-pw" value={result.temporary_password} />
+                  <p className="text-xs text-text-3">
+                    Shown only in development, where email isn’t delivered. In production this is
+                    emailed by Cognito and never displayed here.
+                  </p>
+                </div>
+              )}
             </DialogBody>
             <DialogFooter>
               <Button type="button" variant="primary" onClick={() => onOpenChange(false)}>

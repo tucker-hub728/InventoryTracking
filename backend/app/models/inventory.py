@@ -101,10 +101,20 @@ class ItemCategory(Base):
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        Index(
+            "uq_item_categories_prefix",
+            func.lower(text("prefix")),
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         Index("ix_item_categories_updated_at_desc", text("updated_at DESC")),
         CheckConstraint(
             "char_length(trim(name)) > 0",
             name="ck_item_categories_name_not_blank",
+        ),
+        CheckConstraint(
+            "char_length(trim(prefix)) > 0",
+            name="ck_item_categories_prefix_not_blank",
         ),
         CheckConstraint(
             "kind IN ('purchased', 'built')",
@@ -120,6 +130,10 @@ class ItemCategory(Base):
         server_default=text("gen_random_uuid()"),
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Item-number type prefix (e.g. 'CR', 'AY', 'FG'). Drives per-tier
+    # filtering and the auto-prefixed SKU on the item-create forms
+    # (REQ-2026-07-09-ITM-001/002). Unique (case-insensitive) among live rows.
+    prefix: Mapped[str] = mapped_column(Text, nullable=False)
     # 'purchased' | 'built' — immutable after creation (enforced in the route).
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     # Display colour token ('neutral' | 'accent' | 'success' | 'warning' |
@@ -201,6 +215,17 @@ class Item(Base):
 
     item_number: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # Free-text unit of measure (each, mL, box …). Optional — not every item
+    # carries one, and there is deliberately no controlled UOM list yet.
+    uom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Consumables (gloves, pipette tips …) are blind-consumed to manufacturing
+    # with no per-lot traceability (REQ-2026-07-01-TRX-003). Default: not a
+    # consumable (one-for-one traceable material).
+    is_consumable: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
     # Every item is categorised (requirements v2 §6). The category's ``kind``
     # (purchased/built) governs whether this item may carry a BOM.
     category_id: Mapped[uuid.UUID] = mapped_column(

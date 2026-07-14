@@ -127,6 +127,11 @@ ignore = [
 # dummy credentials for cognito-local trip bandit's hardcoded-password checks
 # (S105/S106/S107). They're not real secrets; silence them just in app/auth/.
 "app/auth/**" = ["S105", "S106", "S107"]
+# Dev-only DB reset script: the dynamic SQL is built from a fixed internal
+# constant of catalog identifiers (never user input) so S608 is a false
+# positive, and the subprocess call uses a fixed argv (sys.executable + fixed
+# alembic args), so S603 is a false positive too.
+"scripts/reset_db.py" = ["S608", "S603"]
 
 [tool.ruff.format]
 quote-style = "double"

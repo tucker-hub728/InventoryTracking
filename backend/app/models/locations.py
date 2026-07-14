@@ -61,30 +61,57 @@ LN2_LEVELS: tuple[str, ...] = (
     "cryo_box_rack",
     "box",
 )
-# Retired in v2 but kept in the CHECK enum so any pre-existing rows still
-# validate (retire-not-drop). Not creatable: absent from ``PARENT_OF``.
-LEGACY_NODE_TYPES: tuple[str, ...] = ("cassette_rack", "sub_slot")
-NODE_TYPES: tuple[str, ...] = (*LN2_LEVELS, "flat", *LEGACY_NODE_TYPES)
+# Freezer area (SRS 2026-07-09 §6): Room (category, e.g. Materials Management /
+# Analytical Lab) → Location (a freezer or open-inventory) → Sub-location (the
+# free-storage leaf — a freezer's T-number unit or a shelf). Units are placed at
+# the sub-location (free placement, no grid); there are no positions inside.
+FREEZER_LEVELS: tuple[str, ...] = ("room", "room_location", "sub_location")
+# Warehouse area (SRS LOC-001): Warehouse One → Shelf (A–Z), the free-storage
+# leaf. A shelf holds units freely — no positions.
+WAREHOUSE_LEVELS: tuple[str, ...] = ("warehouse", "shelf")
+
+# Retired but kept in the CHECK enum so any pre-existing rows still validate
+# (retire-not-drop). Not creatable: absent from ``PARENT_OF``.
+#
+# ``flat`` is retired: the LN2 area keeps only its storage hierarchy, and
+# free-placement moved to the Freezer / Warehouse areas above.
+LEGACY_NODE_TYPES: tuple[str, ...] = ("flat", "cassette_rack", "sub_slot")
+NODE_TYPES: tuple[str, ...] = (
+    *LN2_LEVELS,
+    *FREEZER_LEVELS,
+    *WAREHOUSE_LEVELS,
+    *LEGACY_NODE_TYPES,
+)
 
 # node_type → allowed parent node_type(s) (None = must be a root). Only the
 # keys here are *creatable*; a Box may hang under either container type.
+# ``flat`` is intentionally absent — it is retired (not creatable).
 PARENT_OF: dict[str, tuple[str, ...] | None] = {
     "tank_quadrant": None,
     "rack": ("tank_quadrant",),
     "cassette": ("rack",),
     "cryo_box_rack": ("rack",),
     "box": ("cassette", "cryo_box_rack"),
-    "flat": None,
+    "room": None,
+    "room_location": ("room",),
+    "sub_location": ("room_location",),
+    "warehouse": None,
+    "shelf": ("warehouse",),
 }
 
-# Only these node types can hold a lot allocation (§4.1). The Box is the LN2
-# leaf; flat operational locations store directly.
-STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "flat"})
+# Node types that are roots (parent_id must be NULL). ``flat`` kept for legacy
+# rows. Drives ``ck_location_nodes_root_parentage``.
+ROOT_NODE_TYPES: tuple[str, ...] = ("tank_quadrant", "room", "warehouse", "flat")
+
+# Node types that can hold a lot allocation. The Box is the LN2 grid leaf;
+# freezer sub-locations and warehouse shelves are free (qty) storage leaves.
+STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
 
 # Node types that carry a configurable rows×cols grid. Only the Box.
 GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
 
-# Flat operational location categories (§ location rules B).
+# Legacy flat operational location categories. Kept for the DB CHECK + reading
+# any pre-existing flat rows; no new flat locations are created.
 FLAT_CATEGORIES: tuple[str, ...] = (
     "kanban",
     "lab",
@@ -136,9 +163,11 @@ class LocationNode(Base):
             + ")",
             name="ck_location_nodes_flat_category",
         ),
-        # Roots (tank_quadrant / flat) must have no parent.
+        # Roots (tank_quadrant / room / warehouse; flat legacy) have no parent.
         CheckConstraint(
-            "(node_type IN ('tank_quadrant', 'flat')) = (parent_id IS NULL)",
+            "(node_type IN ("
+            + ", ".join(f"'{t}'" for t in ROOT_NODE_TYPES)
+            + ")) = (parent_id IS NULL)",
             name="ck_location_nodes_root_parentage",
         ),
         # Grid dimensions exist on (and only on) a Box. The Box-under-Cassette

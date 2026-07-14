@@ -124,7 +124,7 @@ def _split_sql(sql: str) -> list[str]:
         if ch == "$":
             # Try to open a dollar-quote tag: $tag$ or $$.
             j = sql.find("$", i + 1)
-            if j != -1 and sql[i + 1 : j].replace("_", "").isalnum() or (
+            if (j != -1 and sql[i + 1 : j].replace("_", "").isalnum()) or (
                 j == i + 1
             ):
                 tag = sql[i : j + 1]

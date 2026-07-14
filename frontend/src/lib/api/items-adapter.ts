@@ -36,6 +36,8 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     id: api.item_number,
     uuid: api.id,
     desc: api.description,
+    uom: api.uom ?? '',
+    isConsumable: api.is_consumable,
     categoryId: api.category_id,
     categoryName: api.category_name,
     categoryKind: api.category_kind,

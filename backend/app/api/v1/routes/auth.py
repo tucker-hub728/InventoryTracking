@@ -27,14 +27,16 @@ from app.auth.dependencies import CurrentUserDep
 from app.auth.schemas import (
     LoginRequest,
     MeResponse,
+    NewPasswordChallengeResponse,
     ReauthRequest,
     ReauthResponse,
     RefreshRequest,
+    SetPasswordRequest,
     TokenResponse,
 )
 from app.core.exceptions import AuthenticationError, AuthorizationError, NotFoundError
+from app.core.passwords import validate_password_strength
 from app.invitations import service as invitations_service
-from app.invitations.schemas import AcceptInviteRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -77,10 +79,12 @@ def _client_ip(request: Request) -> str | None:
 
 @router.post(
     "/login",
-    response_model=TokenResponse,
-    summary="Exchange email + password for tokens",
+    response_model=TokenResponse | NewPasswordChallengeResponse,
+    summary="Exchange email + password for tokens (or a set-password challenge)",
 )
-async def login(payload: LoginRequest, db: DBSession) -> TokenResponse:
+async def login(
+    payload: LoginRequest, db: DBSession
+) -> TokenResponse | NewPasswordChallengeResponse:
     try:
         result = cognito_client.sign_in(email=payload.email, password=payload.password)
     except AuthenticationError:
@@ -89,8 +93,41 @@ async def login(payload: LoginRequest, db: DBSession) -> TokenResponse:
         # precise message; otherwise re-raise the generic auth error.
         await _reject_if_deactivated(db, payload.email)
         raise
-    # cognito-local doesn't enforce the disabled flag, so gate on local status.
+    # cognito-local doesn't enforce the disabled flag, so gate on local status —
+    # for both a normal login and a first-login (temp password) challenge.
     await _reject_if_deactivated(db, payload.email)
+
+    if result.get("challenge") == cognito_client.NEW_PASSWORD_REQUIRED:
+        # Invited user's first sign-in with the temporary password: hand the
+        # challenge session back so the BFF can drive the set-password step.
+        return NewPasswordChallengeResponse(**result)
+    return TokenResponse(**result)
+
+
+@router.post(
+    "/set-password",
+    response_model=TokenResponse,
+    summary="Set a first-login password, completing the NEW_PASSWORD_REQUIRED challenge",
+)
+async def set_password(payload: SetPasswordRequest, db: DBSession) -> TokenResponse:
+    """Public — the invitee has no session yet, only the challenge ``session``
+    from ``/auth/login``. Sets the chosen password (completing the challenge),
+    consumes the pending invitation, and returns a fresh token set for auto-login.
+    """
+    # A deactivated account must not complete onboarding into a live session.
+    await _reject_if_deactivated(db, payload.email)
+    # Enforce the pool policy server-side first, so a weak password is rejected
+    # with a precise 422 even where the backend doesn't enforce it (cognito-local).
+    validate_password_strength(payload.password)
+
+    result = cognito_client.respond_to_new_password_challenge(
+        email=payload.email,
+        session=payload.session,
+        new_password=payload.password,
+    )
+    # Consume the matching pending invite (if any) — the user row itself is
+    # lazy-materialised on the first /auth/me via provisioning.
+    await invitations_service.mark_accepted_by_email(db, email=payload.email)
     return TokenResponse(**result)
 
 
@@ -101,23 +138,6 @@ async def login(payload: LoginRequest, db: DBSession) -> TokenResponse:
 )
 async def refresh(payload: RefreshRequest) -> TokenResponse:
     result = cognito_client.refresh_token(refresh=payload.refresh_token)
-    return TokenResponse(**result)
-
-
-@router.post(
-    "/accept-invite",
-    response_model=TokenResponse,
-    summary="Accept an invitation: set a password via the link token, then sign in",
-)
-async def accept_invite(payload: AcceptInviteRequest, db: DBSession) -> TokenResponse:
-    """Public — the invitee has no session yet. The single-use link token is the
-    credential; sets the chosen password, materialises the local user, consumes
-    the invite, and returns a fresh token set for auto-login."""
-    result = await invitations_service.accept_invitation(
-        db,
-        raw_token=payload.token,
-        password=payload.password,
-    )
     return TokenResponse(**result)
 
 

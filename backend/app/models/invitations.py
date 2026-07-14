@@ -1,24 +1,23 @@
 """Invitation ORM — ``app.invitations``.
 
 An invitation is the app-owned lifecycle record for onboarding a new user.
-Cognito owns the credential (password/MFA) once the invitee accepts, but the
-onboarding lifecycle — who was invited, in what role, by whom, and whether the
-invite is still pending/accepted/revoked/expired — lives here.
+Cognito owns the credential (password/MFA), but the onboarding lifecycle — who
+was invited, in what role, by whom, and whether the invite is still
+pending/accepted/revoked/expired — lives here.
 
 Flow (Cognito identity is reserved at *invite* time, in FORCE_CHANGE_PASSWORD
-until accept):
+until the invitee sets their password):
 
-  1. Admin invites  -> a Cognito user is created and emailed a temporary
-                       password (in prod Cognito sends it; in local dev the app
-                       sends it via SMTP to maildev). A row is written here with
-                       ``status='pending'`` and a hashed single-use link token so
-                       the accept page can pre-fill the invitee's name/role.
-  2. Invitee accepts -> they set a new password (temp password -> new password),
-                        the ``app.users`` mirror is materialised, and the row
-                        flips to ``status='accepted'``.
+  1. Admin invites  -> a Cognito user is created and Cognito emails a temporary
+                       password (delivered via Amazon SES in prod). A row is
+                       written here with ``status='pending'``.
+  2. Invitee logs in with the temp password -> hits NEW_PASSWORD_REQUIRED, sets
+                        a real password, the ``app.users`` mirror is materialised
+                        (lazily on first /me), and the row flips to
+                        ``status='accepted'``.
 
-Only the SHA-256 *hash* of the link token is stored — the raw token is the
-credential and never touches the database or the logs.
+This table holds NO credential — Cognito owns the temporary password and there
+is no app-issued link token.
 
 Deviation from the reference implementation: ``role`` is a ``TEXT`` foreign key
 to ``app.roles.code`` (matching ``app.users.role``), NOT a native enum — this
@@ -61,8 +60,6 @@ class Invitation(Base):
 
     __tablename__ = "invitations"
     __table_args__ = (
-        # The link token — looked up by hash on resolve/accept.
-        Index("uq_invitations_token_hash", "token_hash", unique=True),
         # At most one *pending* invite per email (case-insensitive). Historical
         # accepted/revoked/expired rows for the same address are allowed.
         Index(
@@ -95,9 +92,6 @@ class Invitation(Base):
     # The Cognito identity reserved for this invitee (created at invite time).
     # Nullable so a future accept-time-creation variant stays expressible.
     cognito_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # SHA-256 hex of the raw link token. The raw token is never persisted.
-    token_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
     status: Mapped[str] = mapped_column(
         invite_status_enum,

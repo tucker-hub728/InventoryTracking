@@ -1,11 +1,8 @@
-import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 
-import { InventoryListClient } from '@/components/inventory/inventory-list-client';
-
-export const metadata: Metadata = {
-  title: 'Inventory',
-};
-
+// The combined inventory list is disabled — items are managed per tier now
+// (e.g. Raw Materials at /inventory/cr). Anyone landing on the old index is
+// forwarded to the Raw Materials section.
 export default function InventoryPage() {
-  return <InventoryListClient />;
+  redirect('/inventory/cr');
 }

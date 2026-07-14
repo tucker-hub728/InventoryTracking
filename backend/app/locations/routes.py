@@ -210,6 +210,44 @@ async def get_ln2_tree(
 
 
 @nodes_router.get(
+    "/freezer-tree",
+    response_model=list[NodeTreeRead],
+    summary="Freezer hierarchy as nested trees (room → location → sub-location)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def get_freezer_tree(
+    db: DBSession,
+    active_only: Annotated[bool, Query()] = True,
+) -> list[NodeTreeRead]:
+    from app.models.locations import FREEZER_LEVELS
+
+    nodes = await loc_repo.list_nodes_by_types(db, FREEZER_LEVELS, active_only=active_only)
+    # Free-storage leaves hold units (SUM qty), not one-per-cell — occupancy is
+    # the unit total.
+    units = await loc_repo.active_allocation_units_by_node(db)
+    return _build_tree(nodes, units)
+
+
+@nodes_router.get(
+    "/warehouse-tree",
+    response_model=list[NodeTreeRead],
+    summary="Warehouse hierarchy as nested trees (warehouse → shelf)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def get_warehouse_tree(
+    db: DBSession,
+    active_only: Annotated[bool, Query()] = True,
+) -> list[NodeTreeRead]:
+    from app.models.locations import WAREHOUSE_LEVELS
+
+    nodes = await loc_repo.list_nodes_by_types(
+        db, WAREHOUSE_LEVELS, active_only=active_only
+    )
+    units = await loc_repo.active_allocation_units_by_node(db)
+    return _build_tree(nodes, units)
+
+
+@nodes_router.get(
     "/flat",
     response_model=list[NodeRead],
     summary="Flat operational locations (Kanban / Lab / QC / …)",
@@ -231,11 +269,16 @@ async def list_flat_locations(
 @nodes_router.get(
     "/storage-targets",
     response_model=list[NodeRead],
-    summary="All nodes that can hold a lot (boxes + flat) — for placement",
+    summary="All nodes that can hold a lot (box / freezer sub-location / shelf)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
 async def list_storage_targets(db: DBSession) -> list[NodeRead]:
-    rows = await loc_repo.list_nodes_by_types(db, ("box", "flat"), active_only=True)
+    # Every storage leaf across the areas — LN2 boxes (grid) plus the free
+    # leaves (freezer sub-locations, warehouse shelves). Feeds the transfer
+    # destination picker so stock can move LN2 ↔ Freezer ↔ Warehouse.
+    rows = await loc_repo.list_nodes_by_types(
+        db, ("box", "sub_location", "shelf"), active_only=True
+    )
     # Attach the full breadcrumb so the UI can disambiguate same-named boxes.
     labels = await loc_repo.node_label_map(db)
     return [
@@ -323,28 +366,13 @@ async def create_node(
     parent_uuid: uuid.UUID | None = None
     parent: LocationNode | None = None
     if required_parents is None:
-        # Roots: tank_quadrant / flat must have no parent.
+        # Roots: tank_quadrant must have no parent.
         if payload.parent_id is not None:
             raise ValidationError(
                 f"A '{node_type}' is a root and must not have a parent",
                 code="invalid_hierarchy",
             )
-        if node_type == "flat" and payload.flat_category is None:
-            raise ValidationError(
-                "A flat location requires a flat_category",
-                code="flat_category_required",
-            )
-        if node_type != "flat" and payload.flat_category is not None:
-            raise ValidationError(
-                "flat_category is only valid for flat locations",
-                code="invalid_flat_category",
-            )
     else:
-        if payload.flat_category is not None:
-            raise ValidationError(
-                "flat_category is only valid for flat locations",
-                code="invalid_flat_category",
-            )
         if payload.parent_id is None:
             allowed = " or ".join(f"'{p}'" for p in required_parents)
             raise ValidationError(
@@ -412,7 +440,6 @@ async def create_node(
         name=payload.name,
         created_by_user_id=current.id,
         parent_id=parent_uuid,
-        flat_category=payload.flat_category,
         grid_rows=grid_rows,
         grid_cols=grid_cols,
         dedicated_customer_id=ded_customer,

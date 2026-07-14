@@ -132,8 +132,36 @@ def _translate(exc: ClientError) -> DomainError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Sentinel challenge an invited user hits on their first sign-in with the
+# temporary password Cognito emailed them. The caller (auth route) turns this
+# into a redirect to the set-password page rather than an error.
+NEW_PASSWORD_REQUIRED = "NEW_PASSWORD_REQUIRED"
+
+
+def _tokens_from_result(result: Any) -> dict[str, Any]:
+    return {
+        "id_token": result.get("IdToken"),
+        "access_token": result["AccessToken"],
+        "refresh_token": result.get("RefreshToken"),
+        # cognito-local omits ExpiresIn in some responses; real Cognito
+        # always returns it. Default to the documented 1h TTL so callers
+        # always get a number.
+        "expires_in": int(result.get("ExpiresIn", 3600)),
+        "token_type": result.get("TokenType", "Bearer"),
+    }
+
+
 def sign_in(*, email: str, password: str) -> dict[str, Any]:
-    """USER_PASSWORD_AUTH flow. Returns ID / access / refresh tokens."""
+    """USER_PASSWORD_AUTH flow.
+
+    Returns one of two shapes:
+      * ``{"challenge": "NEW_PASSWORD_REQUIRED", "session": ..., "email": ...}``
+        — an invited user signing in with their temporary password. The caller
+        must send them to the set-password flow (``respond_to_new_password_challenge``).
+      * ``{"access_token": ..., "id_token": ..., ...}`` — a normal successful login.
+
+    Any other challenge (MFA / SMS) is unsupported in v1 and raises.
+    """
     _ensure_configured()
     settings = get_settings()
     client = get_cognito_client()
@@ -152,8 +180,15 @@ def sign_in(*, email: str, password: str) -> dict[str, Any]:
 
     result = resp.get("AuthenticationResult")
     if not result:
-        # MFA / NEW_PASSWORD_REQUIRED / SMS_MFA etc. — not handled in v1.
         challenge = resp.get("ChallengeName")
+        if challenge == NEW_PASSWORD_REQUIRED:
+            log.info("auth.cognito.new_password_required", email=email)
+            return {
+                "challenge": NEW_PASSWORD_REQUIRED,
+                "session": resp["Session"],
+                "email": email,
+            }
+        # MFA / SMS_MFA etc. — not handled in v1.
         log.info("auth.cognito.sign_in_challenge", challenge=challenge)
         raise AuthenticationError(
             "Authentication challenge required (not yet supported in v1)",
@@ -161,16 +196,61 @@ def sign_in(*, email: str, password: str) -> dict[str, Any]:
             details={"challenge": challenge},
         )
 
-    return {
-        "id_token": result.get("IdToken"),
-        "access_token": result["AccessToken"],
-        "refresh_token": result.get("RefreshToken"),
-        # cognito-local omits ExpiresIn in some responses; real Cognito
-        # always returns it. Default to the documented 1h TTL so callers
-        # always get a number.
-        "expires_in": int(result.get("ExpiresIn", 3600)),
-        "token_type": result.get("TokenType", "Bearer"),
-    }
+    return _tokens_from_result(result)
+
+
+def respond_to_new_password_challenge(
+    *, email: str, session: str, new_password: str
+) -> dict[str, Any]:
+    """Complete the ``NEW_PASSWORD_REQUIRED`` challenge for an invited user.
+
+    Called from the set-password flow with the ``session`` handed back by
+    :func:`sign_in` and the password the invitee chose. On success the account
+    becomes ``CONFIRMED`` and a full token set is returned (auto-login).
+
+    A password that fails the pool policy surfaces as :class:`ValidationError`;
+    an expired/invalid session surfaces as :class:`AuthenticationError`.
+    """
+    _ensure_configured()
+    settings = get_settings()
+    client = get_cognito_client()
+    try:
+        resp = client.respond_to_auth_challenge(
+            ClientId=settings.cognito_client_id,  # type: ignore[arg-type]
+            ChallengeName="NEW_PASSWORD_REQUIRED",
+            Session=session,
+            ChallengeResponses={"USERNAME": email, "NEW_PASSWORD": new_password},
+        )
+    except ClientError as exc:
+        err = exc.response.get("Error", {}) if hasattr(exc, "response") else {}
+        code = str(err.get("Code", ""))
+        msg = str(err.get("Message", ""))
+        log.info("auth.cognito.new_password_challenge_failed", cognito_code=code)
+        # A weak password must surface as a 422 the user can act on — not a
+        # fail-closed 401. Real Cognito reports ``InvalidPasswordException``;
+        # cognito-local puts an HTTP status in the Code slot but keeps the
+        # human message, so match on either signal.
+        if code in ("InvalidPasswordException", "InvalidParameterException") or (
+            "password" in msg.lower()
+        ):
+            raise ValidationError(
+                "Password does not meet the security requirements "
+                "(at least 12 characters with uppercase, lowercase, a number "
+                "and a symbol).",
+                code="invalid_password",
+                details={"cognito_message": msg},
+            ) from exc
+        raise _translate(exc) from exc
+
+    result = resp.get("AuthenticationResult")
+    if not result:
+        # A second challenge (e.g. MFA) after setting the password — unsupported.
+        raise AuthenticationError(
+            "Authentication challenge required (not yet supported in v1)",
+            code="challenge_required",
+            details={"challenge": resp.get("ChallengeName")},
+        )
+    return _tokens_from_result(result)
 
 
 def refresh_token(*, refresh: str) -> dict[str, Any]:
@@ -228,14 +308,15 @@ def get_user(*, access_token: str) -> dict[str, Any]:
 # These call Cognito's ``admin_*`` APIs (require AWS admin credentials, or
 # cognito-local in dev). They back the user-invite flow: an admin reserves a
 # Cognito identity at invite time (in FORCE_CHANGE_PASSWORD) and the invitee
-# sets a real password at accept time. Same contract as the request-serving fns
-# above — keyword args, domain exceptions, plain dicts, no boto3 types leaked.
+# sets a real password on first login via the NEW_PASSWORD_REQUIRED challenge.
+# Same contract as the request-serving fns above — keyword args, domain
+# exceptions, plain dicts, no boto3 types leaked.
 #
-# Email delivery is environment-gated (see ``admin_create_user``): in production
-# Cognito sends its own invitation email (its built-in email, no SES); in local
-# dev the message is SUPPRESSED and the app emails the temporary password to
-# maildev over SMTP. The accept flow (temp password → new password) is identical
-# in both environments, so promoting to prod needs no code change.
+# Cognito owns the invitation email: ``admin_create_user`` asks it to email the
+# temporary password (delivered via Amazon SES when the pool is configured for
+# it in prod). cognito-local can't send mail, so in local dev the caller passes
+# an explicit temporary password and logs it. The challenge flow (temp password
+# → new password) is identical in both environments.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -256,33 +337,39 @@ def _extract_sub(attributes: list[Any]) -> str:
     raise IntegrationError("Cognito returned no 'sub' for the user")
 
 
-def admin_create_user(*, email: str, name: str, role: str) -> str:
+def admin_create_user(*, email: str, name: str, role: str, temporary_password: str | None = None) -> str:
     """Reserve a Cognito identity for an invitee and return its ``sub``.
 
-    The account lands in ``FORCE_CHANGE_PASSWORD`` with NO password set, so it
-    is unusable until the invitee sets a real password at accept time (proven by
-    the single-use invite token, not a Cognito temp password). Email is marked
+    The account lands in ``FORCE_CHANGE_PASSWORD``: Cognito generates (or, if
+    ``temporary_password`` is supplied, uses) a temporary password and EMAILS it
+    to the invitee. On first sign-in they hit ``NEW_PASSWORD_REQUIRED`` and set a
+    real password (see :func:`respond_to_new_password_challenge`). Email is marked
     verified and ``custom:role`` seeds the role.
 
-    Cognito's own invitation email is always SUPPRESSED — the app owns the invite
-    email and delivers a single-use accept link (the token is the credential).
+    Email delivery is Cognito's job now (its built-in message, sent via Amazon SES
+    when the pool is configured for it) — the app sends no invite email of its own.
+    ``temporary_password`` is only passed in local dev, where cognito-local can't
+    deliver mail, so the caller can log/return the value for testing.
 
     Raises :class:`ConflictError` if the email already exists in the pool.
     """
     _ensure_configured()
     client = get_cognito_client()
+    kwargs: dict[str, Any] = {
+        "UserPoolId": _pool_id(),
+        "Username": email,
+        "DesiredDeliveryMediums": ["EMAIL"],
+        "UserAttributes": [
+            {"Name": "email", "Value": email},
+            {"Name": "email_verified", "Value": "true"},
+            {"Name": "name", "Value": name},
+            {"Name": "custom:role", "Value": role},
+        ],
+    }
+    if temporary_password is not None:
+        kwargs["TemporaryPassword"] = temporary_password
     try:
-        resp = client.admin_create_user(
-            UserPoolId=_pool_id(),
-            Username=email,
-            MessageAction="SUPPRESS",
-            UserAttributes=[
-                {"Name": "email", "Value": email},
-                {"Name": "email_verified", "Value": "true"},
-                {"Name": "name", "Value": name},
-                {"Name": "custom:role", "Value": role},
-            ],
-        )
+        resp = client.admin_create_user(**kwargs)
     except ClientError as exc:
         err = exc.response.get("Error", {}) if hasattr(exc, "response") else {}
         code = str(err.get("Code", ""))
@@ -300,6 +387,29 @@ def admin_create_user(*, email: str, name: str, role: str) -> str:
             ) from exc
         raise _translate(exc) from exc
     return _extract_sub(resp["User"]["Attributes"])
+
+
+def admin_resend_invite(*, email: str, temporary_password: str | None = None) -> None:
+    """Re-email the invitation for an existing, not-yet-confirmed identity with a
+    fresh temporary password (``MessageAction=RESEND``).
+
+    Used by the resend flow and to recover a re-invited identity. ``temporary_password``
+    is supplied in local dev (where the caller logs it) so the value is known.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    kwargs: dict[str, Any] = {
+        "UserPoolId": _pool_id(),
+        "Username": email,
+        "MessageAction": "RESEND",
+        "DesiredDeliveryMediums": ["EMAIL"],
+    }
+    if temporary_password is not None:
+        kwargs["TemporaryPassword"] = temporary_password
+    try:
+        client.admin_create_user(**kwargs)
+    except ClientError as exc:
+        raise _translate(exc) from exc
 
 
 def admin_get_user(*, email: str) -> dict[str, Any] | None:

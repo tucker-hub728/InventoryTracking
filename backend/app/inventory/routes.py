@@ -41,6 +41,7 @@ from app.inventory.schemas import (
     ReceiptTransactionListResponse,
     ReceiptTransactionRead,
     ReceiveEventRequest,
+    ReceivePlacement,
     SupplierCreate,
     SupplierRead,
     SupplierUpdate,
@@ -53,6 +54,7 @@ from app.models.inventory import (
     StockMovement,
     Supplier,
 )
+from app.models.locations import can_store, is_grid_node
 from app.security.permissions import RequirePermission
 
 items_router = APIRouter(prefix="/items", tags=["items"])
@@ -170,6 +172,8 @@ def _item_to_read(
         id=str(item.id),
         item_number=item.item_number,
         description=item.description,
+        uom=item.uom,
+        is_consumable=item.is_consumable,
         category_id=str(item.category_id),
         category_name=category.name if category else "",
         category_kind=category.kind if category else "purchased",  # type: ignore[arg-type]
@@ -551,6 +555,8 @@ async def create_item(
             description=payload.description,
             category_id=category_uuid,
             created_by_user_id=current.id,
+            uom=payload.uom,
+            is_consumable=payload.is_consumable,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
@@ -1704,6 +1710,96 @@ async def cancel_order(
     return response
 
 
+async def _place_received_lot(
+    db: DBSession,
+    *,
+    lot: Lot,
+    qty_received: int,
+    placement: ReceivePlacement,
+    evidence_uuid: uuid.UUID,
+    user_id: uuid.UUID,
+) -> None:
+    """Unit-IN the freshly-received lot into its chosen destination.
+
+    Single destination, exactly ``qty_received`` units — one box (N distinct
+    empty cells) or one free leaf (freezer sub-location / warehouse shelf, N
+    units). Writes the allocations + a single ``+N`` receipt movement under the
+    receive's e-signature (``evidence_uuid``). Caller commits.
+    """
+    node_uuid = _parse_uuid_or_422(placement.node_id, field="node_id")
+    node = await loc_repo.get_node(db, node_uuid)
+    if node is None:
+        raise NotFoundError(f"Location node {placement.node_id} not found")
+    if not node.is_active:
+        raise ValidationError("Selected location is inactive", code="node_inactive")
+    if not can_store(node.node_type):
+        raise ValidationError(
+            "Selected location can't hold stock — pick a box, freezer "
+            "sub-location, or warehouse shelf",
+            code="node_not_storable",
+        )
+
+    if is_grid_node(node.node_type):
+        cells = placement.cells
+        if len(cells) != qty_received:
+            raise ValidationError(
+                f"Select exactly {qty_received} cell(s) for the received quantity "
+                f"(got {len(cells)})",
+                code="placement_qty_mismatch",
+            )
+        if node.grid_rows is None or node.grid_cols is None:
+            raise ValidationError("Box has no grid configured", code="box_grid_missing")
+        for c in cells:
+            if c.grid_row > node.grid_rows or c.grid_col > node.grid_cols:
+                raise ValidationError(
+                    f"Cell ({c.grid_row},{c.grid_col}) is outside the "
+                    f"{node.grid_rows}×{node.grid_cols} grid",
+                    code="cell_out_of_bounds",
+                )
+            occupant = await loc_repo.get_active_cell_occupant(
+                db, node_id=node.id, grid_row=c.grid_row, grid_col=c.grid_col
+            )
+            if occupant is not None:
+                raise ConflictError(
+                    f"Cell ({c.grid_row},{c.grid_col}) is already occupied",
+                    code="cell_occupied",
+                )
+        for c in cells:
+            await loc_repo.create_allocation(
+                db,
+                lot_id=lot.id,
+                location_node_id=node.id,
+                qty=Decimal("1"),
+                grid_row=c.grid_row,
+                grid_col=c.grid_col,
+                created_by_user_id=user_id,
+            )
+    else:
+        # Free-storage leaf (freezer sub-location / warehouse shelf) — all N units.
+        if placement.cells:
+            raise ValidationError(
+                "This location has no grid; don't send cells", code="cells_not_allowed"
+            )
+        await loc_repo.create_allocation(
+            db,
+            lot_id=lot.id,
+            location_node_id=node.id,
+            qty=Decimal(qty_received),
+            created_by_user_id=user_id,
+        )
+
+    # One +N receipt movement for the whole placement (on-hand becomes derived).
+    await loc_repo.create_node_receipt_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot.id,
+        to_location_node_id=node.id,
+        qty=Decimal(qty_received),
+        performed_by_user_id=user_id,
+        reauth_evidence_id=evidence_uuid,
+    )
+
+
 @receiving_router.post(
     "/transactions/{txn_id}/receive",
     response_model=ReceiptTransactionRead,
@@ -1829,6 +1925,16 @@ async def receive_order(
             qty_received=line_in.qty_received,
             lot_id=lot.id,
             over_receipt_reason=None,
+        )
+        # Unit-IN the received units into their chosen destination, under this
+        # same receive signature (atomic; unit-in happens only here).
+        await _place_received_lot(
+            db,
+            lot=lot,
+            qty_received=line_in.qty_received,
+            placement=line_in.placement,
+            evidence_uuid=evidence_uuid,
+            user_id=current.id,
         )
         await record_entity_change(
             db,

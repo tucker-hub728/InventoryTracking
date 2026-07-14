@@ -28,18 +28,14 @@ import { itemsApi } from '@/lib/api/items';
 import {
   locationNodesApi,
   CHILD_TYPES_OF,
-  FLAT_CATEGORIES,
-  FLAT_CATEGORY_LABEL,
   NODE_TYPE_LABEL,
   type CreatableNodeType,
-  type FlatCategory,
   type LocationNode,
 } from '@/lib/api/location-nodes';
 
 type Mode =
   | { kind: 'ln2-root' }
-  | { kind: 'child'; parent: LocationNode }
-  | { kind: 'flat' };
+  | { kind: 'child'; parent: LocationNode };
 
 interface Props {
   open: boolean;
@@ -71,9 +67,6 @@ function autoCode(name: string): string {
  *  location. */
 export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props) {
   const [name, setName] = React.useState('');
-  const [flatCategory, setFlatCategory] = React.useState<FlatCategory>(
-    FLAT_CATEGORIES[0],
-  );
   // For a rack child the user chooses cassette vs cryo_box_rack.
   const childOptions = mode.kind === 'child' ? CHILD_TYPES_OF[mode.parent.node_type] : [];
   const [childType, setChildType] = React.useState<CreatableNodeType>(
@@ -95,13 +88,11 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
   const nodeType: CreatableNodeType | null =
     mode.kind === 'ln2-root'
       ? 'tank_quadrant'
-      : mode.kind === 'flat'
-        ? 'flat'
-        : childOptions.length === 0
-          ? null
-          : childOptions.length === 1
-            ? (childOptions[0] ?? null)
-            : childType;
+      : childOptions.length === 0
+        ? null
+        : childOptions.length === 1
+          ? (childOptions[0] ?? null)
+          : childType;
 
   const isBox = nodeType === 'box';
   const isQuadrant = nodeType === 'tank_quadrant';
@@ -112,7 +103,6 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
   React.useEffect(() => {
     if (!open) {
       setName('');
-      setFlatCategory(FLAT_CATEGORIES[0]);
       setChildType(childOptions[0] ?? 'box');
       setGridRows('10');
       setGridCols('10');
@@ -153,9 +143,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
   const title =
     mode.kind === 'ln2-root'
       ? 'Add Tank Quadrant'
-      : mode.kind === 'flat'
-        ? 'Add flat location'
-        : `Add ${nodeType ? NODE_TYPE_LABEL[nodeType] : 'child'}`;
+      : `Add ${nodeType ? NODE_TYPE_LABEL[nodeType] : 'child'}`;
 
   const submit = async () => {
     if (!nodeType) return;
@@ -198,7 +186,6 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
         code: autoCode(name),
         name: name.trim(),
         parent_id: mode.kind === 'child' ? mode.parent.id : null,
-        flat_category: mode.kind === 'flat' ? flatCategory : null,
         grid_rows: rows,
         grid_cols: cols,
         dedicated_customer_id: dedCustomer,
@@ -222,9 +209,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
           <DialogDescription>
             {mode.kind === 'child'
               ? `Under ${NODE_TYPE_LABEL[mode.parent.node_type]} ${mode.parent.name}.`
-              : mode.kind === 'flat'
-                ? 'A standalone operational location — no hierarchy.'
-                : 'A top-level LN2 node. Build the hierarchy down to boxes.'}
+              : 'A top-level LN2 node. Build the hierarchy down to boxes.'}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3">
@@ -250,27 +235,6 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
               <p className="text-xs text-text-3">
                 Cassette = single-column of boxes · Cryo Box Rack = grid of boxes.
               </p>
-            </div>
-          )}
-
-          {mode.kind === 'flat' && (
-            <div className="space-y-1.5">
-              <Label>Category</Label>
-              <Select
-                value={flatCategory}
-                onValueChange={(v) => setFlatCategory(v as FlatCategory)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {FLAT_CATEGORIES.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {FLAT_CATEGORY_LABEL[c]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
             </div>
           )}
 

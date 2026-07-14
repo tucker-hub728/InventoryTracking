@@ -38,20 +38,18 @@ const schema = z
 type Values = z.infer<typeof schema>;
 
 interface Props {
-  token: string;
-  invitee: {
-    firstName: string;
-    email: string;
-    roleLabel: string;
-  };
+  /** Display-only — the authoritative email lives in the httpOnly challenge
+   * cookie the BFF reads. Shown so the invitee sees which account they're
+   * activating. */
+  email: string;
 }
 
-interface AcceptErrorBody {
+interface SetPwErrorBody {
   code?: string;
   message?: string;
 }
 
-export function AcceptInviteForm({ token, invitee }: Props) {
+export function SetPasswordForm({ email }: Props) {
   const router = useRouter();
   const setSession = useAuthStore((s) => s.setSession);
   const [showPw, setShowPw] = React.useState(false);
@@ -75,36 +73,32 @@ export function AcceptInviteForm({ token, invitee }: Props) {
     setSubmitError(null);
     let resp: Response;
     try {
-      resp = await fetch('/api/auth/accept-invite', {
+      resp = await fetch('/api/auth/set-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, password: data.password }),
+        body: JSON.stringify({ password: data.password }),
         credentials: 'include',
       });
     } catch {
-      // Network failure on a one-shot flow — the invite isn't consumed on the
-      // server, so tell the user to retry rather than leaving them stuck.
       setSubmitError('Network error. Check your connection and try again.');
       return;
     }
 
     if (!resp.ok) {
-      const body = (await resp.json().catch(() => ({}))) as AcceptErrorBody;
+      const body = (await resp.json().catch(() => ({}))) as SetPwErrorBody;
       const message =
-        body.code === 'invite_invalid'
-          ? 'This invitation is invalid or has already been used.'
-          : body.code === 'invite_expired'
-            ? 'This invitation has expired. Ask an admin to resend it.'
-            : body.code === 'invalid_password'
-              ? (body.message ?? 'That password does not meet the security requirements.')
-              : (body.message ?? 'Could not activate your account. Please try again.');
+        body.code === 'challenge_expired'
+          ? 'Your session expired. Please sign in again with your temporary password.'
+          : body.code === 'invalid_password'
+            ? (body.message ?? 'That password does not meet the security requirements.')
+            : (body.message ?? 'Could not set your password. Please try again.');
       setSubmitError(message);
       return;
     }
 
     const { user } = (await resp.json()) as { user: SessionUser };
     setSession(user);
-    toast.success('Account activated', { description: `Welcome, ${invitee.firstName}.` });
+    toast.success('Password set', { description: `Welcome, ${user.fullName}.` });
     router.replace('/inventory');
     // Refresh server components so the new session cookies are picked up.
     router.refresh();
@@ -114,25 +108,24 @@ export function AcceptInviteForm({ token, invitee }: Props) {
     <div className="mx-auto w-full max-w-md space-y-6 rounded-lg border border-border bg-bg-elev p-8 shadow-elev-md">
       <div>
         <div className="text-xs font-semibold uppercase tracking-widest text-text-3">
-          Accept invitation
+          Set your password
         </div>
-        <h1 className="mt-2 text-xl font-semibold tracking-tight">Welcome, {invitee.firstName}</h1>
+        <h1 className="mt-2 text-xl font-semibold tracking-tight">Choose a new password</h1>
         <p className="mt-1 text-sm text-text-2">
-          You’ve been invited as a <strong className="text-text">{invitee.roleLabel}</strong>. Choose
-          a password to activate your account.
+          Your account is ready. Set a password to finish signing in.
         </p>
       </div>
 
       <form noValidate onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <div className="space-y-1.5">
           <Label>Email</Label>
-          <Input value={invitee.email} disabled readOnly />
+          <Input value={email} disabled readOnly />
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="acc-pw">New password</Label>
+          <Label htmlFor="sp-pw">New password</Label>
           <Input
-            id="acc-pw"
+            id="sp-pw"
             type={showPw ? 'text' : 'password'}
             icon={Lock}
             aria-invalid={Boolean(errors.password)}
@@ -162,9 +155,9 @@ export function AcceptInviteForm({ token, invitee }: Props) {
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="acc-pw2">Confirm new password</Label>
+          <Label htmlFor="sp-pw2">Confirm new password</Label>
           <Input
-            id="acc-pw2"
+            id="sp-pw2"
             type={showConfirm ? 'text' : 'password'}
             icon={Lock}
             aria-invalid={Boolean(errors.confirm)}
@@ -198,7 +191,7 @@ export function AcceptInviteForm({ token, invitee }: Props) {
         )}
 
         <Button type="submit" variant="primary" size="lg" className="w-full" disabled={isSubmitting}>
-          {isSubmitting ? 'Activating…' : 'Activate account'}
+          {isSubmitting ? 'Saving…' : 'Set password'}
         </Button>
       </form>
     </div>

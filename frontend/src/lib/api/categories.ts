@@ -14,6 +14,8 @@ export type CategoryTone = 'neutral' | 'accent' | 'success' | 'warning' | 'dange
 export interface ApiCategory {
   id: string;
   name: string;
+  /** Item-number type prefix (e.g. ``CR``) that fronts every SKU here. */
+  prefix: string;
   kind: CategoryKind;
   tone: string;
   is_seeded: boolean;
@@ -24,6 +26,7 @@ export interface ApiCategory {
 
 export interface CategoryCreateInput {
   name: string;
+  prefix: string;
   kind: CategoryKind;
   tone: CategoryTone;
   evidence_id: string;
@@ -32,6 +35,7 @@ export interface CategoryCreateInput {
 
 export interface CategoryUpdateInput {
   name?: string;
+  prefix?: string;
   tone?: CategoryTone;
   evidence_id: string;
   reason: string;

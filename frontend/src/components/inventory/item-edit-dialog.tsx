@@ -34,8 +34,9 @@ import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
 import { SupplierMultiSelect } from './supplier-multi-select';
 
 const schema = z.object({
-  description: z.string().min(1, 'Description is required').max(512),
+  description: z.string().min(1, 'Name is required').max(512),
   category_id: z.string().min(1, 'Category is required'),
+  uom: z.string().trim().max(32, 'Unit is too long').optional(),
   supplier_ids: z.array(z.string()).default([]),
   avg_lead_days: z
     .string()
@@ -115,6 +116,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     defaultValues: {
       description: '',
       category_id: '',
+      uom: '',
       supplier_ids: [],
       avg_lead_days: '',
       reorder_threshold: '',
@@ -131,6 +133,11 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
   // not bought) — suppliers, lead time, reorder + near-expiry, must-order.
   const showPurchasing =
     categories.find((c) => c.id === categoryId)?.kind === 'purchased';
+
+  // A purchased item is a Raw Material — use raw-material naming and show the
+  // category as a fixed tag; a built item keeps the editable category picker.
+  const built = item?.category_kind === 'built';
+  const isRaw = !built;
 
   // Load suppliers + the fresh item state every time the dialog opens.
   // ``activeOnly: false`` so a supplier that's since been deactivated still
@@ -157,6 +164,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
         reset({
           description: freshItem.description,
           category_id: freshItem.category_id,
+          uom: freshItem.uom ?? '',
           supplier_ids: ids,
           avg_lead_days:
             freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
@@ -191,6 +199,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     const patch: ItemUpdateInput = {};
     if (dirtyFields.description) patch.description = values.description.trim();
     if (dirtyFields.category_id) patch.category_id = values.category_id;
+    if (dirtyFields.uom) patch.uom = values.uom?.trim() ? values.uom.trim() : null;
     if (!sameSupplierSet(values.supplier_ids, loadedSupplierIds)) {
       patch.supplier_ids = values.supplier_ids;
     }
@@ -245,7 +254,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       <DialogContent className="max-w-xl">
         <form noValidate onSubmit={handleSubmit(onSubmit)}>
           <DialogHeader>
-            <DialogTitle>Edit item</DialogTitle>
+            <DialogTitle>{isRaw ? 'Edit Raw Material' : 'Edit item'}</DialogTitle>
             <DialogDescription>
               {item ? (
                 <>
@@ -268,9 +277,14 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                 {loadError}
               </p>
             )}
+            {isRaw && item && (
+              <div>
+                <Badge tone="neutral">{item.category_name}</Badge>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="it-desc">
-                Description <span className="text-danger">*</span>
+                {isRaw ? 'Name' : 'Description'} <span className="text-danger">*</span>
               </Label>
               <Input
                 id="it-desc"
@@ -284,37 +298,54 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               )}
             </div>
 
+            {!isRaw && (
+              <div className="space-y-1.5">
+                <Label htmlFor="it-category">Category</Label>
+                {/* key remounts the Select once the item + categories have loaded
+                    so the pre-selected value renders (Radix shows the placeholder
+                    if value is set before its options mount). */}
+                <Select
+                  key={item?.id ?? 'loading'}
+                  value={categoryId}
+                  onValueChange={(v) =>
+                    setValue('category_id', v, { shouldDirty: true, shouldValidate: true })
+                  }
+                >
+                  <SelectTrigger id="it-category" aria-label="Category">
+                    <SelectValue placeholder="Pick a category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {categories.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        <span className="flex items-center gap-2">
+                          <span className="truncate">{c.name}</span>
+                          <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
+                            {c.kind === 'built' ? 'Product' : 'Purchased'}
+                          </Badge>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {errors.category_id && (
+                  <p role="alert" className="text-xs text-danger">
+                    {errors.category_id.message}
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="space-y-1.5">
-              <Label htmlFor="it-category">Category</Label>
-              {/* key remounts the Select once the item + categories have loaded
-                  so the pre-selected value renders (Radix shows the placeholder
-                  if value is set before its options mount). */}
-              <Select
-                key={item?.id ?? 'loading'}
-                value={categoryId}
-                onValueChange={(v) =>
-                  setValue('category_id', v, { shouldDirty: true, shouldValidate: true })
-                }
-              >
-                <SelectTrigger id="it-category" aria-label="Category">
-                  <SelectValue placeholder="Pick a category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      <span className="flex items-center gap-2">
-                        <span className="truncate">{c.name}</span>
-                        <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
-                          {c.kind === 'built' ? 'Product' : 'Purchased'}
-                        </Badge>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {errors.category_id && (
+              <Label htmlFor="it-uom">Unit</Label>
+              <Input
+                id="it-uom"
+                placeholder="each, mL, box…"
+                aria-invalid={Boolean(errors.uom)}
+                {...register('uom')}
+              />
+              {errors.uom && (
                 <p role="alert" className="text-xs text-danger">
-                  {errors.category_id.message}
+                  {errors.uom.message}
                 </p>
               )}
             </div>

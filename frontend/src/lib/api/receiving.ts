@@ -126,6 +126,19 @@ export interface OrderUpdateInput {
   lines?: OrderLineInput[];
 }
 
+export interface ReceivePlacementCell {
+  grid_row: number;
+  grid_col: number;
+}
+
+/** Where a received lot is placed (unit-in), sent with the receive. Single
+ *  destination, exactly qty_received units: a box takes N distinct cells; a
+ *  freezer sub-location / warehouse shelf takes all N (cells empty). */
+export interface ReceivePlacementInput {
+  node_id: string;
+  cells: ReceivePlacementCell[];
+}
+
 export interface ReceiveEventLineInput {
   line_id: string;
   qty_received: number;
@@ -133,6 +146,7 @@ export interface ReceiveEventLineInput {
   manufacture_date?: string | null;
   expiration_date?: string | null;
   unit_price_amount?: number | null;
+  placement: ReceivePlacementInput;
 }
 
 export interface ReceiveEventInput {

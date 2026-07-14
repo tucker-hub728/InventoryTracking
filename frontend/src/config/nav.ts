@@ -1,13 +1,15 @@
 import {
-  Boxes,
   Building2,
   Contact,
+  FlaskConical,
   History,
   LineChart,
-  MapPin,
+  Refrigerator,
+  Snowflake,
   Tags,
   Truck,
   Users,
+  Warehouse,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -38,9 +40,14 @@ export interface NavSection {
 
 export const navSections: readonly NavSection[] = [
   {
+    title: 'Inventory',
+    items: [
+      { id: 'inventory-cr', label: 'Raw Materials', href: '/inventory/cr', icon: FlaskConical, resource: 'inventory' },
+    ],
+  },
+  {
     title: 'Operations',
     items: [
-      { id: 'inventory', label: 'Inventory', href: '/inventory', icon: Boxes, resource: 'inventory' },
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
       { id: 'categories', label: 'Categories', href: '/categories', icon: Tags, resource: 'inventory' },
       { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
@@ -54,25 +61,16 @@ export const navSections: readonly NavSection[] = [
         disabledReason:
           'Forecasting is a work in progress — demand projections and reorder signals are not yet wired to the backend.',
       },
-      // Hidden for now — route stays wired; uncomment to restore.
-      // {
-      //   id: 'ln2',
-      //   label: 'LN2 Tanks',
-      //   href: '/ln2',
-      //   icon: Snowflake,
-      //   resource: 'inventory'
-      // },
-      { id: 'locations', label: 'Locations', href: '/locations', icon: MapPin, resource: 'inventory' },
-      // {
-      //   id: 'kanban',
-      //   label: 'Kanban',
-      //   href: '/kanban',
-      //   icon: KanbanSquare,
-      //   resource: 'inventory',
-      //   disabled: true,
-      //   disabledReason:
-      //     'Kanban workflow is in active development — board state and card transitions are not yet wired to the backend.',
-      // },
+    ],
+  },
+  {
+    title: 'Locations',
+    items: [
+      // The old combined /locations page now lives at /ln2 (redirect kept for
+      // bookmarks). Freezer + Warehouse are the new per-area sections.
+      { id: 'ln2', label: 'LN2', href: '/ln2', icon: Snowflake, resource: 'inventory' },
+      { id: 'freezer', label: 'Freezers', href: '/freezer', icon: Refrigerator, resource: 'inventory' },
+      { id: 'warehouse', label: 'Warehouse', href: '/warehouse', icon: Warehouse, resource: 'inventory' },
     ],
   },
   {

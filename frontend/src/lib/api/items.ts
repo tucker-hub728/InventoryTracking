@@ -34,6 +34,10 @@ export interface ApiItem {
   id: string;
   item_number: string;
   description: string;
+  /** Free-text unit of measure (each, mL, box …). ``null`` when unset. */
+  uom: string | null;
+  /** Blind-consumed (no per-lot traceability) when true. */
+  is_consumable: boolean;
   /** Category (requirements v2 §6). ``category_kind`` drives the Type column:
    *  built → "Product" (may have a BOM), purchased → bought as-is. */
   category_id: string;
@@ -94,6 +98,10 @@ export interface ItemCreateInput {
   description: string;
   /** Required — the item's category (governs BOM eligibility). */
   category_id: string;
+  /** Free-text unit of measure (each, mL, box …). */
+  uom?: string | null;
+  /** Blind-consumed with no per-lot traceability when true. */
+  is_consumable?: boolean;
   /** Assigned suppliers (zero-or-more). The only suppliers the item can later
    *  be received against. */
   supplier_ids?: string[];
@@ -109,6 +117,8 @@ export interface ItemCreateInput {
  */
 export interface ItemUpdateInput {
   description?: string;
+  uom?: string | null;
+  is_consumable?: boolean;
   /** Re-categorise the item. Blocked server-side if moving a BOM-bearing
    *  item to a purchased category. */
   category_id?: string;

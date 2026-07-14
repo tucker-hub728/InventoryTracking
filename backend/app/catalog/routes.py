@@ -55,6 +55,7 @@ def _category_to_read(cat: ItemCategory, item_count: int) -> CategoryRead:
     return CategoryRead(
         id=str(cat.id),
         name=cat.name,
+        prefix=cat.prefix,
         kind=cat.kind,  # type: ignore[arg-type]
         tone=cat.tone,
         is_seeded=cat.is_seeded,
@@ -184,16 +185,28 @@ async def create_category(
         raise ConflictError(
             f"Category '{payload.name}' already exists", code="category_name_conflict"
         )
+    if (await cat_repo.get_category_by_prefix(db, payload.prefix)) is not None:
+        raise ConflictError(
+            f"Prefix '{payload.prefix}' is already in use",
+            code="category_prefix_conflict",
+        )
     try:
         cat = await cat_repo.create_category(
             db,
             name=payload.name,
+            prefix=payload.prefix,
             kind=payload.kind,
             tone=payload.tone,
             created_by_user_id=current.id,
         )
     except IntegrityError as exc:
         await db.rollback()
+        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
+        if "uq_item_categories_prefix" in msg:
+            raise ConflictError(
+                f"Prefix '{payload.prefix}' is already in use",
+                code="category_prefix_conflict",
+            ) from exc
         raise ConflictError(
             f"Category '{payload.name}' already exists", code="category_name_conflict"
         ) from exc
@@ -252,6 +265,15 @@ async def update_category(
             raise ConflictError(
                 f"Category '{new_name}' already exists",
                 code="category_name_conflict",
+            )
+
+    new_prefix = patch.get("prefix")
+    if new_prefix is not None:
+        clash = await cat_repo.get_category_by_prefix(db, str(new_prefix))
+        if clash is not None and clash.id != cat.id:
+            raise ConflictError(
+                f"Prefix '{new_prefix}' is already in use",
+                code="category_prefix_conflict",
             )
 
     before = cat_repo.category_to_audit_snapshot(cat)

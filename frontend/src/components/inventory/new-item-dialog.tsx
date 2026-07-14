@@ -9,6 +9,7 @@ import {
   Dialog,
   DialogBody,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -24,6 +25,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
@@ -31,6 +33,12 @@ import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
 import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
 
 import { SupplierMultiSelect } from './supplier-multi-select';
+
+/** Strip a re-typed category prefix off the SKU tail (so "CR-001" → "001",
+ *  not "CR-CR-001"). Prefixes are alphanumeric, safe to inline in the regex. */
+function skuTail(prefix: string, raw: string): string {
+  return raw.trim().replace(new RegExp(`^${prefix}-?`, 'i'), '');
+}
 
 // ── Form schema ────────────────────────────────────────────────────────
 
@@ -48,6 +56,10 @@ const schema = z.object({
   // Required category — governs whether the item is a Product (built) or
   // Purchased, and thus BOM eligibility.
   categoryId: z.string().min(1, 'Category is required'),
+  // Free-text unit of measure (each, mL, box …). Optional.
+  uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
+  // Blind-consumed, no per-lot traceability.
+  isConsumable: z.boolean().default(false),
   // Assigned suppliers — zero-or-more. The only suppliers this item can later be
   // received against. Optional: an item may start with none and add later.
   supplierIds: z.array(z.string()).default([]),
@@ -69,9 +81,27 @@ interface Props {
    *  host list refresh itself — the inventory list relies on the store
    *  refetch instead and omits this. */
   onCreated?: () => void;
+  /** When set, the category is fixed to this one and the picker is read-only.
+   *  Used by the per-tier sections (e.g. Raw Materials) where the category is
+   *  implied by the page, not chosen by the operator. */
+  lockedCategory?: ApiCategory | null;
+  /** Dialog title override (defaults to "New inventory item"). */
+  title?: string;
+  /** Short line under the title (e.g. the SKU-prefix hint on a tier page). */
+  description?: React.ReactNode;
+  /** Submit-button label override (defaults to "Create item"). */
+  submitLabel?: string;
 }
 
-export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
+export function NewItemDialog({
+  open,
+  onOpenChange,
+  onCreated,
+  lockedCategory,
+  title,
+  description,
+  submitLabel,
+}: Props) {
   // Store actions — the only thing this component does for I/O.
   const createItem = useInventoryStore((s) => s.create);
   const createPending = useInventoryStore((s) => s.createPending);
@@ -99,7 +129,9 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
     defaultValues: {
       itemId: '',
       desc: '',
-      categoryId: '',
+      categoryId: lockedCategory?.id ?? '',
+      uom: '',
+      isConsumable: false,
       supplierIds: [],
       leadDays: 0,
       threshold: 0,
@@ -109,11 +141,21 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
 
   const supplierIds = watch('supplierIds');
   const categoryId = watch('categoryId');
+  const isConsumable = watch('isConsumable');
+  const itemId = watch('itemId');
+
+  // When the category is locked (e.g. Raw Materials), the SKU is always
+  // prefixed with the category prefix; the operator only types the tail.
+  const skuPrefix = lockedCategory?.prefix ?? '';
+  const fullSku = lockedCategory
+    ? `${skuPrefix}-${skuTail(skuPrefix, itemId)}`
+    : itemId;
 
   // Purchasing fields (suppliers, lead time, reorder + near-expiry) only apply to
   // Purchased categories — a Product is built, not bought. Shown once a
   // Purchased category is picked; hidden for Product / before a pick.
-  const selectedCategory = categories.find((c) => c.id === categoryId);
+  const selectedCategory =
+    lockedCategory ?? categories.find((c) => c.id === categoryId);
   const showPurchasing = selectedCategory?.kind === 'purchased';
 
   // ── Side effects ─────────────────────────────────────────────────────
@@ -137,9 +179,10 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
     return () => ctrl.abort();
   }, [open]);
 
-  // Load categories once when the dialog opens.
+  // Load categories once when the dialog opens — skipped when the category is
+  // fixed by the host page (no picker to populate).
   React.useEffect(() => {
-    if (!open) return;
+    if (!open || lockedCategory) return;
     const ctrl = new AbortController();
     categoriesApi
       .list({ signal: ctrl.signal })
@@ -148,7 +191,14 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
         /* surfaced via the empty dropdown */
       });
     return () => ctrl.abort();
-  }, [open]);
+  }, [open, lockedCategory]);
+
+  // Keep the locked category selected while the dialog is open.
+  React.useEffect(() => {
+    if (open && lockedCategory) {
+      setValue('categoryId', lockedCategory.id, { shouldValidate: true });
+    }
+  }, [open, lockedCategory, setValue]);
 
   // Reset the form when the dialog closes.
   React.useEffect(() => {
@@ -156,6 +206,9 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       reset({
         itemId: '',
         desc: '',
+        categoryId: lockedCategory?.id ?? '',
+        uom: '',
+        isConsumable: false,
         supplierIds: [],
         leadDays: 0,
         threshold: 0,
@@ -163,7 +216,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       });
       setSubmitError(null);
     }
-  }, [open, reset]);
+  }, [open, reset, lockedCategory]);
 
   // ── Submit ───────────────────────────────────────────────────────────
 
@@ -171,15 +224,19 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
     setSubmitError(null);
     try {
       const created = await createItem({
-        item_number: data.itemId,
+        item_number: lockedCategory
+          ? `${skuPrefix}-${skuTail(skuPrefix, data.itemId)}`
+          : data.itemId,
         description: data.desc,
         category_id: data.categoryId,
+        uom: data.uom ? data.uom : null,
+        is_consumable: data.isConsumable,
         supplier_ids: data.supplierIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
         near_expiry_threshold_days: data.nearExpiryThresholdDays,
       });
-      toast.success('Item created', {
+      toast.success(lockedCategory ? 'Raw material created' : 'Item created', {
         description: `${created.id} · ${created.desc}`,
       });
       onCreated?.();
@@ -212,57 +269,125 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
       <DialogContent className="max-w-2xl">
         <form onSubmit={handleSubmit(onSubmit)}>
           <DialogHeader>
-            <DialogTitle>New inventory item</DialogTitle>
+            <DialogTitle>{title ?? 'New inventory item'}</DialogTitle>
+            {description && <DialogDescription>{description}</DialogDescription>}
           </DialogHeader>
           <DialogBody className="space-y-5">
-            <div className="grid gap-4 sm:grid-cols-[160px_1fr]">
-              <Field id="ni-itemId" label="Item #" error={errors.itemId?.message}>
-                <Input
-                  id="ni-itemId"
-                  placeholder="e.g. UR-0001"
-                  className="font-mono"
-                  aria-invalid={Boolean(errors.itemId)}
-                  {...register('itemId')}
-                />
+            {lockedCategory && (
+              <div>
+                <Badge tone="neutral">{lockedCategory.name}</Badge>
+              </div>
+            )}
+            <div
+              className={
+                lockedCategory
+                  ? 'space-y-5'
+                  : 'grid gap-4 sm:grid-cols-[200px_1fr]'
+              }
+            >
+              <Field
+                id="ni-itemId"
+                label={lockedCategory ? 'SKU' : 'Item #'}
+                error={errors.itemId?.message}
+              >
+                {lockedCategory ? (
+                  <>
+                    <div className="flex">
+                      <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
+                        {skuPrefix}-
+                      </span>
+                      <Input
+                        id="ni-itemId"
+                        placeholder="001"
+                        className="rounded-l-none font-mono"
+                        aria-invalid={Boolean(errors.itemId)}
+                        {...register('itemId')}
+                      />
+                    </div>
+                    <p className="text-xs text-text-3">
+                      Full SKU: <span className="font-mono text-text-2">{fullSku}</span>
+                    </p>
+                  </>
+                ) : (
+                  <Input
+                    id="ni-itemId"
+                    placeholder={
+                      selectedCategory
+                        ? `e.g. ${selectedCategory.prefix}-0001`
+                        : 'e.g. UR-0001'
+                    }
+                    className="font-mono"
+                    aria-invalid={Boolean(errors.itemId)}
+                    {...register('itemId')}
+                  />
+                )}
               </Field>
-              <Field id="ni-desc" label="Description" error={errors.desc?.message}>
+              <Field
+                id="ni-desc"
+                label={lockedCategory ? 'Name' : 'Description'}
+                error={errors.desc?.message}
+              >
                 <Input
                   id="ni-desc"
-                  placeholder="e.g. CryoStor CS10, 100 mL Bottle"
+                  placeholder="e.g. Medical Tube, PVC 6mm"
                   aria-invalid={Boolean(errors.desc)}
                   {...register('desc')}
                 />
               </Field>
             </div>
 
-            <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
-              <Select
-                value={categoryId}
-                onValueChange={(v) =>
-                  setValue('categoryId', v, { shouldValidate: true })
-                }
-              >
-                <SelectTrigger id="ni-category" aria-label="Category">
-                  <SelectValue placeholder="Pick a category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      <span className="flex items-center gap-2">
-                        <span className="truncate">{c.name}</span>
-                        <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
-                          {c.kind === 'built' ? 'Product' : 'Purchased'}
-                        </Badge>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-text-3">
-                The category decides whether this is a Product (can have a BOM) or
-                a Purchased item. Manage the BOM from the item&apos;s detail page.
-              </p>
-            </Field>
+            {!lockedCategory && (
+              <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
+                <Select
+                  value={categoryId}
+                  onValueChange={(v) =>
+                    setValue('categoryId', v, { shouldValidate: true })
+                  }
+                >
+                  <SelectTrigger id="ni-category" aria-label="Category">
+                    <SelectValue placeholder="Pick a category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {categories.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        <span className="flex items-center gap-2">
+                          <span className="truncate">{c.name}</span>
+                          <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
+                            {c.kind === 'built' ? 'Product' : 'Purchased'}
+                          </Badge>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-text-3">
+                  The category decides whether this is a Product (can have a BOM) or
+                  a Purchased item. Manage the BOM from the item&apos;s detail page.
+                </p>
+              </Field>
+            )}
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
+                <Input
+                  id="ni-uom"
+                  placeholder="each, mL, box…"
+                  aria-invalid={Boolean(errors.uom)}
+                  {...register('uom')}
+                />
+              </Field>
+              <div className="flex items-center justify-between gap-4 self-end rounded-md border border-border bg-surface px-3 py-2">
+                <div className="space-y-0.5">
+                  <Label htmlFor="ni-consumable">Consumable</Label>
+                  <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+                </div>
+                <Switch
+                  id="ni-consumable"
+                  checked={isConsumable}
+                  onCheckedChange={(v) => setValue('isConsumable', v)}
+                />
+              </div>
+            </div>
 
             {showPurchasing && (
               <>
@@ -356,7 +481,7 @@ export function NewItemDialog({ open, onOpenChange, onCreated }: Props) {
               Cancel
             </Button>
             <Button type="submit" variant="primary" disabled={busy}>
-              {busy ? 'Creating…' : 'Create item'}
+              {busy ? 'Creating…' : (submitLabel ?? 'Create item')}
             </Button>
           </DialogFooter>
         </form>

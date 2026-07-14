@@ -12,8 +12,6 @@ import { cn } from '@/lib/utils';
 import {
   locationNodesApi,
   subtreeStats,
-  FLAT_CATEGORY_LABEL,
-  type FlatCategory,
   type LocationNode,
   type NodeTree,
 } from '@/lib/api/location-nodes';
@@ -21,22 +19,17 @@ import {
 import { NodeCreateDialog } from './node-create-dialog';
 import { NodeDetailPanel, NODE_ICON } from './node-detail-panel';
 
+// ``flat`` operational locations are retired — this view shows only the LN2
+// storage hierarchy now.
 type CreateMode =
   | { kind: 'ln2-root' }
   | { kind: 'child'; parent: LocationNode }
-  | { kind: 'flat' }
   | null;
-
-/** Wrap a flat LocationNode as a childless NodeTree for the detail panel. */
-function asTree(n: LocationNode): NodeTree {
-  return { ...n, children: [] };
-}
 
 export function LocationSystemClient() {
   const canWrite = usePermission('inventory', 'create');
 
   const [tree, setTree] = React.useState<NodeTree[]>([]);
-  const [flat, setFlat] = React.useState<LocationNode[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -49,12 +42,8 @@ export function LocationSystemClient() {
       else setLoading(true);
       setLoadError(null);
       try {
-        const [t, f] = await Promise.all([
-          locationNodesApi.ln2Tree({ signal }),
-          locationNodesApi.flat({ signal }),
-        ]);
+        const t = await locationNodesApi.ln2Tree({ signal });
         setTree(t);
-        setFlat(f);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load locations.');
@@ -85,13 +74,7 @@ export function LocationSystemClient() {
     return { byId, parentOf };
   }, [tree]);
 
-  const flatById = React.useMemo(() => {
-    const m = new Map<string, LocationNode>();
-    flat.forEach((n) => m.set(n.id, n));
-    return m;
-  }, [flat]);
-
-  // Resolve the selected node (LN2 tree or flat) + its breadcrumb path.
+  // Resolve the selected node (LN2 tree) + its breadcrumb path.
   const { selectedNode, path } = React.useMemo(() => {
     if (!selectedId) return { selectedNode: null as NodeTree | null, path: [] as NodeTree[] };
     const ln2 = byId.get(selectedId);
@@ -106,31 +89,15 @@ export function LocationSystemClient() {
       }
       return { selectedNode: ln2, path: chain };
     }
-    const fl = flatById.get(selectedId);
-    if (fl) {
-      const wrapped = asTree(fl);
-      return { selectedNode: wrapped, path: [wrapped] };
-    }
     return { selectedNode: null, path: [] };
-  }, [selectedId, byId, parentOf, flatById]);
+  }, [selectedId, byId, parentOf]);
 
   // Drop the selection if the node disappeared (e.g. after delete).
   React.useEffect(() => {
-    if (selectedId && !byId.has(selectedId) && !flatById.has(selectedId) && !loading) {
+    if (selectedId && !byId.has(selectedId) && !loading) {
       setSelectedId(null);
     }
-  }, [selectedId, byId, flatById, loading]);
-
-  const flatByCategory = React.useMemo(() => {
-    const m = new Map<FlatCategory, LocationNode[]>();
-    for (const n of flat) {
-      if (!n.flat_category) continue;
-      const arr = m.get(n.flat_category) ?? [];
-      arr.push(n);
-      m.set(n.flat_category, arr);
-    }
-    return m;
-  }, [flat]);
+  }, [selectedId, byId, loading]);
 
   return (
     <div className="flex h-[calc(100vh-52px)] min-h-0">
@@ -159,7 +126,7 @@ export function LocationSystemClient() {
                 <Skeleton key={i} className="h-7 w-full" />
               ))}
             </div>
-          ) : tree.length === 0 && flat.length === 0 ? (
+          ) : tree.length === 0 ? (
             <p className="px-3 py-6 text-sm text-text-3">
               No locations yet. Use + to add a tank quadrant.
             </p>
@@ -173,48 +140,6 @@ export function LocationSystemClient() {
                   selectedId={selectedId}
                   onSelect={setSelectedId}
                 />
-              ))}
-
-              {/* Flat locations */}
-              <div className="mt-3 flex items-center justify-between px-3 pb-1 pt-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-text-3">
-                  Flat locations
-                </p>
-                {canWrite && (
-                  <button
-                    type="button"
-                    title="Add flat location"
-                    onClick={() => setCreateMode({ kind: 'flat' })}
-                    className="rounded p-0.5 text-text-3 hover:bg-bg-elev hover:text-text"
-                  >
-                    <Plus size={13} />
-                  </button>
-                )}
-              </div>
-              {[...flatByCategory.entries()].map(([cat, nodes]) => (
-                <div key={cat} className="mb-1">
-                  <p className="px-3 py-1 text-[10px] uppercase tracking-wide text-text-3/70">
-                    {FLAT_CATEGORY_LABEL[cat]}
-                  </p>
-                  {nodes.map((n) => (
-                    <button
-                      key={n.id}
-                      type="button"
-                      onClick={() => setSelectedId(n.id)}
-                      className={cn(
-                        'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm',
-                        selectedId === n.id
-                          ? 'bg-warning/10 font-medium text-text-1'
-                          : 'text-text-2 hover:bg-bg-elev',
-                      )}
-                    >
-                      <OverflowTooltip label={n.name} />
-                      <span className="ml-auto font-mono text-xs text-text-3">
-                        {n.active_allocation_count}
-                      </span>
-                    </button>
-                  ))}
-                </div>
               ))}
             </>
           )}
@@ -263,7 +188,7 @@ export function LocationSystemClient() {
           <div className="flex h-full items-center justify-center p-8">
             <EmptyState
               title="Select a location"
-              hint="Pick a quadrant, rack, container, box or flat location from the hierarchy to see its contents."
+              hint="Pick a quadrant, rack, container or box from the hierarchy to see its contents."
             />
           </div>
         )}

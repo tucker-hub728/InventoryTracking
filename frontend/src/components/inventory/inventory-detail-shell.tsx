@@ -29,8 +29,6 @@ import { InventoryDetailProvider } from './inventory-detail-context';
 // "used in" (Products) view, forecast impact, and audit.
 const PURCHASED_TABS = [
   { seg: 'ledger', label: 'Unit Ledger' },
-  { seg: 'products', label: 'Products' },
-  { seg: 'forecast', label: 'Forecast Impact' },
   { seg: 'audit', label: 'Audit History' },
 ] as const;
 
@@ -223,9 +221,6 @@ export function InventoryDetailShell({
             <span aria-hidden>·</span>
             <Badge tone={(item.categoryTone as never) ?? 'neutral'} dot>
               {item.categoryName}
-            </Badge>
-            <Badge tone={built ? 'accent' : 'neutral'}>
-              {built ? 'Product' : 'Purchased'}
             </Badge>
             {!built && (
               <>

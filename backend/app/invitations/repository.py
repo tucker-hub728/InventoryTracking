@@ -24,7 +24,6 @@ async def create(
     last_name: str,
     role: str,
     cognito_sub: str | None,
-    token_hash: str,
     invited_by: uuid.UUID,
     expires_at: datetime,
 ) -> Invitation:
@@ -35,7 +34,6 @@ async def create(
         last_name=last_name,
         role=role,
         cognito_sub=cognito_sub,
-        token_hash=token_hash,
         status="pending",
         invited_by=invited_by,
         expires_at=expires_at,
@@ -54,12 +52,6 @@ async def delete(session: AsyncSession, invite: Invitation) -> None:
     """Hard-delete an invitation row. Caller commits."""
     await session.delete(invite)
     await session.flush()
-
-
-async def get_by_token_hash(session: AsyncSession, token_hash: str) -> Invitation | None:
-    """Look up an invitation by the SHA-256 hash of its raw link token."""
-    stmt = select(Invitation).where(Invitation.token_hash == token_hash)
-    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_pending_by_email(session: AsyncSession, email: str) -> Invitation | None:

@@ -69,6 +69,34 @@ class TokenResponse(BaseModel):
     token_type: str = "Bearer"
 
 
+class NewPasswordChallengeResponse(BaseModel):
+    """Returned from ``/auth/login`` when an invited user signs in with their
+    temporary password. The BFF stashes ``session`` and sends the user to the
+    set-password step, which calls ``/auth/set-password`` to complete it.
+
+    ``session`` is a short-lived Cognito challenge continuation token — NOT an
+    access token. It only survives a few minutes and is single-use.
+    """
+
+    challenge: str = "NEW_PASSWORD_REQUIRED"
+    session: str
+    email: str
+
+
+class SetPasswordRequest(BaseModel):
+    """Complete the first-login ``NEW_PASSWORD_REQUIRED`` challenge.
+
+    ``session`` comes from the login response; ``password`` is the invitee's
+    chosen password. On success the account is confirmed and a session minted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: Email
+    session: str = Field(min_length=1)
+    password: str = Field(min_length=1, max_length=256)
+
+
 class ReauthRequest(BaseModel):
     """Payload for ``POST /v1/auth/reauth``.
 

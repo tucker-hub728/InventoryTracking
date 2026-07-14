@@ -1,10 +1,9 @@
 /**
  * Invitations API — wraps ``/v1/invitations`` (via the BFF proxy).
  *
- * Admin (super-admin) surface: create / list / revoke / resend. The public
- * accept + resolve endpoints are NOT here — they run server-side through the
- * BFF (see ``lib/auth/backend.ts`` + ``app/api/auth/accept-invite``) because
- * the invitee has no session.
+ * Admin (super-admin) surface: create / list / revoke / resend. Cognito emails
+ * the invitee a temporary password; onboarding is completed by the invitee via
+ * the login → set-password flow, so there is no public accept endpoint here.
  */
 
 import { api } from './client';
@@ -19,7 +18,9 @@ export interface InviteInput {
   role: AssignableRole;
 }
 
-/** Returned on create/resend — carries the one-time link token. */
+/** Returned on create/resend. ``temporary_password`` is populated only in local
+ * dev (cognito-local can't deliver mail, so the admin UI shows it for testing);
+ * it is always null in production, where Cognito emails it. */
 export interface InviteResult {
   id: string;
   email: string;
@@ -28,9 +29,7 @@ export interface InviteResult {
   role: string;
   status: InviteStatus;
   expires_at: string;
-  token: string;
-  accept_path: string;
-  accept_url: string | null;
+  temporary_password: string | null;
 }
 
 /** Directory view of an invitation. */
@@ -45,14 +44,6 @@ export interface Invitation {
   expires_at: string;
   accepted_at: string | null;
   created_at: string;
-}
-
-/** Compose the absolute accept link, falling back to the current origin when
- * the backend has no FRONTEND_BASE_URL configured (dev). */
-export function acceptUrlFor(result: InviteResult): string {
-  if (result.accept_url) return result.accept_url;
-  const origin = typeof window === 'undefined' ? '' : window.location.origin;
-  return `${origin}${result.accept_path}`;
 }
 
 export const invitationsApi = {

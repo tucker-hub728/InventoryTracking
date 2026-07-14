@@ -19,6 +19,7 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
+import { locationNodesApi } from '@/lib/api/location-nodes';
 import {
   receivingApi,
   type Order,
@@ -26,6 +27,13 @@ import {
   type ReceiveEventInput,
   type ReceiveEventLineInput,
 } from '@/lib/api/receiving';
+import {
+  ReceiveLocationPicker,
+  collectLeaves,
+  placementComplete,
+  type AreaLeaves,
+  type PlacementValue,
+} from './receive-location-picker';
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -38,6 +46,8 @@ interface LineDraft {
   manufacture_date: string;
   expiration_date: string;
   unit_price: string;
+  /** Where the received units go (unit-in) — chosen in the same signed step. */
+  placement: PlacementValue | null;
 }
 
 function seedLineDraft(line: OrderLine): LineDraft {
@@ -48,6 +58,7 @@ function seedLineDraft(line: OrderLine): LineDraft {
     manufacture_date: '',
     expiration_date: '',
     unit_price: line.unit_price_amount ?? '',
+    placement: null,
   };
 }
 
@@ -72,6 +83,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
+  const [leaves, setLeaves] = React.useState<AreaLeaves | null>(null);
 
   const outstandingLines = React.useMemo(
     () => (order?.lines ?? []).filter((l) => l.outstanding_qty > 0),
@@ -91,6 +103,28 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     setSubmitting(false);
     setFormError(null);
   }, [open, order]);
+
+  // Load the placement targets (all three areas) once when the dialog opens.
+  React.useEffect(() => {
+    if (!open) return;
+    const ctrl = new AbortController();
+    Promise.all([
+      locationNodesApi.ln2Tree({ signal: ctrl.signal }),
+      locationNodesApi.freezerTree({ signal: ctrl.signal }),
+      locationNodesApi.warehouseTree({ signal: ctrl.signal }),
+    ])
+      .then(([ln2, freezer, warehouse]) =>
+        setLeaves({
+          ln2: collectLeaves(ln2),
+          freezer: collectLeaves(freezer),
+          warehouse: collectLeaves(warehouse),
+        }),
+      )
+      .catch(() => {
+        /* the picker shows an empty state if targets can't load */
+      });
+    return () => ctrl.abort();
+  }, [open]);
 
   const patch = (lineId: string, p: Partial<LineDraft>) =>
     setDrafts((prev) => {
@@ -145,6 +179,14 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         }
         unitPrice = p;
       }
+      if (!placementComplete(d.placement, qty)) {
+        return {
+          error:
+            d.placement?.nodeType === 'box'
+              ? `Line ${line.line_no}: select exactly ${qty} cell(s) in the chosen box.`
+              : `Line ${line.line_no}: choose a destination location for the received units.`,
+        };
+      }
       out.push({
         line_id: line.id,
         qty_received: qty,
@@ -152,6 +194,10 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         manufacture_date: d.manufacture_date || undefined,
         expiration_date: d.expiration_date || undefined,
         unit_price_amount: unitPrice,
+        placement: {
+          node_id: d.placement!.nodeId,
+          cells: d.placement!.cells,
+        },
       });
     }
     if (out.length === 0) {
@@ -348,6 +394,24 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       />
                     </div>
                   </div>
+
+                  {d.include && (
+                    <div className="mt-3 space-y-1.5 border-t border-border pt-3">
+                      <Label>
+                        Destination — unit in <span className="text-danger">*</span>
+                      </Label>
+                      {leaves ? (
+                        <ReceiveLocationPicker
+                          qty={Number(d.qty_received) || 0}
+                          leaves={leaves}
+                          value={d.placement}
+                          onChange={(v) => patch(line.id, { placement: v })}
+                        />
+                      ) : (
+                        <p className="text-xs text-text-3">Loading locations…</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

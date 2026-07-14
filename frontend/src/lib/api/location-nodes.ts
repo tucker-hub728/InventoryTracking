@@ -22,19 +22,27 @@ export type NodeType =
   | 'cassette'
   | 'cryo_box_rack'
   | 'box'
+  // Freezer area: room → room_location → sub_location (free leaf)
+  | 'room'
+  | 'room_location'
+  | 'sub_location'
+  // Warehouse area: warehouse → shelf (free leaf)
+  | 'warehouse'
+  | 'shelf'
   | 'flat'
   // Retired (read-only — old rows only):
   | 'cassette_rack'
   | 'sub_slot';
 
-/** Node types the UI can create. */
+/** Node types the UI can create. Freezer rooms/locations and the warehouse are
+ *  seed-managed; the only free leaf the UI creates is a freezer sub_location. */
 export type CreatableNodeType =
   | 'tank_quadrant'
   | 'rack'
   | 'cassette'
   | 'cryo_box_rack'
   | 'box'
-  | 'flat';
+  | 'sub_location';
 
 export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials';
 export type MovementType =
@@ -52,6 +60,11 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   cassette: 'Cassette',
   cryo_box_rack: 'Cryo Box Rack',
   box: 'Box',
+  room: 'Room',
+  room_location: 'Location',
+  sub_location: 'Sub-location',
+  warehouse: 'Warehouse',
+  shelf: 'Shelf',
   flat: 'Flat location',
   cassette_rack: 'Cassette Rack (legacy)',
   sub_slot: 'Sub-slot (legacy)',
@@ -86,6 +99,12 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   cassette: ['box'],
   cryo_box_rack: ['box'],
   box: [],
+  // Freezer area — a Location holds sub-locations; rooms/warehouse are seeded.
+  room: [],
+  room_location: ['sub_location'],
+  sub_location: [],
+  warehouse: [],
+  shelf: [],
   flat: [],
   cassette_rack: [],
   sub_slot: [],
@@ -177,7 +196,6 @@ export interface NodeCreateInput {
   code: string;
   name: string;
   parent_id?: string | null;
-  flat_category?: FlatCategory | null;
   grid_rows?: number | null;
   grid_cols?: number | null;
   dedicated_customer_id?: string | null;
@@ -276,6 +294,18 @@ export interface LotAvailability {
 export const locationNodesApi = {
   ln2Tree: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
     api.get<NodeTree[]>('/location-nodes/ln2-tree', {
+      query: { active_only: opts?.activeOnly ?? true },
+      signal: opts?.signal,
+    }),
+
+  freezerTree: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
+    api.get<NodeTree[]>('/location-nodes/freezer-tree', {
+      query: { active_only: opts?.activeOnly ?? true },
+      signal: opts?.signal,
+    }),
+
+  warehouseTree: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
+    api.get<NodeTree[]>('/location-nodes/warehouse-tree', {
       query: { active_only: opts?.activeOnly ?? true },
       signal: opts?.signal,
     }),

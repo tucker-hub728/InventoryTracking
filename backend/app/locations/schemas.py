@@ -8,21 +8,30 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 # All node types accepted on read (includes retired ``cassette_rack`` /
-# ``sub_slot`` so any legacy rows still serialise).
+# ``sub_slot`` / ``flat`` so any legacy rows still serialise).
 NodeType = Literal[
     "tank_quadrant",
     "rack",
     "cassette",
     "cryo_box_rack",
     "box",
+    "room",
+    "room_location",
+    "sub_location",
+    "warehouse",
+    "shelf",
     "flat",
     "cassette_rack",
     "sub_slot",
 ]
 # Only these are creatable via the API (§4.1 — legacy types are retired).
+# ``flat`` is retired. Freezer rooms / locations and warehouse / shelves are
+# seed-managed (created by scripts/seed_locations.py), so the only free-storage
+# leaf the UI creates is a freezer ``sub_location``.
 CreatableNodeType = Literal[
-    "tank_quadrant", "rack", "cassette", "cryo_box_rack", "box", "flat"
+    "tank_quadrant", "rack", "cassette", "cryo_box_rack", "box", "sub_location"
 ]
+# Legacy — kept so pre-existing flat rows still read; not creatable.
 FlatCategory = Literal["kanban", "lab", "qc", "engineering", "materials"]
 # Ledger movement kinds surfaced for a node's click-through history.
 MovementType = Literal[
@@ -48,13 +57,13 @@ def _trim_nonblank(field: str):
 class NodeCreate(BaseModel):
     """Create one node. The route enforces the strict parent-type rule:
 
-    * ``tank_quadrant`` and ``flat`` are roots (``parent_id`` must be null);
-      ``flat`` requires ``flat_category``.
+    * ``tank_quadrant`` is the only root (``parent_id`` must be null).
     * ``rack`` → ``tank_quadrant``; ``cassette`` / ``cryo_box_rack`` → ``rack``;
       ``box`` → ``cassette`` **or** ``cryo_box_rack``.
 
     A Box requires ``grid_rows`` / ``grid_cols`` (a Box under a Cassette must
     have ``grid_cols == 1``). Dedication is only valid on a ``tank_quadrant``.
+    ``flat`` is retired and cannot be created.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -63,7 +72,6 @@ class NodeCreate(BaseModel):
     code: Annotated[str, _trim_nonblank("code")] = Field(max_length=64)
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
     parent_id: str | None = None
-    flat_category: FlatCategory | None = None
     grid_rows: int | None = Field(default=None, ge=1, le=400)
     grid_cols: int | None = Field(default=None, ge=1, le=400)
     dedicated_customer_id: str | None = None

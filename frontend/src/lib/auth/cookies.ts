@@ -19,7 +19,15 @@ import { serverEnv } from '@/env';
 export const AUTH_COOKIES = {
   access: 'cellready_at',
   refresh: 'cellready_rt',
+  /** Short-lived carrier for the Cognito NEW_PASSWORD_REQUIRED challenge
+   * (session + email), set at login and consumed by /api/auth/set-password.
+   * httpOnly so the challenge token never reaches client JS. */
+  challenge: 'cellready_pw_challenge',
 } as const;
+
+// The challenge continuation token is only valid for a few minutes on Cognito's
+// side; give the cookie a matching short lifetime.
+const CHALLENGE_MAX_AGE_SECONDS = 15 * 60;
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -67,4 +75,22 @@ export function clearAuthCookies(res: NextResponse): void {
   const expired = { ...baseOpts(0), maxAge: 0 };
   res.cookies.set(AUTH_COOKIES.access, '', expired);
   res.cookies.set(AUTH_COOKIES.refresh, '', expired);
+}
+
+/** Stash the first-login challenge (session + email) in a short-lived httpOnly
+ * cookie so the set-password step can complete it without the challenge token
+ * ever touching the browser. */
+export function setChallengeCookie(
+  res: NextResponse,
+  challenge: { session: string; email: string },
+): void {
+  res.cookies.set(
+    AUTH_COOKIES.challenge,
+    JSON.stringify(challenge),
+    baseOpts(CHALLENGE_MAX_AGE_SECONDS),
+  );
+}
+
+export function clearChallengeCookie(res: NextResponse): void {
+  res.cookies.set(AUTH_COOKIES.challenge, '', { ...baseOpts(0), maxAge: 0 });
 }

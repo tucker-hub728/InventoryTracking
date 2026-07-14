@@ -43,6 +43,16 @@ async def get_category_by_name(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def get_category_by_prefix(
+    session: AsyncSession, prefix: str
+) -> ItemCategory | None:
+    stmt = select(ItemCategory).where(
+        func.lower(ItemCategory.prefix) == prefix.lower(),
+        ItemCategory.deleted_at.is_(None),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def category_item_counts(
     session: AsyncSession, category_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, int]:
@@ -61,12 +71,14 @@ async def create_category(
     session: AsyncSession,
     *,
     name: str,
+    prefix: str,
     kind: str,
     tone: str,
     created_by_user_id: uuid.UUID,
 ) -> ItemCategory:
     cat = ItemCategory(
         name=name,
+        prefix=prefix,
         kind=kind,
         tone=tone,
         is_seeded=False,
@@ -116,6 +128,7 @@ async def soft_delete_category(
 def category_to_audit_snapshot(category: ItemCategory) -> dict[str, object | None]:
     return {
         "name": category.name,
+        "prefix": category.prefix,
         "kind": category.kind,
         "tone": category.tone,
         "is_seeded": category.is_seeded,

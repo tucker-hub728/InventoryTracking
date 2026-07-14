@@ -27,13 +27,17 @@ const TONE_DOT: Record<BadgeTone, string> = {
   danger: 'bg-danger',
 };
 
+// Categories are seed-only for now — hide create / edit / delete until the
+// admin CRUD flow is turned on. Flip to `true` to restore the write actions.
+const CATEGORY_ACTIONS_ENABLED = false;
+
 /**
  * Item Categories admin page. Lists the categories with their kind
  * (Product / Purchased), colour, and item count. Create / edit / delete are
  * electronically signed (via {@link CategoryFormDialog} and the reauth dialog).
  */
 export function CategoriesPageClient() {
-  const canWrite = usePermission('inventory', 'sign');
+  const canWrite = usePermission('inventory', 'sign') && CATEGORY_ACTIONS_ENABLED;
 
   const [categories, setCategories] = React.useState<ApiCategory[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -112,7 +116,7 @@ export function CategoriesPageClient() {
                 <thead>
                   <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                     <th className="px-3 py-2 font-medium">Category</th>
-                    <th className="px-3 py-2 font-medium">Type</th>
+                    <th className="px-3 py-2 font-medium">Prefix</th>
                     <th className="px-3 py-2 text-right font-medium">Items</th>
                     {canWrite && <th className="px-3 py-2" />}
                   </tr>
@@ -141,9 +145,7 @@ export function CategoriesPageClient() {
                           </span>
                         </td>
                         <td className="px-3 py-2.5">
-                          <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
-                            {c.kind === 'built' ? 'Product' : 'Purchased'}
-                          </Badge>
+                          <span className="font-mono text-xs text-text-2">{c.prefix}-</span>
                         </td>
                         <td className="px-3 py-2.5 text-right font-mono text-xs">
                           {c.item_count}
