@@ -89,6 +89,147 @@ export function placementComplete(
   return true;
 }
 
+interface CascadeStep {
+  parentKey: string;
+  options: NodeTree[];
+  value: string;
+}
+
+interface ResolvedCascade {
+  /** Full resolved path, root → deepest selected node. */
+  chain: NodeTree[];
+  /** Visible dropdown levels (collapsed single-option levels are omitted). */
+  steps: CascadeStep[];
+  /** The deepest selected node, whether or not it can store. */
+  deepest: NodeTree | null;
+  /** The chosen storage leaf, or null while only a container is selected. */
+  leaf: NodeTree | null;
+  /** A container was drilled into but has nothing to store in. */
+  deadEnd: boolean;
+}
+
+/**
+ * Walk the area tree from the user's picks. When ``collapseSingles`` is set the
+ * lone option at a level is auto-selected and hidden (used for the single
+ * Warehouse); otherwise every level is shown as a dropdown even if it has one
+ * option, so LN2 / Freezer keep their full hierarchy.
+ */
+function resolveCascade(
+  roots: NodeTree[],
+  picks: Record<string, string>,
+  collapseSingles: boolean,
+): ResolvedCascade {
+  const chain: NodeTree[] = [];
+  const steps: CascadeStep[] = [];
+  let options = roots;
+  let parentKey = ROOT_KEY;
+  while (options.length > 0) {
+    const pickedId = picks[parentKey];
+    const explicit = pickedId ? options.find((o) => o.id === pickedId) ?? null : null;
+
+    // Collapse a single un-picked option (Warehouse only): auto-select + hide.
+    if (collapseSingles && options.length === 1 && !explicit && options[0]) {
+      const only = options[0];
+      chain.push(only);
+      if (only.can_store || only.children.length === 0) break;
+      options = only.children;
+      parentKey = only.id;
+      continue;
+    }
+
+    steps.push({ parentKey, options, value: explicit?.id ?? '' });
+    if (!explicit) break;
+    chain.push(explicit);
+    if (explicit.can_store || explicit.children.length === 0) break;
+    options = explicit.children;
+    parentKey = explicit.id;
+  }
+
+  const deepest = chain[chain.length - 1] ?? null;
+  const leaf = deepest?.can_store ? deepest : null;
+  const deadEnd = Boolean(deepest && !deepest.can_store && deepest.children.length === 0);
+  return { chain, steps, deepest, leaf, deadEnd };
+}
+
+/**
+ * The shared cascade UI: a Location dropdown (LN2 / Freezer / Warehouse) plus
+ * one dropdown per visible hierarchy level, and the empty / dead-end notes. The
+ * caller owns the state and passes down the resolved ``steps``.
+ */
+function CascadeControls({
+  area,
+  roots,
+  steps,
+  deadEnd,
+  deepest,
+  onArea,
+  onPick,
+  disabled,
+  modal,
+}: {
+  area: Area;
+  roots: NodeTree[];
+  steps: CascadeStep[];
+  deadEnd: boolean;
+  deepest: NodeTree | null;
+  onArea: (a: Area) => void;
+  onPick: (parentKey: string, id: string) => void;
+  disabled?: boolean;
+  /** True inside a Dialog (modal popover); false for page-level inline use. */
+  modal?: boolean;
+}) {
+  return (
+    <>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Field label="Location">
+          <Select value={area} onValueChange={(v) => onArea(v as Area)} disabled={disabled}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {AREA_ORDER.map((a) => (
+                <SelectItem key={a} value={a}>
+                  {AREA_LABEL[a]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        {roots.length > 0 &&
+          steps.map((step) => (
+            <Field key={step.parentKey} label={levelLabel(step.options)}>
+              <SearchableSelect
+                modal={modal}
+                options={step.options.map((n) => ({
+                  value: n.id,
+                  label: n.name,
+                  searchText: `${n.name} ${n.code}`,
+                }))}
+                value={step.value}
+                onChange={(id) => onPick(step.parentKey, id)}
+                placeholder={`Select a ${levelLabel(step.options)}…`}
+                disabled={disabled}
+              />
+            </Field>
+          ))}
+      </div>
+
+      {roots.length === 0 ? (
+        <p className="rounded-md border border-border bg-surface px-3 py-2 text-xs text-text-3">
+          No locations available in {AREA_LABEL[area]}
+          {AREA_EMPTY_HINT[area] || '.'}
+        </p>
+      ) : deadEnd ? (
+        <p className="rounded-md border border-border bg-surface px-3 py-2 text-xs text-text-3">
+          <span className="font-mono text-text-2">{deepest?.name}</span> has no storage
+          sub-locations yet.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 export function ReceiveLocationPicker({
   qty,
   trees,
@@ -104,52 +245,11 @@ export function ReceiveLocationPicker({
 }) {
   const [area, setArea] = React.useState<Area>(value?.area ?? 'ln2');
   // Explicit user picks within the current area: parent node id (or the
-  // ``ROOT_KEY`` sentinel for the top level) → the chosen child's id. The
-  // resolved chain is derived from these plus any forced single-option levels.
+  // ``ROOT_KEY`` sentinel for the top level) → the chosen child's id.
   const [picks, setPicks] = React.useState<Record<string, string>>({});
 
   const roots = trees[area];
-
-  // Resolve the cascade from the picks. The Warehouse area auto-selects (and
-  // hides) any single-option level — e.g. a lone Warehouse — so the operator
-  // jumps straight to the shelves. Every other area keeps its full hierarchy:
-  // each level is shown as a dropdown, even when it has only one option.
-  // ``steps`` holds the visible levels; ``chain`` is the full resolved path.
-  const collapseSingles = area === 'warehouse';
-  const chain: NodeTree[] = [];
-  const steps: { parentKey: string; options: NodeTree[]; value: string }[] = [];
-  {
-    let options = roots;
-    let parentKey = ROOT_KEY;
-    while (options.length > 0) {
-      const pickedId = picks[parentKey];
-      const explicit = pickedId
-        ? options.find((o) => o.id === pickedId) ?? null
-        : null;
-
-      // Warehouse only: a single un-picked option is auto-selected and hidden.
-      if (collapseSingles && options.length === 1 && !explicit && options[0]) {
-        const only = options[0];
-        chain.push(only);
-        if (only.can_store || only.children.length === 0) break;
-        options = only.children;
-        parentKey = only.id;
-        continue;
-      }
-
-      steps.push({ parentKey, options, value: explicit?.id ?? '' });
-      if (!explicit) break;
-      chain.push(explicit);
-      if (explicit.can_store || explicit.children.length === 0) break;
-      options = explicit.children;
-      parentKey = explicit.id;
-    }
-  }
-
-  const deepest = chain[chain.length - 1] ?? null;
-  const leaf = deepest?.can_store ? deepest : null;
-  // A container was drilled into but has nothing to store in.
-  const deadEnd = Boolean(deepest && !deepest.can_store && deepest.children.length === 0);
+  const { steps, deepest, leaf, deadEnd } = resolveCascade(roots, picks, area === 'warehouse');
   const leafId = leaf?.id ?? '';
 
   // Push the resolved leaf up to the parent. Keyed on the leaf + area only, so
@@ -175,65 +275,24 @@ export function ReceiveLocationPicker({
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Field label="Location">
-          <Select
-            value={area}
-            onValueChange={(v) => switchArea(v as Area)}
-            disabled={disabled}
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {AREA_ORDER.map((a) => (
-                <SelectItem key={a} value={a}>
-                  {AREA_LABEL[a]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
+      <CascadeControls
+        area={area}
+        roots={roots}
+        steps={steps}
+        deadEnd={deadEnd}
+        deepest={deepest}
+        onArea={switchArea}
+        onPick={(parentKey, id) => setPicks((prev) => ({ ...prev, [parentKey]: id }))}
+        disabled={disabled}
+        modal
+      />
 
-        {roots.length > 0 &&
-          steps.map((step) => (
-            <Field key={step.parentKey} label={levelLabel(step.options)}>
-              <SearchableSelect
-                modal
-                options={step.options.map((n) => ({
-                  value: n.id,
-                  label: n.name,
-                  searchText: `${n.name} ${n.code}`,
-                }))}
-                value={step.value}
-                onChange={(id) =>
-                  setPicks((prev) => ({ ...prev, [step.parentKey]: id }))
-                }
-                placeholder={`Select a ${levelLabel(step.options)}…`}
-                disabled={disabled}
-              />
-            </Field>
-          ))}
-      </div>
-
-      {roots.length === 0 ? (
-        <p className="rounded-md border border-border bg-surface px-3 py-2 text-xs text-text-3">
-          No locations available in {AREA_LABEL[area]}
-          {AREA_EMPTY_HINT[area] || '.'}
-        </p>
-      ) : deadEnd ? (
-        <p className="rounded-md border border-border bg-surface px-3 py-2 text-xs text-text-3">
-          <span className="font-mono text-text-2">{deepest!.name}</span> has no
-          storage sub-locations yet.
-        </p>
-      ) : leaf && leaf.node_type === 'box' ? (
+      {leaf && leaf.node_type === 'box' ? (
         <CellSelector
           box={leaf}
           qty={qty}
           value={value?.cells ?? []}
-          onChange={(cells) =>
-            onChange({ area, nodeId: leaf.id, nodeType: 'box', cells })
-          }
+          onChange={(cells) => onChange({ area, nodeId: leaf.id, nodeType: 'box', cells })}
         />
       ) : leaf ? (
         <p className="text-xs text-text-3">
@@ -241,6 +300,56 @@ export function ReceiveLocationPicker({
           <span className="font-mono text-text-2">{leaf.name}</span>.
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Destination picker that emits the chosen storage leaf (or null). Same
+ * Location → hierarchy cascade as {@link ReceiveLocationPicker}, but without the
+ * box-cell grid — the caller renders its own cell / quantity UI. Used by the
+ * inline transfer flows in the location detail panel.
+ */
+export function LocationLeafPicker({
+  trees,
+  onChange,
+  disabled,
+}: {
+  trees: AreaTrees;
+  onChange: (leaf: NodeTree | null) => void;
+  disabled?: boolean;
+}) {
+  const [area, setArea] = React.useState<Area>('ln2');
+  const [picks, setPicks] = React.useState<Record<string, string>>({});
+
+  const roots = trees[area];
+  const { steps, deepest, leaf, deadEnd } = resolveCascade(roots, picks, area === 'warehouse');
+  const leafId = leaf?.id ?? '';
+
+  // Report the resolved leaf (or null) to the caller whenever it changes.
+  React.useEffect(() => {
+    onChange(leaf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leafId, area]);
+
+  const switchArea = (a: Area) => {
+    if (a === area) return;
+    setArea(a);
+    setPicks({});
+  };
+
+  return (
+    <div className="space-y-2">
+      <CascadeControls
+        area={area}
+        roots={roots}
+        steps={steps}
+        deadEnd={deadEnd}
+        deepest={deepest}
+        onArea={switchArea}
+        onPick={(parentKey, id) => setPicks((prev) => ({ ...prev, [parentKey]: id }))}
+        disabled={disabled}
+      />
     </div>
   );
 }
