@@ -41,11 +41,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from sqlalchemy import select
-
 from app.db.session import get_sessionmaker
 from app.locations import repository as loc_repo
 from app.models.identity import User
+from sqlalchemy import select
 
 # room_code, room_name, [ (loc_code_suffix, loc_name, [unit_ids]) ]
 FREEZERS: list[tuple[str, str, list[tuple[str, str, list[str]]]]] = [
