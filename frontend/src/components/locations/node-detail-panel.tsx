@@ -71,6 +71,11 @@ import {
   type NodeType,
 } from '@/lib/api/location-nodes';
 
+import {
+  LocationLeafPicker,
+  type AreaTrees,
+} from '@/components/inventory/receipt-admin/receive-location-picker';
+
 import { BoxGrid, rowLabel } from './box-grid';
 
 export const NODE_ICON: Record<NodeType, LucideIcon> = {
@@ -156,6 +161,8 @@ export function NodeDetailPanel({
   const [allocations, setAllocations] = React.useState<Allocation[]>([]);
   const [lots, setLots] = React.useState<Lot[]>([]);
   const [targets, setTargets] = React.useState<LocationNode[]>([]);
+  // Full area trees for the cascading transfer-destination picker.
+  const [trees, setTrees] = React.useState<AreaTrees | null>(null);
   const [consumedHere, setConsumedHere] = React.useState<NodeMovement[]>([]);
   const [dedName, setDedName] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -214,6 +221,21 @@ export function NodeDetailPanel({
       setLoading(false);
     }
   }, [node.id, node.can_store, node.node_type]);
+
+  // Load the destination trees once — they feed the transfer cascade picker.
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    Promise.all([
+      locationNodesApi.ln2Tree({ signal: ctrl.signal }),
+      locationNodesApi.freezerTree({ signal: ctrl.signal }),
+      locationNodesApi.warehouseTree({ signal: ctrl.signal }),
+    ])
+      .then(([ln2, freezer, warehouse]) => setTrees({ ln2, freezer, warehouse }))
+      .catch(() => {
+        /* the picker shows an empty state if the trees can't load */
+      });
+    return () => ctrl.abort();
+  }, []);
 
   React.useEffect(() => {
     setSelectedCells(new Set());
@@ -569,6 +591,7 @@ export function NodeDetailPanel({
                 <BatchOutPanel
                   selected={selectedOutAllocs}
                   targets={targets}
+                  trees={trees}
                   busy={busy}
                   onClear={() => {
                     setSelectedOccupied(new Set());
@@ -709,7 +732,7 @@ export function NodeDetailPanel({
                     <AllocationActions
                       key={`${a.id}-${opSeq}`}
                       allocation={a}
-                      targets={targets}
+                      trees={trees}
                       canWrite={canWrite}
                       consumeAtNodeId={node.id}
                       onTransfer={(p) => {
@@ -895,8 +918,7 @@ function ChildCard({ child, onClick }: { child: NodeTree; onClick: () => void })
 
 // ── Lot select ──────────────────────────────────────────────────────────
 
-/** Searchable lot picker — filters by lot number or item number. Mirrors the
- *  destination ``TargetCombobox`` so both pickers feel the same. */
+/** Searchable lot picker — filters by lot number or item number. */
 function LotCombobox({
   lots,
   value,
@@ -1142,91 +1164,6 @@ function DetailRow({
   );
 }
 
-/** Searchable destination picker — filters targets by their breadcrumb path. */
-function TargetCombobox({
-  targets,
-  value,
-  onChange,
-  placeholder = 'Storage target',
-}: {
-  targets: LocationNode[];
-  value: string;
-  onChange: (id: string) => void;
-  placeholder?: string;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const [query, setQuery] = React.useState('');
-  const selected = targets.find((t) => t.id === value) ?? null;
-
-  const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return targets;
-    return targets.filter((t) =>
-      `${t.path ?? t.name} ${NODE_TYPE_LABEL[t.node_type]}`.toLowerCase().includes(q),
-    );
-  }, [targets, query]);
-
-  return (
-    <Popover
-      open={open}
-      onOpenChange={(o) => {
-        setOpen(o);
-        if (!o) setQuery('');
-      }}
-    >
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-surface px-3 text-sm"
-        >
-          <span className={cn('truncate', !selected && 'text-text-3')}>
-            {selected ? (selected.path ?? selected.name) : placeholder}
-          </span>
-          <ChevronDown size={14} className="shrink-0 text-text-3" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        className="w-[var(--radix-popover-trigger-width)] min-w-[18rem]"
-      >
-        <div className="border-b border-border p-2">
-          <Input
-            autoFocus
-            icon={Search}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search locations…"
-          />
-        </div>
-        <div className="max-h-64 overflow-y-auto p-1">
-          {filtered.length === 0 ? (
-            <p className="px-2 py-6 text-center text-xs text-text-3">No matches.</p>
-          ) : (
-            filtered.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => {
-                  onChange(t.id);
-                  setOpen(false);
-                  setQuery('');
-                }}
-                className={cn(
-                  'flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-surface',
-                  t.id === value && 'bg-surface',
-                )}
-              >
-                <span className="truncate text-text-1">{t.path ?? t.name}</span>
-                <span className="ml-2 shrink-0 text-text-3">{NODE_TYPE_LABEL[t.node_type]}</span>
-              </button>
-            ))
-          )}
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
 /** Remaining-to-place hint shown under a lot picker (unit-in cap preview). */
 function RemainingHint({ avail, selecting }: { avail: LotAvailability | null; selecting: number }) {
   if (!avail) return null;
@@ -1300,14 +1237,14 @@ function DestGridPicker({
 
 function AllocationActions({
   allocation,
-  targets,
+  trees,
   canWrite,
   consumeAtNodeId,
   onTransfer,
   onConsume,
 }: {
   allocation: Allocation;
-  targets: LocationNode[];
+  trees: AreaTrees | null;
   canWrite: boolean;
   /** The location that consumes the unit — fixed to the current flat node. */
   consumeAtNodeId: string;
@@ -1315,17 +1252,16 @@ function AllocationActions({
   onConsume: (p: SingleConsumePayload) => void;
 }) {
   const [mode, setMode] = React.useState<'none' | 'transfer' | 'consume'>('none');
-  const [toNode, setToNode] = React.useState('');
+  const [destNode, setDestNode] = React.useState<NodeTree | null>(null);
   const [qty, setQty] = React.useState('1');
   const [destCells, setDestCells] = React.useState<Set<string>>(new Set());
 
   const available = Number(allocation.qty) || 0;
-  const destNode = targets.find((t) => t.id === toNode) ?? null;
   const destIsBox = destNode?.node_type === 'box';
 
   const reset = () => {
     setMode('none');
-    setToNode('');
+    setDestNode(null);
     setQty('1');
     setDestCells(new Set());
   };
@@ -1362,7 +1298,7 @@ function AllocationActions({
 
   const submit = () => {
     if (mode === 'transfer') {
-      if (!toNode) {
+      if (!destNode) {
         toast.error('Pick a destination.');
         return;
       }
@@ -1377,7 +1313,7 @@ function AllocationActions({
         }
         onTransfer({
           allocationIds: [allocation.id],
-          toNodeId: toNode,
+          toNodeId: destNode.id,
           toCells: cellsFromSet(destCells),
           qty: null,
           count: destCells.size,
@@ -1390,7 +1326,7 @@ function AllocationActions({
         }
         onTransfer({
           allocationIds: [allocation.id],
-          toNodeId: toNode,
+          toNodeId: destNode.id,
           toCells: null,
           qty: k,
           count: k,
@@ -1417,14 +1353,17 @@ function AllocationActions({
         <>
           <div className="space-y-1">
             <Label className="text-xs">Destination</Label>
-            <TargetCombobox
-              targets={targets}
-              value={toNode}
-              onChange={(v) => {
-                setToNode(v);
-                setDestCells(new Set());
-              }}
-            />
+            {trees ? (
+              <LocationLeafPicker
+                trees={trees}
+                onChange={(leaf) => {
+                  setDestNode(leaf);
+                  setDestCells(new Set());
+                }}
+              />
+            ) : (
+              <p className="text-xs text-text-3">Loading locations…</p>
+            )}
           </div>
           {destIsBox && destNode ? (
             <div className="space-y-1">
@@ -1483,13 +1422,16 @@ function AllocationActions({
 function BatchOutPanel({
   selected,
   targets,
+  trees,
   busy,
   onTransfer,
   onConsume,
   onClear,
 }: {
   selected: Allocation[];
+  /** Flat locations for the (currently unreachable) consume flow. */
   targets: LocationNode[];
+  trees: AreaTrees | null;
   busy: boolean;
   onTransfer: (p: TransferOutPayload) => void;
   onConsume: (p: ConsumeOutPayload) => void;
@@ -1500,22 +1442,25 @@ function BatchOutPanel({
   const lotLabel = selected[0]?.lot_number ?? selected[0]?.lot_id.slice(0, 8) ?? '';
 
   const [mode, setMode] = React.useState<'none' | 'transfer' | 'consume'>('none');
-  const [toNode, setToNode] = React.useState('');
+  // Transfer destination (cascade leaf); ``consumeNode`` is the flat location id
+  // for the consume flow.
+  const [destNode, setDestNode] = React.useState<NodeTree | null>(null);
+  const [consumeNode, setConsumeNode] = React.useState('');
   const [destCells, setDestCells] = React.useState<Set<string>>(new Set());
 
-  const destNode = targets.find((t) => t.id === toNode) ?? null;
   const destIsBox = destNode?.node_type === 'box';
   const flatTargets = targets.filter((t) => t.node_type === 'flat');
 
   const reset = () => {
     setMode('none');
-    setToNode('');
+    setDestNode(null);
+    setConsumeNode('');
     setDestCells(new Set());
   };
 
   const submit = () => {
     if (mode === 'transfer') {
-      if (!toNode) {
+      if (!destNode) {
         toast.error('Pick a destination.');
         return;
       }
@@ -1526,7 +1471,7 @@ function BatchOutPanel({
         }
         onTransfer({
           allocationIds: ids,
-          toNodeId: toNode,
+          toNodeId: destNode.id,
           toCells: cellsFromSet(destCells),
           qty: null,
           count,
@@ -1534,18 +1479,18 @@ function BatchOutPanel({
       } else {
         onTransfer({
           allocationIds: ids,
-          toNodeId: toNode,
+          toNodeId: destNode.id,
           toCells: null,
           qty: count,
           count,
         });
       }
     } else {
-      if (!toNode) {
+      if (!consumeNode) {
         toast.error('Pick the Flat location that consumed it.');
         return;
       }
-      onConsume({ allocationIds: ids, toNodeId: toNode, count });
+      onConsume({ allocationIds: ids, toNodeId: consumeNode, count });
     }
   };
 
@@ -1573,14 +1518,17 @@ function BatchOutPanel({
             <>
               <div className="space-y-1">
                 <Label className="text-xs">Destination</Label>
-                <TargetCombobox
-                  targets={targets}
-                  value={toNode}
-                  onChange={(v) => {
-                    setToNode(v);
-                    setDestCells(new Set());
-                  }}
-                />
+                {trees ? (
+                  <LocationLeafPicker
+                    trees={trees}
+                    onChange={(leaf) => {
+                      setDestNode(leaf);
+                      setDestCells(new Set());
+                    }}
+                  />
+                ) : (
+                  <p className="text-xs text-text-3">Loading locations…</p>
+                )}
               </div>
               {destIsBox && destNode ? (
                 <div className="space-y-1">
@@ -1600,7 +1548,7 @@ function BatchOutPanel({
           {mode === 'consume' && (
             <div className="space-y-1">
               <Label className="text-xs">Consumed at (Flat location)</Label>
-              <Select value={toNode} onValueChange={setToNode}>
+              <Select value={consumeNode} onValueChange={setConsumeNode}>
                 <SelectTrigger>
                   <SelectValue placeholder="Lab / Kanban / Materials" />
                 </SelectTrigger>
