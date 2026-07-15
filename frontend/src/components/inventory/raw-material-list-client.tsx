@@ -7,6 +7,7 @@ import { Plus, Search } from 'lucide-react';
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -63,7 +64,7 @@ export function RawMaterialListClient() {
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(
-          err instanceof ApiError ? err.message : 'Failed to load categories.',
+          err instanceof ApiError ? err.message : 'Failed to load tiers.',
         );
         setLoading(false);
       });
@@ -166,11 +167,12 @@ export function RawMaterialListClient() {
             />
           ) : (
             <div className="overflow-x-auto">
-              <Table className="min-w-[720px]">
+              <Table className="min-w-[840px]">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-[160px]">SKU</TableHead>
                     <TableHead>Name</TableHead>
+                    <TableHead className="w-[130px]">Consumable</TableHead>
                     <TableHead className="w-[140px]">On hand</TableHead>
                     <TableHead className="w-[140px]">Stock status</TableHead>
                     <TableHead className="w-[120px]">Updated</TableHead>
@@ -188,6 +190,13 @@ export function RawMaterialListClient() {
                         </Link>
                       </TableCell>
                       <TableCell className="text-text-2">{row.desc}</TableCell>
+                      <TableCell>
+                        {row.isConsumable ? (
+                          <Badge tone="accent">Yes</Badge>
+                        ) : (
+                          <span className="text-text-3">—</span>
+                        )}
+                      </TableCell>
                       <TableCell className="font-mono tabular-nums text-text">
                         {row.qty}
                         {row.uom ? (

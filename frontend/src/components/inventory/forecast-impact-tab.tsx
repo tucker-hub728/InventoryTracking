@@ -133,7 +133,7 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
                 <tr key={parent.parent_item_id} className="border-b border-border/60">
                   <td className="px-4 py-2.5">
                     <Link
-                      href={`/inventory/${parent.parent_item_number}/ledger`}
+                      href={`/inventory/${encodeURIComponent(parent.parent_item_number)}/ledger`}
                       className="font-mono text-xs text-accent hover:underline"
                     >
                       {parent.parent_item_number}

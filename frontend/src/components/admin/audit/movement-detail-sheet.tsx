@@ -15,6 +15,8 @@ import {
   type ApiMovement,
   type MovementType,
 } from '@/lib/api/movements';
+import { ItemLink } from '@/components/inventory/item-link';
+import { LotLink } from '@/components/inventory/lot-link';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -126,7 +128,7 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           value={
             movement.item_number ? (
               <span>
-                <span className="font-mono">{movement.item_number}</span>
+                <ItemLink itemNumber={movement.item_number} className="font-mono" />
                 {movement.item_description && (
                   <span className="text-text-2">
                     {' '}
@@ -143,7 +145,11 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           label="Lot"
           value={
             movement.lot_number ? (
-              <span className="font-mono">{movement.lot_number}</span>
+              <LotLink
+                lotId={movement.lot_id}
+                lotNumber={movement.lot_number}
+                className="font-mono"
+              />
             ) : (
               '—'
             )

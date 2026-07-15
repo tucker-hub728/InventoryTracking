@@ -29,6 +29,7 @@ import {
   type ApiMovement,
   type MovementType,
 } from '@/lib/api/movements';
+import { LotLink } from '@/components/inventory/lot-link';
 import { cn } from '@/lib/utils';
 
 import { AuditDetailSheet } from './audit-detail-sheet';
@@ -343,7 +344,8 @@ function MovementRow({
           </span>
           {movement.lot_number && (
             <span className="font-mono text-[11px] text-text-3">
-              lot {movement.lot_number}
+              lot{' '}
+              <LotLink lotId={movement.lot_id} lotNumber={movement.lot_number} />
             </span>
           )}
         </div>

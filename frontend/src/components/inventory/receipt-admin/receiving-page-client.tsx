@@ -37,6 +37,7 @@ import {
 } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
+import { ItemLink } from '@/components/inventory/item-link';
 import { usePermission } from '@/hooks/use-permission';
 import type { ReauthResponse } from '@/lib/api/auth';
 import { cn } from '@/lib/utils';
@@ -61,6 +62,11 @@ const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 // text-search param. This caps how many (most-recent) rows that set covers.
 const ORDER_LIMIT = 200;
 
+const LIST_PATH = '/receiving';
+const orderPath = (id: string) => `${LIST_PATH}/${id}`;
+const orderIdFromPath = (pathname: string) =>
+  /^\/receiving\/([^/]+)\/?$/.exec(pathname)?.[1] ?? null;
+
 const STATUS_TONE: Record<OrderStatus, BadgeTone> = {
   open: 'accent',
   partially_received: 'warning',
@@ -68,7 +74,12 @@ const STATUS_TONE: Record<OrderStatus, BadgeTone> = {
   cancelled: 'neutral',
 };
 
-export function ReceivingPageClient() {
+export function ReceivingPageClient({
+  /** Order id from the `/receiving/[id]` segment, on a cold load or refresh. */
+  initialOrderId,
+}: {
+  initialOrderId?: string;
+} = {}) {
   const canCreate = usePermission('inventory', 'create');
   const canReceive = usePermission('inventory', 'sign');
 
@@ -132,6 +143,67 @@ export function ReceivingPageClient() {
     (id: string) => setOrders((prev) => prev.filter((o) => o.id !== id)),
     [],
   );
+
+  // ── Sheet ⇄ URL ────────────────────────────────────────────────────────
+  // The open sheet is reflected at /receiving/<id> so it survives a refresh
+  // and can be linked to. This uses the native History API rather than
+  // router.push: /receiving and /receiving/[id] are separate route segments,
+  // so a Next navigation would swap the page component out, remounting this
+  // client and re-fetching the whole list behind the sheet on every open.
+  const ordersRef = React.useRef(orders);
+  React.useEffect(() => {
+    ordersRef.current = orders;
+  }, [orders]);
+
+  const showOrderId = React.useCallback(async (id: string, signal?: AbortSignal) => {
+    const known = ordersRef.current.find((o) => o.id === id);
+    if (known) {
+      setDetail(known);
+      return;
+    }
+    // Not in the loaded page (older than ORDER_LIMIT, or a cold load that
+    // raced the list) — fetch it directly.
+    try {
+      setDetail(await receivingApi.getOrder(id, { signal }));
+    } catch (err) {
+      if ((err as DOMException)?.name === 'AbortError') return;
+      // Unknown, deleted, or malformed id — fall back to the plain list
+      // rather than leaving a dead URL in the address bar.
+      setDetail(null);
+      window.history.replaceState(null, '', LIST_PATH);
+    }
+  }, []);
+
+  const openDetail = React.useCallback((order: Order) => {
+    setDetail(order);
+    window.history.pushState(null, '', orderPath(order.id));
+  }, []);
+
+  const closeDetail = React.useCallback(() => {
+    setDetail(null);
+    if (orderIdFromPath(window.location.pathname)) {
+      window.history.pushState(null, '', LIST_PATH);
+    }
+  }, []);
+
+  // Cold load / refresh on /receiving/<id>.
+  React.useEffect(() => {
+    if (!initialOrderId) return;
+    const ctrl = new AbortController();
+    void showOrderId(initialOrderId, ctrl.signal);
+    return () => ctrl.abort();
+  }, [initialOrderId, showOrderId]);
+
+  // Back / forward between the list and an open order.
+  React.useEffect(() => {
+    const onPop = () => {
+      const id = orderIdFromPath(window.location.pathname);
+      if (id) void showOrderId(id);
+      else setDetail(null);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [showOrderId]);
 
   // Client-side search across po_reference, item number/description on lines
   // and lot numbers across receive events.
@@ -272,7 +344,7 @@ export function ReceivingPageClient() {
               <ReceiptTransactionsTable
                 orders={paged}
                 canReceive={canReceive}
-                onView={setDetail}
+                onView={openDetail}
                 onReceive={setReceiveTarget}
               />
               {orders.length >= ORDER_LIMIT && (
@@ -319,13 +391,13 @@ export function ReceivingPageClient() {
         onUpdated={upsert}
         onRemoved={(id) => {
           removeOrder(id);
-          setDetail(null);
+          closeDetail();
         }}
         onReceive={(order) => {
-          setDetail(null);
+          closeDetail();
           setReceiveTarget(order);
         }}
-        onOpenChange={(o) => !o && setDetail(null)}
+        onOpenChange={(o) => !o && closeDetail()}
       />
     </>
   );
@@ -607,9 +679,10 @@ function OrderDetailSheet({
                         className="rounded-md border border-border bg-surface p-3 text-sm"
                       >
                         <div className="flex items-center justify-between">
-                          <span className="font-mono text-xs text-accent">
-                            {l.item_number ?? '—'}
-                          </span>
+                          <ItemLink
+                            itemNumber={l.item_number}
+                            className="font-mono text-xs"
+                          />
                           <span className="text-xs text-text-3">
                             {l.supplier_name ?? '—'}
                           </span>
@@ -683,9 +756,10 @@ function OrderDetailSheet({
                                   </span>
                                   {orderLine && (
                                     <span className="text-text-2">
-                                      <span className="font-mono">
-                                        {orderLine.item_number ?? '—'}
-                                      </span>
+                                      <ItemLink
+                                        itemNumber={orderLine.item_number}
+                                        className="font-mono"
+                                      />
                                       {orderLine.item_description
                                         ? ` — ${orderLine.item_description}`
                                         : ''}

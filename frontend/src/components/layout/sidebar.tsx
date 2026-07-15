@@ -90,22 +90,13 @@ export function Sidebar() {
                     {!collapsed && (
                       <>
                         <span className="truncate">{item.label}</span>
-                        {item.disabled ? (
+                        {(item.disabled || item.comingSoon) && (
                           <span
                             aria-label="In development"
                             className="ml-auto rounded-sm bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-3"
                           >
                             WIP
                           </span>
-                        ) : (
-                          item.comingSoon && (
-                            <span
-                              aria-label="Coming soon"
-                              className="ml-auto rounded-sm bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-3"
-                            >
-                              Soon
-                            </span>
-                          )
                         )}
                       </>
                     )}

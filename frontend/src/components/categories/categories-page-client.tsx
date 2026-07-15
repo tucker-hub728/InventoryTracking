@@ -55,7 +55,7 @@ export function CategoriesPageClient() {
       setCategories(rows);
     } catch (err) {
       if ((err as DOMException)?.name === 'AbortError') return;
-      setLoadError(err instanceof ApiError ? err.message : 'Failed to load categories.');
+      setLoadError(err instanceof ApiError ? err.message : 'Failed to load tiers.');
     } finally {
       setLoading(false);
     }
@@ -74,7 +74,7 @@ export function CategoriesPageClient() {
         evidence_id: evidence.evidence_id,
         reason: evidence.comment ?? '',
       });
-      toast.success('Category deleted', { description: deleting.name });
+      toast.success('Tier deleted', { description: deleting.name });
       setDeleting(null);
       await load();
     } catch (err) {
@@ -89,12 +89,12 @@ export function CategoriesPageClient() {
   return (
     <>
       <PageHeader
-        title="Item Categories"
-        subtitle="Group items by kind. Product categories can carry a bill of materials; Purchased are bought as-is."
+        title="Item Tiers"
+        subtitle="Group items by kind. Product tiers can carry a bill of materials; Purchased are bought as-is."
         actions={
           canWrite ? (
             <Button variant="primary" onClick={() => setCreating(true)}>
-              <Plus size={14} /> New category
+              <Plus size={14} /> New tier
             </Button>
           ) : undefined
         }
@@ -104,18 +104,18 @@ export function CategoriesPageClient() {
         <Card className="p-4">
           {loadError ? (
             <EmptyState
-              title="Couldn't load categories"
+              title="Couldn't load tiers"
               hint={loadError}
               action={<Button onClick={() => void load()}>Retry</Button>}
             />
           ) : !loading && categories.length === 0 ? (
-            <EmptyState title="No categories yet" hint="Create your first item category." />
+            <EmptyState title="No tiers yet" hint="Create your first item tier." />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
-                    <th className="px-3 py-2 font-medium">Category</th>
+                    <th className="px-3 py-2 font-medium">Tier</th>
                     <th className="px-3 py-2 font-medium">Prefix</th>
                     <th className="px-3 py-2 text-right font-medium">Items</th>
                     {canWrite && <th className="px-3 py-2" />}
@@ -167,10 +167,10 @@ export function CategoriesPageClient() {
                                 disabled={c.is_seeded || inUse}
                                 title={
                                   c.is_seeded
-                                    ? 'Seeded categories cannot be deleted'
+                                    ? 'Seeded tiers cannot be deleted'
                                     : inUse
                                       ? 'In use — reassign its items first'
-                                      : 'Delete category'
+                                      : 'Delete tier'
                                 }
                                 onClick={() => setDeleting(c)}
                                 aria-label={`Delete ${c.name}`}
@@ -211,11 +211,11 @@ export function CategoriesPageClient() {
         }}
         action="category.delete"
         meaning={
-          deleting ? `I am deleting the item category "${deleting.name}".` : ''
+          deleting ? `I am deleting the item tier "${deleting.name}".` : ''
         }
         commentPlaceholder="e.g. No longer used"
         onConfirmed={onDeleteConfirmed}
-        title="Sign this category deletion"
+        title="Sign this tier deletion"
         submitLabel="Delete"
       />
     </>

@@ -18,8 +18,9 @@ import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber } from '@/lib/utils';
 import { movementsApi, type ApiMovement } from '@/lib/api/movements';
 import { apiMovementsToLedgerEntries } from '@/lib/api/movements-adapter';
-import { bomApi } from '@/lib/api/bom';
-import { forecastApi } from '@/lib/api/forecast';
+// bomApi / forecastApi are used only by the hidden forecast-demand fetch:
+// import { bomApi } from '@/lib/api/bom';
+// import { forecastApi } from '@/lib/api/forecast';
 import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
@@ -59,7 +60,8 @@ export function InventoryDetailShell({
   const fetchOne = useInventoryStore((s) => s.fetchOne);
   const canSign = usePermission('inventory', 'sign');
   const canCreate = usePermission('inventory', 'create');
-  const currentYear = React.useMemo(() => new Date().getFullYear(), []);
+  // Used only by the hidden forecast-demand fetch below:
+  // const currentYear = React.useMemo(() => new Date().getFullYear(), []);
 
   const [item, setItem] = React.useState<InventoryItem | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -71,8 +73,8 @@ export function InventoryDetailShell({
   const [ledgerLoading, setLedgerLoading] = React.useState(false);
   const [ledgerError, setLedgerError] = React.useState<string | null>(null);
 
-  // Forecast demand for the item this year (null until known / if unavailable).
-  const [demand, setDemand] = React.useState<number | null>(null);
+  // Forecast demand for the item this year — hidden along with its Snapshot row:
+  // const [demand, setDemand] = React.useState<number | null>(null);
 
   const load = React.useCallback(
     async (signal?: AbortSignal) => {
@@ -122,34 +124,38 @@ export function InventoryDetailShell({
     return () => ctrl.abort();
   }, [item]);
 
-  // Forecast demand = Σ over the items that consume this one (where-used)
-  // of (qty_per_run × that parent's forecast runs this year). Left null if the
-  // forecast API is unavailable. Only relevant for Purchased items (the demand
-  // shows in their Snapshot aside); Products have no stock snapshot.
-  React.useEffect(() => {
-    if (!item || item.categoryKind === 'built') return;
-    const ctrl = new AbortController();
-    setDemand(null);
-    Promise.all([
-      bomApi.whereUsed(item.uuid, { signal: ctrl.signal }),
-      forecastApi.list({ year: currentYear }, { signal: ctrl.signal }),
-    ])
-      .then(([using, entries]) => {
-        if (ctrl.signal.aborted) return;
-        const total = using.reduce((sum, p) => {
-          const perRun = Number(p.qty_per_run ?? 0);
-          const runs = entries
-            .filter((e) => e.productId === p.parent_item_id)
-            .reduce((r, e) => r + e.runs, 0);
-          return sum + perRun * runs;
-        }, 0);
-        setDemand(total);
-      })
-      .catch(() => {
-        // Forecast not available yet — keep the Snapshot rows as "—".
-      });
-    return () => ctrl.abort();
-  }, [item, currentYear]);
+  // Forecast demand = Σ over the items that consume this one (where-used) of
+  // (qty_per_run × that parent's forecast runs this year). Temporarily hidden
+  // along with the "Forecast demand" / "Projected shortfall" Snapshot rows it
+  // fed — kept commented rather than left running so we don't pay for the
+  // where-used + forecast round-trips on every item page load. Restore this,
+  // the `demand` state, `currentYear`, the `shortfall` calc and both Snapshot
+  // rows together.
+  //
+  // React.useEffect(() => {
+  //   if (!item || item.categoryKind === 'built') return;
+  //   const ctrl = new AbortController();
+  //   setDemand(null);
+  //   Promise.all([
+  //     bomApi.whereUsed(item.uuid, { signal: ctrl.signal }),
+  //     forecastApi.list({ year: currentYear }, { signal: ctrl.signal }),
+  //   ])
+  //     .then(([using, entries]) => {
+  //       if (ctrl.signal.aborted) return;
+  //       const total = using.reduce((sum, p) => {
+  //         const perRun = Number(p.qty_per_run ?? 0);
+  //         const runs = entries
+  //           .filter((e) => e.productId === p.parent_item_id)
+  //           .reduce((r, e) => r + e.runs, 0);
+  //         return sum + perRun * runs;
+  //       }, 0);
+  //       setDemand(total);
+  //     })
+  //     .catch(() => {
+  //       // Forecast not available yet — keep the Snapshot rows as "—".
+  //     });
+  //   return () => ctrl.abort();
+  // }, [item, currentYear]);
 
   const ledgerEntries: LedgerEntry[] = React.useMemo(
     () => (item ? apiMovementsToLedgerEntries(ledgerRows, item.qty) : []),
@@ -205,8 +211,9 @@ export function InventoryDetailShell({
   if (!item) return null;
 
   const activeSeg = pathname.split('/').pop();
-  // Forecast shortfall is against *available* stock (date-expired excluded).
-  const shortfall = demand != null ? Math.max(0, demand - item.qtyAvailable) : null;
+  // Forecast shortfall (against *available* stock, date-expired excluded) —
+  // hidden along with its Snapshot row:
+  // const shortfall = demand != null ? Math.max(0, demand - item.qtyAvailable) : null;
   // Expired = physically on hand but not available; shown for visibility.
   const expiredQty = Math.max(0, item.qty - item.qtyAvailable);
 
@@ -277,24 +284,13 @@ export function InventoryDetailShell({
                   value={item.threshold ? formatNumber(item.threshold) : '—'}
                   mono
                 />
-                <Separator />
-                <KV
-                  label={`Forecast demand ${currentYear}`}
-                  value={demand != null ? formatNumber(demand) : '—'}
-                  mono
-                />
-                <KV
-                  label={`Projected shortfall ${currentYear}`}
-                  value={shortfall != null ? formatNumber(shortfall) : '—'}
-                  mono
-                  valueClassName={
-                    shortfall == null
-                      ? undefined
-                      : shortfall > 0
-                        ? 'text-danger'
-                        : 'text-success'
-                  }
-                />
+                {/*
+                  "Forecast demand" / "Projected shortfall" — temporarily
+                  hidden. The demand fetch that fed them is commented out above
+                  too; restore both together from git history when forecasting
+                  is wired up. (The Forecast module is still marked WIP in the
+                  sidebar.)
+                */}
                 <Separator />
                 <KV label="Inventory $" value={`$${formatNumber(item.invValue)}`} mono />
                 <KV label="On-PO $" value={`$${formatNumber(item.poValue)}`} mono />

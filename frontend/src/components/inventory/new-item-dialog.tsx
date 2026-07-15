@@ -55,7 +55,7 @@ const schema = z.object({
   desc: z.string().min(3, 'Description is required'),
   // Required category — governs whether the item is a Product (built) or
   // Purchased, and thus BOM eligibility.
-  categoryId: z.string().min(1, 'Category is required'),
+  categoryId: z.string().min(1, 'Tier is required'),
   // Free-text unit of measure (each, mL, box …). Optional.
   uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
   // Blind-consumed, no per-lot traceability.
@@ -337,15 +337,15 @@ export function NewItemDialog({
             </div>
 
             {!lockedCategory && (
-              <Field id="ni-category" label="Category" error={errors.categoryId?.message}>
+              <Field id="ni-category" label="Tier" error={errors.categoryId?.message}>
                 <Select
                   value={categoryId}
                   onValueChange={(v) =>
                     setValue('categoryId', v, { shouldValidate: true })
                   }
                 >
-                  <SelectTrigger id="ni-category" aria-label="Category">
-                    <SelectValue placeholder="Pick a category" />
+                  <SelectTrigger id="ni-category" aria-label="Tier">
+                    <SelectValue placeholder="Pick a tier" />
                   </SelectTrigger>
                   <SelectContent>
                     {categories.map((c) => (

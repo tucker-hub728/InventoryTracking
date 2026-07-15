@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 import {
   ArrowRightLeft,
   Box,
@@ -49,6 +50,8 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
+import { ItemLink } from '@/components/inventory/item-link';
+import { LotLink } from '@/components/inventory/lot-link';
 import { ApiError } from '@/lib/api/client';
 import { lotsApi, type Lot } from '@/lib/api/lots';
 import { customersApi } from '@/lib/api/customers';
@@ -743,10 +746,10 @@ export function NodeDetailPanel({
                   >
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-text-1">
-                        {m.item_number ?? '—'}
+                        <ItemLink itemNumber={m.item_number} />
                       </span>
                       <span className="block truncate text-xs text-text-3">
-                        {m.lot_number ?? '—'} ·{' '}
+                        <LotLink lotId={m.lot_id} lotNumber={m.lot_number} /> ·{' '}
                         {new Date(m.performed_at).toISOString().slice(0, 10)}
                       </span>
                     </span>
@@ -1082,8 +1085,29 @@ function AllocationDetailSheet({
                   <p className="text-xs text-text-3">Loading…</p>
                 ) : lot ? (
                   <>
-                    <DetailRow label="Lot number" value={lot.lot_number} />
-                    <DetailRow label="Item" value={lot.item_number ?? '—'} />
+                    <DetailRow
+                      label="Lot number"
+                      value={
+                        // The full lot is already loaded here, so the owning
+                        // order is known up front — link it directly rather
+                        // than resolving on click like <LotLink> has to.
+                        lot.receipt_transaction_id ? (
+                          <Link
+                            href={`/receiving/${lot.receipt_transaction_id}`}
+                            className="text-accent underline-offset-2 hover:underline"
+                            title="Open the receiving order for this lot"
+                          >
+                            {lot.lot_number}
+                          </Link>
+                        ) : (
+                          lot.lot_number
+                        )
+                      }
+                    />
+                    <DetailRow
+                      label="Item"
+                      value={<ItemLink itemNumber={lot.item_number} />}
+                    />
                     <DetailRow label="Status" value={lot.status} />
                     <DetailRow label="Supplier" value={lot.supplier_name ?? '—'} />
                     <DetailRow label="PO reference" value={lot.po_reference ?? '—'} />
@@ -1103,7 +1127,13 @@ function AllocationDetailSheet({
   );
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+function DetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
   return (
     <div className="flex items-baseline justify-between gap-3">
       <span className="text-xs text-text-3">{label}</span>

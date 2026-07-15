@@ -94,7 +94,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
           evidence_id: evidence.evidence_id,
           reason,
         });
-        toast.success('Category updated', { description: name.trim() });
+        toast.success('Tier updated', { description: name.trim() });
       } else {
         await categoriesApi.create({
           name: name.trim(),
@@ -104,14 +104,14 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
           evidence_id: evidence.evidence_id,
           reason,
         });
-        toast.success('Category created', { description: name.trim() });
+        toast.success('Tier created', { description: name.trim() });
       }
       onSaved();
       onOpenChange(false);
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === 'category_name_conflict') {
-          setError(`A category named "${name.trim()}" already exists.`);
+          setError(`A tier named "${name.trim()}" already exists.`);
         } else if (err.code === 'category_prefix_conflict') {
           setError(`The prefix "${prefix.trim().toUpperCase()}" is already in use.`);
         } else if (
@@ -123,7 +123,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
           setError(err.message);
         }
       } else {
-        setError('Failed to save category.');
+        setError('Failed to save tier.');
       }
     }
   };
@@ -133,11 +133,11 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{isEdit ? 'Edit category' : 'New category'}</DialogTitle>
+            <DialogTitle>{isEdit ? 'Edit tier' : 'New tier'}</DialogTitle>
             <DialogDescription>
               {isEdit
                 ? 'Rename or recolour. The Product/Purchased type is fixed at creation.'
-                : 'Categories decide whether their items are Products (can have a BOM) or Purchased.'}
+                : 'Tiers decide whether their items are Products (can have a BOM) or Purchased.'}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -165,7 +165,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
               </div>
             </div>
             <p className="-mt-2 text-xs text-text-3">
-              The prefix fronts every SKU in this category (e.g. {prefix.trim() || 'CR'}-001).
+              The prefix fronts every SKU in this tier (e.g. {prefix.trim() || 'CR'}-001).
             </p>
 
             <div className="space-y-1.5">
@@ -173,7 +173,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
               <div
                 className="flex w-fit overflow-hidden rounded-md border border-border-strong"
                 role="radiogroup"
-                aria-label="Category type"
+                aria-label="Tier type"
               >
                 {(['purchased', 'built'] as CategoryKind[]).map((k) => (
                   <button
@@ -246,12 +246,12 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
         action={isEdit ? 'category.update' : 'category.create'}
         meaning={
           isEdit
-            ? `I am editing the item category "${name.trim()}".`
-            : `I am creating the item category "${name.trim()}".`
+            ? `I am editing the item tier "${name.trim()}".`
+            : `I am creating the item tier "${name.trim()}".`
         }
-        commentPlaceholder="e.g. New category for QA holds"
+        commentPlaceholder="e.g. New tier for QA holds"
         onConfirmed={onConfirmed}
-        title={isEdit ? 'Sign this category edit' : 'Sign this new category'}
+        title={isEdit ? 'Sign this tier edit' : 'Sign this new tier'}
         submitLabel="Sign"
       />
     </>

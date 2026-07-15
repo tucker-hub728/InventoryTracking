@@ -58,6 +58,8 @@ export interface LedgerEntry {
   /** Full hierarchy breadcrumb for the cell's tooltip (e.g. "Q1 › R01 › C01 › Box 01"). */
   locationPath?: string | null;
   lot: string;
+  /** Lot UUID behind the cell — drives the link to the originating order. */
+  lotId?: string | null;
   exp: string;
   initials: string;
   /** Full ``app.users.full_name`` of the operator who recorded the row.

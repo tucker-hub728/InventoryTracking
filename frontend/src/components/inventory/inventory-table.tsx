@@ -42,7 +42,7 @@ interface Column {
 const COLUMNS: Column[] = [
   { key: 'id', label: 'Item #', sortKey: 'id', className: 'w-[110px]' },
   { key: 'desc', label: 'Name', sortKey: 'desc' },
-  { key: 'categoryName', label: 'Category', className: 'w-[170px]' },
+  { key: 'categoryName', label: 'Tier', className: 'w-[170px]' },
   { key: 'categoryKind', label: 'Type', className: 'w-[100px]' },
   { key: 'supplier', label: 'Supplier', className: 'w-[150px]' },
   { key: 'qty', label: 'Units', align: 'right', className: 'w-[90px]' },

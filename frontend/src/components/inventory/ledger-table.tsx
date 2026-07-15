@@ -30,12 +30,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { EmptyState } from '@/components/shared/empty-state';
+import { LotLink } from '@/components/inventory/lot-link';
 import type { LedgerEntry } from '@/types/inventory';
 import { expiryStatus } from '@/lib/inventory-helpers';
 import { cn, daysFromNow } from '@/lib/utils';
 
 interface LotGroup {
   lot: string;
+  /** Lot UUID for the group. Rows are grouped by lot number within a single
+   *  item, and lot numbers are unique per item, so every row shares one id. */
+  lotId: string | null;
   rows: LedgerEntry[];
   totalIn: number;
   totalOut: number;
@@ -95,7 +99,16 @@ function groupByLot(entries: LedgerEntry[]): LotGroup[] {
         exp = e.exp;
       }
     }
-    return { lot, rows, totalIn, totalOut, balance: totalIn - totalOut, exp, expDays };
+    return {
+      lot,
+      lotId: rows.find((e) => e.lotId)?.lotId ?? null,
+      rows,
+      totalIn,
+      totalOut,
+      balance: totalIn - totalOut,
+      exp,
+      expDays,
+    };
   });
 }
 
@@ -416,7 +429,9 @@ export function LedgerTable({
                       </span>
                     </span>
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-text-2">{e.lot}</TableCell>
+                  <TableCell className="font-mono text-xs text-text-2">
+                    <LotLink lotId={e.lotId} lotNumber={e.lot} />
+                  </TableCell>
                   <TableCell className="text-xs">
                     {expiry ? (
                       <Badge tone={expiry.tone} dot className="font-mono" title={expiry.label}>
@@ -469,7 +484,9 @@ export function LedgerTable({
               </TableCell>
               <TableCell className="text-right font-mono text-xs">{group.balance}</TableCell>
               <TableCell />
-              <TableCell className="font-mono text-xs text-text-2">{group.lot}</TableCell>
+              <TableCell className="font-mono text-xs text-text-2">
+                <LotLink lotId={group.lotId} lotNumber={group.lot} />
+              </TableCell>
               <TableCell />
               <TableCell />
               {showActions && <TableCell />}

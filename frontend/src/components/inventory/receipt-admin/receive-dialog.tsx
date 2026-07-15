@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { AlertCircle, ShieldCheck } from 'lucide-react';
 
 import {
   Dialog,
@@ -82,7 +82,21 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
+  const [errorLineId, setErrorLineId] = React.useState<string | null>(null);
   const [trees, setTrees] = React.useState<AreaTrees | null>(null);
+  const lineRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
+
+  /** Show a validation failure and bring the line that caused it into view. */
+  const fail = (message: string, lineId?: string) => {
+    setFormError(message);
+    setErrorLineId(lineId ?? null);
+    if (lineId) {
+      lineRefs.current[lineId]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }
+  };
 
   const outstandingLines = React.useMemo(
     () => (order?.lines ?? []).filter((l) => l.outstanding_qty > 0),
@@ -101,6 +115,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     setShowReauth(false);
     setSubmitting(false);
     setFormError(null);
+    setErrorLineId(null);
   }, [open, order]);
 
   // Load the placement targets (all three areas) once when the dialog opens.
@@ -121,14 +136,22 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     return () => ctrl.abort();
   }, [open]);
 
-  const patch = (lineId: string, p: Partial<LineDraft>) =>
+  const patch = (lineId: string, p: Partial<LineDraft>) => {
+    // Editing the line that failed clears the complaint about it.
+    if (errorLineId === lineId) {
+      setFormError(null);
+      setErrorLineId(null);
+    }
     setDrafts((prev) => {
       const existing = prev[lineId];
       if (!existing) return prev;
       return { ...prev, [lineId]: { ...existing, ...p } };
     });
+  };
 
-  const buildLines = (): ReceiveEventLineInput[] | { error: string } => {
+  const buildLines = ():
+    | ReceiveEventLineInput[]
+    | { error: string; lineId?: string } => {
     const out: ReceiveEventLineInput[] = [];
     // Track lot numbers already used per item so the same lot number can't be
     // typed twice for the SAME item across lines (backend enforces per-item
@@ -142,17 +165,22 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       if (!Number.isFinite(qty) || qty <= 0) {
         return {
           error: `Line ${line.line_no}: received qty must be greater than 0.`,
+          lineId: line.id,
         };
       }
       const lotNumber = d.lot_number.trim();
       if (!lotNumber) {
-        return { error: `Line ${line.line_no}: a lot number is required.` };
+        return {
+          error: `Line ${line.line_no}: a lot number is required.`,
+          lineId: line.id,
+        };
       }
       const lotKey = lotNumber.toLowerCase();
       const seen = seenLotsByItem.get(line.item_id);
       if (seen?.has(lotKey)) {
         return {
           error: `Line ${line.line_no}: lot number "${lotNumber}" is already used for this item on another line. Use a different lot number per item.`,
+          lineId: line.id,
         };
       }
       if (seen) seen.add(lotKey);
@@ -164,13 +192,17 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       ) {
         return {
           error: `Line ${line.line_no}: expiration must be on or after manufacture date.`,
+          lineId: line.id,
         };
       }
       let unitPrice: number | undefined;
       if (d.unit_price.trim() !== '') {
         const p = Number(d.unit_price);
         if (!Number.isFinite(p) || p < 0) {
-          return { error: `Line ${line.line_no}: unit price must be non-negative.` };
+          return {
+            error: `Line ${line.line_no}: unit price must be non-negative.`,
+            lineId: line.id,
+          };
         }
         unitPrice = p;
       }
@@ -180,6 +212,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
             d.placement?.nodeType === 'box'
               ? `Line ${line.line_no}: select exactly ${qty} cell(s) in the chosen box.`
               : `Line ${line.line_no}: choose a destination location for the received units.`,
+          lineId: line.id,
         };
       }
       out.push({
@@ -203,13 +236,14 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
 
   const openSign = () => {
     setFormError(null);
+    setErrorLineId(null);
     if (!receivedAt) {
-      setFormError('A received date is required.');
+      fail('A received date is required.');
       return;
     }
     const result = buildLines();
     if ('error' in result) {
-      setFormError(result.error);
+      fail(result.error, result.lineId);
       return;
     }
     setShowReauth(true);
@@ -219,7 +253,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     if (!order) return;
     const result = buildLines();
     if ('error' in result) {
-      setFormError(result.error);
+      fail(result.error, result.lineId);
       return;
     }
     const payload: ReceiveEventInput = {
@@ -229,6 +263,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     };
     setSubmitting(true);
     setFormError(null);
+    setErrorLineId(null);
     try {
       const updated = await receivingApi.receive(order.id, payload);
       toast.success('Receipt recorded', {
@@ -298,7 +333,14 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
               return (
                 <div
                   key={line.id}
-                  className="rounded-md border border-border bg-surface p-3"
+                  ref={(el) => {
+                    lineRefs.current[line.id] = el;
+                  }}
+                  className={
+                    errorLineId === line.id
+                      ? 'rounded-md border border-danger bg-danger/5 p-3 ring-1 ring-danger/40'
+                      : 'rounded-md border border-border bg-surface p-3'
+                  }
                 >
                   <div className="mb-2 flex items-center justify-between">
                     <label className="inline-flex items-center gap-2 text-sm">
@@ -411,15 +453,23 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
               );
             })}
 
-            {formError && (
-              <p
-                role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
-              >
-                {formError}
-              </p>
-            )}
           </DialogBody>
+
+          {/*
+            Lives outside DialogBody on purpose: the body is the scroller, so an
+            error rendered inside it lands off-screen and the button reads as
+            dead. Here it sits against the footer, always in view.
+          */}
+          {formError && (
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="flex items-start gap-2 border-t border-danger/30 bg-danger/5 px-5 py-3 text-xs text-danger"
+            >
+              <AlertCircle size={14} className="mt-px shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
 
           <DialogFooter>
             <Button type="button" onClick={() => onOpenChange(false)} disabled={submitting}>

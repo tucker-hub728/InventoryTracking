@@ -398,7 +398,7 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
             {whereUsed.map((p) => (
               <Link
                 key={p.parent_item_id}
-                href={`/inventory/${p.parent_item_number}/ledger`}
+                href={`/inventory/${encodeURIComponent(p.parent_item_number)}/ledger`}
                 className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface"
               >
                 <span className="font-mono text-text-2">{p.parent_item_number}</span>{' '}

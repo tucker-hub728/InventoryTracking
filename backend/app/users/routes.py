@@ -1,10 +1,11 @@
 """``/v1/users`` routes — list users, switch roles, enable/disable.
 
-Both ``super_admin`` and ``admin`` may view the user directory and change roles
-(``users:view`` / ``users:edit``). Enabling/disabling a user is a super-admin
-action routed through AWS Cognito (``admin_enable_user`` / ``admin_disable_user``)
-so a disabled user can't even mint a token — the local ``app.users.status`` and
-the Cognito identity are kept in lock-step.
+Both ``super_admin`` and ``admin`` may view the user directory (``users:view``),
+but changing a member's name / role / active flag is super-admin-only
+(``users:edit`` — a permission no other role holds). Enabling/disabling a user is
+routed through AWS Cognito (``admin_enable_user`` / ``admin_disable_user``) so a
+disabled user can't even mint a token — the local ``app.users.status`` and the
+Cognito identity are kept in lock-step.
 
 A safety guard prevents demoting or deactivating the last remaining
 ``super_admin`` so the system can never be locked out of super-admin access.

@@ -22,7 +22,9 @@ export interface NavItem {
   icon: LucideIcon;
   /** Resource the user must be able to view. Omitted = always visible. */
   resource?: ResourceKey;
-  /** Show a "Soon" pill — feature isn't wired to a backend yet. */
+  /** Show the "WIP" pill but keep the row clickable — the module works well
+   *  enough to use while it's still being built out. Use ``disabled`` instead
+   *  when the page shouldn't be reachable at all. */
   comingSoon?: boolean;
   /** When true, the nav row renders muted, non-clickable, and exposes
    *  ``disabledReason`` via title + tooltip. Use for modules whose
@@ -49,8 +51,18 @@ export const navSections: readonly NavSection[] = [
     title: 'Operations',
     items: [
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
-      { id: 'categories', label: 'Categories', href: '/categories', icon: Tags, resource: 'inventory' },
-      { id: 'customers', label: 'Customers', href: '/customers', icon: Contact, resource: 'inventory' },
+      // Clickable, but pilled as WIP — tiers are seed-only for now (create /
+      // edit / delete are hidden behind ``CATEGORY_ACTIONS_ENABLED``).
+      { id: 'categories', label: 'Tiers', href: '/categories', icon: Tags, resource: 'inventory', comingSoon: true },
+      {
+        id: 'customers',
+        label: 'Customers',
+        href: '/customers',
+        icon: Contact,
+        resource: 'inventory',
+        disabled: true,
+        disabledReason: 'Customers is a work in progress.',
+      },
       {
         id: 'forecast',
         label: 'Forecast',
@@ -76,9 +88,9 @@ export const navSections: readonly NavSection[] = [
   {
     title: 'Administration',
     items: [
-      // Users & Roles — invite users, change roles, enable/disable (super_admin
-      // + admin per the `users` permission bucket). The invite dialog is wired
-      // to the backend; the directory list is the next wiring step.
+      // Users & Roles — super_admin + admin can view the directory
+      // (`users:view`), but inviting, editing and enabling/disabling members are
+      // all super-admin-only.
       { id: 'users', label: 'Users & Roles', href: '/users', icon: Users, resource: 'users' },
       // Master data — viewer can read; admin/editor can create.
       // Page-level permission check enforces the write side.

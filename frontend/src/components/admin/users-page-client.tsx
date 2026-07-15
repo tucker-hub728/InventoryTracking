@@ -16,7 +16,6 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Pagination, usePagination } from '@/components/ui/pagination';
-import { usePermission } from '@/hooks/use-permission';
 import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
 import { usersApi, roleLabel, type ApiUser } from '@/lib/api/users';
@@ -96,10 +95,12 @@ function UsersTable({
 }
 
 export function UsersPageClient() {
-  // Editing an existing member is super-admin-only. ``super_admin`` and
-  // ``admin`` share the same RBAC bucket, so gate on the real role.
-  const canEdit = useAuthStore(selectIsSuperAdmin);
-  const canInvite = usePermission('users', 'create');
+  // Member management (inviting and editing) is super-admin-only. ``super_admin``
+  // and ``admin`` collapse into the same client-side RBAC bucket, so the
+  // permission matrix can't tell them apart — gate on the real backend role.
+  const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  const canEdit = isSuperAdmin;
+  const canInvite = isSuperAdmin;
 
   const [users, setUsers] = React.useState<ApiUser[]>([]);
   const [loading, setLoading] = React.useState(true);

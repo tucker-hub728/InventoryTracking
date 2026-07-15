@@ -22,6 +22,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { ItemLink } from '@/components/inventory/item-link';
+import { LotLink } from '@/components/inventory/lot-link';
 import { locationNodesApi, type Allocation, type NodeTree } from '@/lib/api/location-nodes';
 
 import { TransferDialog } from './transfer-dialog';
@@ -120,10 +122,10 @@ export function NodeContentsSheet({
                         {allocs.map((a) => (
                           <TableRow key={a.id}>
                             <TableCell className="font-mono text-text-2">
-                              {a.item_number ?? '—'}
+                              <ItemLink itemNumber={a.item_number} />
                             </TableCell>
                             <TableCell className="font-mono text-text-2">
-                              {a.lot_number ?? '—'}
+                              <LotLink lotId={a.lot_id} lotNumber={a.lot_number} />
                               {a.grid_row != null && a.grid_col != null
                                 ? ` (${a.grid_row},${a.grid_col})`
                                 : ''}

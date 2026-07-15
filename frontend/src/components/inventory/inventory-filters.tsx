@@ -79,12 +79,12 @@ export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps)
       >
         <SelectTrigger
           className="w-[200px] [&>span]:min-w-0 [&>span]:truncate"
-          aria-label="Filter by category"
+          aria-label="Filter by tier"
         >
-          <SelectValue placeholder="All categories" />
+          <SelectValue placeholder="All tiers" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All categories</SelectItem>
+          <SelectItem value="all">All tiers</SelectItem>
           {categories.map((c) => (
             <SelectItem key={c.id} value={c.id}>
               {c.name}

@@ -35,7 +35,7 @@ import { SupplierMultiSelect } from './supplier-multi-select';
 
 const schema = z.object({
   description: z.string().min(1, 'Name is required').max(512),
-  category_id: z.string().min(1, 'Category is required'),
+  category_id: z.string().min(1, 'Tier is required'),
   uom: z.string().trim().max(32, 'Unit is too long').optional(),
   supplier_ids: z.array(z.string()).default([]),
   avg_lead_days: z
@@ -235,13 +235,13 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     } catch (err) {
       if (err instanceof ApiError && err.code === 'bom_present') {
         setSubmitError(
-          'This Product has a bill of materials — remove its BOM before moving it to a Purchased category.',
+          'This Product has a bill of materials — remove its BOM before moving it to a Purchased tier.',
         );
         return;
       }
       if (err instanceof ApiError && err.code === 'item_received') {
         setSubmitError(
-          'This item has received stock (lots), so it can’t be changed to a Product category. Products are built, not received.',
+          'This item has received stock (lots), so it can’t be changed to a Product tier. Products are built, not received.',
         );
         return;
       }
@@ -300,7 +300,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
             {!isRaw && (
               <div className="space-y-1.5">
-                <Label htmlFor="it-category">Category</Label>
+                <Label htmlFor="it-category">Tier</Label>
                 {/* key remounts the Select once the item + categories have loaded
                     so the pre-selected value renders (Radix shows the placeholder
                     if value is set before its options mount). */}
@@ -311,8 +311,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                     setValue('category_id', v, { shouldDirty: true, shouldValidate: true })
                   }
                 >
-                  <SelectTrigger id="it-category" aria-label="Category">
-                    <SelectValue placeholder="Pick a category" />
+                  <SelectTrigger id="it-category" aria-label="Tier">
+                    <SelectValue placeholder="Pick a tier" />
                   </SelectTrigger>
                   <SelectContent>
                     {categories.map((c) => (
