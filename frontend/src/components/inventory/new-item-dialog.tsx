@@ -30,12 +30,7 @@ import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
 import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
-import {
-  tiersApi,
-  isBuiltTier,
-  TIER_TYPE_LABELS,
-  type ApiTier,
-} from '@/lib/api/tiers';
+import { tiersApi, isBuiltTier, TIER_TYPE_LABELS, type ApiTier } from '@/lib/api/tiers';
 
 import { SupplierMultiSelect } from './supplier-multi-select';
 
@@ -156,9 +151,7 @@ export function NewItemDialog({
   // When the tier is locked (e.g. Raw Materials), the SKU is always
   // prefixed with the tier prefix; the operator only types the tail.
   const skuPrefix = lockedTier?.prefix ?? '';
-  const fullSku = lockedTier
-    ? `${skuPrefix}-${skuTail(skuPrefix, itemId)}`
-    : itemId;
+  const fullSku = lockedTier ? `${skuPrefix}-${skuTail(skuPrefix, itemId)}` : itemId;
 
   // Supplier-side fields only apply to Purchased tiers — a built item
   // (AY/FG) is manufactured, not bought, so it has no supplier and no supplier
@@ -167,12 +160,14 @@ export function NewItemDialog({
   // Transaction Spec §1.1: "A CR item may be designated as either a raw
   // material or a consumable."
   //
-  // Reorder + near-expiry are NOT supplier fields and stay on every tier:
-  // planning nets sub-assemblies against on-hand (REQ-2026-07-09-PLN-002), and
-  // finished goods carry a tracked, flagged expiration (REQ-2026-07-01-INV-008,
-  // Transaction Spec §3.1).
-  const selectedTier =
-    lockedTier ?? tiers.find((c) => c.id === tierId);
+  // Reorder threshold is NOT a supplier field and stays on every tier —
+  // planning nets sub-assemblies against on-hand (REQ-2026-07-09-PLN-002).
+  //
+  // Near-expiry also rides this gate for now, hidden on the built tiers by
+  // request: INV-008 and Transaction Spec §3.1 do want a tracked expiry on
+  // finished goods, but nothing reads the window on AY/FG until manual
+  // transact-in ships, so it is deferred rather than dropped.
+  const selectedTier = lockedTier ?? tiers.find((c) => c.id === tierId);
   const showPurchasing = selectedTier?.type === 'raw_material';
 
   // ── Side effects ─────────────────────────────────────────────────────
@@ -188,9 +183,7 @@ export function NewItemDialog({
       .then((rows) => setSuppliers(rows))
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
-        setSuppliersError(
-          err instanceof ApiError ? err.message : 'Failed to load suppliers.',
-        );
+        setSuppliersError(err instanceof ApiError ? err.message : 'Failed to load suppliers.');
       })
       .finally(() => setSuppliersLoading(false));
     return () => ctrl.abort();
@@ -241,9 +234,7 @@ export function NewItemDialog({
     setSubmitError(null);
     try {
       const created = await createItem({
-        item_number: lockedTier
-          ? `${skuPrefix}-${skuTail(skuPrefix, data.itemId)}`
-          : data.itemId,
+        item_number: lockedTier ? `${skuPrefix}-${skuTail(skuPrefix, data.itemId)}` : data.itemId,
         description: data.desc,
         tier_id: data.tierId,
         uom: data.uom ? data.uom : null,
@@ -290,13 +281,7 @@ export function NewItemDialog({
             {description && <DialogDescription>{description}</DialogDescription>}
           </DialogHeader>
           <DialogBody className="space-y-5">
-            <div
-              className={
-                lockedTier
-                  ? 'space-y-5'
-                  : 'grid gap-4 sm:grid-cols-[200px_1fr]'
-              }
-            >
+            <div className={lockedTier ? 'space-y-5' : 'grid gap-4 sm:grid-cols-[200px_1fr]'}>
               <Field
                 id="ni-itemId"
                 label={lockedTier ? 'SKU' : 'Item #'}
@@ -323,11 +308,7 @@ export function NewItemDialog({
                 ) : (
                   <Input
                     id="ni-itemId"
-                    placeholder={
-                      selectedTier
-                        ? `e.g. ${selectedTier.prefix}-0001`
-                        : 'e.g. UR-0001'
-                    }
+                    placeholder={selectedTier ? `e.g. ${selectedTier.prefix}-0001` : 'e.g. UR-0001'}
                     className="font-mono"
                     aria-invalid={Boolean(errors.itemId)}
                     {...register('itemId')}
@@ -352,9 +333,7 @@ export function NewItemDialog({
               <Field id="ni-tier" label="Tier" error={errors.tierId?.message}>
                 <Select
                   value={tierId}
-                  onValueChange={(v) =>
-                    setValue('tierId', v, { shouldValidate: true })
-                  }
+                  onValueChange={(v) => setValue('tierId', v, { shouldValidate: true })}
                 >
                   <SelectTrigger id="ni-tier" aria-label="Tier">
                     <SelectValue placeholder="Pick a tier" />
@@ -373,12 +352,15 @@ export function NewItemDialog({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-text-3">
-                  The tier decides whether this is a Product (can have a BOM) or
-                  a Purchased item. Manage the BOM from the item&apos;s detail page.
+                  The tier decides whether this is a Product (can have a BOM) or a Purchased item.
+                  Manage the BOM from the item&apos;s detail page.
                 </p>
               </Field>
             )}
 
+            {/* Unit + Reorder threshold are the two fields every tier shows, so
+                they pair up here. The purchasing-only fields (consumable flag,
+                suppliers, lead time, near-expiry) live in the block below. */}
             <div className="grid gap-4 sm:grid-cols-2">
               <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
                 <Input
@@ -388,62 +370,6 @@ export function NewItemDialog({
                   {...register('uom')}
                 />
               </Field>
-              {showPurchasing && (
-                <div className="flex items-center justify-between gap-4 self-end rounded-md border border-border bg-surface px-3 py-2">
-                  <div className="space-y-0.5">
-                    <Label htmlFor="ni-consumable">Consumable</Label>
-                    <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
-                  </div>
-                  <Switch
-                    id="ni-consumable"
-                    checked={isConsumable}
-                    onCheckedChange={(v) => setValue('isConsumable', v)}
-                  />
-                </div>
-              )}
-            </div>
-
-            {showPurchasing && (
-              <>
-                <Field
-                  id="ni-suppliers"
-                  label="Suppliers"
-                  error={errors.supplierIds?.message}
-                >
-                  <SupplierMultiSelect
-                    id="ni-suppliers"
-                    modal
-                    suppliers={suppliers}
-                    value={supplierIds}
-                    onChange={(next) =>
-                      setValue('supplierIds', next, { shouldValidate: true })
-                    }
-                    loading={suppliersLoading}
-                    error={suppliersError}
-                  />
-                  <p className="text-xs text-text-3">
-                    Only these suppliers can be selected when receiving stock for this
-                    item.
-                  </p>
-                </Field>
-
-                <Field
-                  id="ni-lead"
-                  label="Lead time (days)"
-                  error={errors.leadDays?.message}
-                >
-                  <Input
-                    id="ni-lead"
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    {...register('leadDays')}
-                  />
-                </Field>
-              </>
-            )}
-
-            <div className="grid gap-4 sm:grid-cols-2">
               <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
                 <Input
                   id="ni-thr"
@@ -454,23 +380,71 @@ export function NewItemDialog({
                   {...register('threshold')}
                 />
               </Field>
-              <Field
-                id="ni-near-expiry"
-                label="Near expiry threshold (days)"
-                error={errors.nearExpiryThresholdDays?.message}
-              >
-                <Input
-                  id="ni-near-expiry"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  max={3650}
-                  step={1}
-                  placeholder="e.g. 30"
-                  {...register('nearExpiryThresholdDays')}
-                />
-              </Field>
             </div>
+
+            {showPurchasing && (
+              <>
+                <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ni-consumable">Consumable</Label>
+                    <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+                  </div>
+                  <Switch
+                    id="ni-consumable"
+                    checked={isConsumable}
+                    onCheckedChange={(v) => setValue('isConsumable', v)}
+                  />
+                </div>
+
+                <Field id="ni-suppliers" label="Suppliers" error={errors.supplierIds?.message}>
+                  <SupplierMultiSelect
+                    id="ni-suppliers"
+                    modal
+                    suppliers={suppliers}
+                    value={supplierIds}
+                    onChange={(next) => setValue('supplierIds', next, { shouldValidate: true })}
+                    loading={suppliersLoading}
+                    error={suppliersError}
+                  />
+                  <p className="text-xs text-text-3">
+                    Only these suppliers can be selected when receiving stock for this item.
+                  </p>
+                </Field>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
+                    <Input
+                      id="ni-lead"
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      {...register('leadDays')}
+                    />
+                  </Field>
+                  {/* Near-expiry: purchased tiers only for now. INV-008 /
+                      Transaction Spec §3.1 want a tracked expiry on finished
+                      goods, but nothing reads the window on AY/FG until manual
+                      transact-in ships, so it is deferred (the column keeps its
+                      30-day default). Re-show this field to restore it. */}
+                  <Field
+                    id="ni-near-expiry"
+                    label="Near expiry threshold (days)"
+                    error={errors.nearExpiryThresholdDays?.message}
+                  >
+                    <Input
+                      id="ni-near-expiry"
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={3650}
+                      step={1}
+                      placeholder="e.g. 30"
+                      {...register('nearExpiryThresholdDays')}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
 
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
               {showPurchasing
@@ -481,7 +455,7 @@ export function NewItemDialog({
             {submitError && (
               <p
                 role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
+                className="border-danger/30 bg-danger/5 rounded-md border px-3 py-2 text-xs text-danger"
               >
                 {submitError}
               </p>

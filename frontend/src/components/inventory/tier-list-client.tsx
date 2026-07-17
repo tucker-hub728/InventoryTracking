@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
+import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { Badge } from '@/components/ui/badge';
@@ -20,6 +21,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { SegmentedControl } from '@/components/ui/segmented-control';
+import { Skeleton } from '@/components/ui/skeleton';
 import { usePermission } from '@/hooks/use-permission';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ListItemsParams } from '@/lib/api/items';
@@ -98,8 +100,14 @@ export function TierListClient({ config }: { config: TierConfig }) {
   // Unpaged count from the server — the row array stops at the 200 cap.
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
+  // False until the first successful fetch. Drives skeleton-vs-table: once
+  // real rows have landed, a refetch dims them instead of blanking the page,
+  // so typing in the search box doesn't flash a skeleton on every keystroke.
+  const [hasLoaded, setHasLoaded] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
+  // Held briefly — the list returns in ~20ms locally, too fast to see.
+  const showSkeleton = useMinDuration(!hasLoaded && !loadError);
 
   // Active filter pill. The first entry ("All") is the default; reset when the
   // page switches tier so a stale pill can't carry across.
@@ -122,7 +130,16 @@ export function TierListClient({ config }: { config: TierConfig }) {
     const ctrl = new AbortController();
     tiersApi
       .list({ signal: ctrl.signal })
-      .then((tiers) => setTier(findTier(tiers, config)))
+      .then((tiers) => {
+        const found = findTier(tiers, config);
+        setTier(found);
+        // Without a tier there's nothing to fetch, so ``fetchRows`` bails and
+        // ``loading`` would never clear — say so instead of spinning forever.
+        if (!found) {
+          setLoadError(`The ${config.title} tier is missing from the catalogue.`);
+          setLoading(false);
+        }
+      })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load tiers.');
@@ -150,11 +167,15 @@ export function TierListClient({ config }: { config: TierConfig }) {
         );
         setRows(res.items.map(apiItemToInventoryItem));
         setTotal(res.total);
+        setHasLoaded(true);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof ApiError ? err.message : `Failed to load ${config.plural}.`);
       } finally {
-        setLoading(false);
+        // Skip when this request was superseded: the replacement has already
+        // set ``loading`` true, and clearing it here would drop the skeleton
+        // while the new fetch is still in flight.
+        if (!signal?.aborted) setLoading(false);
       }
     },
     [tier, query, activeFilter, config.plural],
@@ -176,6 +197,23 @@ export function TierListClient({ config }: { config: TierConfig }) {
   // term or a non-default pill, the tier isn't empty — the filter just excluded
   // everything.
   const isNarrowed = Boolean(query) || filterId !== config.filters[0].id;
+
+  // Shared by the skeleton and the real table so both agree on the columns.
+  const tableHeader = (
+    <TableHeader>
+      <TableRow>
+        <TableHead className="w-[160px]">SKU</TableHead>
+        <TableHead>Name</TableHead>
+        {showConsumable && <TableHead className="w-[130px]">Consumable</TableHead>}
+        {showBom && <TableHead className="w-[110px]">BOM</TableHead>}
+        <TableHead className="w-[140px]">On hand</TableHead>
+        <TableHead className="w-[140px]">Stock status</TableHead>
+        <TableHead className="w-[120px]">Updated</TableHead>
+      </TableRow>
+    </TableHeader>
+  );
+  // SKU, Name, On hand, Stock status, Updated + the two optional columns.
+  const columnCount = 5 + (showConsumable ? 1 : 0) + (showBom ? 1 : 0);
 
   return (
     <>
@@ -221,7 +259,29 @@ export function TierListClient({ config }: { config: TierConfig }) {
               hint={loadError}
               action={<Button onClick={() => void fetchRows()}>Retry</Button>}
             />
-          ) : !loading && rows.length === 0 ? (
+          ) : showSkeleton ? (
+            // First load: skeleton rows inside the real table, so the columns
+            // land at their final widths and nothing jumps when data arrives.
+            <div className="overflow-x-auto">
+              <Table className="min-w-[840px]">
+                {tableHeader}
+                <TableBody>
+                  {Array.from({ length: 6 }).map((_, r) => (
+                    <TableRow key={r}>
+                      {Array.from({ length: columnCount }).map((_, c) => (
+                        <TableCell key={c}>
+                          <Skeleton className="h-4 w-full max-w-[110px]" />
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <span className="sr-only" role="status">
+                Loading {config.plural}…
+              </span>
+            </div>
+          ) : rows.length === 0 ? (
             <EmptyState
               title={isNarrowed ? `No ${config.plural} match` : `No ${config.plural} yet`}
               hint={
@@ -237,18 +297,15 @@ export function TierListClient({ config }: { config: TierConfig }) {
             />
           ) : (
             <div className="overflow-x-auto">
-              <Table className="min-w-[840px]">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-[160px]">SKU</TableHead>
-                    <TableHead>Name</TableHead>
-                    {showConsumable && <TableHead className="w-[130px]">Consumable</TableHead>}
-                    {showBom && <TableHead className="w-[110px]">BOM</TableHead>}
-                    <TableHead className="w-[140px]">On hand</TableHead>
-                    <TableHead className="w-[140px]">Stock status</TableHead>
-                    <TableHead className="w-[120px]">Updated</TableHead>
-                  </TableRow>
-                </TableHeader>
+              <Table
+                className={cn(
+                  'min-w-[840px] transition-opacity',
+                  // Refetching (filter / search change) with rows already on
+                  // screen: dim rather than blank, so the page doesn't jump.
+                  loading && 'opacity-50',
+                )}
+              >
+                {tableHeader}
                 <TableBody>
                   {rows.map((row) => (
                     <TableRow key={row.uuid} interactive className="group">

@@ -27,20 +27,55 @@ import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
 
-// Purchased items are *received into stock* — they get the ledger, the
-// "used in" (Products) view, forecast impact, and audit.
-const PURCHASED_TABS = [
+interface DetailTab {
+  seg: string;
+  label: string;
+}
+
+// Raw materials are *received into stock* — they get the ledger and audit.
+const RAW_TABS: readonly DetailTab[] = [
   { seg: 'ledger', label: 'Unit Ledger' },
   { seg: 'audit', label: 'Audit History' },
-] as const;
+];
 
-// Product (built) items are *assembled from a BOM* — no stock ledger/snapshot.
+// …plus "Used in" (the where-used view) when the material can actually appear
+// in a BOM. Consumables never can — Transaction Spec §4.3: "Consumables are
+// not tracked directly against an FG or AY BOM" — so for them the tab would be
+// permanently empty and is omitted rather than shown blank.
+const RAW_TABS_WITH_USED_IN: readonly DetailTab[] = [
+  { seg: 'ledger', label: 'Unit Ledger' },
+  { seg: 'products', label: 'Used in' },
+  { seg: 'audit', label: 'Audit History' },
+];
+
+// Built (AY/FG) items are *assembled from a BOM* — no stock ledger/snapshot.
 // They get the multi-level structure (hierarchy) and the BOM editor.
-// (Forecast + Audit for Products are deferred.)
-const PRODUCT_TABS = [
+// (Forecast + Audit for built items are deferred.)
+const PRODUCT_TABS: readonly DetailTab[] = [
   { seg: 'structure', label: 'Structure' },
   { seg: 'bom', label: 'BOM' },
-] as const;
+];
+
+// …plus "Used in" for a sub-assembly (AY), which can be a component of an FG's
+// BOM. A finished good is top-level and never appears on the left of a BOM
+// rule (Transaction Spec §1.1), so its "Used in" would always be empty and the
+// tab is omitted.
+const PRODUCT_TABS_WITH_USED_IN: readonly DetailTab[] = [
+  { seg: 'structure', label: 'Structure' },
+  { seg: 'bom', label: 'BOM' },
+  { seg: 'products', label: 'Used in' },
+];
+
+/** Tabs for an item: built tiers get the BOM views (a sub-assembly also gets
+ *  "Used in"); a raw material gets the ledger, plus "Used in" unless it's a
+ *  consumable (never in a BOM). */
+function tabsForItem(item: InventoryItem | null): readonly DetailTab[] {
+  if (!item) return RAW_TABS;
+  if (isBuiltTier(item.tierType)) {
+    return item.tierType === 'finished_good' ? PRODUCT_TABS : PRODUCT_TABS_WITH_USED_IN;
+  }
+  return item.isConsumable ? RAW_TABS : RAW_TABS_WITH_USED_IN;
+}
 
 /**
  * Shared chrome for an inventory item's detail routes
@@ -167,20 +202,22 @@ export function InventoryDetailShell({
     void load();
   }, [load]);
 
-  // Kind-aware tabs. The server-side index redirect can't know the item kind,
-  // so if we land on a segment that doesn't belong to this item's kind
-  // (e.g. a Product on /ledger, or a Purchased item on /structure), bounce to
-  // the kind's first tab.
+  // Built items have no stock ledger, so no Snapshot sidebar / on-hand chips.
   const built = isBuiltTier(item?.tierType);
-  const tabs = built ? PRODUCT_TABS : PURCHASED_TABS;
+
+  // Tier-aware tabs. The server-side index redirect can't know the item's tier,
+  // so if we land on a segment that doesn't belong to this item (a built item
+  // on /ledger, a raw material on /structure, or a consumable on /products),
+  // bounce to its first tab.
+  const tabs = React.useMemo(() => tabsForItem(item), [item]);
   React.useEffect(() => {
     if (!item) return;
     const seg = pathname.split('/').pop();
-    const valid = (built ? PRODUCT_TABS : PURCHASED_TABS).map((t) => t.seg) as string[];
+    const valid = tabs.map((t) => t.seg);
     if (seg && !valid.includes(seg)) {
       router.replace(`/inventory/${item.id}/${valid[0]}`);
     }
-  }, [item, built, pathname, router]);
+  }, [item, tabs, pathname, router]);
 
   // ── Loading / error shells ───────────────────────────────────────────
   if (loading && item === null) {
@@ -259,71 +296,71 @@ export function InventoryDetailShell({
       <div className="px-6 py-5 sm:px-8">
         <div className={cn('grid gap-5', !built && 'lg:grid-cols-[280px_1fr]')}>
           {!built && (
-          <aside className="space-y-3">
-            <Card>
-              <CardHeader>
-                <CardTitle>Snapshot</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <KV label="Available" value={formatNumber(item.qtyAvailable)} mono />
-                <KV
-                  label="On hand"
-                  value={
-                    expiredQty > 0
-                      ? `${formatNumber(item.qty)} (${formatNumber(expiredQty)} expired)`
-                      : formatNumber(item.qty)
-                  }
-                  mono
-                />
-                <KV
-                  label="On order"
-                  value={item.onOrder ? formatNumber(item.onOrder) : '—'}
-                  mono
-                />
-                <KV
-                  label="Reorder threshold"
-                  value={item.threshold ? formatNumber(item.threshold) : '—'}
-                  mono
-                />
-                {/*
+            <aside className="space-y-3">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Snapshot</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <KV label="Available" value={formatNumber(item.qtyAvailable)} mono />
+                  <KV
+                    label="On hand"
+                    value={
+                      expiredQty > 0
+                        ? `${formatNumber(item.qty)} (${formatNumber(expiredQty)} expired)`
+                        : formatNumber(item.qty)
+                    }
+                    mono
+                  />
+                  <KV
+                    label="On order"
+                    value={item.onOrder ? formatNumber(item.onOrder) : '—'}
+                    mono
+                  />
+                  <KV
+                    label="Reorder threshold"
+                    value={item.threshold ? formatNumber(item.threshold) : '—'}
+                    mono
+                  />
+                  {/*
                   "Forecast demand" / "Projected shortfall" — temporarily
                   hidden. The demand fetch that fed them is commented out above
                   too; restore both together from git history when forecasting
                   is wired up. (The Forecast module is still marked WIP in the
                   sidebar.)
                 */}
-                <Separator />
-                <KV label="Inventory $" value={`$${formatNumber(item.invValue)}`} mono />
-                <KV label="On-PO $" value={`$${formatNumber(item.poValue)}`} mono />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Ledger totals</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <KV
-                  label="Unit in (lifetime)"
-                  value={formatNumber(
-                    ledgerRows
-                      .filter((m) => Number(m.qty_delta) > 0)
-                      .reduce((s, m) => s + Number(m.qty_abs), 0),
-                  )}
-                  mono
-                />
-                <KV
-                  label="Unit out (lifetime)"
-                  value={formatNumber(
-                    ledgerRows
-                      .filter((m) => Number(m.qty_delta) < 0)
-                      .reduce((s, m) => s + Number(m.qty_abs), 0),
-                  )}
-                  mono
-                />
-                <KV label="Entries" value={formatNumber(ledgerTotal)} mono />
-              </CardContent>
-            </Card>
-          </aside>
+                  <Separator />
+                  <KV label="Inventory $" value={`$${formatNumber(item.invValue)}`} mono />
+                  <KV label="On-PO $" value={`$${formatNumber(item.poValue)}`} mono />
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Ledger totals</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  <KV
+                    label="Unit in (lifetime)"
+                    value={formatNumber(
+                      ledgerRows
+                        .filter((m) => Number(m.qty_delta) > 0)
+                        .reduce((s, m) => s + Number(m.qty_abs), 0),
+                    )}
+                    mono
+                  />
+                  <KV
+                    label="Unit out (lifetime)"
+                    value={formatNumber(
+                      ledgerRows
+                        .filter((m) => Number(m.qty_delta) < 0)
+                        .reduce((s, m) => s + Number(m.qty_abs), 0),
+                    )}
+                    mono
+                  />
+                  <KV label="Entries" value={formatNumber(ledgerTotal)} mono />
+                </CardContent>
+              </Card>
+            </aside>
           )}
 
           <Card className="min-w-0 overflow-hidden">

@@ -7,18 +7,18 @@ import { Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  SearchableSelect,
-  type SearchableSelectOption,
-} from '@/components/ui/searchable-select';
+import { SearchableSelect, type SearchableSelectOption } from '@/components/ui/searchable-select';
+import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
+import { TableSkeleton } from '@/components/shared/table-skeleton';
+import { Skeleton } from '@/components/ui/skeleton';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { isBuiltTier, type TierType } from '@/lib/api/tiers';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { bomApi, type ApiBomLine, type ApiWhereUsed } from '@/lib/api/bom';
+import { bomApi, type ApiBomLine } from '@/lib/api/bom';
 import { itemsApi, type ApiItem } from '@/lib/api/items';
 import type { BadgeTone } from '@/types/ui';
 import type { InventoryStatus } from '@/types/inventory';
@@ -26,11 +26,7 @@ import { formatNumber } from '@/lib/utils';
 
 /** Map a v_item_stock status_code to the inventory status label (for the badge). */
 function statusLabel(code: 'available' | 'low_stock' | 'out_of_stock'): InventoryStatus {
-  return code === 'available'
-    ? 'Available'
-    : code === 'low_stock'
-      ? 'Low stock'
-      : 'Out of stock';
+  return code === 'available' ? 'Available' : code === 'low_stock' ? 'Low stock' : 'Out of stock';
 }
 
 interface Props {
@@ -53,19 +49,19 @@ const REAUTH_ACTION: Record<Pending['kind'], string> = {
 };
 
 /**
- * BOM & usage tab for an inventory item.
+ * BOM tab for a Product (built) item — the direct bill of materials, with
+ * adding, re-quantifying and removing lines, each electronically signed.
  *
- * For a Product (built) item it manages the direct bill of materials —
- * adding, re-quantifying and removing lines, each electronically signed. For
- * every item it lists where it's used (the Products that consume it).
+ * Where-used ("Used in") lives in its own tab (ItemWhereUsedTab).
  */
 export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
   const isBuilt = isBuiltTier(itemTierType);
 
   const [lines, setLines] = React.useState<ApiBomLine[]>([]);
-  const [whereUsed, setWhereUsed] = React.useState<ApiWhereUsed[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  // Held briefly — the fetch returns in ~20ms, too fast to see otherwise.
+  const showSkeleton = useMinDuration(loading && lines.length === 0);
 
   // Add-line form state.
   const [items, setItems] = React.useState<ApiItem[]>([]);
@@ -84,14 +80,10 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
       setLoading(true);
       setError(null);
       try {
-        const [bom, used] = await Promise.all([
-          isBuilt
-            ? bomApi.forItem(itemId, { signal })
-            : Promise.resolve({ item_id: itemId, lines: [] }),
-          bomApi.whereUsed(itemId, { signal }),
-        ]);
+        const bom = isBuilt
+          ? await bomApi.forItem(itemId, { signal })
+          : { item_id: itemId, lines: [] };
         setLines(bom.lines);
-        setWhereUsed(used);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setError(err instanceof ApiError ? err.message : 'Failed to load BOM.');
@@ -119,10 +111,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
     return () => ctrl.abort();
   }, [isBuilt]);
 
-  const inBom = React.useMemo(
-    () => new Set(lines.map((l) => l.child_item_id)),
-    [lines],
-  );
+  const inBom = React.useMemo(() => new Set(lines.map((l) => l.child_item_id)), [lines]);
 
   // Only raw materials and sub-assemblies may be components, and never a
   // consumable — see the guards in ``add_bom_line``, which are the real
@@ -131,10 +120,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
   const addOptions: SearchableSelectOption[] = items
     .filter(
       (c) =>
-        c.id !== itemId &&
-        !inBom.has(c.id) &&
-        c.tier_type !== 'finished_good' &&
-        !c.is_consumable,
+        c.id !== itemId && !inBom.has(c.id) && c.tier_type !== 'finished_good' && !c.is_consumable,
     )
     .map((c) => ({
       value: c.id,
@@ -218,8 +204,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
 
   const meaning = React.useMemo(() => {
     if (!pending) return '';
-    if (pending.kind === 'add')
-      return `I am adding a bill-of-materials line to ${itemNumber}.`;
+    if (pending.kind === 'add') return `I am adding a bill-of-materials line to ${itemNumber}.`;
     if (pending.kind === 'update')
       return `I am changing a bill-of-materials quantity on ${itemNumber}.`;
     return `I am removing a bill-of-materials line from ${itemNumber}.`;
@@ -228,10 +213,18 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
   // ── Render ─────────────────────────────────────────────────────────────
 
   if (error) return <EmptyState title="Couldn't load BOM" hint={error} />;
-  if (loading && lines.length === 0 && whereUsed.length === 0) {
+  if (showSkeleton) {
     return (
-      <div className="py-10 text-center text-sm text-text-3" role="status">
-        Loading BOM…
+      <div className="space-y-6 p-4">
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-40" />
+          <TableSkeleton
+            rows={3}
+            columns={5}
+            className="rounded-md border border-border"
+            label="Loading BOM…"
+          />
+        </div>
       </div>
     );
   }
@@ -263,7 +256,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                 </thead>
                 <tbody>
                   {lines.map((l) => (
-                    <tr key={l.id} className="border-b border-border/60">
+                    <tr key={l.id} className="border-border/60 border-b">
                       <td className="px-4 py-2.5">
                         <Link
                           href={`/inventory/${l.child_item_number}/ledger`}
@@ -286,28 +279,24 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                             type="number"
                             min={1}
                             value={editing.qty}
-                            onChange={(e) =>
-                              setEditing({ id: l.id, qty: e.target.value })
-                            }
+                            onChange={(e) => setEditing({ id: l.id, qty: e.target.value })}
                             className="ml-auto w-20 text-right"
                           />
                         ) : (
                           `×${formatNumber(Number(l.qty_per_unit))}`
                         )}
                       </td>
+                      {/* Shown for every component, sub-assemblies included: a
+                          sub-assembly "shall itself be stockable as inventory"
+                          (REQ-2026-07-01-INV-003), so it has a real on-hand
+                          balance — kitting reads it to decide what can be
+                          pulled. A finished good can't be a component at all
+                          (Transaction Spec §1.1), so nothing here is unstocked. */}
                       <td className="px-4 py-2.5 text-right font-mono text-text-2">
-                        {isBuiltTier(l.child_tier_type) ? (
-                          <span className="text-text-3">—</span>
-                        ) : (
-                          formatNumber(Number(l.child_qty_available))
-                        )}
+                        {formatNumber(Number(l.child_qty_available))}
                       </td>
                       <td className="px-4 py-2.5">
-                        {isBuiltTier(l.child_tier_type) ? (
-                          <span className="text-text-3">—</span>
-                        ) : (
-                          <StatusBadge status={statusLabel(l.child_status_code)} />
-                        )}
+                        <StatusBadge status={statusLabel(l.child_status_code)} />
                       </td>
                       <td className="px-4 py-2.5 text-right">
                         <div className="flex items-center justify-end gap-1">
@@ -323,11 +312,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                               >
                                 <ShieldCheck size={13} /> Sign
                               </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => setEditing(null)}
-                              >
+                              <Button variant="ghost" size="sm" onClick={() => setEditing(null)}>
                                 Cancel
                               </Button>
                             </>
@@ -380,9 +365,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
               />
             </div>
             <div className="w-24">
-              <label className="mb-1 block text-xs font-medium text-text-2">
-                Qty / run
-              </label>
+              <label className="mb-1 block text-xs font-medium text-text-2">Qty / run</label>
               <Input
                 type="number"
                 min={1}
@@ -394,40 +377,13 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
             <Button
               variant="primary"
               disabled={!addChild || Number(addQty) <= 0}
-              onClick={() =>
-                requestSign({ kind: 'add', childId: addChild, qty: Number(addQty) })
-              }
+              onClick={() => requestSign({ kind: 'add', childId: addChild, qty: Number(addQty) })}
             >
               <Plus size={14} /> Add line (sign)
             </Button>
           </div>
         </section>
       )}
-
-      {/* ── Where used ── (shown for all items: a component's consumers, or a
-          sub-assembly's parent products). */}
-      <section className="space-y-3">
-        <h3 className="text-sm font-semibold">Used in</h3>
-        {whereUsed.length === 0 ? (
-          <p className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-text-3">
-            Not consumed by any Product&apos;s bill of materials.
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {whereUsed.map((p) => (
-              <Link
-                key={p.parent_item_id}
-                href={`/inventory/${encodeURIComponent(p.parent_item_number)}/ledger`}
-                className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface"
-              >
-                <span className="font-mono text-text-2">{p.parent_item_number}</span>{' '}
-                <span className="text-text">{p.parent_description}</span>{' '}
-                <span className="text-text-3">×{formatNumber(Number(p.qty_per_unit))}</span>
-              </Link>
-            ))}
-          </div>
-        )}
-      </section>
 
       <PasswordReauthDialog
         open={showReauth}
