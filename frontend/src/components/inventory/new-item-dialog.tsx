@@ -30,11 +30,16 @@ import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
 import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
-import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
+import {
+  tiersApi,
+  isBuiltTier,
+  TIER_TYPE_LABELS,
+  type ApiTier,
+} from '@/lib/api/tiers';
 
 import { SupplierMultiSelect } from './supplier-multi-select';
 
-/** Strip a re-typed category prefix off the SKU tail (so "CR-001" → "001",
+/** Strip a re-typed tier prefix off the SKU tail (so "CR-001" → "001",
  *  not "CR-CR-001"). Prefixes are alphanumeric, safe to inline in the regex. */
 function skuTail(prefix: string, raw: string): string {
   return raw.trim().replace(new RegExp(`^${prefix}-?`, 'i'), '');
@@ -53,9 +58,9 @@ const schema = z.object({
     .min(1, 'Item # is required')
     .max(64, 'Item # must be at most 64 characters'),
   desc: z.string().min(3, 'Description is required'),
-  // Required category — governs whether the item is a Product (built) or
+  // Required tier — governs whether the item is a Product (built) or
   // Purchased, and thus BOM eligibility.
-  categoryId: z.string().min(1, 'Tier is required'),
+  tierId: z.string().min(1, 'Tier is required'),
   // Free-text unit of measure (each, mL, box …). Optional.
   uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
   // Blind-consumed, no per-lot traceability.
@@ -81,26 +86,30 @@ interface Props {
    *  host list refresh itself — the inventory list relies on the store
    *  refetch instead and omits this. */
   onCreated?: () => void;
-  /** When set, the category is fixed to this one and the picker is read-only.
-   *  Used by the per-tier sections (e.g. Raw Materials) where the category is
+  /** When set, the tier is fixed to this one and the picker is read-only.
+   *  Used by the per-tier sections (e.g. Raw Materials) where the tier is
    *  implied by the page, not chosen by the operator. */
-  lockedCategory?: ApiCategory | null;
+  lockedTier?: ApiTier | null;
   /** Dialog title override (defaults to "New inventory item"). */
   title?: string;
   /** Short line under the title (e.g. the SKU-prefix hint on a tier page). */
   description?: React.ReactNode;
   /** Submit-button label override (defaults to "Create item"). */
   submitLabel?: string;
+  /** Success-toast headline (e.g. "Sub-assembly created"). Defaults to the
+   *  generic "Item created". */
+  createdLabel?: string;
 }
 
 export function NewItemDialog({
   open,
   onOpenChange,
   onCreated,
-  lockedCategory,
+  lockedTier,
   title,
   description,
   submitLabel,
+  createdLabel,
 }: Props) {
   // Store actions — the only thing this component does for I/O.
   const createItem = useInventoryStore((s) => s.create);
@@ -113,7 +122,7 @@ export function NewItemDialog({
   const [suppliersLoading, setSuppliersLoading] = React.useState(false);
   const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
 
-  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
+  const [tiers, setTiers] = React.useState<ApiTier[]>([]);
 
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -129,7 +138,7 @@ export function NewItemDialog({
     defaultValues: {
       itemId: '',
       desc: '',
-      categoryId: lockedCategory?.id ?? '',
+      tierId: lockedTier?.id ?? '',
       uom: '',
       isConsumable: false,
       supplierIds: [],
@@ -140,23 +149,31 @@ export function NewItemDialog({
   });
 
   const supplierIds = watch('supplierIds');
-  const categoryId = watch('categoryId');
+  const tierId = watch('tierId');
   const isConsumable = watch('isConsumable');
   const itemId = watch('itemId');
 
-  // When the category is locked (e.g. Raw Materials), the SKU is always
-  // prefixed with the category prefix; the operator only types the tail.
-  const skuPrefix = lockedCategory?.prefix ?? '';
-  const fullSku = lockedCategory
+  // When the tier is locked (e.g. Raw Materials), the SKU is always
+  // prefixed with the tier prefix; the operator only types the tail.
+  const skuPrefix = lockedTier?.prefix ?? '';
+  const fullSku = lockedTier
     ? `${skuPrefix}-${skuTail(skuPrefix, itemId)}`
     : itemId;
 
-  // Purchasing fields (suppliers, lead time, reorder + near-expiry) only apply to
-  // Purchased categories — a Product is built, not bought. Shown once a
-  // Purchased category is picked; hidden for Product / before a pick.
-  const selectedCategory =
-    lockedCategory ?? categories.find((c) => c.id === categoryId);
-  const showPurchasing = selectedCategory?.kind === 'purchased';
+  // Supplier-side fields only apply to Purchased tiers — a built item
+  // (AY/FG) is manufactured, not bought, so it has no supplier and no supplier
+  // lead time (REQ-2026-07-01-INV-002; per-supplier lead time is future state
+  // per REQ-2026-07-09-PLN-006). The consumable flag is likewise CR-only —
+  // Transaction Spec §1.1: "A CR item may be designated as either a raw
+  // material or a consumable."
+  //
+  // Reorder + near-expiry are NOT supplier fields and stay on every tier:
+  // planning nets sub-assemblies against on-hand (REQ-2026-07-09-PLN-002), and
+  // finished goods carry a tracked, flagged expiration (REQ-2026-07-01-INV-008,
+  // Transaction Spec §3.1).
+  const selectedTier =
+    lockedTier ?? tiers.find((c) => c.id === tierId);
+  const showPurchasing = selectedTier?.type === 'raw_material';
 
   // ── Side effects ─────────────────────────────────────────────────────
 
@@ -179,26 +196,26 @@ export function NewItemDialog({
     return () => ctrl.abort();
   }, [open]);
 
-  // Load categories once when the dialog opens — skipped when the category is
+  // Load tiers once when the dialog opens — skipped when the tier is
   // fixed by the host page (no picker to populate).
   React.useEffect(() => {
-    if (!open || lockedCategory) return;
+    if (!open || lockedTier) return;
     const ctrl = new AbortController();
-    categoriesApi
+    tiersApi
       .list({ signal: ctrl.signal })
-      .then(setCategories)
+      .then(setTiers)
       .catch(() => {
         /* surfaced via the empty dropdown */
       });
     return () => ctrl.abort();
-  }, [open, lockedCategory]);
+  }, [open, lockedTier]);
 
-  // Keep the locked category selected while the dialog is open.
+  // Keep the locked tier selected while the dialog is open.
   React.useEffect(() => {
-    if (open && lockedCategory) {
-      setValue('categoryId', lockedCategory.id, { shouldValidate: true });
+    if (open && lockedTier) {
+      setValue('tierId', lockedTier.id, { shouldValidate: true });
     }
-  }, [open, lockedCategory, setValue]);
+  }, [open, lockedTier, setValue]);
 
   // Reset the form when the dialog closes.
   React.useEffect(() => {
@@ -206,7 +223,7 @@ export function NewItemDialog({
       reset({
         itemId: '',
         desc: '',
-        categoryId: lockedCategory?.id ?? '',
+        tierId: lockedTier?.id ?? '',
         uom: '',
         isConsumable: false,
         supplierIds: [],
@@ -216,7 +233,7 @@ export function NewItemDialog({
       });
       setSubmitError(null);
     }
-  }, [open, reset, lockedCategory]);
+  }, [open, reset, lockedTier]);
 
   // ── Submit ───────────────────────────────────────────────────────────
 
@@ -224,11 +241,11 @@ export function NewItemDialog({
     setSubmitError(null);
     try {
       const created = await createItem({
-        item_number: lockedCategory
+        item_number: lockedTier
           ? `${skuPrefix}-${skuTail(skuPrefix, data.itemId)}`
           : data.itemId,
         description: data.desc,
-        category_id: data.categoryId,
+        tier_id: data.tierId,
         uom: data.uom ? data.uom : null,
         is_consumable: data.isConsumable,
         supplier_ids: data.supplierIds,
@@ -236,7 +253,7 @@ export function NewItemDialog({
         reorder_threshold: data.threshold,
         near_expiry_threshold_days: data.nearExpiryThresholdDays,
       });
-      toast.success(lockedCategory ? 'Raw material created' : 'Item created', {
+      toast.success(createdLabel ?? 'Item created', {
         description: `${created.id} · ${created.desc}`,
       });
       onCreated?.();
@@ -273,24 +290,19 @@ export function NewItemDialog({
             {description && <DialogDescription>{description}</DialogDescription>}
           </DialogHeader>
           <DialogBody className="space-y-5">
-            {lockedCategory && (
-              <div>
-                <Badge tone="neutral">{lockedCategory.name}</Badge>
-              </div>
-            )}
             <div
               className={
-                lockedCategory
+                lockedTier
                   ? 'space-y-5'
                   : 'grid gap-4 sm:grid-cols-[200px_1fr]'
               }
             >
               <Field
                 id="ni-itemId"
-                label={lockedCategory ? 'SKU' : 'Item #'}
+                label={lockedTier ? 'SKU' : 'Item #'}
                 error={errors.itemId?.message}
               >
-                {lockedCategory ? (
+                {lockedTier ? (
                   <>
                     <div className="flex">
                       <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
@@ -312,8 +324,8 @@ export function NewItemDialog({
                   <Input
                     id="ni-itemId"
                     placeholder={
-                      selectedCategory
-                        ? `e.g. ${selectedCategory.prefix}-0001`
+                      selectedTier
+                        ? `e.g. ${selectedTier.prefix}-0001`
                         : 'e.g. UR-0001'
                     }
                     className="font-mono"
@@ -324,7 +336,7 @@ export function NewItemDialog({
               </Field>
               <Field
                 id="ni-desc"
-                label={lockedCategory ? 'Name' : 'Description'}
+                label={lockedTier ? 'Name' : 'Description'}
                 error={errors.desc?.message}
               >
                 <Input
@@ -336,24 +348,24 @@ export function NewItemDialog({
               </Field>
             </div>
 
-            {!lockedCategory && (
-              <Field id="ni-category" label="Tier" error={errors.categoryId?.message}>
+            {!lockedTier && (
+              <Field id="ni-tier" label="Tier" error={errors.tierId?.message}>
                 <Select
-                  value={categoryId}
+                  value={tierId}
                   onValueChange={(v) =>
-                    setValue('categoryId', v, { shouldValidate: true })
+                    setValue('tierId', v, { shouldValidate: true })
                   }
                 >
-                  <SelectTrigger id="ni-category" aria-label="Tier">
+                  <SelectTrigger id="ni-tier" aria-label="Tier">
                     <SelectValue placeholder="Pick a tier" />
                   </SelectTrigger>
                   <SelectContent>
-                    {categories.map((c) => (
+                    {tiers.map((c) => (
                       <SelectItem key={c.id} value={c.id}>
                         <span className="flex items-center gap-2">
                           <span className="truncate">{c.name}</span>
-                          <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
-                            {c.kind === 'built' ? 'Product' : 'Purchased'}
+                          <Badge tone={isBuiltTier(c.type) ? 'accent' : 'neutral'}>
+                            {TIER_TYPE_LABELS[c.type]}
                           </Badge>
                         </span>
                       </SelectItem>
@@ -361,7 +373,7 @@ export function NewItemDialog({
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-text-3">
-                  The category decides whether this is a Product (can have a BOM) or
+                  The tier decides whether this is a Product (can have a BOM) or
                   a Purchased item. Manage the BOM from the item&apos;s detail page.
                 </p>
               </Field>
@@ -376,53 +388,62 @@ export function NewItemDialog({
                   {...register('uom')}
                 />
               </Field>
-              <div className="flex items-center justify-between gap-4 self-end rounded-md border border-border bg-surface px-3 py-2">
-                <div className="space-y-0.5">
-                  <Label htmlFor="ni-consumable">Consumable</Label>
-                  <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+              {showPurchasing && (
+                <div className="flex items-center justify-between gap-4 self-end rounded-md border border-border bg-surface px-3 py-2">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ni-consumable">Consumable</Label>
+                    <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+                  </div>
+                  <Switch
+                    id="ni-consumable"
+                    checked={isConsumable}
+                    onCheckedChange={(v) => setValue('isConsumable', v)}
+                  />
                 </div>
-                <Switch
-                  id="ni-consumable"
-                  checked={isConsumable}
-                  onCheckedChange={(v) => setValue('isConsumable', v)}
-                />
-              </div>
+              )}
             </div>
 
             {showPurchasing && (
               <>
-            <Field
-              id="ni-suppliers"
-              label="Suppliers"
-              error={errors.supplierIds?.message}
-            >
-              <SupplierMultiSelect
-                id="ni-suppliers"
-                modal
-                suppliers={suppliers}
-                value={supplierIds}
-                onChange={(next) =>
-                  setValue('supplierIds', next, { shouldValidate: true })
-                }
-                loading={suppliersLoading}
-                error={suppliersError}
-              />
-              <p className="text-xs text-text-3">
-                Only these suppliers can be selected when receiving stock for this
-                item.
-              </p>
-            </Field>
+                <Field
+                  id="ni-suppliers"
+                  label="Suppliers"
+                  error={errors.supplierIds?.message}
+                >
+                  <SupplierMultiSelect
+                    id="ni-suppliers"
+                    modal
+                    suppliers={suppliers}
+                    value={supplierIds}
+                    onChange={(next) =>
+                      setValue('supplierIds', next, { shouldValidate: true })
+                    }
+                    loading={suppliersLoading}
+                    error={suppliersError}
+                  />
+                  <p className="text-xs text-text-3">
+                    Only these suppliers can be selected when receiving stock for this
+                    item.
+                  </p>
+                </Field>
+
+                <Field
+                  id="ni-lead"
+                  label="Lead time (days)"
+                  error={errors.leadDays?.message}
+                >
+                  <Input
+                    id="ni-lead"
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    {...register('leadDays')}
+                  />
+                </Field>
+              </>
+            )}
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
-                <Input
-                  id="ni-lead"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  {...register('leadDays')}
-                />
-              </Field>
               <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
                 <Input
                   id="ni-thr"
@@ -433,9 +454,6 @@ export function NewItemDialog({
                   {...register('threshold')}
                 />
               </Field>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
               <Field
                 id="ni-near-expiry"
                 label="Near expiry threshold (days)"
@@ -453,8 +471,6 @@ export function NewItemDialog({
                 />
               </Field>
             </div>
-              </>
-            )}
 
             <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
               {showPurchasing

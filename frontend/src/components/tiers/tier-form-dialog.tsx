@@ -20,15 +20,16 @@ import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import {
-  categoriesApi,
-  type ApiCategory,
-  type CategoryKind,
-  type CategoryTone,
-} from '@/lib/api/categories';
+  tiersApi,
+  TIER_TYPE_LABELS,
+  type ApiTier,
+  type TierType,
+  type TierTone,
+} from '@/lib/api/tiers';
 import { cn } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
 
-const TONES: CategoryTone[] = ['neutral', 'accent', 'success', 'warning', 'danger'];
+const TONES: TierTone[] = ['neutral', 'accent', 'success', 'warning', 'danger'];
 
 const TONE_DOT: Record<BadgeTone, string> = {
   neutral: 'bg-text-3',
@@ -41,34 +42,34 @@ const TONE_DOT: Record<BadgeTone, string> = {
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** When set, edits this category (kind is immutable); otherwise creates. */
-  category?: ApiCategory | null;
+  /** When set, edits this tier (type is immutable); otherwise creates. */
+  tier?: ApiTier | null;
   onSaved: () => void;
 }
 
 /**
- * Create / edit an item category. Every write is electronically signed —
- * submitting opens the reauth dialog (action ``category.create`` /
- * ``category.update``); the typed comment becomes the audit reason.
+ * Create / edit an item tier. Every write is electronically signed —
+ * submitting opens the reauth dialog (action ``tier.create`` /
+ * ``tier.update``); the typed comment becomes the audit reason.
  */
-export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Props) {
-  const isEdit = Boolean(category);
+export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
+  const isEdit = Boolean(tier);
 
   const [name, setName] = React.useState('');
   const [prefix, setPrefix] = React.useState('');
-  const [kind, setKind] = React.useState<CategoryKind>('purchased');
-  const [tone, setTone] = React.useState<CategoryTone>('accent');
+  const [type, setType] = React.useState<TierType>('raw_material');
+  const [tone, setTone] = React.useState<TierTone>('accent');
   const [error, setError] = React.useState<string | null>(null);
   const [showReauth, setShowReauth] = React.useState(false);
 
   React.useEffect(() => {
     if (!open) return;
-    setName(category?.name ?? '');
-    setPrefix(category?.prefix ?? '');
-    setKind((category?.kind as CategoryKind) ?? 'purchased');
-    setTone((category?.tone as CategoryTone) ?? 'accent');
+    setName(tier?.name ?? '');
+    setPrefix(tier?.prefix ?? '');
+    setType((tier?.type as TierType) ?? 'raw_material');
+    setTone((tier?.tone as TierTone) ?? 'accent');
     setError(null);
-  }, [open, category]);
+  }, [open, tier]);
 
   const openSign = () => {
     if (!name.trim()) {
@@ -86,8 +87,8 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
   const onConfirmed = async (evidence: ReauthResponse) => {
     const reason = evidence.comment ?? '';
     try {
-      if (category) {
-        await categoriesApi.update(category.id, {
+      if (tier) {
+        await tiersApi.update(tier.id, {
           name: name.trim(),
           prefix: prefix.trim(),
           tone,
@@ -96,10 +97,10 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
         });
         toast.success('Tier updated', { description: name.trim() });
       } else {
-        await categoriesApi.create({
+        await tiersApi.create({
           name: name.trim(),
           prefix: prefix.trim(),
-          kind,
+          type,
           tone,
           evidence_id: evidence.evidence_id,
           reason,
@@ -110,9 +111,9 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
       onOpenChange(false);
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.code === 'category_name_conflict') {
+        if (err.code === 'tier_name_conflict') {
           setError(`A tier named "${name.trim()}" already exists.`);
-        } else if (err.code === 'category_prefix_conflict') {
+        } else if (err.code === 'tier_prefix_conflict') {
           setError(`The prefix "${prefix.trim().toUpperCase()}" is already in use.`);
         } else if (
           err.code === 'reauth_evidence_replayed' ||
@@ -136,8 +137,8 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
             <DialogTitle>{isEdit ? 'Edit tier' : 'New tier'}</DialogTitle>
             <DialogDescription>
               {isEdit
-                ? 'Rename or recolour. The Product/Purchased type is fixed at creation.'
-                : 'Tiers decide whether their items are Products (can have a BOM) or Purchased.'}
+                ? 'Rename or recolour. The tier type is fixed at creation.'
+                : 'A tier decides how its items are treated: raw materials are bought; sub-assemblies and finished goods are built from a BOM.'}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -175,22 +176,24 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
                 role="radiogroup"
                 aria-label="Tier type"
               >
-                {(['purchased', 'built'] as CategoryKind[]).map((k) => (
+                {(
+                  ['raw_material', 'sub_assembly', 'finished_good'] as TierType[]
+                ).map((k) => (
                   <button
                     key={k}
                     type="button"
                     role="radio"
-                    aria-checked={kind === k}
+                    aria-checked={type === k}
                     disabled={isEdit}
-                    onClick={() => setKind(k)}
+                    onClick={() => setType(k)}
                     className={cn(
                       'px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed',
-                      kind === k
+                      type === k
                         ? 'bg-accent text-white'
                         : 'bg-bg-elev text-text-2 hover:bg-surface disabled:hover:bg-bg-elev',
                     )}
                   >
-                    {k === 'built' ? 'Product' : 'Purchased'}
+                    {TIER_TYPE_LABELS[k]}
                   </button>
                 ))}
               </div>
@@ -243,7 +246,7 @@ export function CategoryFormDialog({ open, onOpenChange, category, onSaved }: Pr
       <PasswordReauthDialog
         open={showReauth}
         onOpenChange={setShowReauth}
-        action={isEdit ? 'category.update' : 'category.create'}
+        action={isEdit ? 'tier.update' : 'tier.create'}
         meaning={
           isEdit
             ? `I am editing the item tier "${name.trim()}".`

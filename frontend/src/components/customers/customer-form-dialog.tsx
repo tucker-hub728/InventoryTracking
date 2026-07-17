@@ -20,6 +20,7 @@ import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem } from '@/lib/api/items';
+import { isBuiltTier } from '@/lib/api/tiers';
 import {
   customersApi,
   type Customer,
@@ -85,7 +86,7 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
       .list({ limit: 200 }, { signal: ctrl.signal })
       .then((resp) =>
         // Customers link to finished-good (Product / built) items only.
-        setProducts(resp.items.filter((i) => i.category_kind === 'built')),
+        setProducts(resp.items.filter((i) => isBuiltTier(i.tier_type))),
       )
       .catch(() => {})
       .finally(() => setProductsLoading(false));

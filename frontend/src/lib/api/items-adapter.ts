@@ -38,10 +38,10 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     desc: api.description,
     uom: api.uom ?? '',
     isConsumable: api.is_consumable,
-    categoryId: api.category_id,
-    categoryName: api.category_name,
-    categoryKind: api.category_kind,
-    categoryTone: api.category_tone,
+    tierId: api.tier_id,
+    tierName: api.tier_name,
+    tierType: api.tier_type,
+    tierTone: api.tier_tone,
     // Items can have multiple assigned suppliers — show them joined. Empty
     // when the item has no suppliers yet.
     supplier: api.suppliers.map((v) => v.supplier_name).join(', '),
@@ -54,6 +54,7 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     onOrder: num(api.qty_on_order),
     mustOrder: api.must_order_flag ? 1 : 0,
     nearExpiryThresholdDays: api.near_expiry_threshold_days ?? 30,
+    bomLineCount: api.bom_line_count ?? 0,
     // Batch dimensions land with the movements module.
     location: '',
     lot: '',

@@ -16,6 +16,7 @@ import { StatusBadge } from '@/components/shared/status-badge';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
+import { isBuiltTier, type TierType } from '@/lib/api/tiers';
 import type { ReauthResponse } from '@/lib/api/auth';
 import { bomApi, type ApiBomLine, type ApiWhereUsed } from '@/lib/api/bom';
 import { itemsApi, type ApiItem } from '@/lib/api/items';
@@ -35,8 +36,8 @@ function statusLabel(code: 'available' | 'low_stock' | 'out_of_stock'): Inventor
 interface Props {
   itemId: string;
   itemNumber: string;
-  /** 'built' items can have a BOM; 'purchased' show where-used only. */
-  itemKind: 'built' | 'purchased';
+  /** Built tiers (AY/FG) can have a BOM; raw materials show where-used only. */
+  itemTierType: TierType;
 }
 
 // A pending e-signed BOM action, captured before the reauth prompt.
@@ -58,8 +59,8 @@ const REAUTH_ACTION: Record<Pending['kind'], string> = {
  * adding, re-quantifying and removing lines, each electronically signed. For
  * every item it lists where it's used (the Products that consume it).
  */
-export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
-  const isBuilt = itemKind === 'built';
+export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
+  const isBuilt = isBuiltTier(itemTierType);
 
   const [lines, setLines] = React.useState<ApiBomLine[]>([]);
   const [whereUsed, setWhereUsed] = React.useState<ApiWhereUsed[]>([]);
@@ -123,17 +124,27 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
     [lines],
   );
 
+  // Only raw materials and sub-assemblies may be components, and never a
+  // consumable — see the guards in ``add_bom_line``, which are the real
+  // enforcement. This filter keeps ineligible items out of the picker so the
+  // operator isn't offered a choice the API will reject.
   const addOptions: SearchableSelectOption[] = items
-    .filter((c) => c.id !== itemId && !inBom.has(c.id))
+    .filter(
+      (c) =>
+        c.id !== itemId &&
+        !inBom.has(c.id) &&
+        c.tier_type !== 'finished_good' &&
+        !c.is_consumable,
+    )
     .map((c) => ({
       value: c.id,
-      searchText: `${c.item_number} ${c.description} ${c.category_name}`,
+      searchText: `${c.item_number} ${c.description} ${c.tier_name}`,
       label: (
         <span className="flex items-center gap-2">
           <span className="font-mono text-xs text-text-2">{c.item_number}</span>
           <span className="truncate">{c.description}</span>
-          <Badge tone={(c.category_tone as BadgeTone) ?? 'neutral'} dot className="ml-auto">
-            {c.category_name}
+          <Badge tone={(c.tier_tone as BadgeTone) ?? 'neutral'} dot className="ml-auto">
+            {c.tier_name}
           </Badge>
         </span>
       ),
@@ -153,7 +164,7 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
       if (pending.kind === 'add') {
         await bomApi.addLine(itemId, {
           child_item_id: pending.childId,
-          qty_per_run: pending.qty,
+          qty_per_unit: pending.qty,
           evidence_id: evidence.evidence_id,
           reason,
         });
@@ -162,7 +173,7 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
         setAddQty('1');
       } else if (pending.kind === 'update') {
         await bomApi.updateLine(pending.line.id, {
-          qty_per_run: pending.qty,
+          qty_per_unit: pending.qty,
           evidence_id: evidence.evidence_id,
           reason,
         });
@@ -183,6 +194,14 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
           toast.error('Would create a circular reference', { description: err.message });
         } else if (err.code === 'bom_line_conflict') {
           toast.error('Already a BOM line');
+        } else if (err.code === 'child_finished_good') {
+          toast.error('Finished goods can’t be components', {
+            description: err.message,
+          });
+        } else if (err.code === 'child_consumable') {
+          toast.error('Consumables can’t be in a BOM', {
+            description: err.message,
+          });
         } else if (
           err.code === 'reauth_evidence_replayed' ||
           err.code === 'reauth_evidence_expired'
@@ -254,11 +273,11 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
                         </Link>
                         <span className="ml-2 text-text-2">{l.child_description}</span>
                         <Badge
-                          tone={(l.child_category_tone as BadgeTone) ?? 'neutral'}
+                          tone={(l.child_tier_tone as BadgeTone) ?? 'neutral'}
                           dot
                           className="ml-2"
                         >
-                          {l.child_category_name}
+                          {l.child_tier_name}
                         </Badge>
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono">
@@ -273,18 +292,18 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
                             className="ml-auto w-20 text-right"
                           />
                         ) : (
-                          `×${formatNumber(Number(l.qty_per_run))}`
+                          `×${formatNumber(Number(l.qty_per_unit))}`
                         )}
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono text-text-2">
-                        {l.child_category_kind === 'built' ? (
+                        {isBuiltTier(l.child_tier_type) ? (
                           <span className="text-text-3">—</span>
                         ) : (
                           formatNumber(Number(l.child_qty_available))
                         )}
                       </td>
                       <td className="px-4 py-2.5">
-                        {l.child_category_kind === 'built' ? (
+                        {isBuiltTier(l.child_tier_type) ? (
                           <span className="text-text-3">—</span>
                         ) : (
                           <StatusBadge status={statusLabel(l.child_status_code)} />
@@ -319,7 +338,7 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
                                 size="icon-sm"
                                 aria-label="Edit quantity"
                                 onClick={() =>
-                                  setEditing({ id: l.id, qty: String(Number(l.qty_per_run)) })
+                                  setEditing({ id: l.id, qty: String(Number(l.qty_per_unit)) })
                                 }
                               >
                                 <Pencil size={14} />
@@ -369,7 +388,7 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
                 min={1}
                 value={addQty}
                 onChange={(e) => setAddQty(e.target.value)}
-                aria-label="Quantity per run"
+                aria-label="Quantity per unit"
               />
             </div>
             <Button
@@ -403,7 +422,7 @@ export function ItemBomTab({ itemId, itemNumber, itemKind }: Props) {
               >
                 <span className="font-mono text-text-2">{p.parent_item_number}</span>{' '}
                 <span className="text-text">{p.parent_description}</span>{' '}
-                <span className="text-text-3">×{formatNumber(Number(p.qty_per_run))}</span>
+                <span className="text-text-3">×{formatNumber(Number(p.qty_per_unit))}</span>
               </Link>
             ))}
           </div>

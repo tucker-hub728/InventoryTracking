@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/select';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
-import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
+import { tiersApi, type ApiTier } from '@/lib/api/tiers';
 import type { InventoryStatus } from '@/types/inventory';
 
 interface InventoryFiltersProps {
@@ -36,10 +36,10 @@ const STATUS_FILTER_OPTIONS: readonly InventoryStatus[] = [
 export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps) {
   const query = useInventoryStore((s) => s.query);
   const status = useInventoryStore((s) => s.status);
-  const categoryId = useInventoryStore((s) => s.categoryId);
+  const tierId = useInventoryStore((s) => s.tierId);
   const setQuery = useInventoryStore((s) => s.setQuery);
   const setStatus = useInventoryStore((s) => s.setStatus);
-  const setCategory = useInventoryStore((s) => s.setCategory);
+  const setTier = useInventoryStore((s) => s.setTier);
 
   // Local input state for snappy typing; commit to store on debounce.
   const [local, setLocal] = React.useState(query);
@@ -49,13 +49,13 @@ export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced]);
 
-  // Category options for the filter dropdown (master data; loaded once).
-  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
+  // Tier options for the filter dropdown (master data; loaded once).
+  const [tiers, setTiers] = React.useState<ApiTier[]>([]);
   React.useEffect(() => {
     const ctrl = new AbortController();
-    categoriesApi
+    tiersApi
       .list({ signal: ctrl.signal })
-      .then(setCategories)
+      .then(setTiers)
       .catch(() => {
         /* filter still works without the list */
       });
@@ -74,8 +74,8 @@ export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps)
       />
 
       <Select
-        value={categoryId}
-        onValueChange={(v) => setCategory(v as typeof categoryId)}
+        value={tierId}
+        onValueChange={(v) => setTier(v as typeof tierId)}
       >
         <SelectTrigger
           className="w-[200px] [&>span]:min-w-0 [&>span]:truncate"
@@ -85,7 +85,7 @@ export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps)
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="all">All tiers</SelectItem>
-          {categories.map((c) => (
+          {tiers.map((c) => (
             <SelectItem key={c.id} value={c.id}>
               {c.name}
             </SelectItem>

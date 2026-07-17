@@ -48,6 +48,7 @@ from app.inventory.schemas import (
 )
 from app.locations import repository as loc_repo
 from app.models.inventory import (
+    BUILT_TIER_TYPES,
     Item,
     Lot,
     ReceiptTransaction,
@@ -148,6 +149,7 @@ def _supplier_to_read(v: Supplier) -> SupplierRead:
 def _item_to_read(
     item: Item,
     valuation: tuple[Decimal, Decimal, Decimal] | None = None,
+    bom_line_count: int = 0,
 ) -> ItemRead:
     # The eager ``Item.stock`` relationship joins ``app.v_item_stock``,
     # which is LEFT-joined on the items query so newly-created items
@@ -167,17 +169,17 @@ def _item_to_read(
         Decimal("0"),
         Decimal("0"),
     )
-    category = item.category
+    tier = item.tier
     return ItemRead(
         id=str(item.id),
         item_number=item.item_number,
         description=item.description,
         uom=item.uom,
         is_consumable=item.is_consumable,
-        category_id=str(item.category_id),
-        category_name=category.name if category else "",
-        category_kind=category.kind if category else "purchased",  # type: ignore[arg-type]
-        category_tone=category.tone if category else "neutral",
+        tier_id=str(item.tier_id),
+        tier_name=tier.name if tier else "",
+        tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
+        tier_tone=tier.tone if tier else "neutral",
         suppliers=[
             ItemSupplierRead(
                 supplier_id=str(iv.supplier_id),
@@ -202,13 +204,15 @@ def _item_to_read(
         po_value_amount=po_value_amount,
         status_code=status_code,  # type: ignore[arg-type]
         last_movement_at=last_movement_at,
+        bom_line_count=bom_line_count,
     )
 
 
 async def _item_read_with_valuation(db: DBSession, item: Item) -> ItemRead:
     """Serialise a single item, computing its lot-derived valuation."""
     valuations = await inv_repo.compute_item_valuations(db, [item.id])
-    return _item_to_read(item, valuations.get(item.id))
+    counts = await inv_repo.bom_line_counts(db, [item.id])
+    return _item_to_read(item, valuations.get(item.id), counts.get(item.id, 0))
 
 
 async def _resolve_item_supplier_ids(
@@ -444,14 +448,37 @@ async def list_items(
     db: DBSession,
     q: Annotated[str | None, Query(description="Search description + item_number")] = None,
     supplier_id: Annotated[uuid.UUID | None, Query()] = None,
-    category_id: Annotated[
-        uuid.UUID | None, Query(description="Filter by item category")
+    tier_id: Annotated[
+        uuid.UUID | None, Query(description="Filter by item tier")
     ] = None,
     status_filter: Annotated[
         Literal["available", "low_stock", "out_of_stock"] | None,
         Query(
             alias="status",
             description="Filter by computed stock status from v_item_stock",
+        ),
+    ] = None,
+    is_consumable: Annotated[
+        bool | None,
+        Query(description="Filter to consumables (true) or non-consumables (false)"),
+    ] = None,
+    has_bom: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Filter to items that have (true) or lack (false) a bill of "
+                "materials. ``false`` is the 'missing BOM' view."
+            )
+        ),
+    ] = None,
+    below_reorder: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Filter to items at or below their reorder threshold — i.e. "
+                "needing reorder. Broader than status=low_stock, which "
+                "excludes zero-stock items."
+            )
         ),
     ] = None,
     sort: Annotated[
@@ -467,7 +494,10 @@ async def list_items(
         q=q,
         supplier_id=supplier_id,
         status=status_filter,
-        category_id=category_id,
+        tier_id=tier_id,
+        is_consumable=is_consumable,
+        has_bom=has_bom,
+        below_reorder=below_reorder,
         sort=sort,
         direction=direction,
         limit=limit,
@@ -475,8 +505,13 @@ async def list_items(
     )
     ids = [i.id for i in items]
     valuations = await inv_repo.compute_item_valuations(db, ids)
+    # One grouped count for the page, not one query per row.
+    bom_counts = await inv_repo.bom_line_counts(db, ids)
     return ItemListResponse(
-        items=[_item_to_read(i, valuations.get(i.id)) for i in items],
+        items=[
+            _item_to_read(i, valuations.get(i.id), bom_counts.get(i.id, 0))
+            for i in items
+        ],
         total=total,
         limit=limit,
         offset=offset,
@@ -543,17 +578,17 @@ async def create_item(
     # Validate the assigned-supplier list (each must be an existing supplier).
     supplier_uuids = await _resolve_item_supplier_ids(db, payload.supplier_ids)
 
-    # Validate the category exists.
-    category_uuid = _parse_uuid_or_422(payload.category_id, field="category_id")
-    if (await inv_repo.get_category(db, category_uuid)) is None:
-        raise NotFoundError(f"Category {payload.category_id} not found")
+    # Validate the tier exists.
+    tier_uuid = _parse_uuid_or_422(payload.tier_id, field="tier_id")
+    if (await inv_repo.get_tier(db, tier_uuid)) is None:
+        raise NotFoundError(f"Tier {payload.tier_id} not found")
 
     try:
         item = await inv_repo.create_item(
             db,
             item_number=payload.item_number,
             description=payload.description,
-            category_id=category_uuid,
+            tier_id=tier_uuid,
             created_by_user_id=current.id,
             uom=payload.uom,
             is_consumable=payload.is_consumable,
@@ -619,33 +654,35 @@ async def update_item(
     if supplier_ids is not None:
         supplier_uuids = await _resolve_item_supplier_ids(db, supplier_ids)
 
-    # Re-categorise: validate the target category, and block moving a
-    # BOM-bearing item into a purchased category (that would orphan its BOM).
-    if "category_id" in patch:
-        category_uuid = _parse_uuid_or_422(
-            str(patch["category_id"]), field="category_id"
+    # Re-assign tier: validate the target tier, and block moving a
+    # BOM-bearing item into the raw-material tier (that would orphan its BOM).
+    if "tier_id" in patch:
+        tier_uuid = _parse_uuid_or_422(
+            str(patch["tier_id"]), field="tier_id"
         )
-        target_category = await inv_repo.get_category(db, category_uuid)
-        if target_category is None:
-            raise NotFoundError(f"Category {patch['category_id']} not found")
-        if target_category.kind == "purchased":
-            # A Product with a BOM can't become Purchased (would orphan its BOM).
+        target_tier = await inv_repo.get_tier(db, tier_uuid)
+        if target_tier is None:
+            raise NotFoundError(f"Tier {patch['tier_id']} not found")
+        if target_tier.type == "raw_material":
+            # A built item with a BOM can't become a raw material (would orphan
+            # its BOM).
             if item.id in await inv_repo.items_with_bom(db, [item.id]):
                 raise ConflictError(
-                    "Remove this item's bill of materials before moving it to a "
-                    "purchased category",
+                    "Remove this item's bill of materials before moving it to "
+                    "the raw-material tier",
                     code="bom_present",
                 )
-        elif target_category.kind == "built":
-            # A received (stocked) item can't become a Product — Products are
-            # built, not received, and we don't surface on-hand stock for them.
+        elif target_tier.type in BUILT_TIER_TYPES:
+            # A received (stocked) item can't become built — built items are
+            # manufactured, not received.
             if await inv_repo.item_has_lots(db, item.id):
                 raise ConflictError(
-                    "This item has received stock (lots) and can't be changed to "
-                    "a Product category. Products are built, not received.",
+                    "This item has received stock (lots) and can't be changed "
+                    "to a sub-assembly or finished-good tier. Built items are "
+                    "manufactured, not received.",
                     code="item_received",
                 )
-        patch["category_id"] = category_uuid
+        patch["tier_id"] = tier_uuid
 
     if not patch and supplier_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")

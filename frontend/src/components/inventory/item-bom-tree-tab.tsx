@@ -7,6 +7,7 @@ import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { bomApi, type ApiBomLine } from '@/lib/api/bom';
+import { isBuiltTier, TIER_TYPE_LABELS } from '@/lib/api/tiers';
 import { ApiError } from '@/lib/api/client';
 import { cn, formatNumber } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
@@ -21,7 +22,7 @@ interface Props {
  * Structure tab — the full multi-level BOM hierarchy for a Product, read-only
  * (the editor lives on the BOM tab). The whole tree is fetched in one nested
  * call (`?nested=true`) and rendered fully expanded, so the entire hierarchy is
- * visible on load; every line shows the child's category, qty/run, in-stock and
+ * visible on load; every line shows the child's tier, qty/unit, in-stock and
  * stock status, and sub-assemblies can still be collapsed by hand.
  */
 export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
@@ -104,7 +105,7 @@ function BomNode({
   // Products (built items) aren't stocked, so their on-hand Available + Stock
   // status are hidden. For purchased children the badge = the child's REAL
   // stock status (same value the inventory list shows).
-  const isBuiltChild = line.child_category_kind === 'built';
+  const isBuiltChild = isBuiltTier(line.child_tier_type);
   const status: InventoryStatus =
     line.child_status_code === 'available'
       ? 'Available'
@@ -133,7 +134,7 @@ function BomNode({
 
         <span
           aria-hidden
-          className={cn('size-2 shrink-0 rounded-full', dotClass(line.child_category_tone))}
+          className={cn('size-2 shrink-0 rounded-full', dotClass(line.child_tier_tone))}
         />
 
         <span className="min-w-0 flex-1 truncate">
@@ -145,12 +146,12 @@ function BomNode({
           </Link>{' '}
           <span className="text-text">{line.child_description}</span>
           <span className="ml-1.5 text-[10px] uppercase tracking-wide text-text-3">
-            {line.child_category_kind === 'built' ? 'Product' : 'Purchased'}
+            {TIER_TYPE_LABELS[line.child_tier_type]}
           </span>
         </span>
 
         <span className="w-20 text-right font-mono text-xs text-text-2">
-          ×{formatNumber(Number(line.qty_per_run))}
+          ×{formatNumber(Number(line.qty_per_unit))}
         </span>
         {/* Products aren't stocked (built on demand) — on-hand metrics don't
             apply, so Available + Stock status read "—" for them. */}

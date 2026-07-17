@@ -17,6 +17,7 @@ import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber } from '@/lib/utils';
 import { movementsApi, type ApiMovement } from '@/lib/api/movements';
+import { isBuiltTier } from '@/lib/api/tiers';
 import { apiMovementsToLedgerEntries } from '@/lib/api/movements-adapter';
 // bomApi / forecastApi are used only by the hidden forecast-demand fetch:
 // import { bomApi } from '@/lib/api/bom';
@@ -125,7 +126,7 @@ export function InventoryDetailShell({
   }, [item]);
 
   // Forecast demand = Σ over the items that consume this one (where-used) of
-  // (qty_per_run × that parent's forecast runs this year). Temporarily hidden
+  // (qty_per_unit × that parent's forecast runs this year). Temporarily hidden
   // along with the "Forecast demand" / "Projected shortfall" Snapshot rows it
   // fed — kept commented rather than left running so we don't pay for the
   // where-used + forecast round-trips on every item page load. Restore this,
@@ -133,7 +134,7 @@ export function InventoryDetailShell({
   // rows together.
   //
   // React.useEffect(() => {
-  //   if (!item || item.categoryKind === 'built') return;
+  //   if (!item || isBuiltTier(item.tierType)) return;
   //   const ctrl = new AbortController();
   //   setDemand(null);
   //   Promise.all([
@@ -143,7 +144,7 @@ export function InventoryDetailShell({
   //     .then(([using, entries]) => {
   //       if (ctrl.signal.aborted) return;
   //       const total = using.reduce((sum, p) => {
-  //         const perRun = Number(p.qty_per_run ?? 0);
+  //         const perRun = Number(p.qty_per_unit ?? 0);
   //         const runs = entries
   //           .filter((e) => e.productId === p.parent_item_id)
   //           .reduce((r, e) => r + e.runs, 0);
@@ -170,7 +171,7 @@ export function InventoryDetailShell({
   // so if we land on a segment that doesn't belong to this item's kind
   // (e.g. a Product on /ledger, or a Purchased item on /structure), bounce to
   // the kind's first tab.
-  const built = item?.categoryKind === 'built';
+  const built = isBuiltTier(item?.tierType);
   const tabs = built ? PRODUCT_TABS : PURCHASED_TABS;
   React.useEffect(() => {
     if (!item) return;
@@ -226,8 +227,8 @@ export function InventoryDetailShell({
           <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-accent">{item.id}</span>
             <span aria-hidden>·</span>
-            <Badge tone={(item.categoryTone as never) ?? 'neutral'} dot>
-              {item.categoryName}
+            <Badge tone={(item.tierTone as never) ?? 'neutral'} dot>
+              {item.tierName}
             </Badge>
             {!built && (
               <>

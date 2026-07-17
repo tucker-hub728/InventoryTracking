@@ -18,9 +18,9 @@ from sqlalchemy.orm import selectinload
 from app.models.inventory import (
     BomLine,
     Item,
-    ItemCategory,
     ItemStock,
     ItemSupplier,
+    ItemTier,
     Lot,
     ReceiptEvent,
     ReceiptEventLine,
@@ -131,11 +131,23 @@ def _apply_filters(
     q: str | None,
     supplier_id: uuid.UUID | None,
     status: str | None,
-    category_id: uuid.UUID | None = None,
+    tier_id: uuid.UUID | None = None,
+    is_consumable: bool | None = None,
+    has_bom: bool | None = None,
+    below_reorder: bool | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
-    if category_id is not None:
-        stmt = stmt.where(Item.category_id == category_id)
+    if tier_id is not None:
+        stmt = stmt.where(Item.tier_id == tier_id)
+    if is_consumable is not None:
+        stmt = stmt.where(Item.is_consumable.is_(is_consumable))
+    if has_bom is not None:
+        # Parents of at least one live BOM line. ``has_bom=False`` is the
+        # "missing BOM" case — a built item nobody has defined a recipe for.
+        with_bom = select(BomLine.parent_item_id).where(BomLine.deleted_at.is_(None))
+        stmt = stmt.where(
+            Item.id.in_(with_bom) if has_bom else Item.id.not_in(with_bom)
+        )
     if supplier_id is not None:
         # Suppliers live in ``meta.item_suppliers`` now — filter items that have
         # the requested supplier in their assigned list.
@@ -154,15 +166,22 @@ def _apply_filters(
                 func.lower(Item.description).like(like),
             )
         )
-    if status is not None:
+    if status is not None or below_reorder is not None:
         # Join the view explicitly so the filter works in both the
         # ``items`` select and the ``count()`` select. ``v_item_stock``
         # has one row per non-deleted item, so the inner join doesn't
-        # change which items are eligible — only filters them by
-        # computed ``status_code``.
-        stmt = stmt.join(ItemStock, ItemStock.item_id == Item.id).where(
-            ItemStock.status_code == status
-        )
+        # change which items are eligible — only filters them. Joined once
+        # even when both stock filters are set (a second join would error).
+        stmt = stmt.join(ItemStock, ItemStock.item_id == Item.id)
+        if status is not None:
+            stmt = stmt.where(ItemStock.status_code == status)
+        if below_reorder is not None:
+            # "Needs reorder": at or below the reorder point. Deliberately
+            # broader than ``status_code == 'low_stock'``, which excludes
+            # zero-stock items because the view tests ``qty_available <= 0``
+            # first — so a filter on it would hide the *most* urgent rows.
+            at_or_below = ItemStock.qty_available <= Item.reorder_threshold
+            stmt = stmt.where(at_or_below if below_reorder else ~at_or_below)
     return stmt
 
 
@@ -180,27 +199,38 @@ async def list_items(
     q: str | None = None,
     supplier_id: uuid.UUID | None = None,
     status: str | None = None,
-    category_id: uuid.UUID | None = None,
+    tier_id: uuid.UUID | None = None,
+    is_consumable: bool | None = None,
+    has_bom: bool | None = None,
+    below_reorder: bool | None = None,
     sort: SortField = "item_number",
     direction: SortDirection = "asc",
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[Item], int]:
     """Return ``(items, total)``. Total is the unpaged count."""
+    # Spelled out for both selects rather than unpacked from a dict: a
+    # ``**kwargs`` dict widens the value type and loses mypy's per-parameter
+    # checking on the way in.
     base = _apply_filters(
         select(Item),
         q=q,
         supplier_id=supplier_id,
         status=status,
-        category_id=category_id,
+        tier_id=tier_id,
+        is_consumable=is_consumable,
+        has_bom=has_bom,
+        below_reorder=below_reorder,
     )
-
     count_stmt = _apply_filters(
         select(func.count()).select_from(Item),
         q=q,
         supplier_id=supplier_id,
         status=status,
-        category_id=category_id,
+        tier_id=tier_id,
+        is_consumable=is_consumable,
+        has_bom=has_bom,
+        below_reorder=below_reorder,
     )
     total = int((await session.execute(count_stmt)).scalar_one())
 
@@ -229,7 +259,7 @@ async def create_item(
     *,
     item_number: str,
     description: str,
-    category_id: uuid.UUID,
+    tier_id: uuid.UUID,
     created_by_user_id: uuid.UUID,
     uom: str | None = None,
     is_consumable: bool = False,
@@ -245,7 +275,7 @@ async def create_item(
     item = Item(
         item_number=item_number,
         description=description,
-        category_id=category_id,
+        tier_id=tier_id,
         uom=uom,
         is_consumable=is_consumable,
         avg_lead_days=avg_lead_days,
@@ -311,7 +341,7 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
         "description": item.description,
         "uom": item.uom,
         "is_consumable": item.is_consumable,
-        "category_id": str(item.category_id),
+        "tier_id": str(item.tier_id),
         "supplier_ids": sorted(str(iv.supplier_id) for iv in item.suppliers),
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
@@ -414,16 +444,16 @@ async def compute_item_valuations(
     return {k: (v[0], v[1], v[2]) for k, v in rows.items()}
 
 
-# ── Categories + BOM helpers (shared by items + catalog modules) ────────
+# ── Tiers + BOM helpers (shared by items + catalog modules) ────────
 
 
-async def get_category(
-    session: AsyncSession, category_id: uuid.UUID
-) -> ItemCategory | None:
-    """Fetch one live (non-deleted) category."""
-    stmt = select(ItemCategory).where(
-        ItemCategory.id == category_id,
-        ItemCategory.deleted_at.is_(None),
+async def get_tier(
+    session: AsyncSession, tier_id: uuid.UUID
+) -> ItemTier | None:
+    """Fetch one live (non-deleted) tier."""
+    stmt = select(ItemTier).where(
+        ItemTier.id == tier_id,
+        ItemTier.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
@@ -455,6 +485,28 @@ async def items_with_bom(
         .distinct()
     )
     return set((await session.execute(stmt)).scalars().all())
+
+
+async def bom_line_counts(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    """``{item_id: live BOM-line count}`` — the item's direct component count.
+
+    Direct lines only, not the whole exploded tree: it answers "how many
+    components does this recipe list", which is what the list column shows.
+    Items with no BOM are absent; callers default to zero.
+    """
+    if not item_ids:
+        return {}
+    stmt = (
+        select(BomLine.parent_item_id, func.count())
+        .where(
+            BomLine.parent_item_id.in_(item_ids),
+            BomLine.deleted_at.is_(None),
+        )
+        .group_by(BomLine.parent_item_id)
+    )
+    return {pid: int(n) for pid, n in (await session.execute(stmt)).all()}
 
 
 # ── Lots ───────────────────────────────────────────────────────────────

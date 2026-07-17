@@ -77,48 +77,56 @@ class Supplier(Base):
     )
 
 
-# Item-category kind (requirements v2 §6). A category is either:
-#   * purchased — its items are bought as-is (raw components / materials)
-#   * built     — its items are assembled from a BOM (sub-assemblies, finished
-#                 goods). Surfaced in the UI as "Product".
-# The kind is fixed at creation and decides whether an item may carry a BOM.
-ITEM_CATEGORY_KINDS: tuple[str, ...] = ("purchased", "built")
+# The three item tiers (REQ-2026-07-15-ITM-001). Exactly these three exist:
+#   * raw_material  — CR, bought off-the-shelf from a supplier
+#   * sub_assembly  — AY, built from CR/AY components and itself stockable
+#   * finished_good — FG, built and shipped to a customer
+# Admin-added prefixes live *inside* one of these tiers and never constitute a
+# fourth tier, so the system always knows how to treat an item for kitting,
+# debiting and planning. The type is fixed at creation.
+ITEM_TIER_TYPES: tuple[str, ...] = ("raw_material", "sub_assembly", "finished_good")
+
+# The two tier types that are manufactured rather than purchased — i.e. the
+# tiers whose items may carry a bill of materials (Transaction Spec §1.1:
+# only AY and FG appear on the left of a BOM rule).
+BUILT_TIER_TYPES: tuple[str, ...] = ("sub_assembly", "finished_good")
 
 
-class ItemCategory(Base):
-    """A user-managed item category (finished goods, sub-assemblies, …).
+class ItemTier(Base):
+    """One of the three item tiers (raw material, sub-assembly, finished good).
 
-    Every :class:`Item` belongs to exactly one category. The category's
-    ``kind`` (purchased vs built) is inherited by its items and governs BOM
-    eligibility. Seeded with the five client categories; users can add more.
+    Every :class:`Item` belongs to exactly one tier. The tier's ``type`` is
+    inherited by its items and governs BOM eligibility: only ``sub_assembly``
+    and ``finished_good`` items may be a BOM parent, and a ``finished_good``
+    may never be a BOM child (Transaction Spec §1.1).
     """
 
-    __tablename__ = "item_categories"
+    __tablename__ = "item_tiers"
     __table_args__ = (
         Index(
-            "uq_item_categories_name",
+            "uq_item_tiers_name",
             func.lower(text("name")),
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
         Index(
-            "uq_item_categories_prefix",
+            "uq_item_tiers_prefix",
             func.lower(text("prefix")),
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
-        Index("ix_item_categories_updated_at_desc", text("updated_at DESC")),
+        Index("ix_item_tiers_updated_at_desc", text("updated_at DESC")),
         CheckConstraint(
             "char_length(trim(name)) > 0",
-            name="ck_item_categories_name_not_blank",
+            name="ck_item_tiers_name_not_blank",
         ),
         CheckConstraint(
             "char_length(trim(prefix)) > 0",
-            name="ck_item_categories_prefix_not_blank",
+            name="ck_item_tiers_prefix_not_blank",
         ),
         CheckConstraint(
-            "kind IN ('purchased', 'built')",
-            name="ck_item_categories_kind",
+            "type IN ('raw_material', 'sub_assembly', 'finished_good')",
+            name="ck_item_tiers_type",
         ),
         {"schema": "app"},
     )
@@ -134,15 +142,16 @@ class ItemCategory(Base):
     # filtering and the auto-prefixed SKU on the item-create forms
     # (REQ-2026-07-09-ITM-001/002). Unique (case-insensitive) among live rows.
     prefix: Mapped[str] = mapped_column(Text, nullable=False)
-    # 'purchased' | 'built' — immutable after creation (enforced in the route).
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'raw_material' | 'sub_assembly' | 'finished_good' — immutable after
+    # creation (enforced in the route).
+    type: Mapped[str] = mapped_column(Text, nullable=False)
     # Display colour token ('neutral' | 'accent' | 'success' | 'warning' |
     # 'danger'); cosmetic only.
     tone: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'neutral'")
     )
-    # Seeded categories may be renamed/recoloured but are protected from
-    # deletion of the canonical five (enforced in the route).
+    # Seeded tiers may be renamed/recoloured but are protected from deletion
+    # (enforced in the route).
     is_seeded: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("FALSE")
     )
@@ -159,8 +168,8 @@ class ItemCategory(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # Nullable so the migration can seed the 5 default categories with no
-    # creator (system seed). App-created categories always set these.
+    # Nullable so the migration can seed the three default tiers with no
+    # creator (system seed). App-created tiers always set these.
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.users.id", ondelete="RESTRICT"),
@@ -179,9 +188,9 @@ class Item(Base):
     Quantities are NOT on this table — they're derived from the ledger
     once the movements module ships. ``status`` is similarly derived.
 
-    Every item belongs to an :class:`ItemCategory`; the category's ``kind``
-    decides whether the item is *built* (may carry a BOM via
-    :class:`BomLine`) or *purchased*.
+    Every item belongs to an :class:`ItemTier`; the tier's ``type`` decides
+    whether the item is a raw material, a sub-assembly or a finished good, and
+    thus whether it may carry a BOM via :class:`BomLine`.
     """
 
     __tablename__ = "items"
@@ -226,11 +235,11 @@ class Item(Base):
         nullable=False,
         server_default=text("FALSE"),
     )
-    # Every item is categorised (requirements v2 §6). The category's ``kind``
-    # (purchased/built) governs whether this item may carry a BOM.
-    category_id: Mapped[uuid.UUID] = mapped_column(
+    # Every item belongs to exactly one tier (REQ-2026-07-15-ITM-001). The
+    # tier's ``type`` governs whether this item may carry a BOM.
+    tier_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("app.item_categories.id", ondelete="RESTRICT"),
+        ForeignKey("app.item_tiers.id", ondelete="RESTRICT"),
         nullable=False,
     )
 
@@ -302,22 +311,33 @@ class Item(Base):
         foreign_keys=[updated_by_user_id],
         viewonly=True,
     )
-    # Eager-joined so a read hydrates the category (name/kind/tone) in one query.
-    category: Mapped[ItemCategory] = relationship(
-        foreign_keys=[category_id],
+    # Eager-joined so a read hydrates the tier (name/type/tone) in one query.
+    tier: Mapped[ItemTier] = relationship(
+        foreign_keys=[tier_id],
         lazy="joined",
         viewonly=True,
     )
 
 
 class BomLine(Base):
-    """One bill-of-materials line: ``parent_item`` consumes ``qty_per_run`` of
-    ``child_item`` per production run.
+    """One bill-of-materials line: *one* ``parent_item`` consumes
+    ``qty_per_unit`` of ``child_item``.
+
+    The quantity is per unit of the parent, not per production run: planning
+    scales it by the plan quantity (REQ-2026-07-09-PLN-002) and kitting by the
+    build quantity (Transaction Spec §2), neither of which is computable from a
+    per-run figure without a run-size column that no requirement defines.
 
     Self-referencing over :class:`Item`, so a child may itself be a built item
     with its own BOM — this is what enables multi-level / nested BOMs
-    (requirements v2 §6). A parent should be a *built*-category item; cycle
-    prevention (A→B→A) is enforced in the route, not by a DB constraint.
+    (requirements v2 §6).
+
+    The tier rules from Transaction Spec §1.1 (CR+CR→AY, AY+AY→AY, CR+CR→FG,
+    CR+AY→FG) reduce to: the parent is a built tier (AY/FG), and every child is
+    a raw material or a sub-assembly — never a finished good. Consumables are
+    excluded too (§4.3: "Consumables are not tracked directly against an FG or
+    AY BOM"). Those rules and cycle prevention (A→B→A) are enforced in the
+    route, not by DB constraints, because they span rows.
     """
 
     __tablename__ = "bom_lines"
@@ -335,7 +355,7 @@ class BomLine(Base):
             "parent_item_id <> child_item_id",
             name="ck_bom_lines_no_self_reference",
         ),
-        CheckConstraint("qty_per_run > 0", name="ck_bom_lines_qty_per_run_positive"),
+        CheckConstraint("qty_per_unit > 0", name="ck_bom_lines_qty_per_unit_positive"),
         {"schema": "app"},
     )
 
@@ -355,7 +375,9 @@ class BomLine(Base):
         ForeignKey("app.items.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    qty_per_run: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    # How many of the child ONE parent consumes. Planning multiplies by the
+    # plan quantity; kitting by the build quantity.
+    qty_per_unit: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -380,8 +402,8 @@ class BomLine(Base):
         nullable=False,
     )
 
-    # The child item eager-joins its stock + category so a BOM read reaches
-    # ``child.stock.qty_on_hand`` and the child's category in one query.
+    # The child item eager-joins its stock + tier so a BOM read reaches
+    # ``child.stock.qty_on_hand`` and the child's tier in one query.
     child_item: Mapped[Item] = relationship(
         foreign_keys=[child_item_id], lazy="joined", viewonly=True
     )

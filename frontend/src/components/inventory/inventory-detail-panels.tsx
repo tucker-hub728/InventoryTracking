@@ -77,7 +77,7 @@ export function ItemProductsPanel() {
     <ItemBomTab
       itemId={item.uuid}
       itemNumber={item.id}
-      itemKind={item.categoryKind}
+      itemTierType={item.tierType}
     />
   );
 }

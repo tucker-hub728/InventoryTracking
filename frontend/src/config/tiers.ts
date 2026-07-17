@@ -1,0 +1,92 @@
+/**
+ * The three item tiers and their per-page labelling.
+ *
+ * REQ-2026-07-15-ITM-001: exactly three tiers exist — raw material,
+ * sub-assembly and finished good. Admin-added prefixes live *inside* one of
+ * these and never constitute a fourth tier, so this list is fixed by
+ * design and is not admin-extensible.
+ *
+ * Each entry is a module-level constant so it is referentially stable across
+ * renders (``TierListClient`` takes it as an effect dependency).
+ */
+
+import type { TierConfig, TierFilter } from '@/components/inventory/tier-list-client';
+
+/**
+ * "Needs reorder" — at or below the reorder threshold.
+ *
+ * Deliberately not ``status: 'low_stock'``. ``v_item_stock`` tests
+ * ``qty_available <= 0`` *before* the threshold, so an item sitting at zero is
+ * classed ``out_of_stock`` and a low_stock filter would hide it — exactly the
+ * rows that most need ordering.
+ */
+const NEEDS_REORDER: TierFilter = {
+  id: 'needs-reorder',
+  label: 'Needs reorder',
+  params: { below_reorder: true },
+};
+
+/**
+ * "Missing BOM" — built items nobody has given a recipe yet. A sub-assembly or
+ * finished good without a BOM can't be kitted or planned, so it's a data gap
+ * worth surfacing. Only offered on the built tiers: a raw material is bought,
+ * not assembled, so it has no BOM by definition.
+ */
+const MISSING_BOM: TierFilter = {
+  id: 'missing-bom',
+  label: 'Missing BOM',
+  params: { has_bom: false },
+};
+
+const ALL: TierFilter = { id: 'all', label: 'All' };
+
+/** CR — off-the-shelf raw material purchased externally (REQ-2026-07-01-INV-002). */
+export const RAW_MATERIAL_TIER: TierConfig = {
+  prefix: 'CR',
+  type: 'raw_material',
+  title: 'Raw Materials',
+  singular: 'raw material',
+  plural: 'raw materials',
+  newLabel: 'New Raw Material',
+  createdLabel: 'Raw material created',
+  // Purchased items are received into stock, so they open the unit ledger.
+  detailSegment: 'ledger',
+  // Consumable is CR-only (Transaction Spec §1.1), so only this tier splits on it.
+  filters: [
+    ALL,
+    { id: 'consumables', label: 'Consumables', params: { is_consumable: true } },
+    {
+      id: 'non-consumables',
+      label: 'Non-consumables',
+      params: { is_consumable: false },
+    },
+    NEEDS_REORDER,
+  ],
+};
+
+/** AY — built from two or more CR items and itself stockable (REQ-2026-07-01-INV-003). */
+export const SUB_ASSEMBLY_TIER: TierConfig = {
+  prefix: 'AY',
+  type: 'sub_assembly',
+  title: 'Sub-Assemblies',
+  singular: 'sub-assembly',
+  plural: 'sub-assemblies',
+  newLabel: 'New Sub-Assembly',
+  createdLabel: 'Sub-assembly created',
+  // Built items have no ledger tab — open the multi-level structure instead.
+  detailSegment: 'structure',
+  filters: [ALL, MISSING_BOM, NEEDS_REORDER],
+};
+
+/** FG — finished good; renamed from "Products" for COGS semantics (REQ-2026-07-01-INV-006). */
+export const FINISHED_GOOD_TIER: TierConfig = {
+  prefix: 'FG',
+  type: 'finished_good',
+  title: 'Finished Goods',
+  singular: 'finished good',
+  plural: 'finished goods',
+  newLabel: 'New Finished Good',
+  createdLabel: 'Finished good created',
+  detailSegment: 'structure',
+  filters: [ALL, MISSING_BOM, NEEDS_REORDER],
+};

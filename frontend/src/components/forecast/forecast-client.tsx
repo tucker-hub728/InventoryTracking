@@ -27,6 +27,7 @@ import {
   type ForecastEntry,
 } from '@/lib/api/forecast';
 import { itemsApi } from '@/lib/api/items';
+import { isBuiltTier } from '@/lib/api/tiers';
 import { customersApi, type Customer } from '@/lib/api/customers';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
@@ -115,7 +116,7 @@ export function ForecastClient() {
       // Forecastable products = built (finished-good) items.
       setProducts(
         itemsResp.items
-          .filter((i) => i.category_kind === 'built')
+          .filter((i) => isBuiltTier(i.tier_type))
           .map((i) => ({ id: i.id, sku: i.item_number, name: i.description })),
       );
       setCustomers(custs);
