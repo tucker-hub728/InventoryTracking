@@ -7,6 +7,7 @@ import {
   LineChart,
   Package,
   Refrigerator,
+  Scale,
   Snowflake,
   Tags,
   Truck,
@@ -61,6 +62,16 @@ export const navSections: readonly NavSection[] = [
       // Clickable, but pilled as WIP — tiers are seed-only for now (create /
       // edit / delete are hidden behind ``TIER_ACTIONS_ENABLED``).
       { id: 'tiers', label: 'Tiers', href: '/tiers', icon: Tags, resource: 'inventory', comingSoon: true },
+      // Frontend-only model of the kitting / back-flush flow (Transaction Spec
+      // §2-§4). Mock data, no backend — pilled as WIP until it's wired up.
+      // {
+      //   id: 'reconciliation',
+      //   label: 'Kitting & Reconciliation',
+      //   href: '/reconciliation',
+      //   icon: Scale,
+      //   resource: 'inventory',
+      //   comingSoon: true,
+      // },
       {
         id: 'customers',
         label: 'Customers',
