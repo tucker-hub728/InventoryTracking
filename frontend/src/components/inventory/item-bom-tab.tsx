@@ -278,8 +278,14 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                           <Input
                             type="number"
                             min={1}
+                            step={1}
                             value={editing.qty}
-                            onChange={(e) => setEditing({ id: l.id, qty: e.target.value })}
+                            onChange={(e) =>
+                              setEditing({
+                                id: l.id,
+                                qty: e.target.value.replace(/[^0-9]/g, ''),
+                              })
+                            }
                             className="ml-auto w-20 text-right"
                           />
                         ) : (
@@ -369,8 +375,9 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
               <Input
                 type="number"
                 min={1}
+                step={1}
                 value={addQty}
-                onChange={(e) => setAddQty(e.target.value)}
+                onChange={(e) => setAddQty(e.target.value.replace(/[^0-9]/g, ''))}
                 aria-label="Quantity per unit"
               />
             </div>
