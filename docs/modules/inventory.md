@@ -291,7 +291,7 @@ Columns map **1:1** to the `Component Inventory Tracker` header row 49.
 
 | Field | Why omitted |
 |--|--|
-| `category_id` / `category` | Excel has no category column; prefix is a derived convenience only (§3.1) |
+| `tier_id` / `tier` | Excel has no tier column; prefix is a derived convenience only (§3.1) |
 | `location`, `lot`, `expires` | Per-receipt, not per-item. Live on `lots` and `item_batches`; detail page shows them as "latest batch" via join |
 | `status` (enum value column) | Derived from `qty_on_hand` + `reorder_threshold` (§3.2) |
 | `qty_on_hand` | Derived from ledger sum; cached in `item_balances` (§4.4) |

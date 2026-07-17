@@ -3,7 +3,9 @@ import {
   Contact,
   FlaskConical,
   History,
+  Layers,
   LineChart,
+  Package,
   Refrigerator,
   Snowflake,
   Tags,
@@ -42,9 +44,14 @@ export interface NavSection {
 
 export const navSections: readonly NavSection[] = [
   {
+    // One dedicated screen per tier, not a filter over a shared list
+    // (REQ-2026-07-01-INV-001). The set is fixed at three
+    // (REQ-2026-07-15-ITM-001).
     title: 'Inventory',
     items: [
       { id: 'inventory-cr', label: 'Raw Materials', href: '/inventory/cr', icon: FlaskConical, resource: 'inventory' },
+      { id: 'inventory-ay', label: 'Sub-Assemblies', href: '/inventory/ay', icon: Layers, resource: 'inventory' },
+      { id: 'inventory-fg', label: 'Finished Goods', href: '/inventory/fg', icon: Package, resource: 'inventory' },
     ],
   },
   {
@@ -52,8 +59,8 @@ export const navSections: readonly NavSection[] = [
     items: [
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
       // Clickable, but pilled as WIP — tiers are seed-only for now (create /
-      // edit / delete are hidden behind ``CATEGORY_ACTIONS_ENABLED``).
-      { id: 'categories', label: 'Tiers', href: '/categories', icon: Tags, resource: 'inventory', comingSoon: true },
+      // edit / delete are hidden behind ``TIER_ACTIONS_ENABLED``).
+      { id: 'tiers', label: 'Tiers', href: '/tiers', icon: Tags, resource: 'inventory', comingSoon: true },
       {
         id: 'customers',
         label: 'Customers',

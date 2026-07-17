@@ -1,5 +1,6 @@
 'use client';
 
+import { isBuiltTier, TIER_TYPE_LABELS } from '@/lib/api/tiers';
 import * as React from 'react';
 import Link from 'next/link';
 import { ArrowDown, ArrowUp, ChevronsUpDown } from 'lucide-react';
@@ -42,8 +43,8 @@ interface Column {
 const COLUMNS: Column[] = [
   { key: 'id', label: 'Item #', sortKey: 'id', className: 'w-[110px]' },
   { key: 'desc', label: 'Name', sortKey: 'desc' },
-  { key: 'categoryName', label: 'Tier', className: 'w-[170px]' },
-  { key: 'categoryKind', label: 'Type', className: 'w-[100px]' },
+  { key: 'tierName', label: 'Tier', className: 'w-[170px]' },
+  { key: 'tierType', label: 'Type', className: 'w-[100px]' },
   { key: 'supplier', label: 'Supplier', className: 'w-[150px]' },
   { key: 'qty', label: 'Units', align: 'right', className: 'w-[90px]' },
   // "Exp. Risk" was driven by ``item.expires`` which the API adapter
@@ -118,7 +119,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
       </TableHeader>
       <TableBody>
         {rows.map((item) => {
-          const isBuilt = item.categoryKind === 'built';
+          const isBuilt = isBuiltTier(item.tierType);
           const lowQty = item.qtyAvailable > 0 && item.qtyAvailable <= item.threshold;
           // Units shown = available (excludes date-expired lots), clamped at 0
           // so a data artifact (expired-lot units exceeding on-hand) never
@@ -129,7 +130,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
           const expired = Math.max(0, item.qty - item.qtyAvailable);
           // Products open on their Structure tab; Purchased on the Ledger.
           const detailHref =
-            item.categoryKind === 'built'
+            isBuiltTier(item.tierType)
               ? `/inventory/${item.id}/structure`
               : `/inventory/${item.id}/ledger`;
           return (
@@ -151,18 +152,18 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                   {item.desc}
                 </Link>
               </TableCell>
-              <TableCell className="truncate" title={item.categoryName}>
-                {item.categoryName ? (
-                  <Badge tone={(item.categoryTone as BadgeTone) ?? 'neutral'} dot>
-                    {item.categoryName}
+              <TableCell className="truncate" title={item.tierName}>
+                {item.tierName ? (
+                  <Badge tone={(item.tierTone as BadgeTone) ?? 'neutral'} dot>
+                    {item.tierName}
                   </Badge>
                 ) : (
                   <span className="text-text-3">—</span>
                 )}
               </TableCell>
               <TableCell>
-                <Badge tone={item.categoryKind === 'built' ? 'accent' : 'neutral'}>
-                  {item.categoryKind === 'built' ? 'Product' : 'Purchased'}
+                <Badge tone={isBuiltTier(item.tierType) ? 'accent' : 'neutral'}>
+                  {TIER_TYPE_LABELS[item.tierType]}
                 </Badge>
               </TableCell>
               <TableCell className="truncate text-xs text-text-2" title={item.supplier}>

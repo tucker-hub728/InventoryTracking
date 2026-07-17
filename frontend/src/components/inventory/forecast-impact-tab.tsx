@@ -71,7 +71,7 @@ export function ForecastImpactTab({ itemId, onHand }: Props) {
         const runs = entries
           .filter((e) => e.productId === parent.parent_item_id)
           .reduce((sum, e) => sum + e.runs, 0);
-        const perRun = Number(parent.qty_per_run ?? 0);
+        const perRun = Number(parent.qty_per_unit ?? 0);
         return { parent, perRun, runs, needed: perRun * runs };
       })
       .filter((r) => r.runs > 0)

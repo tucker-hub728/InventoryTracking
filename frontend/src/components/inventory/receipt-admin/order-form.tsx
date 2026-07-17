@@ -207,7 +207,7 @@ export function OrderForm({
   const itemOptions = React.useMemo<SearchableSelectOption[]>(
     () =>
       items
-        .filter((i) => i.category_kind === 'purchased')
+        .filter((i) => i.tier_type === 'raw_material')
         .map((i) => ({
           value: i.id,
           label: (

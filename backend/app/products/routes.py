@@ -20,6 +20,7 @@ from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
+from app.models.inventory import BUILT_TIER_TYPES
 from app.models.products import Customer
 from app.products import repository as products_repo
 from app.products.schemas import (
@@ -76,9 +77,9 @@ async def _validate_item_ids(db: DBSession, item_ids: list[str]) -> list[uuid.UU
         item = await inv_repo.get_item(db, iu)
         if item is None:
             raise NotFoundError(f"Item {raw} not found")
-        if item.category is None or item.category.kind != "built":
+        if item.tier is None or item.tier.type not in BUILT_TIER_TYPES:
             raise ValidationError(
-                "Customers can only be linked to Product (built) items",
+                "Customers can only be linked to sub-assembly or finished-good items",
                 code="item_not_built",
             )
         seen.add(iu)

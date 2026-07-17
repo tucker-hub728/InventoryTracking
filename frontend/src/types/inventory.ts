@@ -6,7 +6,9 @@ export type InventoryStatus =
   | 'Expired'
   | 'Out of stock';
 
-export type ItemKind = 'purchased' | 'built';
+import type { TierType } from '@/lib/api/tiers';
+
+export type { TierType };
 
 export interface InventoryItem {
   /** Human-readable item number (e.g. ``CM-0001``). What URLs key on. */
@@ -18,11 +20,11 @@ export interface InventoryItem {
   uom: string;
   /** Blind-consumed with no per-lot traceability when true. */
   isConsumable: boolean;
-  /** Category (requirements v2 §6). ``categoryKind`` drives the Type column. */
-  categoryId: string;
-  categoryName: string;
-  categoryKind: ItemKind;
-  categoryTone: string;
+  /** Tier (requirements v2 §6). ``tierType`` drives the Type column. */
+  tierId: string;
+  tierName: string;
+  tierType: TierType;
+  tierTone: string;
   supplier: string;
   lead: number;
   invValue: number;
@@ -37,6 +39,9 @@ export interface InventoryItem {
   mustOrder: number;
   /** Per-item near-expiry window (days) driving the ledger expiry colours. */
   nearExpiryThresholdDays: number;
+  /** Direct BOM components. Always 0 for a raw material; on a built tier, 0
+   *  means the recipe hasn't been defined yet. */
+  bomLineCount: number;
   location: string;
   lot: string;
   expires: string;

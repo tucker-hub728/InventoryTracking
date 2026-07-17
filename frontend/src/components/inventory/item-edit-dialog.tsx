@@ -17,25 +17,19 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem, type ItemUpdateInput } from '@/lib/api/items';
 import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
-import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
+import { TIER_TYPE_LABELS } from '@/lib/api/tiers';
 
 import { SupplierMultiSelect } from './supplier-multi-select';
 
 const schema = z.object({
   description: z.string().min(1, 'Name is required').max(512),
-  category_id: z.string().min(1, 'Tier is required'),
+  // ``tier_id`` is deliberately absent — the tier is fixed at creation and
+  // named by the dialog title, so it is never a field and never part of the
+  // patch.
   uom: z.string().trim().max(32, 'Unit is too long').optional(),
   supplier_ids: z.array(z.string()).default([]),
   avg_lead_days: z
@@ -86,9 +80,14 @@ function sameSupplierSet(a: string[], b: string[]): boolean {
 
 /**
  * Edit dialog for the inventory item detail page. Captures the
- * commonly-edited fields: description, assigned suppliers, lead time,
- * thresholds, must-order flag. ``item_number`` is NOT here — it's the
- * immutable human handle. Pricing lives on the lot, not the item.
+ * commonly-edited fields: name, unit, thresholds, and — for raw materials
+ * only — assigned suppliers, lead time and the must-order flag.
+ *
+ * Neither ``item_number`` nor the tier is editable, and neither is shown as a
+ * field — the number sits in the dialog subtitle and the tier is named by the
+ * dialog title ("Edit Finished Good"). The SKU is prefixed from the tier, so
+ * letting the tier move while the number stays put would strand FG-001 in the
+ * Sub-Assemblies tier. Pricing lives on the lot, not the item.
  *
  * Submit sends only what changed so the audit diff shows the operator's
  * actual intent. The supplier list is sent whole (replace semantics) when it
@@ -97,7 +96,6 @@ function sameSupplierSet(a: string[], b: string[]): boolean {
 export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props) {
   const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
   const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
-  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
   const [item, setItem] = React.useState<ApiItem | null>(null);
   // The supplier list as it was when the dialog loaded — submit diffs against it.
   const [loadedSupplierIds, setLoadedSupplierIds] = React.useState<string[]>([]);
@@ -115,7 +113,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     resolver: zodResolver(schema),
     defaultValues: {
       description: '',
-      category_id: '',
       uom: '',
       supplier_ids: [],
       avg_lead_days: '',
@@ -127,17 +124,13 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
   const supplierIds = watch('supplier_ids');
   const mustOrder = watch('must_order_flag');
-  const categoryId = watch('category_id');
 
-  // Purchasing fields apply only to Purchased categories (a Product is built,
-  // not bought) — suppliers, lead time, reorder + near-expiry, must-order.
-  const showPurchasing =
-    categories.find((c) => c.id === categoryId)?.kind === 'purchased';
-
-  // A purchased item is a Raw Material — use raw-material naming and show the
-  // category as a fixed tag; a built item keeps the editable category picker.
-  const built = item?.category_kind === 'built';
-  const isRaw = !built;
+  // Supplier-side fields apply only to the raw-material tier (a built AY/FG is
+  // manufactured, not bought) — suppliers, lead time, must-order. Near-expiry
+  // rides the same gate for now (deferred on AY/FG). Reorder threshold sits
+  // outside it: planning needs it on every tier. See ``new-item-dialog.tsx``
+  // for the citations. Read off the item itself, since the tier is fixed.
+  const showPurchasing = item?.tier_type === 'raw_material';
 
   // Load suppliers + the fresh item state every time the dialog opens.
   // ``activeOnly: false`` so a supplier that's since been deactivated still
@@ -153,21 +146,17 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     Promise.all([
       suppliersApi.list({ activeOnly: false, signal: ctrl.signal }),
       itemsApi.get(itemId, { signal: ctrl.signal }),
-      categoriesApi.list({ signal: ctrl.signal }),
     ])
-      .then(([supplierList, freshItem, categoryList]) => {
+      .then(([supplierList, freshItem]) => {
         setSuppliers(supplierList);
-        setCategories(categoryList);
         setItem(freshItem);
         const ids = freshItem.suppliers.map((v) => v.supplier_id);
         setLoadedSupplierIds(ids);
         reset({
           description: freshItem.description,
-          category_id: freshItem.category_id,
           uom: freshItem.uom ?? '',
           supplier_ids: ids,
-          avg_lead_days:
-            freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
+          avg_lead_days: freshItem.avg_lead_days != null ? String(freshItem.avg_lead_days) : '',
           // Reorder threshold is a whole count of units — never decimal. The
           // API returns it as a NUMERIC string (e.g. "5.000"); show the whole
           // number only.
@@ -185,9 +174,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
-        setLoadError(
-          err instanceof ApiError ? err.message : 'Failed to load item.',
-        );
+        setLoadError(err instanceof ApiError ? err.message : 'Failed to load item.');
       });
     return () => ctrl.abort();
   }, [open, itemId, reset]);
@@ -198,20 +185,15 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
     const patch: ItemUpdateInput = {};
     if (dirtyFields.description) patch.description = values.description.trim();
-    if (dirtyFields.category_id) patch.category_id = values.category_id;
     if (dirtyFields.uom) patch.uom = values.uom?.trim() ? values.uom.trim() : null;
     if (!sameSupplierSet(values.supplier_ids, loadedSupplierIds)) {
       patch.supplier_ids = values.supplier_ids;
     }
     if (dirtyFields.avg_lead_days) {
-      patch.avg_lead_days = values.avg_lead_days
-        ? Number(values.avg_lead_days)
-        : null;
+      patch.avg_lead_days = values.avg_lead_days ? Number(values.avg_lead_days) : null;
     }
     if (dirtyFields.reorder_threshold) {
-      patch.reorder_threshold = values.reorder_threshold
-        ? Number(values.reorder_threshold)
-        : 0;
+      patch.reorder_threshold = values.reorder_threshold ? Number(values.reorder_threshold) : 0;
     }
     if (dirtyFields.near_expiry_threshold_days) {
       // Non-nullable column (default 30): a cleared field falls back to 0,
@@ -254,13 +236,15 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       <DialogContent className="max-w-xl">
         <form noValidate onSubmit={handleSubmit(onSubmit)}>
           <DialogHeader>
-            <DialogTitle>{isRaw ? 'Edit Raw Material' : 'Edit item'}</DialogTitle>
+            <DialogTitle>
+              {item ? `Edit ${TIER_TYPE_LABELS[item.tier_type]}` : 'Edit item'}
+            </DialogTitle>
             <DialogDescription>
               {item ? (
                 <>
-                  <span className="font-mono text-accent">{item.item_number}</span> ·
-                  Every change is recorded to the audit log with a before/after
-                  diff. The item number is immutable.
+                  <span className="font-mono text-accent">{item.item_number}</span> · Every change
+                  is recorded to the audit log with a before/after diff. The item number and tier
+                  are immutable.
                 </>
               ) : (
                 'Loading item…'
@@ -272,19 +256,14 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
             {loadError && (
               <p
                 role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
+                className="border-danger/30 bg-danger/5 rounded-md border px-3 py-2 text-xs text-danger"
               >
                 {loadError}
               </p>
             )}
-            {isRaw && item && (
-              <div>
-                <Badge tone="neutral">{item.category_name}</Badge>
-              </div>
-            )}
             <div className="space-y-1.5">
               <Label htmlFor="it-desc">
-                {isRaw ? 'Name' : 'Description'} <span className="text-danger">*</span>
+                Name <span className="text-danger">*</span>
               </Label>
               <Input
                 id="it-desc"
@@ -298,93 +277,21 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               )}
             </div>
 
-            {!isRaw && (
+            {/* Unit + Reorder threshold are the two fields every tier shows, so
+                they pair up here. The purchasing-only fields (suppliers, lead
+                time, near-expiry, must-order) live in the block below. */}
+            <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label htmlFor="it-category">Tier</Label>
-                {/* key remounts the Select once the item + categories have loaded
-                    so the pre-selected value renders (Radix shows the placeholder
-                    if value is set before its options mount). */}
-                <Select
-                  key={item?.id ?? 'loading'}
-                  value={categoryId}
-                  onValueChange={(v) =>
-                    setValue('category_id', v, { shouldDirty: true, shouldValidate: true })
-                  }
-                >
-                  <SelectTrigger id="it-category" aria-label="Tier">
-                    <SelectValue placeholder="Pick a tier" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {categories.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>
-                        <span className="flex items-center gap-2">
-                          <span className="truncate">{c.name}</span>
-                          <Badge tone={c.kind === 'built' ? 'accent' : 'neutral'}>
-                            {c.kind === 'built' ? 'Product' : 'Purchased'}
-                          </Badge>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {errors.category_id && (
-                  <p role="alert" className="text-xs text-danger">
-                    {errors.category_id.message}
-                  </p>
-                )}
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <Label htmlFor="it-uom">Unit</Label>
-              <Input
-                id="it-uom"
-                placeholder="each, mL, box…"
-                aria-invalid={Boolean(errors.uom)}
-                {...register('uom')}
-              />
-              {errors.uom && (
-                <p role="alert" className="text-xs text-danger">
-                  {errors.uom.message}
-                </p>
-              )}
-            </div>
-
-            {showPurchasing && (
-              <>
-            <div className="space-y-1.5">
-              <Label htmlFor="it-suppliers">Suppliers</Label>
-              <SupplierMultiSelect
-                id="it-suppliers"
-                modal
-                suppliers={suppliers}
-                value={supplierIds}
-                onChange={(next) =>
-                  setValue('supplier_ids', next, { shouldDirty: true })
-                }
-                error={suppliersError}
-              />
-              <p className="text-xs text-text-3">
-                Only these suppliers can be selected when receiving stock for this
-                item.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="it-lead">Lead time (days)</Label>
+                <Label htmlFor="it-uom">Unit</Label>
                 <Input
-                  id="it-lead"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  max={3650}
-                  aria-invalid={Boolean(errors.avg_lead_days)}
-                  {...register('avg_lead_days')}
+                  id="it-uom"
+                  placeholder="each, mL, box…"
+                  aria-invalid={Boolean(errors.uom)}
+                  {...register('uom')}
                 />
-                {errors.avg_lead_days && (
+                {errors.uom && (
                   <p role="alert" className="text-xs text-danger">
-                    {errors.avg_lead_days.message}
+                    {errors.uom.message}
                   </p>
                 )}
               </div>
@@ -405,46 +312,85 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   </p>
                 )}
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="it-near-expiry">Near expiry (days)</Label>
-                <Input
-                  id="it-near-expiry"
-                  type="number"
-                  inputMode="numeric"
-                  step="1"
-                  min={0}
-                  max={3650}
-                  aria-invalid={Boolean(errors.near_expiry_threshold_days)}
-                  {...register('near_expiry_threshold_days')}
-                />
-                {errors.near_expiry_threshold_days && (
-                  <p role="alert" className="text-xs text-danger">
-                    {errors.near_expiry_threshold_days.message}
-                  </p>
-                )}
-              </div>
             </div>
 
-            <label className="flex cursor-pointer items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={mustOrder}
-                onChange={(e) =>
-                  setValue('must_order_flag', e.target.checked, {
-                    shouldDirty: true,
-                  })
-                }
-                className="size-4"
-              />
-              <span>Flag as must-order for next PO</span>
-            </label>
+            {showPurchasing && (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="it-suppliers">Suppliers</Label>
+                  <SupplierMultiSelect
+                    id="it-suppliers"
+                    modal
+                    suppliers={suppliers}
+                    value={supplierIds}
+                    onChange={(next) => setValue('supplier_ids', next, { shouldDirty: true })}
+                    error={suppliersError}
+                  />
+                  <p className="text-xs text-text-3">
+                    Only these suppliers can be selected when receiving stock for this item.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="it-lead">Lead time (days)</Label>
+                    <Input
+                      id="it-lead"
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={3650}
+                      aria-invalid={Boolean(errors.avg_lead_days)}
+                      {...register('avg_lead_days')}
+                    />
+                    {errors.avg_lead_days && (
+                      <p role="alert" className="text-xs text-danger">
+                        {errors.avg_lead_days.message}
+                      </p>
+                    )}
+                  </div>
+                  {/* Near-expiry: purchased tiers only for now — see the matching
+                      note in ``new-item-dialog``. Deferred, not dropped. */}
+                  <div className="space-y-1.5">
+                    <Label htmlFor="it-near-expiry">Near expiry (days)</Label>
+                    <Input
+                      id="it-near-expiry"
+                      type="number"
+                      inputMode="numeric"
+                      step="1"
+                      min={0}
+                      max={3650}
+                      aria-invalid={Boolean(errors.near_expiry_threshold_days)}
+                      {...register('near_expiry_threshold_days')}
+                    />
+                    {errors.near_expiry_threshold_days && (
+                      <p role="alert" className="text-xs text-danger">
+                        {errors.near_expiry_threshold_days.message}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={mustOrder}
+                    onChange={(e) =>
+                      setValue('must_order_flag', e.target.checked, {
+                        shouldDirty: true,
+                      })
+                    }
+                    className="size-4"
+                  />
+                  <span>Flag as must-order for next PO</span>
+                </label>
               </>
             )}
 
             {submitError && (
               <p
                 role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
+                className="border-danger/30 bg-danger/5 rounded-md border px-3 py-2 text-xs text-danger"
               >
                 {submitError}
               </p>

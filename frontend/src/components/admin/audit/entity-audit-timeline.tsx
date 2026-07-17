@@ -6,7 +6,6 @@ import {
   ArrowRightLeft,
   ArrowUpFromLine,
   History,
-  Loader2,
   Pencil,
   Plus,
   Scale,
@@ -14,7 +13,9 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
+import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
+import { TableSkeleton } from '@/components/shared/table-skeleton';
 import {
   auditApi,
   type ApiAuditAction,
@@ -153,17 +154,14 @@ function formatTime(iso: string): string {
  * Clicking an audit row opens the side-sheet with the field-level diff,
  * the recorded reason, and forensic snapshots.
  */
-export function EntityAuditTimeline({
-  subjectTable,
-  subjectId,
-  limit = 100,
-}: Props) {
+export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100 }: Props) {
   const [entries, setEntries] = React.useState<TimelineEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  // Held briefly — the fetch returns in ~20ms, too fast to see otherwise.
+  const showSkeleton = useMinDuration(loading);
   const [selectedAuditId, setSelectedAuditId] = React.useState<string | null>(null);
-  const [selectedMovement, setSelectedMovement] =
-    React.useState<ApiMovement | null>(null);
+  const [selectedMovement, setSelectedMovement] = React.useState<ApiMovement | null>(null);
 
   React.useEffect(() => {
     if (!subjectId) return;
@@ -171,10 +169,7 @@ export function EntityAuditTimeline({
     setLoading(true);
     setError(null);
 
-    const auditP = auditApi.list(
-      { subjectTable, subjectId, limit },
-      { signal: ctrl.signal },
-    );
+    const auditP = auditApi.list({ subjectTable, subjectId, limit }, { signal: ctrl.signal });
     // Only items live in the movement ledger; other subject tables
     // skip this fetch entirely.
     const ledgerP =
@@ -203,24 +198,15 @@ export function EntityAuditTimeline({
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
-        setError(
-          err instanceof ApiError ? err.message : 'Failed to load audit history.',
-        );
+        setError(err instanceof ApiError ? err.message : 'Failed to load audit history.');
       })
       .finally(() => setLoading(false));
 
     return () => ctrl.abort();
   }, [subjectTable, subjectId, limit]);
 
-  if (loading) {
-    return (
-      <div
-        className="flex items-center justify-center gap-2 py-10 text-sm text-text-3"
-        role="status"
-      >
-        <Loader2 size={14} className="animate-spin" /> Loading audit history…
-      </div>
-    );
+  if (showSkeleton) {
+    return <TableSkeleton rows={5} columns={4} label="Loading audit history…" />;
   }
 
   if (error) {
@@ -240,10 +226,7 @@ export function EntityAuditTimeline({
     <>
       <ol className="relative space-y-3 px-4 py-3">
         {/* Vertical rail behind the icons. */}
-        <span
-          aria-hidden
-          className="absolute bottom-3 left-[27px] top-3 w-px bg-border"
-        />
+        <span aria-hidden className="absolute bottom-3 left-[27px] top-3 w-px bg-border" />
         {entries.map((entry, i) => (
           <TimelineRow
             key={entry.id}
@@ -297,11 +280,7 @@ function TimelineRow({
     );
   }
   return (
-    <AuditRow
-      event={entry.event}
-      index={index}
-      onSelect={() => onSelectAudit(entry.event.id)}
-    />
+    <AuditRow event={entry.event} index={index} onSelect={() => onSelectAudit(entry.event.id)} />
   );
 }
 
@@ -337,15 +316,14 @@ function MovementRow({
       <RowIcon Icon={Icon} pillClass={style.pill} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-sm font-medium text-text-1">{typeLabel}</span>
+          <span className="text-text-1 text-sm font-medium">{typeLabel}</span>
           <span className={cn('font-mono text-xs font-semibold', style.tint)}>
             {sign}
             {qtyAbs}
           </span>
           {movement.lot_number && (
             <span className="font-mono text-[11px] text-text-3">
-              lot{' '}
-              <LotLink lotId={movement.lot_id} lotNumber={movement.lot_number} />
+              lot <LotLink lotId={movement.lot_id} lotNumber={movement.lot_number} />
             </span>
           )}
         </div>
@@ -360,11 +338,7 @@ function MovementRow({
             </>
           )}
         </div>
-        {movement.notes && (
-          <p className="mt-1 text-xs text-text-2">
-            {movement.notes}
-          </p>
-        )}
+        {movement.notes && <p className="mt-1 text-xs text-text-2">{movement.notes}</p>}
       </div>
       {movement.reauth_evidence_id && <ESignedBadge />}
       <span className="font-mono text-[10px] text-text-3">#{index}</span>
@@ -381,8 +355,7 @@ function AuditRow({
   index: number;
   onSelect: () => void;
 }) {
-  const style =
-    AUDIT_ACTION_ICON[event.action as ApiAuditAction] ?? AUDIT_ACTION_ICON.updated;
+  const style = AUDIT_ACTION_ICON[event.action as ApiAuditAction] ?? AUDIT_ACTION_ICON.updated;
   const { Icon } = style;
   const diffCount = event.diff ? Object.keys(event.diff).length : 0;
 
@@ -394,12 +367,10 @@ function AuditRow({
       <RowIcon Icon={Icon} pillClass={style.pill} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-sm font-medium text-text-1">
+          <span className="text-text-1 text-sm font-medium">
             {AUDIT_ACTION_LABEL[event.action as ApiAuditAction] ?? event.action}
           </span>
-          <span className="font-mono text-[11px] text-text-3">
-            {event.event_type}
-          </span>
+          <span className="font-mono text-[11px] text-text-3">{event.event_type}</span>
         </div>
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-xs text-text-3">
           <span className="font-mono">{formatTime(event.occurred_at)}</span>
@@ -421,13 +392,7 @@ function AuditRow({
   );
 }
 
-function RowIcon({
-  Icon,
-  pillClass,
-}: {
-  Icon: LucideIcon;
-  pillClass: string;
-}) {
+function RowIcon({ Icon, pillClass }: { Icon: LucideIcon; pillClass: string }) {
   return (
     <span
       className={cn(

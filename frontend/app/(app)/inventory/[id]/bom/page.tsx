@@ -1,7 +1,6 @@
-import { ItemProductsPanel } from '@/components/inventory/inventory-detail-panels';
+import { ItemBomPanel } from '@/components/inventory/inventory-detail-panels';
 
-/** Product "BOM" tab — the BOM editor (ItemProductsPanel renders ItemBomTab,
- *  which shows the editor for built items). */
+/** Product "BOM" tab — the direct bill-of-materials editor for built items. */
 export default function InventoryBomPage() {
-  return <ItemProductsPanel />;
+  return <ItemBomPanel />;
 }

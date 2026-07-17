@@ -27,9 +27,11 @@ export interface ApiItemSupplier {
   supplier_name: string;
 }
 
-/** Raw API row — numeric fields come back as strings (Postgres NUMERIC). */
-export type ApiCategoryKind = 'purchased' | 'built';
+import type { TierType } from './tiers';
 
+export type { TierType };
+
+/** Raw API row — numeric fields come back as strings (Postgres NUMERIC). */
 export interface ApiItem {
   id: string;
   item_number: string;
@@ -38,12 +40,12 @@ export interface ApiItem {
   uom: string | null;
   /** Blind-consumed (no per-lot traceability) when true. */
   is_consumable: boolean;
-  /** Category (requirements v2 §6). ``category_kind`` drives the Type column:
-   *  built → "Product" (may have a BOM), purchased → bought as-is. */
-  category_id: string;
-  category_name: string;
-  category_kind: ApiCategoryKind;
-  category_tone: string;
+  /** Tier (REQ-2026-07-15-ITM-001). ``tier_type`` drives the Type column:
+   *  sub_assembly / finished_good may have a BOM; raw_material is bought as-is. */
+  tier_id: string;
+  tier_name: string;
+  tier_type: TierType;
+  tier_tone: string;
   /** Assigned suppliers — the suppliers this item can be received against. */
   suppliers: ApiItemSupplier[];
   avg_lead_days: number | null;
@@ -66,6 +68,9 @@ export interface ApiItem {
   /** On-hand minus units in date-expired lots — the count used for
    *  reorder + forecasting. ``qty_on_hand`` stays as the physical total. */
   qty_available: string;
+  /** Direct BOM components. Always 0 for a raw material; on a built tier, 0
+   *  means the recipe hasn't been defined yet. */
+  bom_line_count: number;
 }
 
 export interface ApiItemListResponse {
@@ -83,10 +88,20 @@ export type ApiSortDirection = 'asc' | 'desc';
 export interface ListItemsParams {
   q?: string | null;
   supplier_id?: string | null;
-  /** Filter by item category (server-side). */
-  category_id?: string | null;
+  /** Filter by item tier (server-side). */
+  tier_id?: string | null;
   /** Filter by ``v_item_stock.status_code`` (server-side). */
   status?: ApiItemStatus | null;
+  /** ``true`` = consumables only, ``false`` = non-consumables only. */
+  is_consumable?: boolean | null;
+  /** ``false`` selects items with no bill of materials ("missing BOM"). */
+  has_bom?: boolean | null;
+  /**
+   * ``true`` selects items at or below their reorder threshold. Broader than
+   * ``status: 'low_stock'``, which excludes zero-stock items (the view tests
+   * ``qty_available <= 0`` first, so those read as ``out_of_stock``).
+   */
+  below_reorder?: boolean | null;
   sort?: ApiSortField;
   direction?: ApiSortDirection;
   limit?: number;
@@ -96,8 +111,8 @@ export interface ListItemsParams {
 export interface ItemCreateInput {
   item_number: string;
   description: string;
-  /** Required — the item's category (governs BOM eligibility). */
-  category_id: string;
+  /** Required — the item's tier (governs BOM eligibility). */
+  tier_id: string;
   /** Free-text unit of measure (each, mL, box …). */
   uom?: string | null;
   /** Blind-consumed with no per-lot traceability when true. */
@@ -119,9 +134,9 @@ export interface ItemUpdateInput {
   description?: string;
   uom?: string | null;
   is_consumable?: boolean;
-  /** Re-categorise the item. Blocked server-side if moving a BOM-bearing
-   *  item to a purchased category. */
-  category_id?: string;
+  /** Re-assign the item to another tier. Blocked server-side if moving a
+   *  BOM-bearing item to the raw-material tier. */
+  tier_id?: string;
   supplier_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
@@ -137,8 +152,11 @@ export const itemsApi = {
       query: {
         q: params.q ?? undefined,
         supplier_id: params.supplier_id ?? undefined,
-        category_id: params.category_id ?? undefined,
+        tier_id: params.tier_id ?? undefined,
         status: params.status ?? undefined,
+        is_consumable: params.is_consumable ?? undefined,
+        has_bom: params.has_bom ?? undefined,
+        below_reorder: params.below_reorder ?? undefined,
         sort: params.sort,
         direction: params.direction,
         limit: params.limit,

@@ -2,12 +2,15 @@
 
 import * as React from 'react';
 
+import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
+import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timeline';
 
 import { LedgerExpiryToolbar, LedgerTable, useLedgerExpiryControls } from './ledger-table';
 import { ForecastImpactTab } from './forecast-impact-tab';
 import { ItemBomTab } from './item-bom-tab';
+import { ItemWhereUsedTab } from './item-where-used-tab';
 import { ItemBomTreeTab } from './item-bom-tree-tab';
 import { useInventoryDetail } from './inventory-detail-context';
 
@@ -22,16 +25,14 @@ export function ItemLedgerPanel() {
   // create / edit item dialogs. The ledger only *reads* it to colour the
   // expiry pills (green / amber / red) — no editing here.
   const controls = useLedgerExpiryControls(ledger.entries, item.nearExpiryThresholdDays);
+  // Held briefly — the fetch returns in ~20ms, too fast to see otherwise.
+  const showSkeleton = useMinDuration(ledger.loading && ledger.entries.length === 0);
 
   if (ledger.error) {
     return <EmptyState title="Couldn't load ledger" hint={ledger.error} />;
   }
-  if (ledger.loading && ledger.entries.length === 0) {
-    return (
-      <div className="py-10 text-center text-sm text-text-3" role="status">
-        Loading ledger…
-      </div>
-    );
+  if (showSkeleton) {
+    return <TableSkeleton rows={6} columns={7} label="Loading ledger…" />;
   }
   if (ledger.entries.length === 0) {
     return <EmptyState title="No movements yet" hint="Recorded transactions will appear here." />;
@@ -68,18 +69,18 @@ export function ItemLedgerPanel() {
   );
 }
 
-/** Purchased "Products" tab + Product "BOM" tab both use ItemBomTab, which
- *  branches on the item kind (purchased → where-used only; built → BOM editor
- *  + where-used). */
+/** "Used in" tab (the ``products`` segment) — the where-used view, shown for
+ *  non-consumable raw materials and for built tiers (AY/FG) alike. */
 export function ItemProductsPanel() {
   const { item } = useInventoryDetail();
-  return (
-    <ItemBomTab
-      itemId={item.uuid}
-      itemNumber={item.id}
-      itemKind={item.categoryKind}
-    />
-  );
+  return <ItemWhereUsedTab itemId={item.uuid} />;
+}
+
+/** Product "BOM" tab — the direct bill-of-materials editor (built items only).
+ *  Where-used lives in its own "Used in" tab (ItemProductsPanel). */
+export function ItemBomPanel() {
+  const { item } = useInventoryDetail();
+  return <ItemBomTab itemId={item.uuid} itemNumber={item.id} itemTierType={item.tierType} />;
 }
 
 /** Product "Structure" tab — the read-only multi-level BOM hierarchy. */

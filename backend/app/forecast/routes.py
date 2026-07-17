@@ -30,6 +30,7 @@ from app.forecast.schemas import (
 )
 from app.inventory import repository as inv_repo
 from app.models.forecast import ForecastEntry
+from app.models.inventory import BUILT_TIER_TYPES
 from app.products import repository as products_repo
 from app.security.permissions import RequirePermission
 
@@ -124,9 +125,9 @@ async def save_forecasts(
             product = await inv_repo.get_item(db, product_uuid)
             if product is None:
                 raise NotFoundError(f"Item {ch.product_id} not found")
-            if product.category is None or product.category.kind != "built":
+            if product.tier is None or product.tier.type not in BUILT_TIER_TYPES:
                 raise ValidationError(
-                    "Forecasts can only target Product (built) items",
+                    "Forecasts can only target sub-assembly or finished-good items",
                     code="item_not_built",
                 )
             prod_cache[product_uuid] = product

@@ -1,4 +1,4 @@
-"""``/v1/item-categories`` and BOM routes (``/v1/items/{id}/bom``, …).
+"""``/v1/item-tiers`` and BOM routes (``/v1/items/{id}/bom``, …).
 
 Reads require ``inventory:view``. Writes require ``inventory:sign`` and are
 electronically signed — every create/update/delete consumes a fresh reauth
@@ -23,19 +23,19 @@ from app.catalog.schemas import (
     BomLineDelete,
     BomLineRead,
     BomLineUpdate,
-    CategoryCreate,
-    CategoryDelete,
-    CategoryRead,
-    CategoryUpdate,
     ItemBomResponse,
+    TierCreate,
+    TierDelete,
+    TierRead,
+    TierUpdate,
     WhereUsedRead,
 )
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
-from app.models.inventory import BomLine, ItemCategory
+from app.models.inventory import BUILT_TIER_TYPES, BomLine, ItemTier
 from app.security.permissions import RequirePermission
 
-categories_router = APIRouter(prefix="/item-categories", tags=["categories"])
+tiers_router = APIRouter(prefix="/item-tiers", tags=["tiers"])
 bom_router = APIRouter(tags=["bom"])
 
 
@@ -51,12 +51,12 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
         ) from exc
 
 
-def _category_to_read(cat: ItemCategory, item_count: int) -> CategoryRead:
-    return CategoryRead(
+def _tier_to_read(cat: ItemTier, item_count: int) -> TierRead:
+    return TierRead(
         id=str(cat.id),
         name=cat.name,
         prefix=cat.prefix,
-        kind=cat.kind,  # type: ignore[arg-type]
+        type=cat.type,  # type: ignore[arg-type]
         tone=cat.tone,
         is_seeded=cat.is_seeded,
         item_count=item_count,
@@ -74,17 +74,17 @@ def _bom_line_to_read(line: BomLine, *, child_has_bom: bool) -> BomLineRead:
     qty_on_hand = stock.qty_on_hand if stock else Decimal("0")
     qty_available = stock.qty_available if stock else Decimal("0")
     status_code = stock.status_code if stock else "out_of_stock"
-    cat = child.category if child else None
+    cat = child.tier if child else None
     return BomLineRead(
         id=str(line.id),
         parent_item_id=str(line.parent_item_id),
         child_item_id=str(line.child_item_id),
         child_item_number=child.item_number if child else "",
         child_description=child.description if child else "",
-        child_category_name=cat.name if cat else "",
-        child_category_kind=cat.kind if cat else "purchased",  # type: ignore[arg-type]
-        child_category_tone=cat.tone if cat else "neutral",
-        qty_per_run=line.qty_per_run,
+        child_tier_name=cat.name if cat else "",
+        child_tier_type=cat.type if cat else "raw_material",  # type: ignore[arg-type]
+        child_tier_tone=cat.tone if cat else "neutral",
+        qty_per_unit=line.qty_per_unit,
         child_qty_on_hand=qty_on_hand,
         child_qty_available=qty_available,
         child_status_code=status_code,  # type: ignore[arg-type]
@@ -139,87 +139,87 @@ async def _build_bom_subtree(
     return reads
 
 
-# ── Categories ─────────────────────────────────────────────────────────
+# ── Tiers ─────────────────────────────────────────────────────────
 
 
-@categories_router.get(
+@tiers_router.get(
     "",
-    response_model=list[CategoryRead],
-    summary="List item categories",
+    response_model=list[TierRead],
+    summary="List item tiers",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def list_categories(db: DBSession) -> list[CategoryRead]:
-    cats = await cat_repo.list_categories(db)
-    counts = await cat_repo.category_item_counts(db, [c.id for c in cats])
-    return [_category_to_read(c, counts.get(c.id, 0)) for c in cats]
+async def list_tiers(db: DBSession) -> list[TierRead]:
+    cats = await cat_repo.list_tiers(db)
+    counts = await cat_repo.tier_item_counts(db, [c.id for c in cats])
+    return [_tier_to_read(c, counts.get(c.id, 0)) for c in cats]
 
 
-@categories_router.get(
-    "/{category_id}",
-    response_model=CategoryRead,
-    summary="Get one item category",
+@tiers_router.get(
+    "/{tier_id}",
+    response_model=TierRead,
+    summary="Get one item tier",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def get_category(
-    db: DBSession, category_id: Annotated[uuid.UUID, Path()]
-) -> CategoryRead:
-    cat = await cat_repo.get_category(db, category_id)
+async def get_tier(
+    db: DBSession, tier_id: Annotated[uuid.UUID, Path()]
+) -> TierRead:
+    cat = await cat_repo.get_tier(db, tier_id)
     if cat is None:
-        raise NotFoundError(f"Category {category_id} not found")
-    counts = await cat_repo.category_item_counts(db, [cat.id])
-    return _category_to_read(cat, counts.get(cat.id, 0))
+        raise NotFoundError(f"Tier {tier_id} not found")
+    counts = await cat_repo.tier_item_counts(db, [cat.id])
+    return _tier_to_read(cat, counts.get(cat.id, 0))
 
 
-@categories_router.post(
+@tiers_router.post(
     "",
-    response_model=CategoryRead,
+    response_model=TierRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Create an item category (e-signed)",
+    summary="Create an item tier (e-signed)",
     dependencies=[Depends(RequirePermission("inventory", "sign"))],
 )
-async def create_category(
-    db: DBSession, current: CurrentDbUserDep, payload: CategoryCreate
-) -> CategoryRead:
+async def create_tier(
+    db: DBSession, current: CurrentDbUserDep, payload: TierCreate
+) -> TierRead:
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    if (await cat_repo.get_category_by_name(db, payload.name)) is not None:
+    if (await cat_repo.get_tier_by_name(db, payload.name)) is not None:
         raise ConflictError(
-            f"Category '{payload.name}' already exists", code="category_name_conflict"
+            f"Tier '{payload.name}' already exists", code="tier_name_conflict"
         )
-    if (await cat_repo.get_category_by_prefix(db, payload.prefix)) is not None:
+    if (await cat_repo.get_tier_by_prefix(db, payload.prefix)) is not None:
         raise ConflictError(
             f"Prefix '{payload.prefix}' is already in use",
-            code="category_prefix_conflict",
+            code="tier_prefix_conflict",
         )
     try:
-        cat = await cat_repo.create_category(
+        cat = await cat_repo.create_tier(
             db,
             name=payload.name,
             prefix=payload.prefix,
-            kind=payload.kind,
+            tier_type=payload.type,
             tone=payload.tone,
             created_by_user_id=current.id,
         )
     except IntegrityError as exc:
         await db.rollback()
         msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-        if "uq_item_categories_prefix" in msg:
+        if "uq_item_tiers_prefix" in msg:
             raise ConflictError(
                 f"Prefix '{payload.prefix}' is already in use",
-                code="category_prefix_conflict",
+                code="tier_prefix_conflict",
             ) from exc
         raise ConflictError(
-            f"Category '{payload.name}' already exists", code="category_name_conflict"
+            f"Tier '{payload.name}' already exists", code="tier_name_conflict"
         ) from exc
 
     await record_entity_change(
         db,
         actor_user_id=current.id,
         action="created",
-        subject_table="app.item_categories",
+        subject_table="app.item_tiers",
         subject_id=cat.id,
         subject_label=cat.name,
         before=None,
-        after=cat_repo.category_to_audit_snapshot(cat),
+        after=cat_repo.tier_to_audit_snapshot(cat),
         context={"reason": payload.reason},
         signature_id=evidence_uuid,
     )
@@ -227,65 +227,65 @@ async def create_category(
         db,
         evidence_id=evidence_uuid,
         user_id=current.id,
-        expected_action="category.create",
-        target_table="app.item_categories",
+        expected_action="tier.create",
+        target_table="app.item_tiers",
         target_id=cat.id,
     )
-    result = _category_to_read(cat, 0)
+    result = _tier_to_read(cat, 0)
     await db.commit()
     return result
 
 
-@categories_router.patch(
-    "/{category_id}",
-    response_model=CategoryRead,
-    summary="Update an item category (e-signed). Kind is immutable.",
+@tiers_router.patch(
+    "/{tier_id}",
+    response_model=TierRead,
+    summary="Update an item tier (e-signed). Kind is immutable.",
     dependencies=[Depends(RequirePermission("inventory", "sign"))],
 )
-async def update_category(
+async def update_tier(
     db: DBSession,
     current: CurrentDbUserDep,
-    category_id: Annotated[uuid.UUID, Path()],
-    payload: CategoryUpdate,
-) -> CategoryRead:
+    tier_id: Annotated[uuid.UUID, Path()],
+    payload: TierUpdate,
+) -> TierRead:
     patch = payload.model_dump(exclude_unset=True)
     evidence_uuid = _parse_uuid_or_422(str(patch.pop("evidence_id")), field="evidence_id")
     reason = patch.pop("reason", "")
     if not patch:
         raise ValidationError("No fields to update", code="empty_patch")
 
-    cat = await cat_repo.get_category(db, category_id)
+    cat = await cat_repo.get_tier(db, tier_id)
     if cat is None:
-        raise NotFoundError(f"Category {category_id} not found")
+        raise NotFoundError(f"Tier {tier_id} not found")
 
     new_name = patch.get("name")
     if new_name is not None:
-        clash = await cat_repo.get_category_by_name(db, str(new_name))
+        clash = await cat_repo.get_tier_by_name(db, str(new_name))
         if clash is not None and clash.id != cat.id:
             raise ConflictError(
-                f"Category '{new_name}' already exists",
-                code="category_name_conflict",
+                f"Tier '{new_name}' already exists",
+                code="tier_name_conflict",
             )
 
     new_prefix = patch.get("prefix")
     if new_prefix is not None:
-        clash = await cat_repo.get_category_by_prefix(db, str(new_prefix))
+        clash = await cat_repo.get_tier_by_prefix(db, str(new_prefix))
         if clash is not None and clash.id != cat.id:
             raise ConflictError(
                 f"Prefix '{new_prefix}' is already in use",
-                code="category_prefix_conflict",
+                code="tier_prefix_conflict",
             )
 
-    before = cat_repo.category_to_audit_snapshot(cat)
-    updated = await cat_repo.apply_category_patch(
-        db, category=cat, patch=patch, updated_by_user_id=current.id
+    before = cat_repo.tier_to_audit_snapshot(cat)
+    updated = await cat_repo.apply_tier_patch(
+        db, tier=cat, patch=patch, updated_by_user_id=current.id
     )
-    after = cat_repo.category_to_audit_snapshot(updated)
+    after = cat_repo.tier_to_audit_snapshot(updated)
     await record_entity_change(
         db,
         actor_user_id=current.id,
         action="updated",
-        subject_table="app.item_categories",
+        subject_table="app.item_tiers",
         subject_id=updated.id,
         subject_label=updated.name,
         before=before,
@@ -297,55 +297,55 @@ async def update_category(
         db,
         evidence_id=evidence_uuid,
         user_id=current.id,
-        expected_action="category.update",
-        target_table="app.item_categories",
+        expected_action="tier.update",
+        target_table="app.item_tiers",
         target_id=updated.id,
     )
-    counts = await cat_repo.category_item_counts(db, [updated.id])
-    result = _category_to_read(updated, counts.get(updated.id, 0))
+    counts = await cat_repo.tier_item_counts(db, [updated.id])
+    result = _tier_to_read(updated, counts.get(updated.id, 0))
     await db.commit()
     return result
 
 
-@categories_router.delete(
-    "/{category_id}",
-    response_model=CategoryRead,
-    summary="Delete an item category (e-signed). Blocked if seeded or in use.",
+@tiers_router.delete(
+    "/{tier_id}",
+    response_model=TierRead,
+    summary="Delete an item tier (e-signed). Blocked if seeded or in use.",
     dependencies=[Depends(RequirePermission("inventory", "sign"))],
 )
-async def delete_category(
+async def delete_tier(
     db: DBSession,
     current: CurrentDbUserDep,
-    category_id: Annotated[uuid.UUID, Path()],
-    payload: CategoryDelete,
-) -> CategoryRead:
+    tier_id: Annotated[uuid.UUID, Path()],
+    payload: TierDelete,
+) -> TierRead:
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    cat = await cat_repo.get_category(db, category_id)
+    cat = await cat_repo.get_tier(db, tier_id)
     if cat is None:
-        raise NotFoundError(f"Category {category_id} not found")
+        raise NotFoundError(f"Tier {tier_id} not found")
     if cat.is_seeded:
         raise ConflictError(
-            "Seeded categories cannot be deleted", code="category_seeded"
+            "Seeded tiers cannot be deleted", code="tier_seeded"
         )
-    counts = await cat_repo.category_item_counts(db, [cat.id])
+    counts = await cat_repo.tier_item_counts(db, [cat.id])
     if counts.get(cat.id, 0) > 0:
         raise ConflictError(
-            "Category is in use — reassign its items first", code="category_in_use"
+            "Tier is in use — reassign its items first", code="tier_in_use"
         )
 
-    before = cat_repo.category_to_audit_snapshot(cat)
-    updated = await cat_repo.soft_delete_category(
-        db, category=cat, deleted_by_user_id=current.id
+    before = cat_repo.tier_to_audit_snapshot(cat)
+    updated = await cat_repo.soft_delete_tier(
+        db, tier=cat, deleted_by_user_id=current.id
     )
     await record_entity_change(
         db,
         actor_user_id=current.id,
         action="deleted",
-        subject_table="app.item_categories",
+        subject_table="app.item_tiers",
         subject_id=updated.id,
         subject_label=updated.name,
         before=before,
-        after=cat_repo.category_to_audit_snapshot(updated),
+        after=cat_repo.tier_to_audit_snapshot(updated),
         context={"reason": payload.reason},
         signature_id=evidence_uuid,
     )
@@ -353,11 +353,11 @@ async def delete_category(
         db,
         evidence_id=evidence_uuid,
         user_id=current.id,
-        expected_action="category.delete",
-        target_table="app.item_categories",
+        expected_action="tier.delete",
+        target_table="app.item_tiers",
         target_id=updated.id,
     )
-    result = _category_to_read(updated, 0)
+    result = _tier_to_read(updated, 0)
     await db.commit()
     return result
 
@@ -420,14 +420,34 @@ async def add_bom_line(
     parent = await inv_repo.get_item(db, item_id)
     if parent is None:
         raise NotFoundError(f"Item {item_id} not found")
-    if parent.category is None or parent.category.kind != "built":
+    if parent.tier is None or parent.tier.type not in BUILT_TIER_TYPES:
         raise ConflictError(
-            "Only Product (built) items can have a bill of materials",
+            "Only sub-assembly and finished-good items can have a bill of "
+            "materials",
             code="parent_not_built",
         )
     child = await inv_repo.get_item(db, child_uuid)
     if child is None:
         raise NotFoundError(f"Item {payload.child_item_id} not found")
+    # Transaction Spec §1.1 lists every legal combination — CR+CR→AY, AY+AY→AY,
+    # CR+CR→FG, CR+AY→FG. A finished good never appears as a component: it is
+    # terminal and leaves via the customer shipment (REQ-2026-07-01-TRX-005).
+    if child.tier is None or child.tier.type == "finished_good":
+        raise ConflictError(
+            "A finished good can't be a component of another item. BOM "
+            "components must be raw materials or sub-assemblies.",
+            code="child_finished_good",
+        )
+    # Transaction Spec §4.3: "Consumables are not tracked directly against an
+    # FG or AY BOM." They are issued blindly to a location and follow a separate
+    # calculation path from one-for-one product items (REQ-2026-07-09-PLN-005),
+    # so a consumable in a BOM would corrupt the planning maths.
+    if child.is_consumable:
+        raise ConflictError(
+            "Consumables can't be part of a bill of materials — they're "
+            "issued directly to a location and reconciled by back-flush.",
+            code="child_consumable",
+        )
     if await cat_repo.get_bom_line_by_pair(db, item_id, child_uuid) is not None:
         raise ConflictError(
             "This item is already a BOM line", code="bom_line_conflict"
@@ -444,7 +464,7 @@ async def add_bom_line(
         db,
         parent_item_id=item_id,
         child_item_id=child_uuid,
-        qty_per_run=payload.qty_per_run,
+        qty_per_unit=payload.qty_per_unit,
         created_by_user_id=current.id,
     )
     await record_entity_change(
@@ -493,7 +513,7 @@ async def update_bom_line(
     updated = await cat_repo.apply_bom_line_patch(
         db,
         line=line,
-        patch={"qty_per_run": payload.qty_per_run},
+        patch={"qty_per_unit": payload.qty_per_unit},
         updated_by_user_id=current.id,
     )
     await record_entity_change(
@@ -589,8 +609,8 @@ async def list_where_used(
                 parent_item_id=str(parent.id),
                 parent_item_number=parent.item_number,
                 parent_description=parent.description,
-                parent_category_name=parent.category.name if parent.category else "",
-                qty_per_run=ln.qty_per_run,
+                parent_tier_name=parent.tier.name if parent.tier else "",
+                qty_per_unit=ln.qty_per_unit,
             )
         )
     return out

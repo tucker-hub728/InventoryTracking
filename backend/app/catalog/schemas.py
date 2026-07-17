@@ -1,6 +1,6 @@
-"""Pydantic schemas for the catalogue API (item categories + BOM).
+"""Pydantic schemas for the catalogue API (item tiers + BOM).
 
-Category and BOM writes are electronically signed: every create/update/delete
+Tier and BOM writes are electronically signed: every create/update/delete
 carries an ``evidence_id`` (a fresh reauth ticket) and a ``reason`` recorded on
 the audit row, mirroring the lot-update contract.
 """
@@ -13,8 +13,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
-CategoryKind = Literal["purchased", "built"]
-CategoryTone = Literal["neutral", "accent", "success", "warning", "danger"]
+# The three tiers, fixed by REQ-2026-07-15-ITM-001. Admin-added prefixes live
+# inside one of these and never constitute a fourth tier.
+TierType = Literal["raw_material", "sub_assembly", "finished_good"]
+TierTone = Literal["neutral", "accent", "success", "warning", "danger"]
 
 
 def _trimmed_non_blank(field_name: str):
@@ -30,7 +32,7 @@ def _trimmed_non_blank(field_name: str):
 
 
 def _normalise_prefix(v: str | None) -> str | None:
-    """Trim + upper-case a category prefix, rejecting the empty result.
+    """Trim + upper-case a tier prefix, rejecting the empty result.
 
     ``None`` passes through so the same validator guards the required Create
     field and the optional Update field. The prefix is the type code (``CR`` /
@@ -68,17 +70,17 @@ class _ESignFields(BaseModel):
     )
 
 
-# ── Categories ─────────────────────────────────────────────────────────
+# ── Tiers ─────────────────────────────────────────────────────────
 
 
-class CategoryRead(BaseModel):
+class TierRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
-    # Item-number type prefix (e.g. 'CR'). Fronts every SKU in this category.
+    # Item-number type prefix (e.g. 'CR'). Fronts every SKU in this tier.
     prefix: str
-    kind: CategoryKind
+    type: TierType
     tone: str
     is_seeded: bool
     item_count: int = 0
@@ -86,18 +88,18 @@ class CategoryRead(BaseModel):
     updated_at: datetime
 
 
-class CategoryCreate(_ESignFields):
+class TierCreate(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=128)
-    # Required — the type code that prefixes SKUs in this category.
+    # Required — the type code that prefixes SKUs in this tier.
     prefix: Prefix = Field(max_length=8)
-    kind: CategoryKind
-    tone: CategoryTone = "neutral"
+    type: TierType
+    tone: TierTone = "neutral"
 
 
-class CategoryUpdate(_ESignFields):
-    """Partial update. ``kind`` is immutable (omitted on purpose)."""
+class TierUpdate(_ESignFields):
+    """Partial update. ``type`` is immutable (omitted on purpose)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -105,10 +107,10 @@ class CategoryUpdate(_ESignFields):
         default=None, max_length=128
     )
     prefix: Prefix | None = Field(default=None, max_length=8)
-    tone: CategoryTone | None = None
+    tone: TierTone | None = None
 
 
-class CategoryDelete(_ESignFields):
+class TierDelete(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
 
@@ -116,7 +118,7 @@ class CategoryDelete(_ESignFields):
 
 
 class BomLineRead(BaseModel):
-    """One direct BOM line, with the child's stock + category hydrated."""
+    """One direct BOM line, with the child's stock + tier hydrated."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -125,10 +127,10 @@ class BomLineRead(BaseModel):
     child_item_id: str
     child_item_number: str
     child_description: str
-    child_category_name: str
-    child_category_kind: CategoryKind
-    child_category_tone: str
-    qty_per_run: Decimal
+    child_tier_name: str
+    child_tier_type: TierType
+    child_tier_tone: str
+    qty_per_unit: Decimal
     # The child's physical on-hand and its available stock (on-hand minus
     # expired) — ``child_qty_available`` is the "Available" column, the same
     # number the inventory list shows.
@@ -165,13 +167,13 @@ class BomLineCreate(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
     child_item_id: str = Field(min_length=1)
-    qty_per_run: Decimal = Field(gt=Decimal("0"))
+    qty_per_unit: Decimal = Field(gt=Decimal("0"))
 
 
 class BomLineUpdate(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
-    qty_per_run: Decimal = Field(gt=Decimal("0"))
+    qty_per_unit: Decimal = Field(gt=Decimal("0"))
 
 
 class BomLineDelete(_ESignFields):
@@ -186,5 +188,5 @@ class WhereUsedRead(BaseModel):
     parent_item_id: str
     parent_item_number: str
     parent_description: str
-    parent_category_name: str
-    qty_per_run: Decimal
+    parent_tier_name: str
+    qty_per_unit: Decimal

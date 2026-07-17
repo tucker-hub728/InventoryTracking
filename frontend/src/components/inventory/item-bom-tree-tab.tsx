@@ -2,11 +2,14 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 
+import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
+import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { bomApi, type ApiBomLine } from '@/lib/api/bom';
+import { TIER_TYPE_LABELS } from '@/lib/api/tiers';
 import { ApiError } from '@/lib/api/client';
 import { cn, formatNumber } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
@@ -21,13 +24,15 @@ interface Props {
  * Structure tab — the full multi-level BOM hierarchy for a Product, read-only
  * (the editor lives on the BOM tab). The whole tree is fetched in one nested
  * call (`?nested=true`) and rendered fully expanded, so the entire hierarchy is
- * visible on load; every line shows the child's category, qty/run, in-stock and
+ * visible on load; every line shows the child's tier, qty/unit, in-stock and
  * stock status, and sub-assemblies can still be collapsed by hand.
  */
 export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
   const [lines, setLines] = React.useState<ApiBomLine[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  // Held briefly — the fetch returns in ~20ms, too fast to see otherwise.
+  const showSkeleton = useMinDuration(loading);
 
   React.useEffect(() => {
     const ctrl = new AbortController();
@@ -47,12 +52,8 @@ export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
   }, [itemId]);
 
   if (error) return <EmptyState title="Couldn't load structure" hint={error} />;
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 py-10 text-sm text-text-3" role="status">
-        <Loader2 size={14} className="animate-spin" /> Loading structure…
-      </div>
-    );
+  if (showSkeleton) {
+    return <TableSkeleton rows={5} columns={4} label="Loading structure…" />;
   }
   if (lines.length === 0) {
     return (
@@ -88,23 +89,16 @@ export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
 /** One tree row. Children arrive embedded in the nested payload, so the whole
  *  subtree is present up front and rendered open by default; the caret just
  *  collapses/expands what's already loaded. */
-function BomNode({
-  line,
-  depth,
-}: {
-  line: ApiBomLine;
-  depth: number;
-}) {
+function BomNode({ line, depth }: { line: ApiBomLine; depth: number }) {
   const children = line.children ?? [];
   const hasChildren = line.child_has_bom && children.length > 0;
   // Open by default so the entire hierarchy shows on load.
   const [expanded, setExpanded] = React.useState(true);
   const toggle = () => setExpanded((e) => !e);
 
-  // Products (built items) aren't stocked, so their on-hand Available + Stock
-  // status are hidden. For purchased children the badge = the child's REAL
-  // stock status (same value the inventory list shows).
-  const isBuiltChild = line.child_category_kind === 'built';
+  // Stock status badge = the child's REAL stock status (same value the
+  // inventory list shows) — for every tier, sub-assemblies included, since
+  // those are stockable (REQ-2026-07-01-INV-003).
   const status: InventoryStatus =
     line.child_status_code === 'available'
       ? 'Available'
@@ -133,7 +127,7 @@ function BomNode({
 
         <span
           aria-hidden
-          className={cn('size-2 shrink-0 rounded-full', dotClass(line.child_category_tone))}
+          className={cn('size-2 shrink-0 rounded-full', dotClass(line.child_tier_tone))}
         />
 
         <span className="min-w-0 flex-1 truncate">
@@ -145,28 +139,21 @@ function BomNode({
           </Link>{' '}
           <span className="text-text">{line.child_description}</span>
           <span className="ml-1.5 text-[10px] uppercase tracking-wide text-text-3">
-            {line.child_category_kind === 'built' ? 'Product' : 'Purchased'}
+            {TIER_TYPE_LABELS[line.child_tier_type]}
           </span>
         </span>
 
         <span className="w-20 text-right font-mono text-xs text-text-2">
-          ×{formatNumber(Number(line.qty_per_run))}
+          ×{formatNumber(Number(line.qty_per_unit))}
         </span>
-        {/* Products aren't stocked (built on demand) — on-hand metrics don't
-            apply, so Available + Stock status read "—" for them. */}
+        {/* Shown for every component, sub-assemblies included: a sub-assembly
+            "shall itself be stockable as inventory" (REQ-2026-07-01-INV-003),
+            so it has a real on-hand balance that kitting reads. */}
         <span className="w-20 text-right font-mono text-xs text-text-2">
-          {isBuiltChild ? (
-            <span className="text-text-3">—</span>
-          ) : (
-            formatNumber(Number(line.child_qty_available))
-          )}
+          {formatNumber(Number(line.child_qty_available))}
         </span>
         <span className="flex w-28 justify-end">
-          {isBuiltChild ? (
-            <span className="text-text-3">—</span>
-          ) : (
-            <StatusBadge status={status} />
-          )}
+          <StatusBadge status={status} />
         </span>
       </div>
 

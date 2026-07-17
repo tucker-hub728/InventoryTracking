@@ -13,11 +13,11 @@ import { toast } from '@/components/ui/sonner';
 import { usePermission } from '@/hooks/use-permission';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { categoriesApi, type ApiCategory } from '@/lib/api/categories';
+import { tiersApi, type ApiTier } from '@/lib/api/tiers';
 import { cn } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
 
-import { CategoryFormDialog } from './category-form-dialog';
+import { TierFormDialog } from './tier-form-dialog';
 
 const TONE_DOT: Record<BadgeTone, string> = {
   neutral: 'bg-text-3',
@@ -27,32 +27,32 @@ const TONE_DOT: Record<BadgeTone, string> = {
   danger: 'bg-danger',
 };
 
-// Categories are seed-only for now — hide create / edit / delete until the
+// Tiers are seed-only for now — hide create / edit / delete until the
 // admin CRUD flow is turned on. Flip to `true` to restore the write actions.
-const CATEGORY_ACTIONS_ENABLED = false;
+const TIER_ACTIONS_ENABLED = false;
 
 /**
- * Item Categories admin page. Lists the categories with their kind
- * (Product / Purchased), colour, and item count. Create / edit / delete are
- * electronically signed (via {@link CategoryFormDialog} and the reauth dialog).
+ * Item Tiers admin page. Lists the tiers with their kind
+ * (raw material / sub-assembly / finished good), colour, and item count. Create / edit / delete are
+ * electronically signed (via {@link TierFormDialog} and the reauth dialog).
  */
-export function CategoriesPageClient() {
-  const canWrite = usePermission('inventory', 'sign') && CATEGORY_ACTIONS_ENABLED;
+export function TiersPageClient() {
+  const canWrite = usePermission('inventory', 'sign') && TIER_ACTIONS_ENABLED;
 
-  const [categories, setCategories] = React.useState<ApiCategory[]>([]);
+  const [tiers, setTiers] = React.useState<ApiTier[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
 
   const [creating, setCreating] = React.useState(false);
-  const [editing, setEditing] = React.useState<ApiCategory | null>(null);
-  const [deleting, setDeleting] = React.useState<ApiCategory | null>(null);
+  const [editing, setEditing] = React.useState<ApiTier | null>(null);
+  const [deleting, setDeleting] = React.useState<ApiTier | null>(null);
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setLoadError(null);
     try {
-      const rows = await categoriesApi.list({ signal });
-      setCategories(rows);
+      const rows = await tiersApi.list({ signal });
+      setTiers(rows);
     } catch (err) {
       if ((err as DOMException)?.name === 'AbortError') return;
       setLoadError(err instanceof ApiError ? err.message : 'Failed to load tiers.');
@@ -70,7 +70,7 @@ export function CategoriesPageClient() {
   const onDeleteConfirmed = async (evidence: ReauthResponse) => {
     if (!deleting) return;
     try {
-      await categoriesApi.remove(deleting.id, {
+      await tiersApi.remove(deleting.id, {
         evidence_id: evidence.evidence_id,
         reason: evidence.comment ?? '',
       });
@@ -90,7 +90,7 @@ export function CategoriesPageClient() {
     <>
       <PageHeader
         title="Item Tiers"
-        subtitle="Group items by kind. Product tiers can carry a bill of materials; Purchased are bought as-is."
+        subtitle="The three item tiers. Sub-assemblies and finished goods carry a bill of materials; raw materials are bought as-is."
         actions={
           canWrite ? (
             <Button variant="primary" onClick={() => setCreating(true)}>
@@ -108,7 +108,7 @@ export function CategoriesPageClient() {
               hint={loadError}
               action={<Button onClick={() => void load()}>Retry</Button>}
             />
-          ) : !loading && categories.length === 0 ? (
+          ) : !loading && tiers.length === 0 ? (
             <EmptyState title="No tiers yet" hint="Create your first item tier." />
           ) : (
             <div className="overflow-x-auto">
@@ -122,7 +122,7 @@ export function CategoriesPageClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {categories.map((c) => {
+                  {tiers.map((c) => {
                     const inUse = c.item_count > 0;
                     return (
                       <tr
@@ -190,17 +190,17 @@ export function CategoriesPageClient() {
         </Card>
       </div>
 
-      <CategoryFormDialog
+      <TierFormDialog
         open={creating}
         onOpenChange={setCreating}
         onSaved={() => void load()}
       />
-      <CategoryFormDialog
+      <TierFormDialog
         open={editing !== null}
         onOpenChange={(o) => {
           if (!o) setEditing(null);
         }}
-        category={editing}
+        tier={editing}
         onSaved={() => void load()}
       />
 
@@ -209,7 +209,7 @@ export function CategoriesPageClient() {
         onOpenChange={(o) => {
           if (!o) setDeleting(null);
         }}
-        action="category.delete"
+        action="tier.delete"
         meaning={
           deleting ? `I am deleting the item tier "${deleting.name}".` : ''
         }

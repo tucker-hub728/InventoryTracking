@@ -136,7 +136,7 @@ class ItemCreate(BaseModel):
 
     ``item_number`` is a single free-form field supplied by the client.
     The only server-side rule is uniqueness — there is no prefix /
-    category constraint on what can be created.
+    tier constraint on what can be created.
 
     ``supplier_ids`` is the item's assigned-supplier list (zero-or-more). These
     are the only suppliers the item can later be received against. Optional —
@@ -147,9 +147,9 @@ class ItemCreate(BaseModel):
 
     item_number: ItemNumber
     description: str = Field(min_length=1, max_length=512)
-    # Required: every item is categorised (requirements v2 §6). The category's
-    # kind (purchased/built) decides whether the item may carry a BOM.
-    category_id: str = Field(min_length=1)
+    # Required: every item belongs to a tier (REQ-2026-07-15-ITM-001). The tier's
+    # type (raw_material/sub_assembly/finished_good) decides whether the item may carry a BOM.
+    tier_id: str = Field(min_length=1)
     # Free-text unit of measure (each, mL, box …). Optional.
     uom: Annotated[str | None, _trimmed_non_blank("uom")] = Field(
         default=None, max_length=32
@@ -186,10 +186,10 @@ class ItemUpdate(BaseModel):
         default=None, max_length=32
     )
     is_consumable: bool | None = None
-    # Re-categorise an item. The new category's kind still governs BOM
-    # eligibility (the route blocks moving a BOM-bearing item to a purchased
-    # category).
-    category_id: str | None = Field(default=None, min_length=1)
+    # Re-assign an item to another tier. The new tier's type still governs BOM
+    # eligibility (the route blocks moving a BOM-bearing item to the raw-material
+    # tier).
+    tier_id: str | None = Field(default=None, min_length=1)
     supplier_ids: list[str] | None = Field(default=None, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
@@ -214,12 +214,12 @@ class ItemRead(BaseModel):
     uom: str | None = None
     # Blind-consumed (no per-lot traceability) when true.
     is_consumable: bool = False
-    # Category (requirements v2 §6). ``category_kind`` drives the UI "Type"
-    # column: built → "Product" (may have a BOM), purchased → bought as-is.
-    category_id: str
-    category_name: str
-    category_kind: Literal["purchased", "built"]
-    category_tone: str
+    # Tier (requirements v2 §6). ``tier_type`` drives the UI "Type"
+    # column: sub_assembly/finished_good may have a BOM; raw_material is bought as-is.
+    tier_id: str
+    tier_name: str
+    tier_type: Literal["raw_material", "sub_assembly", "finished_good"]
+    tier_tone: str
     # Assigned suppliers (the list an item can be received against).
     suppliers: list[ItemSupplierRead] = Field(default_factory=list)
     avg_lead_days: int | None
@@ -242,6 +242,9 @@ class ItemRead(BaseModel):
     po_value_amount: Decimal = Decimal("0")
     status_code: Literal["available", "low_stock", "out_of_stock"] = "out_of_stock"
     last_movement_at: datetime | None = None
+    # Direct BOM components. Always 0 for a raw material (it's bought, not
+    # assembled); on a built tier, 0 means the recipe hasn't been defined yet.
+    bom_line_count: int = 0
 
 
 class ItemListResponse(BaseModel):

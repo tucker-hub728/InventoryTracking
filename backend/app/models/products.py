@@ -2,7 +2,7 @@
 
 Historically this module also held ``Product`` / ``ProductMaterial``. Under the
 unified catalogue (requirements v2 §6) those are gone: a "product" is now just
-an :class:`~app.models.inventory.Item` in a *built* category, and a BOM is an
+an :class:`~app.models.inventory.Item` in a *built* tier, and a BOM is an
 :class:`~app.models.inventory.BomLine`. What remains here is the **Customer**
 and its many-to-many link to finished-good items (:class:`CustomerItem`).
 """

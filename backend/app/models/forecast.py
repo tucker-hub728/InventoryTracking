@@ -72,7 +72,7 @@ class ForecastEntry(Base):
         default=uuid.uuid4,
         server_default=text("gen_random_uuid()"),
     )
-    # The forecasted finished good — a *built*-category item (enforced in the
+    # The forecasted finished good — a *built* tier item (enforced in the
     # route). Column name kept as ``product_id`` for continuity.
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

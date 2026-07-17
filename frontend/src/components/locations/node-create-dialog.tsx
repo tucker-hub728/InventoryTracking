@@ -25,6 +25,7 @@ import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { customersApi, type Customer } from '@/lib/api/customers';
 import { itemsApi } from '@/lib/api/items';
+import { isBuiltTier } from '@/lib/api/tiers';
 import {
   locationNodesApi,
   CHILD_TYPES_OF,
@@ -129,7 +130,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
         .list({ limit: 200 }, { signal: ctrl.signal })
         .then((resp) =>
           resp.items
-            .filter((i) => i.category_kind === 'built')
+            .filter((i) => isBuiltTier(i.tier_type))
             .map((i) => ({ id: i.id, name: `${i.item_number} · ${i.description}` })),
         )
         .catch(() => []),

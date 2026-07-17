@@ -348,7 +348,7 @@ Indexes:
 
 | Field | Why omitted |
 |--|--|
-| `category_id` / `category` | Excel has no category column; the 2-letter prefix is the only grouping signal (§4.1) |
+| `tier_id` / `tier` | Excel has no tier column; the 2-letter prefix is the only grouping signal (§4.1) |
 | `location`, `lot`, `expires` | Per-receipt, not per-item. Live on `lots` and `item_batches`; the inventory detail page shows them as "latest batch" via a join |
 | `status` (enum value column) | Derived from `qty_on_hand` + `reorder_threshold` (§4.2); not stored |
 | `qty_on_hand` | Derived from the ledger sum; cached in `app.item_balances` (§6.5) |

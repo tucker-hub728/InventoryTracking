@@ -46,7 +46,7 @@ export function InventoryListClient() {
   // these *primitives* actually changes.
   const query = useInventoryStore((s) => s.query);
   const status = useInventoryStore((s) => s.status);
-  const categoryId = useInventoryStore((s) => s.categoryId);
+  const tierId = useInventoryStore((s) => s.tierId);
   const sortKey = useInventoryStore((s) => s.sortKey);
   const sortDir = useInventoryStore((s) => s.sortDir);
   const page = useInventoryStore((s) => s.page);
@@ -54,13 +54,13 @@ export function InventoryListClient() {
 
   // Refetch when anything the backend filters / sorts / paginates by
   // changes. The store's filter mutators are responsible for resetting
-  // ``page`` to 1 on a query/category/status change so this effect
+  // ``page`` to 1 on a query/tier/status change so this effect
   // fires with the right offset.
   React.useEffect(() => {
     const ctrl = new AbortController();
     void fetchItems({ signal: ctrl.signal });
     return () => ctrl.abort();
-  }, [fetchItems, query, status, categoryId, sortKey, sortDir, page, pageSize]);
+  }, [fetchItems, query, status, tierId, sortKey, sortDir, page, pageSize]);
 
   // KPI tile inputs — until the movements module ships and we have a
   // ``/items/summary`` endpoint, derive what we can from the current
