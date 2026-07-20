@@ -3,38 +3,8 @@
 import * as React from 'react';
 
 import { Badge } from '@/components/ui/badge';
+import { KIT_STATUS_LABEL, KIT_STATUS_TONE, type KitStatus } from '@/lib/api/kits';
 import { cn } from '@/lib/utils';
-
-import {
-  EXPIRY_LABEL,
-  EXPIRY_TONE,
-  KIT_STATUS_LABEL,
-  KIT_STATUS_TONE,
-  expiryStateOf,
-  itemOf,
-  type ItemTier,
-  type KitStatus,
-} from './reconciliation-data';
-
-const TIER_TONE: Record<ItemTier, 'neutral' | 'accent' | 'success'> = {
-  CR: 'neutral',
-  AY: 'accent',
-  FG: 'success',
-};
-
-const TIER_LABEL: Record<ItemTier, string> = {
-  CR: 'Raw material',
-  AY: 'Sub-assembly',
-  FG: 'Finished good',
-};
-
-export function TierBadge({ tier }: { tier: ItemTier }) {
-  return (
-    <Badge tone={TIER_TONE[tier]} title={TIER_LABEL[tier]}>
-      {tier}
-    </Badge>
-  );
-}
 
 export function KitStatusBadge({ status }: { status: KitStatus }) {
   return (
@@ -44,39 +14,27 @@ export function KitStatusBadge({ status }: { status: KitStatus }) {
   );
 }
 
-export function ExpiryBadge({ itemId }: { itemId: string }) {
-  const item = itemOf(itemId);
-  const state = expiryStateOf(item);
-  if (state === 'none') {
-    return <span className="text-xs text-text-3">No expiry</span>;
-  }
-  return (
-    <Badge tone={EXPIRY_TONE[state]} title={item.expires ?? undefined}>
-      {EXPIRY_LABEL[state]}
-    </Badge>
-  );
-}
-
-/** Item number + description, the pairing used in every table here. */
-export function ItemCell({ itemId, indent = 0 }: { itemId: string; indent?: number }) {
-  const item = itemOf(itemId);
+/** Item number + description — the pairing used in every kit table. */
+export function ItemCell({
+  itemNumber,
+  description,
+  indent = 0,
+  badge,
+}: {
+  itemNumber: string;
+  description: string;
+  indent?: number;
+  badge?: React.ReactNode;
+}) {
   return (
     <div className="flex min-w-0 items-center gap-2" style={{ paddingLeft: indent * 18 }}>
-      <TierBadge tier={item.tier} />
       <div className="min-w-0">
-        <div className="font-mono text-xs font-medium text-text">{item.id}</div>
-        <div className="truncate text-xs text-text-3" title={item.desc}>
-          {item.desc}
+        <div className="font-mono text-xs font-medium text-text">{itemNumber}</div>
+        <div className="truncate text-xs text-text-3" title={description}>
+          {description}
         </div>
       </div>
-      {item.isConsumable && (
-        <Badge
-          tone="warning"
-          title="Consumable — never a BOM component (Transaction Spec §4.3). Moved to a Kanban/lab location by a separate transaction and reconciled by periodic count; expiry is still tracked."
-        >
-          consumable
-        </Badge>
-      )}
+      {badge}
     </div>
   );
 }
@@ -106,7 +64,6 @@ export function QtyCell({
   );
 }
 
-/** Small stat block used across the kit tabs. */
 export function Stat({
   label,
   value,
@@ -145,28 +102,32 @@ export function RuleNote({ children }: { children: React.ReactNode }) {
   );
 }
 
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
 export function LocationSelect({
   value,
   options,
   onChange,
   disabled,
+  placeholder,
   className,
   'aria-label': ariaLabel,
 }: {
-  value: string;
-  options: readonly string[];
+  value: string | null;
+  options: SelectOption[];
   onChange: (v: string) => void;
   disabled?: boolean;
+  placeholder?: string;
   className?: string;
   'aria-label'?: string;
 }) {
-  // Native select: the picker sits inside dense table rows where a Radix
-  // popover would fight the horizontal scroll container.
-  const opts = options.includes(value) ? options : [value, ...options];
   return (
     <select
       aria-label={ariaLabel}
-      value={value}
+      value={value ?? ''}
       disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
       className={cn(
@@ -174,9 +135,14 @@ export function LocationSelect({
         className,
       )}
     >
-      {opts.map((o) => (
-        <option key={o} value={o}>
-          {o}
+      {placeholder && (
+        <option value="" disabled>
+          {placeholder}
+        </option>
+      )}
+      {options.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
         </option>
       ))}
     </select>
@@ -222,4 +188,24 @@ export function NumberInput({
       )}
     />
   );
+}
+
+/** Formats an ISO timestamp for the activity log. */
+export function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+export function formatDate(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
 }

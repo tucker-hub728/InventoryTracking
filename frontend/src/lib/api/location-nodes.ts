@@ -44,7 +44,7 @@ export type CreatableNodeType =
   | 'box'
   | 'sub_location';
 
-export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials';
+export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials' | 'production';
 export type MovementType =
   | 'receipt'
   | 'dispense'
@@ -76,6 +76,8 @@ export const FLAT_CATEGORY_LABEL: Record<FlatCategory, string> = {
   qc: 'QC',
   engineering: 'Engineering',
   materials: 'Materials',
+  // Advisory production floors a kit is issued to (docs/modules/kitting.md §4.1).
+  production: 'Production',
 };
 
 // 'kanban' is intentionally omitted — the Kanban flow was retired, so it is no

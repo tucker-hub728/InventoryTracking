@@ -32,7 +32,9 @@ CreatableNodeType = Literal[
     "tank_quadrant", "rack", "cassette", "cryo_box_rack", "box", "sub_location"
 ]
 # Legacy — kept so pre-existing flat rows still read; not creatable.
-FlatCategory = Literal["kanban", "lab", "qc", "engineering", "materials"]
+FlatCategory = Literal[
+    "kanban", "lab", "qc", "engineering", "materials", "production"
+]
 # Ledger movement kinds surfaced for a node's click-through history.
 MovementType = Literal[
     "receipt", "dispense", "discard", "adjustment", "transfer_out", "transfer_in"

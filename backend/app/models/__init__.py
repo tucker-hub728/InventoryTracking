@@ -28,6 +28,7 @@ from app.models.inventory import (
     Supplier,
 )
 from app.models.invitations import Invitation
+from app.models.kitting import Kit, KitLine
 from app.models.locations import (
     LocationNode,
     LotAllocation,
@@ -45,6 +46,8 @@ __all__ = [
     "ItemStock",
     "ItemSupplier",
     "ItemTier",
+    "Kit",
+    "KitLine",
     "LocationNode",
     "Lot",
     "LotAllocation",

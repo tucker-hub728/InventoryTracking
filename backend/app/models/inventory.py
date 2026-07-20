@@ -724,6 +724,13 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     "discard",
     "transfer_out",
     "transfer_in",
+    # Kitting / back-flush (docs/modules/kitting.md §4.3). Issue types are
+    # unit-OUT (from source, qty_delta < 0); output/backflush are unit-IN
+    # (to a node, qty_delta > 0).
+    "kit_issue",
+    "kit_additional_issue",
+    "production_output",
+    "backflush",
 )
 
 
@@ -750,6 +757,11 @@ class StockMovement(Base):
         ),
         Index("ix_movements_type", "movement_type"),
         Index("ix_movements_performed_at_desc", text("performed_at DESC")),
+        Index(
+            "ix_movements_kit_id",
+            "kit_id",
+            postgresql_where=text("kit_id IS NOT NULL"),
+        ),
         Index(
             "ix_movements_from_location_node_id",
             "from_location_node_id",
@@ -809,6 +821,20 @@ class StockMovement(Base):
     paired_movement_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.stock_movements.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    # Kitting trace links (docs/modules/kitting.md §4.3). Null for every
+    # non-kit movement; set on kit_issue / kit_additional_issue /
+    # production_output / backflush rows so the kit's Activity log can group
+    # its ledger entries.
+    kit_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.kits.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    kit_line_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.kit_lines.id", ondelete="RESTRICT"),
         nullable=True,
     )
     # The reauth-event row that authorised this movement (Chunk 4+).
