@@ -25,6 +25,10 @@ export interface InventoryItem {
   tierName: string;
   tierType: TierType;
   tierTone: string;
+  /** The item's type prefix (REQ-2026-07-09-ITM-001) — the tab/filter criterion. */
+  prefixId: string;
+  prefixCode: string;
+  prefixLabel: string | null;
   supplier: string;
   lead: number;
   invValue: number;

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from sqlalchemy import Select, asc, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory import Item
+from app.models.inventory import Item, ItemPrefix
 from app.models.products import Customer, CustomerItem
 
 
@@ -121,14 +121,18 @@ async def items_for_customers(
     """
     if not customer_ids:
         return {}
+    # The item number is derived (``<prefix code>-<suffix>``), not a column, so
+    # build it in SQL from the joined prefix code + the stored suffix.
     stmt = (
         select(
             CustomerItem.customer_id,
             Item.id,
-            Item.item_number,
+            ItemPrefix.code,
+            Item.sku_suffix,
             Item.description,
         )
         .join(Item, Item.id == CustomerItem.item_id)
+        .join(ItemPrefix, ItemPrefix.id == Item.prefix_id)
         .where(
             CustomerItem.customer_id.in_(customer_ids),
             Item.deleted_at.is_(None),
@@ -136,8 +140,8 @@ async def items_for_customers(
         .order_by(func.lower(Item.description))
     )
     out: dict[uuid.UUID, list[tuple[uuid.UUID, str]]] = {}
-    for customer_id, iid, number, desc in (await session.execute(stmt)).all():
-        out.setdefault(customer_id, []).append((iid, f"{number} · {desc}"))
+    for customer_id, iid, code, suffix, desc in (await session.execute(stmt)).all():
+        out.setdefault(customer_id, []).append((iid, f"{code}-{suffix} · {desc}"))
     return out
 
 

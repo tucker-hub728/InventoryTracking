@@ -56,7 +56,6 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
   const isEdit = Boolean(tier);
 
   const [name, setName] = React.useState('');
-  const [prefix, setPrefix] = React.useState('');
   const [type, setType] = React.useState<TierType>('raw_material');
   const [tone, setTone] = React.useState<TierTone>('accent');
   const [error, setError] = React.useState<string | null>(null);
@@ -65,7 +64,6 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
   React.useEffect(() => {
     if (!open) return;
     setName(tier?.name ?? '');
-    setPrefix(tier?.prefix ?? '');
     setType((tier?.type as TierType) ?? 'raw_material');
     setTone((tier?.tone as TierTone) ?? 'accent');
     setError(null);
@@ -74,10 +72,6 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
   const openSign = () => {
     if (!name.trim()) {
       setError('Name is required.');
-      return;
-    }
-    if (!prefix.trim()) {
-      setError('Prefix is required.');
       return;
     }
     setError(null);
@@ -90,7 +84,6 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
       if (tier) {
         await tiersApi.update(tier.id, {
           name: name.trim(),
-          prefix: prefix.trim(),
           tone,
           evidence_id: evidence.evidence_id,
           reason,
@@ -99,7 +92,6 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
       } else {
         await tiersApi.create({
           name: name.trim(),
-          prefix: prefix.trim(),
           type,
           tone,
           evidence_id: evidence.evidence_id,
@@ -113,8 +105,6 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
       if (err instanceof ApiError) {
         if (err.code === 'tier_name_conflict') {
           setError(`A tier named "${name.trim()}" already exists.`);
-        } else if (err.code === 'tier_prefix_conflict') {
-          setError(`The prefix "${prefix.trim().toUpperCase()}" is already in use.`);
         } else if (
           err.code === 'reauth_evidence_replayed' ||
           err.code === 'reauth_evidence_expired'
@@ -142,31 +132,18 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
-            <div className="grid grid-cols-[1fr_120px] gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="cat-name">Name</Label>
-                <Input
-                  id="cat-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Consumables"
-                  autoFocus
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="cat-prefix">Prefix</Label>
-                <Input
-                  id="cat-prefix"
-                  value={prefix}
-                  onChange={(e) => setPrefix(e.target.value.toUpperCase())}
-                  placeholder="e.g. CR"
-                  maxLength={8}
-                  className="font-mono uppercase"
-                />
-              </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cat-name">Name</Label>
+              <Input
+                id="cat-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Consumables"
+                autoFocus
+              />
             </div>
             <p className="-mt-2 text-xs text-text-3">
-              The prefix fronts every SKU in this tier (e.g. {prefix.trim() || 'CR'}-001).
+              Prefixes for this tier are managed from the tier&apos;s row on the Item Tiers page.
             </p>
 
             <div className="space-y-1.5">

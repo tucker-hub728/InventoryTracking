@@ -53,9 +53,11 @@ export interface TierFilter {
 }
 
 export interface TierConfig {
-  /** Tier prefix used to resolve the tier (``CR`` / ``AY`` / ``FG``). */
+  /** Canonical SKU prefix for this tier (``CR`` / ``AY`` / ``FG``) — informational
+   *  only; the tier is resolved by ``type`` and the real prefixes come from the
+   *  tier's admin-managed ``prefixes`` list. */
   prefix: string;
-  /** Tier type, used as the fallback when resolving by prefix fails. */
+  /** Tier type — the key the page resolves its tier by. */
   type: TierType;
   /** Filter pills beside the search box. Non-empty by construction — the
    *  first entry is the default ("All"). */
@@ -75,12 +77,13 @@ export interface TierConfig {
   detailSegment: string;
 }
 
-/** Locate the tier's tier by prefix, falling back to the seeded tier
- *  of the same type if prefixes ever drift. */
+/** Locate the page's tier by type. Exactly three tiers exist, one seeded per
+ *  type (REQ-2026-07-15-ITM-001), so the type match is unambiguous; the
+ *  non-seeded fallback covers a hand-created tier of the same type. */
 function findTier(tiers: ApiTier[], cfg: TierConfig): ApiTier | null {
   return (
-    tiers.find((c) => c.prefix?.toUpperCase() === cfg.prefix) ??
     tiers.find((c) => c.type === cfg.type && c.is_seeded) ??
+    tiers.find((c) => c.type === cfg.type) ??
     null
   );
 }
@@ -366,7 +369,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
         onOpenChange={setCreating}
         lockedTier={tier}
         title={config.newLabel}
-        description={tier ? `Create a new ${config.singular} (${tier.prefix} tier).` : undefined}
+        description={tier ? `Create a new ${config.singular} in the ${tier.name} tier.` : undefined}
         submitLabel={config.newLabel.replace(/^New /, 'Create ')}
         createdLabel={config.createdLabel}
         onCreated={() => void fetchRows()}

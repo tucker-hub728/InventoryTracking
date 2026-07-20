@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 from app.models.inventory import (
     BomLine,
     Item,
+    ItemPrefix,
     ItemStock,
     ItemSupplier,
     ItemTier,
@@ -132,13 +133,21 @@ def _apply_filters(
     supplier_id: uuid.UUID | None,
     status: str | None,
     tier_id: uuid.UUID | None = None,
+    prefix_id: uuid.UUID | None = None,
     is_consumable: bool | None = None,
     has_bom: bool | None = None,
     below_reorder: bool | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
     if tier_id is not None:
-        stmt = stmt.where(Item.tier_id == tier_id)
+        # Tier lives on the prefix now — filter by the tier's prefixes.
+        stmt = stmt.where(
+            Item.prefix_id.in_(
+                select(ItemPrefix.id).where(ItemPrefix.tier_id == tier_id)
+            )
+        )
+    if prefix_id is not None:
+        stmt = stmt.where(Item.prefix_id == prefix_id)
     if is_consumable is not None:
         stmt = stmt.where(Item.is_consumable.is_(is_consumable))
     if has_bom is not None:
@@ -162,8 +171,13 @@ def _apply_filters(
         like = f"%{q.lower()}%"
         stmt = stmt.where(
             or_(
-                func.lower(Item.item_number).like(like),
+                # The number is derived, so match its parts: the suffix, the
+                # description, or the prefix code (so "PRR" finds all PRR items).
+                func.lower(Item.sku_suffix).like(like),
                 func.lower(Item.description).like(like),
+                Item.prefix_id.in_(
+                    select(ItemPrefix.id).where(func.lower(ItemPrefix.code).like(like))
+                ),
             )
         )
     if status is not None or below_reorder is not None:
@@ -186,7 +200,9 @@ def _apply_filters(
 
 
 _SORT_COLUMNS = {
-    "item_number": Item.item_number,
+    # "item_number" sorts by the stored suffix — the derived number isn't a
+    # column. Within a tier's list (one prefix) this matches number order.
+    "item_number": Item.sku_suffix,
     "description": Item.description,
     "updated_at": Item.updated_at,
     "created_at": Item.created_at,
@@ -200,6 +216,7 @@ async def list_items(
     supplier_id: uuid.UUID | None = None,
     status: str | None = None,
     tier_id: uuid.UUID | None = None,
+    prefix_id: uuid.UUID | None = None,
     is_consumable: bool | None = None,
     has_bom: bool | None = None,
     below_reorder: bool | None = None,
@@ -218,6 +235,7 @@ async def list_items(
         supplier_id=supplier_id,
         status=status,
         tier_id=tier_id,
+        prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
         below_reorder=below_reorder,
@@ -228,6 +246,7 @@ async def list_items(
         supplier_id=supplier_id,
         status=status,
         tier_id=tier_id,
+        prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
         below_reorder=below_reorder,
@@ -246,20 +265,47 @@ async def get_item(session: AsyncSession, item_id: uuid.UUID) -> Item | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def get_item_by_number(session: AsyncSession, item_number: str) -> Item | None:
+async def get_item_by_prefix_suffix(
+    session: AsyncSession, prefix_id: uuid.UUID, sku_suffix: str
+) -> Item | None:
+    """Live item with this (prefix, suffix) — the uniqueness pair."""
     stmt = select(Item).where(
-        Item.item_number == item_number,
+        Item.prefix_id == prefix_id,
+        Item.sku_suffix == sku_suffix,
         Item.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def get_item_by_number(session: AsyncSession, item_number: str) -> Item | None:
+    """Resolve a full SKU (``<prefix code>-<suffix>``) back to its item.
+
+    The number is derived, not stored, so split on the first ``-`` into the
+    prefix code and the suffix, resolve the (live) prefix by code, then the item
+    by ``(prefix_id, suffix)``.
+    """
+    code, sep, suffix = item_number.partition("-")
+    if not sep:
+        return None
+    prefix = (
+        await session.execute(
+            select(ItemPrefix).where(
+                func.lower(ItemPrefix.code) == code.lower(),
+                ItemPrefix.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if prefix is None:
+        return None
+    return await get_item_by_prefix_suffix(session, prefix.id, suffix)
+
+
 async def create_item(
     session: AsyncSession,
     *,
-    item_number: str,
+    sku_suffix: str,
     description: str,
-    tier_id: uuid.UUID,
+    prefix_id: uuid.UUID,
     created_by_user_id: uuid.UUID,
     uom: str | None = None,
     is_consumable: bool = False,
@@ -269,13 +315,15 @@ async def create_item(
 ) -> Item:
     """Insert an item row (no suppliers yet). Caller commits.
 
-    Assigned suppliers are written separately via ``replace_item_suppliers`` so
-    the FK validation / audit happen at the route layer.
+    The tier is derived from ``prefix_id`` (a prefix lives inside one tier), so
+    there is no ``tier_id`` to set. Assigned suppliers are written separately via
+    ``replace_item_suppliers`` so the FK validation / audit happen at the route
+    layer.
     """
     item = Item(
-        item_number=item_number,
+        sku_suffix=sku_suffix,
         description=description,
-        tier_id=tier_id,
+        prefix_id=prefix_id,
         uom=uom,
         is_consumable=is_consumable,
         avg_lead_days=avg_lead_days,
@@ -338,10 +386,11 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     """Trim an item row to fields worth recording in the audit log."""
     return {
         "item_number": item.item_number,
+        "sku_suffix": item.sku_suffix,
         "description": item.description,
         "uom": item.uom,
         "is_consumable": item.is_consumable,
-        "tier_id": str(item.tier_id),
+        "prefix_id": str(item.prefix_id),
         "supplier_ids": sorted(str(iv.supplier_id) for iv in item.suppliers),
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
@@ -454,6 +503,17 @@ async def get_tier(
     stmt = select(ItemTier).where(
         ItemTier.id == tier_id,
         ItemTier.deleted_at.is_(None),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_prefix(
+    session: AsyncSession, prefix_id: uuid.UUID
+) -> ItemPrefix | None:
+    """Fetch one live (non-deleted) prefix (tier eager-joined)."""
+    stmt = select(ItemPrefix).where(
+        ItemPrefix.id == prefix_id,
+        ItemPrefix.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 

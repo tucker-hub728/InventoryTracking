@@ -9,11 +9,9 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from '@/components/ui/sonner';
 import { cn } from '@/lib/utils';
 
-import { ConsumablesReconClient } from './consumables-recon-client';
 import { NewKitDialog } from './new-kit-dialog';
 import { ItemCell, KitStatusBadge, RuleNote } from './recon-bits';
 import { KIT_STATUS_LABEL, formatDate, itemOf, type KitStatus } from './reconciliation-data';
@@ -70,34 +68,27 @@ export function ReconciliationPageClient() {
       />
 
       <div className="px-6 py-5 sm:px-8">
-        <Tabs defaultValue="kits">
-          <TabsList>
-            <TabsTrigger value="kits">Kits</TabsTrigger>
-            <TabsTrigger value="consumables">Consumables reconciliation</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="kits">
-            <div className="mb-3 flex flex-wrap items-center gap-1.5">
-              {STATUS_FILTERS.map((s) => {
-                const n = counts[s] ?? 0;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setFilter(s)}
-                    className={cn(
-                      'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors',
-                      filter === s
-                        ? 'border-accent bg-accent-soft font-medium text-accent'
-                        : 'border-border bg-bg-elev text-text-2 hover:bg-surface',
-                    )}
-                  >
-                    {s === 'all' ? 'All' : KIT_STATUS_LABEL[s]}
-                    <span className="font-mono tabular-nums text-text-3">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          {STATUS_FILTERS.map((s) => {
+            const n = counts[s] ?? 0;
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setFilter(s)}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors',
+                  filter === s
+                    ? 'border-accent bg-accent-soft font-medium text-accent'
+                    : 'border-border bg-bg-elev text-text-2 hover:bg-surface',
+                )}
+              >
+                {s === 'all' ? 'All' : KIT_STATUS_LABEL[s]}
+                <span className="font-mono tabular-nums text-text-3">{n}</span>
+              </button>
+            );
+          })}
+        </div>
 
             <Card className="p-4">
               {visible.length === 0 ? (
@@ -196,20 +187,14 @@ export function ReconciliationPageClient() {
               )}
             </Card>
 
-            <div className="mt-3">
-              <RuleNote>
-                A kit moves Draft → Issued → In Production → Closed. Issuing decrements the source
-                location straight away, so kitted material stops counting as on hand
-                (REQ-2026-07-09-TRX-001). Nothing is bound to a production lot at kitting time, which
-                is why a cancelled kit can always hand its material back (REQ-2026-07-09-TRX-002).
-              </RuleNote>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="consumables">
-            <ConsumablesReconClient />
-          </TabsContent>
-        </Tabs>
+        <div className="mt-3">
+          <RuleNote>
+            A kit moves Draft → Issued → In Production → Closed. Issuing decrements the source
+            location straight away, so kitted material stops counting as on hand
+            (REQ-2026-07-09-TRX-001). Nothing is bound to a production lot at kitting time, which is
+            why a cancelled kit can always hand its material back (REQ-2026-07-09-TRX-002).
+          </RuleNote>
+        </div>
       </div>
 
       <NewKitDialog open={creating} onOpenChange={setCreating} />

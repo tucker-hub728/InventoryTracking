@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ArrowRight, Plus } from 'lucide-react';
+import { Plus } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -32,11 +32,9 @@ import { useReconStore } from './reconciliation-store';
 export function KitIssueTab({
   kit,
   actor,
-  onIssue,
 }: {
   kit: Kit;
   actor: string;
-  onIssue: () => void;
 }) {
   const stock = useReconStore((s) => s.stock);
   const setLineIssued = useReconStore((s) => s.setLineIssued);
@@ -102,20 +100,13 @@ export function KitIssueTab({
       )}
 
       <Card className="p-4">
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-medium text-text">Kit structure</h2>
-            <p className="mt-0.5 text-xs text-text-3">
-              {isDraft
-                ? 'Quantity Needed comes from the BOM. Quantity Issued is what you actually pull — edit it before issuing.'
-                : 'Issued and locked. Extra material during production goes through an additional issue.'}
-            </p>
-          </div>
-          {isDraft && (
-            <Button variant="primary" onClick={onIssue}>
-              Issue material <ArrowRight size={14} />
-            </Button>
-          )}
+        <div className="mb-3">
+          <h2 className="text-sm font-medium text-text">Kit structure</h2>
+          <p className="mt-0.5 text-xs text-text-3">
+            {isDraft
+              ? 'Quantity Needed comes from the BOM. Quantity Issued is what you actually pull — edit it before issuing.'
+              : 'Issued and locked. Extra material during production goes through an additional issue.'}
+          </p>
         </div>
 
         <div className="overflow-x-auto">

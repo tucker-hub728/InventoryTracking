@@ -109,20 +109,10 @@ class ItemTier(Base):
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
-        Index(
-            "uq_item_tiers_prefix",
-            func.lower(text("prefix")),
-            unique=True,
-            postgresql_where=text("deleted_at IS NULL"),
-        ),
         Index("ix_item_tiers_updated_at_desc", text("updated_at DESC")),
         CheckConstraint(
             "char_length(trim(name)) > 0",
             name="ck_item_tiers_name_not_blank",
-        ),
-        CheckConstraint(
-            "char_length(trim(prefix)) > 0",
-            name="ck_item_tiers_prefix_not_blank",
         ),
         CheckConstraint(
             "type IN ('raw_material', 'sub_assembly', 'finished_good')",
@@ -138,10 +128,9 @@ class ItemTier(Base):
         server_default=text("gen_random_uuid()"),
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    # Item-number type prefix (e.g. 'CR', 'AY', 'FG'). Drives per-tier
-    # filtering and the auto-prefixed SKU on the item-create forms
-    # (REQ-2026-07-09-ITM-001/002). Unique (case-insensitive) among live rows.
-    prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    # Item-number type prefixes (e.g. 'CR', 'AY', 'FG') now live in
+    # ``app.item_prefixes`` — one tier owns many prefixes (REQ-2026-07-15-ITM-002).
+    # See the ``prefixes`` relationship below.
     # 'raw_material' | 'sub_assembly' | 'finished_good' — immutable after
     # creation (enforced in the route).
     type: Mapped[str] = mapped_column(Text, nullable=False)
@@ -181,6 +170,121 @@ class ItemTier(Base):
         nullable=True,
     )
 
+    # The tier's admin-managed prefixes (live rows, seeded-first then A-Z).
+    # Defined after ItemPrefix below so the forward reference resolves without
+    # a string lookup.
+
+
+class ItemPrefix(Base):
+    """One item-number type prefix living **inside** a tier.
+
+    A tier owns many prefixes (REQ-2026-07-15-ITM-002 — e.g. the finished-good
+    tier may carry a distinct prefix for drug finished goods vs. other build
+    aids), but a prefix belongs to exactly one tier and never constitutes a
+    fourth tier (REQ-2026-07-15-ITM-001). The admin maintains this list through
+    the Tier admin screen (REQ-2026-07-09-ITM-003); every item references one
+    prefix, and the composite FK on :class:`Item` guarantees the chosen prefix
+    lives in the item's tier.
+
+    ``code`` is the type code shown on the item-create form (``CR`` / ``AY`` /
+    ``FG`` / ``DR`` …). Exactly one prefix per tier is ``is_default`` — the value
+    the create form pre-fills when that tier is chosen (REQ-2026-07-09-ITM-002).
+    """
+
+    __tablename__ = "item_prefixes"
+    __table_args__ = (
+        # Code is globally unique (case-insensitive) among live rows — a prefix
+        # names an item's type across the whole catalogue, so two tiers can't
+        # both own 'CR'.
+        Index(
+            "uq_item_prefixes_code",
+            func.lower(text("code")),
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        # Exactly one default prefix per tier (the form pre-fill).
+        Index(
+            "uq_item_prefixes_default_per_tier",
+            "tier_id",
+            unique=True,
+            postgresql_where=text("is_default AND deleted_at IS NULL"),
+        ),
+        Index("ix_item_prefixes_tier_id", "tier_id"),
+        CheckConstraint(
+            "char_length(trim(code)) > 0",
+            name="ck_item_prefixes_code_not_blank",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    tier_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.item_tiers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    # Item-number type code ('CR', 'AY', 'FG', 'DR' …). Stored upper-case.
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    # Optional human label, e.g. 'Drug Finished Good'.
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The prefix pre-filled when this tier is chosen on the item-create form.
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    # Seeded prefixes (CR/AY/FG) may be renamed but not deleted.
+    is_seeded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("FALSE")
+    )
+    # A prefix has no colour of its own — it inherits the owning tier's tone
+    # (exposed via ``tier.tone`` in the API), so there is no ``tone`` column.
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Nullable so the migration can seed prefixes with no creator (system seed).
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    tier: Mapped[ItemTier] = relationship(
+        foreign_keys=[tier_id], lazy="joined", viewonly=True
+    )
+
+
+# Eager-loaded ``ItemTier.prefixes`` — the tier's live prefixes, seeded-first
+# then A-Z by code. Defined here so the forward reference to ItemPrefix resolves
+# without a string lookup.
+ItemTier.prefixes = relationship(  # type: ignore[assignment]
+    ItemPrefix,
+    primaryjoin=lambda: (ItemTier.id == ItemPrefix.tier_id)
+    & ItemPrefix.deleted_at.is_(None),
+    foreign_keys=[ItemPrefix.tier_id],
+    order_by=[ItemPrefix.is_seeded.desc(), func.lower(ItemPrefix.code)],
+    lazy="selectin",
+    viewonly=True,
+)
+
 
 class Item(Base):
     """Inventory catalogue row. One per Excel master tracker line.
@@ -195,8 +299,6 @@ class Item(Base):
 
     __tablename__ = "items"
     __table_args__ = (
-        # No CHECK on item_number — it's free-form, uniqueness only (§3.1).
-        # The partial-unique index ``uq_items_item_number`` is the sole guard.
         CheckConstraint(
             "reorder_threshold >= 0",
             name="ck_items_reorder_threshold_nonneg",
@@ -205,13 +307,23 @@ class Item(Base):
             "near_expiry_threshold_days >= 0",
             name="ck_items_near_expiry_threshold_days_nonneg",
         ),
+        CheckConstraint(
+            "char_length(trim(sku_suffix)) > 0",
+            name="ck_items_sku_suffix_not_blank",
+        ),
+        # The full SKU is derived as ``<prefix code>-<sku_suffix>`` — the number
+        # is not stored, it follows the prefix (rename CR→CRX re-labels every
+        # item). Uniqueness is therefore per (prefix, suffix); since prefix codes
+        # are globally unique, that guarantees the derived number is unique too.
         Index(
-            "uq_items_item_number",
-            "item_number",
+            "uq_items_prefix_suffix",
+            "prefix_id",
+            "sku_suffix",
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
         Index("ix_items_updated_at_desc", text("updated_at DESC")),
+        Index("ix_items_prefix_id", "prefix_id"),
         {"schema": "app"},
     )
 
@@ -222,7 +334,10 @@ class Item(Base):
         server_default=text("gen_random_uuid()"),
     )
 
-    item_number: Mapped[str] = mapped_column(Text, nullable=False)
+    # The SKU tail only (e.g. '001'). The displayed item number is derived from
+    # the prefix code + this suffix — see the ``item_number`` property. Stored
+    # instead of the full number so renaming a prefix re-labels its items.
+    sku_suffix: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     # Free-text unit of measure (each, mL, box …). Optional — not every item
     # carries one, and there is deliberately no controlled UOM list yet.
@@ -235,11 +350,13 @@ class Item(Base):
         nullable=False,
         server_default=text("FALSE"),
     )
-    # Every item belongs to exactly one tier (REQ-2026-07-15-ITM-001). The
-    # tier's ``type`` governs whether this item may carry a BOM.
-    tier_id: Mapped[uuid.UUID] = mapped_column(
+    # The item's type prefix (REQ-2026-07-09-ITM-001) — mandatory. The tier is
+    # derived from it (a prefix lives inside exactly one tier), so there is no
+    # separate ``tier_id`` column; the tier's ``type`` still governs BOM
+    # eligibility via ``prefix.tier``.
+    prefix_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("app.item_tiers.id", ondelete="RESTRICT"),
+        ForeignKey("app.item_prefixes.id", ondelete="RESTRICT"),
         nullable=False,
     )
 
@@ -311,12 +428,32 @@ class Item(Base):
         foreign_keys=[updated_by_user_id],
         viewonly=True,
     )
-    # Eager-joined so a read hydrates the tier (name/type/tone) in one query.
-    tier: Mapped[ItemTier] = relationship(
-        foreign_keys=[tier_id],
+    # Eager-joined so a read hydrates the prefix (code/label) and, through it,
+    # the tier (name/type/tone) in one query. ``ItemPrefix.tier`` is itself
+    # joined, so ``item.prefix.tier`` costs no extra round-trip.
+    prefix: Mapped[ItemPrefix] = relationship(
+        foreign_keys=[prefix_id],
+        primaryjoin=lambda: Item.prefix_id == ItemPrefix.id,
         lazy="joined",
         viewonly=True,
     )
+
+    # ── Derived, read-only (the number is not stored) ─────────────────
+    @property
+    def item_number(self) -> str:
+        """Full SKU: ``<prefix code>-<suffix>``. Follows the prefix, so a prefix
+        rename re-labels the item. Requires ``prefix`` loaded (it is, eagerly)."""
+        code = self.prefix.code if self.prefix else ""
+        return f"{code}-{self.sku_suffix}"
+
+    @property
+    def tier(self) -> ItemTier | None:
+        """The item's tier, reached through its prefix (no ``tier_id`` column)."""
+        return self.prefix.tier if self.prefix else None
+
+    @property
+    def tier_id(self) -> uuid.UUID | None:
+        return self.prefix.tier_id if self.prefix else None
 
 
 class BomLine(Base):

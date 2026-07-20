@@ -42,6 +42,9 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     tierName: api.tier_name,
     tierType: api.tier_type,
     tierTone: api.tier_tone,
+    prefixId: api.prefix_id,
+    prefixCode: api.prefix_code,
+    prefixLabel: api.prefix_label,
     // Items can have multiple assigned suppliers — show them joined. Empty
     // when the item has no suppliers yet.
     supplier: api.suppliers.map((v) => v.supplier_name).join(', '),

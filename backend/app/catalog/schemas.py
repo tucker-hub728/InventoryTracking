@@ -73,17 +73,39 @@ class _ESignFields(BaseModel):
 # ── Tiers ─────────────────────────────────────────────────────────
 
 
+class PrefixRead(BaseModel):
+    """One admin-managed prefix living inside a tier."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    tier_id: str
+    # Item-number type code (e.g. 'CR', 'DR'). Stored upper-case.
+    code: str
+    label: str | None = None
+    # The prefix pre-filled when this tier is chosen on the item-create form.
+    is_default: bool = False
+    is_seeded: bool = False
+    # Colour inherited from the owning tier (a prefix has no colour of its own).
+    tone: str = "neutral"
+    # Live items carrying this prefix — drives the "in use" delete guard.
+    item_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
 class TierRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
-    # Item-number type prefix (e.g. 'CR'). Fronts every SKU in this tier.
-    prefix: str
     type: TierType
     tone: str
     is_seeded: bool
     item_count: int = 0
+    # The tier's admin-managed prefixes (many per tier, REQ-2026-07-15-ITM-002),
+    # seeded-first then A-Z. One is ``is_default`` (the create-form pre-fill).
+    prefixes: list[PrefixRead] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -92,8 +114,6 @@ class TierCreate(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, _trimmed_non_blank("name")] = Field(max_length=128)
-    # Required — the type code that prefixes SKUs in this tier.
-    prefix: Prefix = Field(max_length=8)
     type: TierType
     tone: TierTone = "neutral"
 
@@ -106,11 +126,43 @@ class TierUpdate(_ESignFields):
     name: Annotated[str | None, _trimmed_non_blank("name")] = Field(
         default=None, max_length=128
     )
-    prefix: Prefix | None = Field(default=None, max_length=8)
     tone: TierTone | None = None
 
 
 class TierDelete(_ESignFields):
+    model_config = ConfigDict(extra="forbid")
+
+
+# ── Prefixes (nested under a tier) ──────────────────────────────────────
+
+
+class PrefixCreate(_ESignFields):
+    model_config = ConfigDict(extra="forbid")
+
+    # Required — the type code (upper-cased, non-blank).
+    code: Prefix = Field(max_length=8)
+    label: Annotated[str | None, _trimmed_non_blank("label")] = Field(
+        default=None, max_length=128
+    )
+    # When true this becomes the tier's default (clearing any previous default).
+    is_default: bool = False
+
+
+class PrefixUpdate(_ESignFields):
+    """Partial update of a prefix. ``tier_id`` is immutable (a prefix never
+    moves between tiers — that would let it cross a category boundary). The
+    colour is inherited from the tier, so there is no ``tone`` here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Prefix | None = Field(default=None, max_length=8)
+    label: Annotated[str | None, _trimmed_non_blank("label")] = Field(
+        default=None, max_length=128
+    )
+    is_default: bool | None = None
+
+
+class PrefixDelete(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
 

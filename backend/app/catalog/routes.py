@@ -24,6 +24,10 @@ from app.catalog.schemas import (
     BomLineRead,
     BomLineUpdate,
     ItemBomResponse,
+    PrefixCreate,
+    PrefixDelete,
+    PrefixRead,
+    PrefixUpdate,
     TierCreate,
     TierDelete,
     TierRead,
@@ -32,7 +36,7 @@ from app.catalog.schemas import (
 )
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
-from app.models.inventory import BUILT_TIER_TYPES, BomLine, ItemTier
+from app.models.inventory import BUILT_TIER_TYPES, BomLine, ItemPrefix, ItemTier
 from app.security.permissions import RequirePermission
 
 tiers_router = APIRouter(prefix="/item-tiers", tags=["tiers"])
@@ -51,15 +55,41 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
         ) from exc
 
 
-def _tier_to_read(cat: ItemTier, item_count: int) -> TierRead:
+def _prefix_to_read(prefix: ItemPrefix, item_count: int = 0) -> PrefixRead:
+    # A prefix has no colour of its own — it inherits the owning tier's tone.
+    tone = prefix.tier.tone if prefix.tier else "neutral"
+    return PrefixRead(
+        id=str(prefix.id),
+        tier_id=str(prefix.tier_id),
+        code=prefix.code,
+        label=prefix.label,
+        is_default=prefix.is_default,
+        is_seeded=prefix.is_seeded,
+        tone=tone,
+        item_count=item_count,
+        created_at=prefix.created_at,
+        updated_at=prefix.updated_at,
+    )
+
+
+def _tier_to_read(
+    cat: ItemTier,
+    item_count: int,
+    prefixes: list[ItemPrefix] | None = None,
+    prefix_counts: dict[uuid.UUID, int] | None = None,
+) -> TierRead:
+    # The eager ``ItemTier.prefixes`` relationship already returns live rows
+    # seeded-first then A-Z; fall back to it when the caller didn't pass a list.
+    rows = prefixes if prefixes is not None else list(cat.prefixes)
+    counts = prefix_counts or {}
     return TierRead(
         id=str(cat.id),
         name=cat.name,
-        prefix=cat.prefix,
         type=cat.type,  # type: ignore[arg-type]
         tone=cat.tone,
         is_seeded=cat.is_seeded,
         item_count=item_count,
+        prefixes=[_prefix_to_read(p, counts.get(p.id, 0)) for p in rows],
         created_at=cat.created_at,
         updated_at=cat.updated_at,
     )
@@ -151,7 +181,13 @@ async def _build_bom_subtree(
 async def list_tiers(db: DBSession) -> list[TierRead]:
     cats = await cat_repo.list_tiers(db)
     counts = await cat_repo.tier_item_counts(db, [c.id for c in cats])
-    return [_tier_to_read(c, counts.get(c.id, 0)) for c in cats]
+    # Per-prefix item counts (the tier count is the sum of its prefixes').
+    all_prefix_ids = [p.id for c in cats for p in c.prefixes]
+    prefix_counts = await cat_repo.prefix_item_counts(db, all_prefix_ids)
+    return [
+        _tier_to_read(c, counts.get(c.id, 0), prefix_counts=prefix_counts)
+        for c in cats
+    ]
 
 
 @tiers_router.get(
@@ -167,7 +203,8 @@ async def get_tier(
     if cat is None:
         raise NotFoundError(f"Tier {tier_id} not found")
     counts = await cat_repo.tier_item_counts(db, [cat.id])
-    return _tier_to_read(cat, counts.get(cat.id, 0))
+    prefix_counts = await cat_repo.prefix_item_counts(db, [p.id for p in cat.prefixes])
+    return _tier_to_read(cat, counts.get(cat.id, 0), prefix_counts=prefix_counts)
 
 
 @tiers_router.post(
@@ -185,28 +222,16 @@ async def create_tier(
         raise ConflictError(
             f"Tier '{payload.name}' already exists", code="tier_name_conflict"
         )
-    if (await cat_repo.get_tier_by_prefix(db, payload.prefix)) is not None:
-        raise ConflictError(
-            f"Prefix '{payload.prefix}' is already in use",
-            code="tier_prefix_conflict",
-        )
     try:
         cat = await cat_repo.create_tier(
             db,
             name=payload.name,
-            prefix=payload.prefix,
             tier_type=payload.type,
             tone=payload.tone,
             created_by_user_id=current.id,
         )
     except IntegrityError as exc:
         await db.rollback()
-        msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-        if "uq_item_tiers_prefix" in msg:
-            raise ConflictError(
-                f"Prefix '{payload.prefix}' is already in use",
-                code="tier_prefix_conflict",
-            ) from exc
         raise ConflictError(
             f"Tier '{payload.name}' already exists", code="tier_name_conflict"
         ) from exc
@@ -231,7 +256,7 @@ async def create_tier(
         target_table="app.item_tiers",
         target_id=cat.id,
     )
-    result = _tier_to_read(cat, 0)
+    result = _tier_to_read(cat, 0, prefixes=[])
     await db.commit()
     return result
 
@@ -265,15 +290,6 @@ async def update_tier(
             raise ConflictError(
                 f"Tier '{new_name}' already exists",
                 code="tier_name_conflict",
-            )
-
-    new_prefix = patch.get("prefix")
-    if new_prefix is not None:
-        clash = await cat_repo.get_tier_by_prefix(db, str(new_prefix))
-        if clash is not None and clash.id != cat.id:
-            raise ConflictError(
-                f"Prefix '{new_prefix}' is already in use",
-                code="tier_prefix_conflict",
             )
 
     before = cat_repo.tier_to_audit_snapshot(cat)
@@ -357,7 +373,244 @@ async def delete_tier(
         target_table="app.item_tiers",
         target_id=updated.id,
     )
-    result = _tier_to_read(updated, 0)
+    result = _tier_to_read(updated, 0, prefixes=[])
+    await db.commit()
+    return result
+
+
+# ── Prefixes (nested under a tier) ─────────────────────────────────────
+
+
+async def _get_tier_or_404(db: DBSession, tier_id: uuid.UUID) -> ItemTier:
+    tier = await cat_repo.get_tier(db, tier_id)
+    if tier is None:
+        raise NotFoundError(f"Tier {tier_id} not found")
+    return tier
+
+
+async def _prefix_read_with_count(db: DBSession, prefix: ItemPrefix) -> PrefixRead:
+    counts = await cat_repo.prefix_item_counts(db, [prefix.id])
+    return _prefix_to_read(prefix, counts.get(prefix.id, 0))
+
+
+@tiers_router.get(
+    "/{tier_id}/prefixes",
+    response_model=list[PrefixRead],
+    summary="List a tier's prefixes",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_prefixes(
+    db: DBSession, tier_id: Annotated[uuid.UUID, Path()]
+) -> list[PrefixRead]:
+    await _get_tier_or_404(db, tier_id)
+    prefixes = await cat_repo.list_prefixes(db, tier_id)
+    counts = await cat_repo.prefix_item_counts(db, [p.id for p in prefixes])
+    return [_prefix_to_read(p, counts.get(p.id, 0)) for p in prefixes]
+
+
+@tiers_router.post(
+    "/{tier_id}/prefixes",
+    response_model=PrefixRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a prefix to a tier (e-signed)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def create_prefix(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    tier_id: Annotated[uuid.UUID, Path()],
+    payload: PrefixCreate,
+) -> PrefixRead:
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    await _get_tier_or_404(db, tier_id)
+    if (await cat_repo.get_prefix_by_code(db, payload.code)) is not None:
+        raise ConflictError(
+            f"Prefix '{payload.code}' is already in use",
+            code="prefix_code_conflict",
+        )
+    # Promoting this one to default first clears the tier's previous default, so
+    # the partial-unique index never sees two defaults.
+    if payload.is_default:
+        await cat_repo.clear_tier_default_prefix(
+            db, tier_id=tier_id, except_prefix_id=None
+        )
+    try:
+        prefix = await cat_repo.create_prefix(
+            db,
+            tier_id=tier_id,
+            code=payload.code,
+            label=payload.label,
+            is_default=payload.is_default,
+            created_by_user_id=current.id,
+        )
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            f"Prefix '{payload.code}' is already in use",
+            code="prefix_code_conflict",
+        ) from exc
+
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="app.item_prefixes",
+        subject_id=prefix.id,
+        subject_label=prefix.code,
+        before=None,
+        after=cat_repo.prefix_to_audit_snapshot(prefix),
+        context={"reason": payload.reason},
+        signature_id=evidence_uuid,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="prefix.create",
+        target_table="app.item_prefixes",
+        target_id=prefix.id,
+    )
+    result = _prefix_to_read(prefix, 0)
+    await db.commit()
+    return result
+
+
+@tiers_router.patch(
+    "/{tier_id}/prefixes/{prefix_id}",
+    response_model=PrefixRead,
+    summary="Update a prefix (e-signed). The owning tier is immutable.",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def update_prefix(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    tier_id: Annotated[uuid.UUID, Path()],
+    prefix_id: Annotated[uuid.UUID, Path()],
+    payload: PrefixUpdate,
+) -> PrefixRead:
+    patch = payload.model_dump(exclude_unset=True)
+    evidence_uuid = _parse_uuid_or_422(
+        str(patch.pop("evidence_id")), field="evidence_id"
+    )
+    reason = patch.pop("reason", "")
+    if not patch:
+        raise ValidationError("No fields to update", code="empty_patch")
+
+    prefix = await cat_repo.get_prefix(db, prefix_id)
+    if prefix is None or prefix.tier_id != tier_id:
+        raise NotFoundError(f"Prefix {prefix_id} not found")
+
+    new_code = patch.get("code")
+    if new_code is not None:
+        clash = await cat_repo.get_prefix_by_code(db, str(new_code))
+        if clash is not None and clash.id != prefix.id:
+            raise ConflictError(
+                f"Prefix '{new_code}' is already in use",
+                code="prefix_code_conflict",
+            )
+
+    # Turning a prefix into the default clears the tier's previous default.
+    # Un-defaulting the tier's only default is rejected — the create form always
+    # needs one prefix to pre-fill.
+    if "is_default" in patch:
+        if patch["is_default"]:
+            await cat_repo.clear_tier_default_prefix(
+                db, tier_id=tier_id, except_prefix_id=prefix.id
+            )
+        elif prefix.is_default:
+            raise ConflictError(
+                "A tier must keep one default prefix — set another prefix as "
+                "the default instead of clearing this one.",
+                code="prefix_default_required",
+            )
+
+    before = cat_repo.prefix_to_audit_snapshot(prefix)
+    updated = await cat_repo.apply_prefix_patch(
+        db, prefix=prefix, patch=patch, updated_by_user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.item_prefixes",
+        subject_id=updated.id,
+        subject_label=updated.code,
+        before=before,
+        after=cat_repo.prefix_to_audit_snapshot(updated),
+        context={"reason": reason},
+        signature_id=evidence_uuid,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="prefix.update",
+        target_table="app.item_prefixes",
+        target_id=updated.id,
+    )
+    result = await _prefix_read_with_count(db, updated)
+    await db.commit()
+    return result
+
+
+@tiers_router.delete(
+    "/{tier_id}/prefixes/{prefix_id}",
+    response_model=PrefixRead,
+    summary="Delete a prefix (e-signed). Blocked if seeded or in use.",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def delete_prefix(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    tier_id: Annotated[uuid.UUID, Path()],
+    prefix_id: Annotated[uuid.UUID, Path()],
+    payload: PrefixDelete,
+) -> PrefixRead:
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    prefix = await cat_repo.get_prefix(db, prefix_id)
+    if prefix is None or prefix.tier_id != tier_id:
+        raise NotFoundError(f"Prefix {prefix_id} not found")
+    if prefix.is_seeded:
+        raise ConflictError(
+            "Seeded prefixes cannot be deleted", code="prefix_seeded"
+        )
+    counts = await cat_repo.prefix_item_counts(db, [prefix.id])
+    if counts.get(prefix.id, 0) > 0:
+        raise ConflictError(
+            "Prefix is in use — reassign its items first", code="prefix_in_use"
+        )
+    if prefix.is_default:
+        raise ConflictError(
+            "This is the tier's default prefix — set another prefix as the "
+            "default before deleting it.",
+            code="prefix_default_required",
+        )
+
+    before = cat_repo.prefix_to_audit_snapshot(prefix)
+    updated = await cat_repo.soft_delete_prefix(
+        db, prefix=prefix, deleted_by_user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="deleted",
+        subject_table="app.item_prefixes",
+        subject_id=updated.id,
+        subject_label=updated.code,
+        before=before,
+        after=cat_repo.prefix_to_audit_snapshot(updated),
+        context={"reason": payload.reason},
+        signature_id=evidence_uuid,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="prefix.delete",
+        target_table="app.item_prefixes",
+        target_id=updated.id,
+    )
+    result = _prefix_to_read(updated, 0)
     await db.commit()
     return result
 

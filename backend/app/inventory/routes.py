@@ -170,9 +170,11 @@ def _item_to_read(
         Decimal("0"),
     )
     tier = item.tier
+    prefix = item.prefix
     return ItemRead(
         id=str(item.id),
         item_number=item.item_number,
+        sku_suffix=item.sku_suffix,
         description=item.description,
         uom=item.uom,
         is_consumable=item.is_consumable,
@@ -180,6 +182,9 @@ def _item_to_read(
         tier_name=tier.name if tier else "",
         tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
         tier_tone=tier.tone if tier else "neutral",
+        prefix_id=str(item.prefix_id),
+        prefix_code=prefix.code if prefix else "",
+        prefix_label=prefix.label if prefix else None,
         suppliers=[
             ItemSupplierRead(
                 supplier_id=str(iv.supplier_id),
@@ -451,6 +456,9 @@ async def list_items(
     tier_id: Annotated[
         uuid.UUID | None, Query(description="Filter by item tier")
     ] = None,
+    prefix_id: Annotated[
+        uuid.UUID | None, Query(description="Filter by item prefix")
+    ] = None,
     status_filter: Annotated[
         Literal["available", "low_stock", "out_of_stock"] | None,
         Query(
@@ -495,6 +503,7 @@ async def list_items(
         supplier_id=supplier_id,
         status=status_filter,
         tier_id=tier_id,
+        prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
         below_reorder=below_reorder,
@@ -566,29 +575,34 @@ async def create_item(
     current: CurrentDbUserDep,
     payload: ItemCreate,
 ) -> ItemRead:
-    # Uniqueness pre-check for a clean 409. The partial-unique index is
-    # still the authoritative guard (handled in the except).
-    existing = await inv_repo.get_item_by_number(db, payload.item_number)
-    if existing is not None:
-        raise ConflictError(
-            f"item_number {payload.item_number} is already in use",
-            code="item_number_conflict",
-        )
-
     # Validate the assigned-supplier list (each must be an existing supplier).
     supplier_uuids = await _resolve_item_supplier_ids(db, payload.supplier_ids)
 
-    # Validate the tier exists.
-    tier_uuid = _parse_uuid_or_422(payload.tier_id, field="tier_id")
-    if (await inv_repo.get_tier(db, tier_uuid)) is None:
-        raise NotFoundError(f"Tier {payload.tier_id} not found")
+    # Validate the prefix (the tier is derived from it).
+    prefix_uuid = _parse_uuid_or_422(payload.prefix_id, field="prefix_id")
+    prefix = await inv_repo.get_prefix(db, prefix_uuid)
+    if prefix is None:
+        raise NotFoundError(f"Prefix {payload.prefix_id} not found")
+
+    # The derived number is ``<code>-<suffix>``; uniqueness is per (prefix,
+    # suffix). Pre-check for a clean 409 (the partial-unique index is the
+    # authoritative guard, handled in the except).
+    full_number = f"{prefix.code}-{payload.sku_suffix}"
+    existing = await inv_repo.get_item_by_prefix_suffix(
+        db, prefix_uuid, payload.sku_suffix
+    )
+    if existing is not None:
+        raise ConflictError(
+            f"item {full_number} is already in use",
+            code="item_number_conflict",
+        )
 
     try:
         item = await inv_repo.create_item(
             db,
-            item_number=payload.item_number,
+            sku_suffix=payload.sku_suffix,
             description=payload.description,
-            tier_id=tier_uuid,
+            prefix_id=prefix_uuid,
             created_by_user_id=current.id,
             uom=payload.uom,
             is_consumable=payload.is_consumable,
@@ -600,9 +614,9 @@ async def create_item(
         # Race lost on the partial-unique index.
         await db.rollback()
         msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-        if "uq_items_item_number" in msg:
+        if "uq_items_prefix_suffix" in msg:
             raise ConflictError(
-                f"item_number {payload.item_number} is already in use",
+                f"item {full_number} is already in use",
                 code="item_number_conflict",
             ) from exc
         raise
@@ -654,15 +668,19 @@ async def update_item(
     if supplier_ids is not None:
         supplier_uuids = await _resolve_item_supplier_ids(db, supplier_ids)
 
-    # Re-assign tier: validate the target tier, and block moving a
-    # BOM-bearing item into the raw-material tier (that would orphan its BOM).
-    if "tier_id" in patch:
-        tier_uuid = _parse_uuid_or_422(
-            str(patch["tier_id"]), field="tier_id"
+    # Re-assign prefix: validate the target prefix, derive its tier, and apply
+    # the same guards as before against the derived tier's type. Changing the
+    # prefix also updates ``tier_id`` so the composite FK stays consistent.
+    if "prefix_id" in patch:
+        prefix_uuid = _parse_uuid_or_422(
+            str(patch["prefix_id"]), field="prefix_id"
         )
-        target_tier = await inv_repo.get_tier(db, tier_uuid)
+        target_prefix = await inv_repo.get_prefix(db, prefix_uuid)
+        if target_prefix is None:
+            raise NotFoundError(f"Prefix {patch['prefix_id']} not found")
+        target_tier = await inv_repo.get_tier(db, target_prefix.tier_id)
         if target_tier is None:
-            raise NotFoundError(f"Tier {patch['tier_id']} not found")
+            raise NotFoundError(f"Tier {target_prefix.tier_id} not found")
         if target_tier.type == "raw_material":
             # A built item with a BOM can't become a raw material (would orphan
             # its BOM).
@@ -682,7 +700,7 @@ async def update_item(
                     "manufactured, not received.",
                     code="item_received",
                 )
-        patch["tier_id"] = tier_uuid
+        patch["prefix_id"] = prefix_uuid
 
     if not patch and supplier_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")

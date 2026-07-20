@@ -1,9 +1,8 @@
 'use client';
 
 import * as React from 'react';
-import { ArrowRight, CheckCircle2 } from 'lucide-react';
+import { CheckCircle2 } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 
@@ -41,13 +40,11 @@ export function KitCloseOutTab({
   kit,
   output,
   lineErrors,
-  onClose,
   closeReady,
 }: {
   kit: Kit;
   output: OutputDraft;
   lineErrors: Record<string, string>;
-  onClose: () => void;
   closeReady: boolean;
 }) {
   const setLineUsed = useReconStore((s) => s.setLineUsed);
@@ -111,19 +108,12 @@ export function KitCloseOutTab({
       </div>
 
       <Card className="p-4">
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-medium text-text">Reconciliation</h2>
-            <p className="mt-0.5 text-xs text-text-3">
-              Enter Quantity Used from the traveler. Anything left over returns to inventory as an
-              explicit back-flush.
-            </p>
-          </div>
-          {editable && (
-            <Button variant="primary" onClick={onClose} disabled={!closeReady}>
-              Post output &amp; close kit <ArrowRight size={14} />
-            </Button>
-          )}
+        <div className="mb-3">
+          <h2 className="text-sm font-medium text-text">Reconciliation</h2>
+          <p className="mt-0.5 text-xs text-text-3">
+            Enter Quantity Used from the traveler. Anything left over returns to inventory as an
+            explicit back-flush.
+          </p>
         </div>
 
         <div className="overflow-x-auto">

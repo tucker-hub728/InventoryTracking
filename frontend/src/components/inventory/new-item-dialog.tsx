@@ -30,32 +30,35 @@ import { toast } from '@/components/ui/sonner';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { ApiError } from '@/lib/api/client';
 import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
-import { tiersApi, isBuiltTier, TIER_TYPE_LABELS, type ApiTier } from '@/lib/api/tiers';
+import {
+  tiersApi,
+  isBuiltTier,
+  defaultPrefix,
+  TIER_TYPE_LABELS,
+  type ApiTier,
+} from '@/lib/api/tiers';
 
 import { SupplierMultiSelect } from './supplier-multi-select';
-
-/** Strip a re-typed tier prefix off the SKU tail (so "CR-001" → "001",
- *  not "CR-CR-001"). Prefixes are alphanumeric, safe to inline in the regex. */
-function skuTail(prefix: string, raw: string): string {
-  return raw.trim().replace(new RegExp(`^${prefix}-?`, 'i'), '');
-}
 
 // ── Form schema ────────────────────────────────────────────────────────
 
 const schema = z.object({
-  // Free-form item number — any non-blank code the operator issues
-  // (e.g. CM-0001, CM-0001A, REF-017). Per docs/modules/inventory.md §3.1
-  // the only backend rule is uniqueness, so we just trim, require non-blank
-  // and cap the length to match the server contract.
-  itemId: z
+  // The SKU tail only (e.g. '001'). The full number is derived as
+  // ``<prefix code>-<suffix>`` server-side, so the operator types the tail and
+  // picks the prefix separately. Uniqueness is per (prefix, suffix).
+  suffix: z
     .string()
     .trim()
-    .min(1, 'Item # is required')
-    .max(64, 'Item # must be at most 64 characters'),
+    .min(1, 'Number is required')
+    .max(64, 'Number must be at most 64 characters'),
   desc: z.string().min(3, 'Description is required'),
   // Required tier — governs whether the item is a Product (built) or
-  // Purchased, and thus BOM eligibility.
+  // Purchased, and thus BOM eligibility. Only used to scope the prefix picker;
+  // the backend derives the tier from the chosen prefix.
   tierId: z.string().min(1, 'Tier is required'),
+  // Required prefix — assigned to the item (REQ-2026-07-09-ITM-001). Lives
+  // inside the selected tier; pre-filled with that tier's default.
+  prefixId: z.string().min(1, 'Prefix is required'),
   // Free-text unit of measure (each, mL, box …). Optional.
   uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
   // Blind-consumed, no per-lot traceability.
@@ -131,9 +134,10 @@ export function NewItemDialog({
   } = useForm<Values>({
     resolver: zodResolver(schema),
     defaultValues: {
-      itemId: '',
+      suffix: '',
       desc: '',
       tierId: lockedTier?.id ?? '',
+      prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
       uom: '',
       isConsumable: false,
       supplierIds: [],
@@ -145,13 +149,18 @@ export function NewItemDialog({
 
   const supplierIds = watch('supplierIds');
   const tierId = watch('tierId');
+  const prefixId = watch('prefixId');
   const isConsumable = watch('isConsumable');
-  const itemId = watch('itemId');
+  const suffix = watch('suffix');
 
-  // When the tier is locked (e.g. Raw Materials), the SKU is always
-  // prefixed with the tier prefix; the operator only types the tail.
-  const skuPrefix = lockedTier?.prefix ?? '';
-  const fullSku = lockedTier ? `${skuPrefix}-${skuTail(skuPrefix, itemId)}` : itemId;
+  // The tier whose prefixes scope the picker, and the chosen prefix within it.
+  const selectedTier = lockedTier ?? tiers.find((c) => c.id === tierId);
+  const tierPrefixes = selectedTier?.prefixes ?? [];
+  const selectedPrefix = tierPrefixes.find((p) => p.id === prefixId) ?? null;
+
+  // The SKU is fronted with the chosen prefix code; the operator types the tail.
+  const skuPrefix = selectedPrefix?.code ?? '';
+  const fullSku = skuPrefix ? `${skuPrefix}-${suffix.trim()}` : suffix.trim();
 
   // Supplier-side fields only apply to Purchased tiers — a built item
   // (AY/FG) is manufactured, not bought, so it has no supplier and no supplier
@@ -167,7 +176,6 @@ export function NewItemDialog({
   // request: INV-008 and Transaction Spec §3.1 do want a tracked expiry on
   // finished goods, but nothing reads the window on AY/FG until manual
   // transact-in ships, so it is deferred rather than dropped.
-  const selectedTier = lockedTier ?? tiers.find((c) => c.id === tierId);
   const showPurchasing = selectedTier?.type === 'raw_material';
 
   // ── Side effects ─────────────────────────────────────────────────────
@@ -203,20 +211,35 @@ export function NewItemDialog({
     return () => ctrl.abort();
   }, [open, lockedTier]);
 
-  // Keep the locked tier selected while the dialog is open.
+  // Keep the locked tier + its default prefix selected while the dialog is open.
   React.useEffect(() => {
     if (open && lockedTier) {
       setValue('tierId', lockedTier.id, { shouldValidate: true });
+      setValue('prefixId', defaultPrefix(lockedTier)?.id ?? '', { shouldValidate: true });
     }
   }, [open, lockedTier, setValue]);
+
+  // When the operator picks a different tier, jump the prefix to that tier's
+  // default (a prefix can't cross tiers). Skipped when the tier is locked.
+  React.useEffect(() => {
+    if (!open || lockedTier || !tierId) return;
+    const tier = tiers.find((c) => c.id === tierId);
+    if (!tier) return;
+    // Only reset when the current prefix isn't one of the new tier's prefixes.
+    const stillValid = tier.prefixes.some((p) => p.id === prefixId);
+    if (!stillValid) {
+      setValue('prefixId', defaultPrefix(tier)?.id ?? '', { shouldValidate: true });
+    }
+  }, [open, lockedTier, tierId, tiers, prefixId, setValue]);
 
   // Reset the form when the dialog closes.
   React.useEffect(() => {
     if (!open) {
       reset({
-        itemId: '',
+        suffix: '',
         desc: '',
         tierId: lockedTier?.id ?? '',
+        prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
         uom: '',
         isConsumable: false,
         supplierIds: [],
@@ -234,9 +257,9 @@ export function NewItemDialog({
     setSubmitError(null);
     try {
       const created = await createItem({
-        item_number: lockedTier ? `${skuPrefix}-${skuTail(skuPrefix, data.itemId)}` : data.itemId,
+        sku_suffix: data.suffix,
         description: data.desc,
-        tier_id: data.tierId,
+        prefix_id: data.prefixId,
         uom: data.uom ? data.uom : null,
         is_consumable: data.isConsumable,
         supplier_ids: data.supplierIds,
@@ -253,7 +276,7 @@ export function NewItemDialog({
       if (err instanceof ApiError) {
         if (err.code === 'item_number_conflict') {
           setSubmitError(
-            `${data.itemId} is already in use. Re-open the dialog or pick a different number.`,
+            `${fullSku} is already in use. Pick a different number.`,
           );
           return;
         }
@@ -281,54 +304,8 @@ export function NewItemDialog({
             {description && <DialogDescription>{description}</DialogDescription>}
           </DialogHeader>
           <DialogBody className="space-y-5">
-            <div className={lockedTier ? 'space-y-5' : 'grid gap-4 sm:grid-cols-[200px_1fr]'}>
-              <Field
-                id="ni-itemId"
-                label={lockedTier ? 'SKU' : 'Item #'}
-                error={errors.itemId?.message}
-              >
-                {lockedTier ? (
-                  <>
-                    <div className="flex">
-                      <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
-                        {skuPrefix}-
-                      </span>
-                      <Input
-                        id="ni-itemId"
-                        placeholder="001"
-                        className="rounded-l-none font-mono"
-                        aria-invalid={Boolean(errors.itemId)}
-                        {...register('itemId')}
-                      />
-                    </div>
-                    <p className="text-xs text-text-3">
-                      Full SKU: <span className="font-mono text-text-2">{fullSku}</span>
-                    </p>
-                  </>
-                ) : (
-                  <Input
-                    id="ni-itemId"
-                    placeholder={selectedTier ? `e.g. ${selectedTier.prefix}-0001` : 'e.g. UR-0001'}
-                    className="font-mono"
-                    aria-invalid={Boolean(errors.itemId)}
-                    {...register('itemId')}
-                  />
-                )}
-              </Field>
-              <Field
-                id="ni-desc"
-                label={lockedTier ? 'Name' : 'Description'}
-                error={errors.desc?.message}
-              >
-                <Input
-                  id="ni-desc"
-                  placeholder="e.g. Medical Tube, PVC 6mm"
-                  aria-invalid={Boolean(errors.desc)}
-                  {...register('desc')}
-                />
-              </Field>
-            </div>
-
+            {/* Tier (non-locked): scopes the prefix choices and decides
+                Product (can have a BOM) vs Purchased. */}
             {!lockedTier && (
               <Field id="ni-tier" label="Tier" error={errors.tierId?.message}>
                 <Select
@@ -351,12 +328,73 @@ export function NewItemDialog({
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-text-3">
-                  The tier decides whether this is a Product (can have a BOM) or a Purchased item.
-                  Manage the BOM from the item&apos;s detail page.
-                </p>
               </Field>
             )}
+
+            <div className={lockedTier ? 'space-y-5' : 'grid gap-4 sm:grid-cols-[minmax(0,260px)_1fr]'}>
+              {/* Item # = inline prefix dropdown + suffix. The full number is
+                  derived (prefix code + suffix), so renaming the prefix later
+                  re-labels the item. */}
+              <Field
+                id="ni-suffix"
+                label="Item #"
+                error={errors.suffix?.message ?? errors.prefixId?.message}
+              >
+                <div className="flex">
+                  {tierPrefixes.length > 1 ? (
+                    <Select
+                      value={prefixId}
+                      onValueChange={(v) => setValue('prefixId', v, { shouldValidate: true })}
+                    >
+                      <SelectTrigger
+                        aria-label="Prefix"
+                        className="w-auto shrink-0 gap-1 rounded-r-none border-r-0 font-mono"
+                      >
+                        <span className="font-mono">{skuPrefix ? `${skuPrefix}-` : 'Prefix'}</span>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {tierPrefixes.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            <span className="flex items-center gap-2">
+                              <span className="font-mono">{p.code}</span>
+                              {p.label && <span className="text-text-3">{p.label}</span>}
+                              {p.is_default && <Badge tone="neutral">default</Badge>}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
+                      {skuPrefix || '—'}-
+                    </span>
+                  )}
+                  <Input
+                    id="ni-suffix"
+                    placeholder="001"
+                    className="rounded-l-none font-mono"
+                    aria-invalid={Boolean(errors.suffix)}
+                    {...register('suffix')}
+                  />
+                </div>
+                <p className="text-xs text-text-3">
+                  Full SKU: <span className="font-mono text-text-2">{fullSku || '—'}</span>
+                  {tierPrefixes.length > 1 && ' · prefix follows renames'}
+                </p>
+              </Field>
+              <Field
+                id="ni-desc"
+                label={lockedTier ? 'Name' : 'Description'}
+                error={errors.desc?.message}
+              >
+                <Input
+                  id="ni-desc"
+                  placeholder="e.g. Medical Tube, PVC 6mm"
+                  aria-invalid={Boolean(errors.desc)}
+                  {...register('desc')}
+                />
+              </Field>
+            </div>
 
             {/* Unit + Reorder threshold are the two fields every tier shows, so
                 they pair up here. The purchasing-only fields (consumable flag,
