@@ -46,6 +46,14 @@ export interface ApiItem {
   tier_name: string;
   tier_type: TierType;
   tier_tone: string;
+  /** The item's type prefix (REQ-2026-07-09-ITM-001) — the tab/filter criterion.
+   *  Lives inside the tier; ``prefix_code`` fronts the SKU on the create form. */
+  prefix_id: string;
+  prefix_code: string;
+  prefix_label: string | null;
+  /** The SKU tail only (e.g. '001'). The full ``item_number`` above is derived
+   *  as ``<prefix_code>-<sku_suffix>`` and follows the prefix on rename. */
+  sku_suffix: string;
   /** Assigned suppliers — the suppliers this item can be received against. */
   suppliers: ApiItemSupplier[];
   avg_lead_days: number | null;
@@ -90,12 +98,16 @@ export interface ListItemsParams {
   supplier_id?: string | null;
   /** Filter by item tier (server-side). */
   tier_id?: string | null;
+  /** Filter by item prefix (server-side). */
+  prefix_id?: string | null;
   /** Filter by ``v_item_stock.status_code`` (server-side). */
   status?: ApiItemStatus | null;
   /** ``true`` = consumables only, ``false`` = non-consumables only. */
   is_consumable?: boolean | null;
   /** ``false`` selects items with no bill of materials ("missing BOM"). */
   has_bom?: boolean | null;
+  /** Only items whose BOM has at least this many distinct components. */
+  min_bom_lines?: number | null;
   /**
    * ``true`` selects items at or below their reorder threshold. Broader than
    * ``status: 'low_stock'``, which excludes zero-stock items (the view tests
@@ -109,10 +121,13 @@ export interface ListItemsParams {
 }
 
 export interface ItemCreateInput {
-  item_number: string;
+  /** The SKU tail only (e.g. '001'). The full number is derived server-side as
+   *  ``<prefix code>-<suffix>``. */
+  sku_suffix: string;
   description: string;
-  /** Required — the item's tier (governs BOM eligibility). */
-  tier_id: string;
+  /** Required — the item's prefix. The tier is derived from it server-side
+   *  (a prefix lives inside one tier) and governs BOM eligibility. */
+  prefix_id: string;
   /** Free-text unit of measure (each, mL, box …). */
   uom?: string | null;
   /** Blind-consumed with no per-lot traceability when true. */
@@ -134,9 +149,9 @@ export interface ItemUpdateInput {
   description?: string;
   uom?: string | null;
   is_consumable?: boolean;
-  /** Re-assign the item to another tier. Blocked server-side if moving a
-   *  BOM-bearing item to the raw-material tier. */
-  tier_id?: string;
+  /** Re-assign the item to another prefix (its tier is derived). Blocked
+   *  server-side if moving a BOM-bearing item to a raw-material prefix. */
+  prefix_id?: string;
   supplier_ids?: string[];
   avg_lead_days?: number | null;
   reorder_threshold?: number;
@@ -153,9 +168,11 @@ export const itemsApi = {
         q: params.q ?? undefined,
         supplier_id: params.supplier_id ?? undefined,
         tier_id: params.tier_id ?? undefined,
+        prefix_id: params.prefix_id ?? undefined,
         status: params.status ?? undefined,
         is_consumable: params.is_consumable ?? undefined,
         has_bom: params.has_bom ?? undefined,
+        min_bom_lines: params.min_bom_lines ?? undefined,
         below_reorder: params.below_reorder ?? undefined,
         sort: params.sort,
         direction: params.direction,
@@ -179,8 +196,7 @@ export const itemsApi = {
       signal: opts?.signal,
     }),
 
-  create: (input: ItemCreateInput) =>
-    api.post<ApiItem>('/items', { json: input }),
+  create: (input: ItemCreateInput) => api.post<ApiItem>('/items', { json: input }),
 
   /** Partial update; writes an audit row server-side. */
   update: (id: string, input: ItemUpdateInput) =>

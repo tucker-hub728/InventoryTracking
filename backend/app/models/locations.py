@@ -110,14 +110,17 @@ STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
 # Node types that carry a configurable rows×cols grid. Only the Box.
 GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
 
-# Legacy flat operational location categories. Kept for the DB CHECK + reading
-# any pre-existing flat rows; no new flat locations are created.
+# Flat operational location categories. The legacy set (kanban…materials) is
+# kept for the DB CHECK + reading pre-existing flat rows. ``production`` was
+# added for kitting (docs/modules/kitting.md §4.1) — the advisory production
+# floors a kit is issued to (Clean Room 1/2, Manufacturing Floor, PD Lab One/Two).
 FLAT_CATEGORIES: tuple[str, ...] = (
     "kanban",
     "lab",
     "qc",
     "engineering",
     "materials",
+    "production",
 )
 
 

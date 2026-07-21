@@ -71,7 +71,7 @@ export function RecordMovementPicker({
                   type="button"
                   onClick={() => {
                     onOpenChange(false);
-                    router.push(`/inventory/${it.id}?action=record`);
+                    router.push(`/inventory/${it.uuid}?action=record`);
                   }}
                   className="flex w-full items-center justify-between gap-3 border-b border-border px-3 py-2 text-left text-sm last:border-b-0 hover:bg-surface focus-visible:bg-surface focus-visible:outline-none"
                 >

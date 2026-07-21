@@ -80,7 +80,7 @@ export function ItemWhereUsedTab({ itemId }: Props) {
               <tr key={p.parent_item_id} className="border-border/60 border-b last:border-b-0">
                 <td className="px-4 py-2.5">
                   <Link
-                    href={`/inventory/${encodeURIComponent(p.parent_item_number)}/ledger`}
+                    href={`/inventory/${p.parent_item_id}/ledger`}
                     className="font-mono text-xs text-accent hover:underline"
                   >
                     {p.parent_item_number}

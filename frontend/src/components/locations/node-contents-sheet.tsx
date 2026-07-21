@@ -122,7 +122,7 @@ export function NodeContentsSheet({
                         {allocs.map((a) => (
                           <TableRow key={a.id}>
                             <TableCell className="font-mono text-text-2">
-                              <ItemLink itemNumber={a.item_number} />
+                              <ItemLink itemNumber={a.item_number} itemId={a.item_id} />
                             </TableCell>
                             <TableCell className="font-mono text-text-2">
                               <LotLink lotId={a.lot_id} lotNumber={a.lot_number} />

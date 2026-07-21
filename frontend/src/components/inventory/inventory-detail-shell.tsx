@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { notFound, usePathname, useRouter } from 'next/navigation';
+import { notFound, usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeft, Loader2, Pencil } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -15,7 +15,7 @@ import { StatusBadge } from '@/components/shared/status-badge';
 import { ItemEditDialog } from './item-edit-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
-import { cn, formatNumber } from '@/lib/utils';
+import { cn, formatNumber, isUuid } from '@/lib/utils';
 import { movementsApi, type ApiMovement } from '@/lib/api/movements';
 import { isBuiltTier } from '@/lib/api/tiers';
 import { apiMovementsToLedgerEntries } from '@/lib/api/movements-adapter';
@@ -48,12 +48,17 @@ const RAW_TABS_WITH_USED_IN: readonly DetailTab[] = [
   { seg: 'audit', label: 'Audit History' },
 ];
 
-// Built (AY/FG) items are *assembled from a BOM* — no stock ledger/snapshot.
-// They get the multi-level structure (hierarchy) and the BOM editor.
+// Built (AY/FG) items are assembled from a BOM — they get the multi-level
+// structure and the BOM editor. Since kitting landed they also hold real
+// stock (a close-out posts a `production_output` into a storage location, and
+// a sub-assembly can be kitted into a parent), so they get the Unit Ledger
+// too: REQ-2026-07-01-INV requires that "drilling into a finished good shall
+// reveal its storage location(s)".
 // (Forecast + Audit for built items are deferred.)
 const PRODUCT_TABS: readonly DetailTab[] = [
   { seg: 'structure', label: 'Structure' },
   { seg: 'bom', label: 'BOM' },
+  { seg: 'ledger', label: 'Unit Ledger' },
 ];
 
 // …plus "Used in" for a sub-assembly (AY), which can be a component of an FG's
@@ -63,6 +68,7 @@ const PRODUCT_TABS: readonly DetailTab[] = [
 const PRODUCT_TABS_WITH_USED_IN: readonly DetailTab[] = [
   { seg: 'structure', label: 'Structure' },
   { seg: 'bom', label: 'BOM' },
+  { seg: 'ledger', label: 'Unit Ledger' },
   { seg: 'products', label: 'Used in' },
 ];
 
@@ -85,14 +91,17 @@ function tabsForItem(item: InventoryItem | null): readonly DetailTab[] {
  * segment renders as ``children`` and reads the item/ledger from context.
  */
 export function InventoryDetailShell({
-  itemNumber,
+  itemKey,
   children,
 }: {
-  itemNumber: string;
+  /** The ``[id]`` route segment: the item's stable UUID, or — for a legacy /
+   *  bookmarked link — its human-readable number. Either resolves. */
+  itemKey: string;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const fetchOne = useInventoryStore((s) => s.fetchOne);
   const canSign = usePermission('inventory', 'sign');
   const canCreate = usePermission('inventory', 'create');
@@ -117,7 +126,7 @@ export function InventoryDetailShell({
       setLoading(true);
       setLoadError(null);
       try {
-        const row = await fetchOne(itemNumber, { signal });
+        const row = await fetchOne(itemKey, { signal });
         if (signal?.aborted) return;
         if (row === null) {
           notFound();
@@ -131,7 +140,7 @@ export function InventoryDetailShell({
         if (!signal?.aborted) setLoading(false);
       }
     },
-    [fetchOne, itemNumber],
+    [fetchOne, itemKey],
   );
 
   React.useEffect(() => {
@@ -205,27 +214,40 @@ export function InventoryDetailShell({
   // Built items have no stock ledger, so no Snapshot sidebar / on-hand chips.
   const built = isBuiltTier(item?.tierType);
 
-  // Tier-aware tabs. The server-side index redirect can't know the item's tier,
-  // so if we land on a segment that doesn't belong to this item (a built item
-  // on /ledger, a raw material on /structure, or a consumable on /products),
-  // bounce to its first tab.
+  // Canonical URL + tier-aware tabs, resolved together so we never fire two
+  // competing redirects.
+  //
+  // * The URL key is the item's stable UUID. A legacy/bookmarked link carrying
+  //   the human number still resolves (see ``fetchOne``), and we rewrite it to
+  //   the UUID form — the number is derived from the prefix, so it changes
+  //   whenever a prefix is renamed and can't be a durable URL key.
+  // * The server-side index redirect can't know the item's tier, so a segment
+  //   that doesn't belong to this item (a built item on /ledger, a raw material
+  //   on /structure, a consumable on /products) bounces to its first tab.
   const tabs = React.useMemo(() => tabsForItem(item), [item]);
   React.useEffect(() => {
     if (!item) return;
-    const seg = pathname.split('/').pop();
     const valid = tabs.map((t) => t.seg);
-    if (seg && !valid.includes(seg)) {
-      router.replace(`/inventory/${item.id}/${valid[0]}`);
+    const seg = pathname.split('/').pop();
+    const targetSeg = seg && valid.includes(seg) ? seg : valid[0];
+    const target = `/inventory/${item.uuid}/${targetSeg}`;
+    if (pathname !== target) {
+      const query = searchParams.toString();
+      router.replace(query ? `${target}?${query}` : target);
     }
-  }, [item, tabs, pathname, router]);
+  }, [item, tabs, pathname, router, searchParams]);
 
   // ── Loading / error shells ───────────────────────────────────────────
+  // A UUID in the URL means nothing to a human, so fall back to a neutral
+  // label until the real item (and its SKU) has loaded.
+  const fallbackLabel = isUuid(itemKey) ? 'Item' : itemKey;
+
   if (loading && item === null) {
     return (
       <>
-        <FallbackHeader itemNumber={itemNumber} />
+        <FallbackHeader label={fallbackLabel} />
         <div className="flex items-center gap-2 px-6 py-10 text-sm text-text-2 sm:px-8">
-          <Loader2 size={14} className="animate-spin" /> Loading {itemNumber}…
+          <Loader2 size={14} className="animate-spin" /> Loading {fallbackLabel}…
         </div>
       </>
     );
@@ -233,7 +255,7 @@ export function InventoryDetailShell({
   if (loadError && item === null) {
     return (
       <>
-        <FallbackHeader itemNumber={itemNumber} />
+        <FallbackHeader label={fallbackLabel} />
         <div className="px-6 py-5 sm:px-8">
           <Card>
             <EmptyState
@@ -374,7 +396,7 @@ export function InventoryDetailShell({
                   return (
                     <Link
                       key={t.seg}
-                      href={`/inventory/${item.id}/${t.seg}`}
+                      href={`/inventory/${item.uuid}/${t.seg}`}
                       aria-current={active ? 'page' : undefined}
                       className={cn(
                         '-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3.5 py-2.5 text-sm font-normal text-text-2 transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
@@ -417,11 +439,11 @@ export function InventoryDetailShell({
   );
 }
 
-function FallbackHeader({ itemNumber }: { itemNumber: string }) {
+function FallbackHeader({ label }: { label: string }) {
   return (
     <PageHeader
-      title={itemNumber}
-      crumbs={[{ label: 'Inventory', href: '/inventory' }, { label: itemNumber }]}
+      title={label}
+      crumbs={[{ label: 'Inventory', href: '/inventory' }, { label }]}
       actions={
         <Button variant="ghost" asChild>
           <Link href="/inventory">

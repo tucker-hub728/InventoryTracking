@@ -18,29 +18,27 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
-# ``item_number`` is free-form and user-supplied. Per
-# docs/modules/inventory.md §3.1 / §4.1 / §9.2 the *only* backend rule is
-# uniqueness (the partial-unique index ``uq_items_item_number``); there is
-# deliberately **no format CHECK**. We trim, upper-case (preserving the
-# existing normalisation so case-variants can't masquerade as distinct
-# items), and reject blank / over-long values — everything else the user
-# types is accepted, so custom alphanumeric codes like ``CM-0001A``,
-# ``REF-017`` or ``WIDGET-12`` all go through.
-ITEM_NUMBER_MAX_LEN = 64
+# ``sku_suffix`` is the tail of the SKU (e.g. ``001``) — the item's number is
+# derived as ``<prefix code>-<suffix>``, so only the suffix is user-supplied.
+# The only backend rule is uniqueness within the prefix (the partial-unique
+# index ``uq_items_prefix_suffix``); no format CHECK. We trim, upper-case
+# (so case-variants can't masquerade as distinct items), and reject blank /
+# over-long values.
+SKU_SUFFIX_MAX_LEN = 64
 
 
-def _validate_item_number(v: str) -> str:
+def _validate_sku_suffix(v: str) -> str:
     v = v.strip().upper()
     if not v:
-        raise ValueError("item_number must not be blank")
-    if len(v) > ITEM_NUMBER_MAX_LEN:
+        raise ValueError("sku_suffix must not be blank")
+    if len(v) > SKU_SUFFIX_MAX_LEN:
         raise ValueError(
-            f"item_number must be at most {ITEM_NUMBER_MAX_LEN} characters"
+            f"sku_suffix must be at most {SKU_SUFFIX_MAX_LEN} characters"
         )
     return v
 
 
-ItemNumber = Annotated[str, BeforeValidator(_validate_item_number)]
+SkuSuffix = Annotated[str, BeforeValidator(_validate_sku_suffix)]
 
 
 def _trimmed_non_blank(field_name: str):
@@ -134,9 +132,8 @@ class ItemSupplierRead(BaseModel):
 class ItemCreate(BaseModel):
     """Payload for ``POST /v1/items``.
 
-    ``item_number`` is a single free-form field supplied by the client.
-    The only server-side rule is uniqueness — there is no prefix /
-    tier constraint on what can be created.
+    The client supplies ``prefix_id`` + ``sku_suffix``; the full number is
+    derived as ``<prefix code>-<suffix>`` and must be unique within the prefix.
 
     ``supplier_ids`` is the item's assigned-supplier list (zero-or-more). These
     are the only suppliers the item can later be received against. Optional —
@@ -145,11 +142,14 @@ class ItemCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    item_number: ItemNumber
+    # The SKU tail only (e.g. ``001``). The full number is derived as
+    # ``<prefix code>-<suffix>``.
+    sku_suffix: SkuSuffix
     description: str = Field(min_length=1, max_length=512)
-    # Required: every item belongs to a tier (REQ-2026-07-15-ITM-001). The tier's
-    # type (raw_material/sub_assembly/finished_good) decides whether the item may carry a BOM.
-    tier_id: str = Field(min_length=1)
+    # Required: every item is assigned exactly one prefix (REQ-2026-07-09-ITM-001).
+    # The tier is derived from the prefix (a prefix lives inside one tier), and the
+    # tier's type (raw_material/sub_assembly/finished_good) decides BOM eligibility.
+    prefix_id: str = Field(min_length=1)
     # Free-text unit of measure (each, mL, box …). Optional.
     uom: Annotated[str | None, _trimmed_non_blank("uom")] = Field(
         default=None, max_length=32
@@ -186,10 +186,10 @@ class ItemUpdate(BaseModel):
         default=None, max_length=32
     )
     is_consumable: bool | None = None
-    # Re-assign an item to another tier. The new tier's type still governs BOM
-    # eligibility (the route blocks moving a BOM-bearing item to the raw-material
-    # tier).
-    tier_id: str | None = Field(default=None, min_length=1)
+    # Re-assign an item to another prefix. The prefix's tier (derived server-side)
+    # still governs BOM eligibility — the route blocks moving a BOM-bearing item
+    # to a raw-material prefix, and a stocked item to a built prefix.
+    prefix_id: str | None = Field(default=None, min_length=1)
     supplier_ids: list[str] | None = Field(default=None, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
@@ -208,7 +208,9 @@ class ItemRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    # Derived full SKU (``<prefix code>-<suffix>``) + the stored tail.
     item_number: str
+    sku_suffix: str
     description: str
     # Free-text unit of measure (each, mL, box …). ``None`` when unset.
     uom: str | None = None
@@ -220,6 +222,10 @@ class ItemRead(BaseModel):
     tier_name: str
     tier_type: Literal["raw_material", "sub_assembly", "finished_good"]
     tier_tone: str
+    # The item's type prefix (REQ-2026-07-09-ITM-001) — the tab/filter criterion.
+    prefix_id: str
+    prefix_code: str
+    prefix_label: str | None = None
     # Assigned suppliers (the list an item can be received against).
     suppliers: list[ItemSupplierRead] = Field(default_factory=list)
     avg_lead_days: int | None
@@ -364,6 +370,18 @@ MovementType = Literal[
     "discard",
     "transfer_out",
     "transfer_in",
+    # Kitting / back-flush. These already exist in the DB CHECK and in
+    # ``app.models.inventory.MOVEMENT_TYPES``; omitting them here made the
+    # ledger endpoint fail to serialise any item that had been kitted
+    # (ValidationError on MovementRead). Keep this list in lock-step with
+    # MOVEMENT_TYPES.
+    "kit_issue",
+    "kit_additional_issue",
+    "production_output",
+    # Three distinct return events — see MOVEMENT_TYPES (kitting05).
+    "backflush",
+    "kit_return",
+    "kit_cancel_return",
 ]
 
 
@@ -401,6 +419,13 @@ class MovementRead(BaseModel):
     movement_type: MovementType
     qty_delta: int
     qty_abs: int
+
+    # The kit that caused this row, when there is one (kit_issue /
+    # kit_additional_issue / production_output / backflush). Drives the
+    # AY/FG ledger's Transaction column ("Made KIT-0034"). A transaction
+    # reference only — SRS §7 excludes finished-good → component-lot tracing.
+    kit_id: str | None = None
+    kit_number: str | None = None
 
     # Mandatory §3 comment captured on every e-signed movement.
     notes: str | None

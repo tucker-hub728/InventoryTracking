@@ -18,7 +18,18 @@ export type MovementType =
   | 'adjustment'
   | 'discard'
   | 'transfer_out'
-  | 'transfer_in';
+  | 'transfer_in'
+  // Kitting / back-flush — written by the kitting module and present in the
+  // ledger, so the item ledger must be able to label them.
+  | 'kit_issue'
+  | 'kit_additional_issue'
+  | 'production_output'
+  // Three distinct return events (kitting05). Every `Record<MovementType, …>`
+  // must cover them — leaving them out of this union is what let an incomplete
+  // icon map compile and then crash the audit timeline at runtime.
+  | 'backflush'
+  | 'kit_return'
+  | 'kit_cancel_return';
 
 /** Display labels — keep aligned with the backend ``MovementType`` enum. */
 export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
@@ -28,6 +39,13 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   discard: 'Discard',
   transfer_out: 'Transfer out',
   transfer_in: 'Transfer in',
+  kit_issue: 'Kit issue',
+  kit_additional_issue: 'Additional issue',
+  production_output: 'Production output',
+  // Three distinct return events (kitting05).
+  backflush: 'Back-flushed',
+  kit_return: 'Returned',
+  kit_cancel_return: 'Cancel return',
 };
 
 /** Sign of the qty_delta enforced by each type — useful for colouring the row. */
@@ -38,6 +56,14 @@ export const MOVEMENT_TYPE_SIGN: Record<MovementType, 'in' | 'out' | 'signed'> =
   discard: 'out',
   transfer_out: 'out',
   adjustment: 'signed',
+  // Issues leave the source; output / back-flush land in a node.
+  kit_issue: 'out',
+  kit_additional_issue: 'out',
+  production_output: 'in',
+  // All three return events bring stock back into a node.
+  backflush: 'in',
+  kit_return: 'in',
+  kit_cancel_return: 'in',
 };
 
 export interface ApiMovement {
@@ -64,6 +90,11 @@ export interface ApiMovement {
   qty_delta: number;
   /** Unsigned integer — what the operator entered. */
   qty_abs: number;
+
+  /** Kit that caused this row (kit_issue / kit_additional_issue /
+   *  production_output / backflush); null for every other movement. */
+  kit_id: string | null;
+  kit_number: string | null;
 
   /** Mandatory §3 comment. */
   notes: string | null;

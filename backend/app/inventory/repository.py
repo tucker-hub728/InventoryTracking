@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 from app.models.inventory import (
     BomLine,
     Item,
+    ItemPrefix,
     ItemStock,
     ItemSupplier,
     ItemTier,
@@ -132,13 +133,22 @@ def _apply_filters(
     supplier_id: uuid.UUID | None,
     status: str | None,
     tier_id: uuid.UUID | None = None,
+    prefix_id: uuid.UUID | None = None,
     is_consumable: bool | None = None,
     has_bom: bool | None = None,
+    min_bom_lines: int | None = None,
     below_reorder: bool | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
     if tier_id is not None:
-        stmt = stmt.where(Item.tier_id == tier_id)
+        # Tier lives on the prefix now — filter by the tier's prefixes.
+        stmt = stmt.where(
+            Item.prefix_id.in_(
+                select(ItemPrefix.id).where(ItemPrefix.tier_id == tier_id)
+            )
+        )
+    if prefix_id is not None:
+        stmt = stmt.where(Item.prefix_id == prefix_id)
     if is_consumable is not None:
         stmt = stmt.where(Item.is_consumable.is_(is_consumable))
     if has_bom is not None:
@@ -148,6 +158,18 @@ def _apply_filters(
         stmt = stmt.where(
             Item.id.in_(with_bom) if has_bom else Item.id.not_in(with_bom)
         )
+    if min_bom_lines is not None and min_bom_lines > 0:
+        # Items whose BOM has at least N distinct components. Kitting uses this
+        # with N=2: every composition rule in Transaction_Spec §1.1 is
+        # two-input (CR+CR→AY, AY+AY→AY, CR+AY→FG), so a one-line "recipe" is
+        # an incomplete BOM, not something you can gather a kit for.
+        enough_lines = (
+            select(BomLine.parent_item_id)
+            .where(BomLine.deleted_at.is_(None))
+            .group_by(BomLine.parent_item_id)
+            .having(func.count(BomLine.id) >= min_bom_lines)
+        )
+        stmt = stmt.where(Item.id.in_(enough_lines))
     if supplier_id is not None:
         # Suppliers live in ``meta.item_suppliers`` now — filter items that have
         # the requested supplier in their assigned list.
@@ -162,8 +184,13 @@ def _apply_filters(
         like = f"%{q.lower()}%"
         stmt = stmt.where(
             or_(
-                func.lower(Item.item_number).like(like),
+                # The number is derived, so match its parts: the suffix, the
+                # description, or the prefix code (so "PRR" finds all PRR items).
+                func.lower(Item.sku_suffix).like(like),
                 func.lower(Item.description).like(like),
+                Item.prefix_id.in_(
+                    select(ItemPrefix.id).where(func.lower(ItemPrefix.code).like(like))
+                ),
             )
         )
     if status is not None or below_reorder is not None:
@@ -186,7 +213,9 @@ def _apply_filters(
 
 
 _SORT_COLUMNS = {
-    "item_number": Item.item_number,
+    # "item_number" sorts by the stored suffix — the derived number isn't a
+    # column. Within a tier's list (one prefix) this matches number order.
+    "item_number": Item.sku_suffix,
     "description": Item.description,
     "updated_at": Item.updated_at,
     "created_at": Item.created_at,
@@ -200,8 +229,10 @@ async def list_items(
     supplier_id: uuid.UUID | None = None,
     status: str | None = None,
     tier_id: uuid.UUID | None = None,
+    prefix_id: uuid.UUID | None = None,
     is_consumable: bool | None = None,
     has_bom: bool | None = None,
+    min_bom_lines: int | None = None,
     below_reorder: bool | None = None,
     sort: SortField = "item_number",
     direction: SortDirection = "asc",
@@ -218,8 +249,10 @@ async def list_items(
         supplier_id=supplier_id,
         status=status,
         tier_id=tier_id,
+        prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
+        min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
     )
     count_stmt = _apply_filters(
@@ -228,8 +261,10 @@ async def list_items(
         supplier_id=supplier_id,
         status=status,
         tier_id=tier_id,
+        prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
+        min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
     )
     total = int((await session.execute(count_stmt)).scalar_one())
@@ -246,20 +281,72 @@ async def get_item(session: AsyncSession, item_id: uuid.UUID) -> Item | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def get_item_by_number(session: AsyncSession, item_number: str) -> Item | None:
+async def get_item_by_prefix_suffix(
+    session: AsyncSession, prefix_id: uuid.UUID, sku_suffix: str
+) -> Item | None:
+    """Live item with this (prefix, suffix) — the uniqueness pair.
+
+    Matched case-insensitively: suffixes are stored upper-cased by the schema
+    validator, so a differently-cased URL still resolves.
+    """
     stmt = select(Item).where(
-        Item.item_number == item_number,
+        Item.prefix_id == prefix_id,
+        func.lower(Item.sku_suffix) == sku_suffix.lower(),
         Item.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def get_item_by_number(session: AsyncSession, item_number: str) -> Item | None:
+    """Resolve a full SKU (``<prefix code>-<suffix>``) back to its item.
+
+    The number is derived, not stored, so it has to be split back into a prefix
+    code and a suffix — but the split point is **ambiguous**, because a prefix
+    code may itself contain ``-`` (e.g. ``AS-TEST-002`` is ``AS-TEST`` + ``002``,
+    not ``AS`` + ``TEST-002``). Splitting on the first ``-`` therefore fails for
+    such codes.
+
+    Instead, match the number against the real (live) prefix list: try every
+    code the number starts with, longest first, and return the first one that
+    actually resolves to an item. That is deterministic, handles dashed codes,
+    and — because it verifies the item exists — still finds the right row when
+    two codes overlap (``AS`` and ``AS-TEST`` both present).
+
+    The prefix table is small (one row per admin-defined code), so loading it is
+    cheap compared with guessing.
+    """
+    number = item_number.strip()
+    if not number:
+        return None
+    prefixes = (
+        (
+            await session.execute(
+                select(ItemPrefix).where(ItemPrefix.deleted_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    lowered = number.lower()
+    candidates = [p for p in prefixes if lowered.startswith(f"{p.code.lower()}-")]
+    # Longest code first: 'AS-TEST' must win over 'AS' for 'AS-TEST-002'.
+    candidates.sort(key=lambda p: len(p.code), reverse=True)
+    for prefix in candidates:
+        suffix = number[len(prefix.code) + 1 :]
+        if not suffix:
+            continue
+        item = await get_item_by_prefix_suffix(session, prefix.id, suffix)
+        if item is not None:
+            return item
+    return None
+
+
 async def create_item(
     session: AsyncSession,
     *,
-    item_number: str,
+    sku_suffix: str,
     description: str,
-    tier_id: uuid.UUID,
+    prefix_id: uuid.UUID,
     created_by_user_id: uuid.UUID,
     uom: str | None = None,
     is_consumable: bool = False,
@@ -269,13 +356,15 @@ async def create_item(
 ) -> Item:
     """Insert an item row (no suppliers yet). Caller commits.
 
-    Assigned suppliers are written separately via ``replace_item_suppliers`` so
-    the FK validation / audit happen at the route layer.
+    The tier is derived from ``prefix_id`` (a prefix lives inside one tier), so
+    there is no ``tier_id`` to set. Assigned suppliers are written separately via
+    ``replace_item_suppliers`` so the FK validation / audit happen at the route
+    layer.
     """
     item = Item(
-        item_number=item_number,
+        sku_suffix=sku_suffix,
         description=description,
-        tier_id=tier_id,
+        prefix_id=prefix_id,
         uom=uom,
         is_consumable=is_consumable,
         avg_lead_days=avg_lead_days,
@@ -338,10 +427,11 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     """Trim an item row to fields worth recording in the audit log."""
     return {
         "item_number": item.item_number,
+        "sku_suffix": item.sku_suffix,
         "description": item.description,
         "uom": item.uom,
         "is_consumable": item.is_consumable,
-        "tier_id": str(item.tier_id),
+        "prefix_id": str(item.prefix_id),
         "supplier_ids": sorted(str(iv.supplier_id) for iv in item.suppliers),
         "avg_lead_days": item.avg_lead_days,
         "reorder_threshold": str(item.reorder_threshold),
@@ -454,6 +544,17 @@ async def get_tier(
     stmt = select(ItemTier).where(
         ItemTier.id == tier_id,
         ItemTier.deleted_at.is_(None),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_prefix(
+    session: AsyncSession, prefix_id: uuid.UUID
+) -> ItemPrefix | None:
+    """Fetch one live (non-deleted) prefix (tier eager-joined)."""
+    stmt = select(ItemPrefix).where(
+        ItemPrefix.id == prefix_id,
+        ItemPrefix.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
 

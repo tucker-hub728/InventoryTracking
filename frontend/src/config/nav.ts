@@ -64,14 +64,14 @@ export const navSections: readonly NavSection[] = [
       { id: 'tiers', label: 'Tiers', href: '/tiers', icon: Tags, resource: 'inventory', comingSoon: true },
       // Frontend-only model of the kitting / back-flush flow (Transaction Spec
       // §2-§4). Mock data, no backend — pilled as WIP until it's wired up.
-      // {
-      //   id: 'reconciliation',
-      //   label: 'Kitting & Reconciliation',
-      //   href: '/reconciliation',
-      //   icon: Scale,
-      //   resource: 'inventory',
-      //   comingSoon: true,
-      // },
+      {
+        id: 'reconciliation',
+        label: 'Kitting & Reconciliation',
+        href: '/reconciliation',
+        icon: Scale,
+        resource: 'inventory',
+        comingSoon: true,
+      },
       {
         id: 'customers',
         label: 'Customers',

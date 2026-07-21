@@ -10,6 +10,7 @@ import {
   Plus,
   Scale,
   Trash2,
+  Undo2,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -81,6 +82,40 @@ const MOVEMENT_ICON: Record<MovementType, IconStyle> = {
     Icon: Scale,
     tint: 'text-accent',
     pill: 'border-accent/30 bg-accent/5 text-accent',
+  },
+  // Kitting / back-flush. Issues leave stock (warning, out-arrow); production
+  // output and back-flush return it (success, in-arrow).
+  kit_issue: {
+    Icon: ArrowUpFromLine,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
+  kit_additional_issue: {
+    Icon: ArrowUpFromLine,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
+  production_output: {
+    Icon: ArrowDownToLine,
+    tint: 'text-success',
+    pill: 'border-success/30 bg-success/5 text-success',
+  },
+  backflush: {
+    Icon: ArrowDownToLine,
+    tint: 'text-success',
+    pill: 'border-success/30 bg-success/5 text-success',
+  },
+  // The other two return events (kitting05). A manual return is routine
+  // (accent); a cancellation is worth flagging (warning).
+  kit_return: {
+    Icon: Undo2,
+    tint: 'text-accent',
+    pill: 'border-accent/30 bg-accent/5 text-accent',
+  },
+  kit_cancel_return: {
+    Icon: Undo2,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
   },
 };
 

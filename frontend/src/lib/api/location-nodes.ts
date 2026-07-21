@@ -44,7 +44,7 @@ export type CreatableNodeType =
   | 'box'
   | 'sub_location';
 
-export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials';
+export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials' | 'production';
 export type MovementType =
   | 'receipt'
   | 'dispense'
@@ -76,6 +76,8 @@ export const FLAT_CATEGORY_LABEL: Record<FlatCategory, string> = {
   qc: 'QC',
   engineering: 'Engineering',
   materials: 'Materials',
+  // Advisory production floors a kit is issued to (docs/modules/kitting.md §4.1).
+  production: 'Production',
 };
 
 // 'kanban' is intentionally omitted — the Kanban flow was retired, so it is no
@@ -164,6 +166,8 @@ export interface Allocation {
   id: string;
   lot_id: string;
   lot_number: string | null;
+  /** Item UUID — item detail URLs key on it, so links can go straight there. */
+  item_id: string | null;
   item_number: string | null;
   location_node_id: string;
   location_name: string | null;
@@ -180,6 +184,8 @@ export interface NodeMovement {
   id: string;
   lot_id: string | null;
   lot_number: string | null;
+  /** Item UUID — see {@link Allocation.item_id}. */
+  item_id: string | null;
   item_number: string | null;
   movement_type: MovementType;
   from_location_node_id: string | null;
@@ -329,8 +335,7 @@ export const locationNodesApi = {
       signal: opts?.signal,
     }),
 
-  create: (input: NodeCreateInput) =>
-    api.post<LocationNode>('/location-nodes', { json: input }),
+  create: (input: NodeCreateInput) => api.post<LocationNode>('/location-nodes', { json: input }),
 
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 
@@ -351,8 +356,7 @@ export const locationNodesApi = {
   transfer: (input: TransferInput) =>
     api.post<Allocation>('/allocations/transfer', { json: input }),
 
-  consume: (input: ConsumeInput) =>
-    api.post<Allocation>('/allocations/consume', { json: input }),
+  consume: (input: ConsumeInput) => api.post<Allocation>('/allocations/consume', { json: input }),
 
   consumeBatch: (input: ConsumeBatchInput) =>
     api.post<Allocation[]>('/allocations/consume-batch', { json: input }),

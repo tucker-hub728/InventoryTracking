@@ -13,219 +13,249 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { SearchableSelect } from '@/components/ui/searchable-select';
 import { toast } from '@/components/ui/sonner';
-import { cn } from '@/lib/utils';
+import { ApiError } from '@/lib/api/client';
+import { itemsApi, type ApiItem } from '@/lib/api/items';
+import { kitsApi } from '@/lib/api/kits';
+import { isBuiltTier } from '@/lib/api/tiers';
 
-import { ItemCell, LocationSelect, NumberInput, RuleNote } from './recon-bits';
-import {
-  BOM,
-  PRODUCTION_LOCATIONS,
-  buildableItems,
-  itemOf,
-  onHandTotal,
-} from './reconciliation-data';
-import { useReconStore } from './reconciliation-store';
-
-const ACTOR = 'Jordan Okafor';
+import { LocationTreePicker } from './location-tree-picker';
+import { NumberInput, RuleNote } from './recon-bits';
 
 /**
- * Open a kit ad-hoc: pick a buildable item and a quantity, and the BOM explodes
- * into Qty Needed (qtyPerUnit × buildQty) per Transaction Spec §2. Planning
- * (REQ-2026-07-09-PLN-001) would be the other entry point, but it isn't built.
+ * Open a kit ad-hoc: pick a buildable item (sub-assembly / finished good that
+ * has a BOM), a quantity, and a production floor. The backend explodes the BOM
+ * into the kit's lines.
  */
 export function NewKitDialog({
   open,
   onOpenChange,
+  onCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCreated?: () => void;
 }) {
   const router = useRouter();
-  const stock = useReconStore((s) => s.stock);
-  const createKit = useReconStore((s) => s.createKit);
-  const lastError = useReconStore((s) => s.lastError);
 
-  const options = React.useMemo(() => buildableItems(), []);
-  const [parentId, setParentId] = React.useState<string>(options[0]?.id ?? '');
-  const [buildQty, setBuildQty] = React.useState<number | null>(3);
-  const [location, setLocation] = React.useState<string>(PRODUCTION_LOCATIONS[0]);
+  const [items, setItems] = React.useState<ApiItem[]>([]);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+
+  const [kitNumber, setKitNumber] = React.useState('');
+  const [itemId, setItemId] = React.useState('');
+  const [targetQty, setTargetQty] = React.useState<number | null>(3);
+  const [prodNodeId, setProdNodeId] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     if (!open) return;
-    setParentId(options[0]?.id ?? '');
-    setBuildQty(3);
-    setLocation(PRODUCTION_LOCATIONS[0]);
-  }, [open, options]);
+    const ctrl = new AbortController();
+    setLoadError(null);
+    setError(null);
+    setTargetQty(3);
+    setProdNodeId('');
+    setKitNumber('');
+    // Pre-fill a free KIT-#### so the field is never blank; the operator
+    // overwrites it with the traveler's batch number when they have one.
+    void kitsApi
+      .nextNumber({ signal: ctrl.signal })
+      .then((r) => setKitNumber((cur) => cur || r.kit_number))
+      .catch(() => {});
+    void (async () => {
+      try {
+        // Only items you can actually gather a kit for: a built tier (AY/FG)
+        // whose BOM has at least two components. Transaction_Spec §1.1 composes
+        // every built item from two inputs, so a one-line BOM is an unfinished
+        // recipe. The backend enforces the same rule on create.
+        const itemRes = await itemsApi.list(
+          { has_bom: true, min_bom_lines: 2, limit: 200 },
+          { signal: ctrl.signal },
+        );
+        const buildable = itemRes.items.filter((i) => isBuiltTier(i.tier_type));
+        setItems(buildable);
+        setItemId(buildable[0]?.id ?? '');
+      } catch (err) {
+        if ((err as DOMException)?.name === 'AbortError') return;
+        setLoadError(err instanceof ApiError ? err.message : 'Failed to load items.');
+      }
+    })();
+    return () => ctrl.abort();
+  }, [open]);
 
-  const preview = React.useMemo(() => {
-    if (!parentId || !buildQty || buildQty < 1) return [];
-    return (BOM[parentId] ?? []).map((line) => {
-      const needed = line.qtyPerUnit * buildQty;
-      const have = onHandTotal(stock, line.childId);
-      return { ...line, needed, have, short: Math.max(0, needed - have) };
-    });
-  }, [parentId, buildQty, stock]);
-
-  const shortages = preview.filter((p) => p.short > 0);
-
-  const submit = () => {
-    if (!buildQty || buildQty < 1) {
-      toast.error('Enter a build quantity of 1 or more.');
+  const submit = async () => {
+    if (!kitNumber.trim()) {
+      setError('Enter a kit / batch name.');
       return;
     }
-    const id = createKit({
-      parentItemId: parentId,
-      buildQty,
-      productionLocation: location,
-      actor: ACTOR,
-    });
-    if (!id) {
-      toast.error('Could not open kit', { description: useReconStore.getState().lastError ?? undefined });
+    if (!itemId) {
+      setError('Pick an item to build.');
       return;
     }
-    toast.success(`${id} opened`, {
-      description: `Draft to build ${buildQty} × ${parentId}. Nothing has moved yet.`,
-    });
-    onOpenChange(false);
-    router.push(`/reconciliation/${id}`);
+    if (!prodNodeId) {
+      setError('Pick a production location.');
+      return;
+    }
+    if (!targetQty || targetQty < 1) {
+      setError('Enter a target quantity of 1 or more.');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const kit = await kitsApi.create({
+        kit_number: kitNumber.trim(),
+        item_id: itemId,
+        target_qty: targetQty,
+        production_location_node_id: prodNodeId,
+      });
+      toast.success(`${kit.kit_number} opened`, {
+        description: `Draft to build ${targetQty} × ${kit.item_number}.`,
+      });
+      onOpenChange(false);
+      onCreated?.();
+      router.push(`/reconciliation/${kit.id}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not open the kit.');
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  const selected = items.find((i) => i.id === itemId);
+  const noBuildable = !loadError && items.length === 0;
+
+  // Buildable items can run long once a catalog fills out, so the picker is the
+  // searchable one rather than a plain dropdown.
+  const itemOptions = React.useMemo(
+    () =>
+      items.map((i) => ({
+        value: i.id,
+        label: (
+          <span className="flex items-center gap-2">
+            <span className="font-mono">{i.item_number}</span>
+            <span className="truncate text-text-2">{i.description}</span>
+          </span>
+        ),
+        searchText: `${i.item_number} ${i.description}`,
+      })),
+    [items],
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>New kit</DialogTitle>
           <DialogDescription>
-            Pick what to build. Quantity Needed explodes from the bill of materials; you enter
-            Quantity Issued on the kit itself.
+            Pick a sub-assembly or finished good to build. The bill of materials explodes into the
+            kit&apos;s lines.
           </DialogDescription>
         </DialogHeader>
 
         <DialogBody className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="sm:col-span-2">
-              <label
-                htmlFor="kit-parent"
-                className="mb-1.5 block text-xs font-medium text-text-2"
-              >
-                Build
-              </label>
-              <select
-                id="kit-parent"
-                value={parentId}
-                onChange={(e) => setParentId(e.target.value)}
-                className="h-8 w-full rounded-md border border-border-strong bg-bg-elev px-2 text-sm text-text outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20"
-              >
-                {options.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.tier} · {o.id} — {o.desc}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label htmlFor="kit-qty" className="mb-1.5 block text-xs font-medium text-text-2">
-                Build quantity
-              </label>
-              <NumberInput
-                aria-label="Build quantity"
-                value={buildQty}
-                min={1}
-                onChange={setBuildQty}
-                className="h-8 w-full text-sm"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label htmlFor="kit-loc" className="mb-1.5 block text-xs font-medium text-text-2">
-              Production location
-            </label>
-            <LocationSelect
-              aria-label="Production location"
-              value={location}
-              options={PRODUCTION_LOCATIONS}
-              onChange={setLocation}
-              className="h-8 text-sm"
-            />
-            <p className="mt-1.5 text-xs text-text-3">
-              Material transfers here from its storage location when the kit is issued.
-            </p>
-          </div>
-
-          {preview.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-xs font-medium text-text-2">
-                Exploded bill of materials
-              </div>
-              <div className="max-h-60 overflow-y-auto rounded-md border border-border">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-surface">
-                    <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
-                      <th className="px-3 py-2 font-medium">Item</th>
-                      <th className="px-3 py-2 text-right font-medium">Per unit</th>
-                      <th className="px-3 py-2 text-right font-medium">Needed</th>
-                      <th className="px-3 py-2 text-right font-medium">On hand</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {preview.map((p) => (
-                      <tr key={p.childId} className="border-b border-border/60 last:border-0">
-                        <td className="max-w-[300px] px-3 py-2">
-                          <ItemCell itemId={p.childId} />
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono text-xs tabular-nums text-text-3">
-                          ×{p.qtyPerUnit}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono text-xs font-medium tabular-nums">
-                          {p.needed}
-                        </td>
-                        <td
-                          className={cn(
-                            'px-3 py-2 text-right font-mono text-xs tabular-nums',
-                            p.short > 0 ? 'font-medium text-danger' : 'text-text-2',
-                          )}
-                        >
-                          {p.have}
-                          {p.short > 0 && (
-                            <span className="ml-1 text-[11px]">(short {p.short})</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {shortages.length > 0 && (
+          {loadError ? (
+            <p className="text-sm text-danger">{loadError}</p>
+          ) : noBuildable ? (
             <RuleNote>
-              <span className="font-medium text-warning">
-                {shortages.length === 1 ? 'One line is' : `${shortages.length} lines are`} short.
-              </span>{' '}
-              You can still open the kit as a Draft — nothing moves until you issue it. A
-              sub-assembly that is short has to be built by its own kit first: an AY only gains stock
-              by being produced (Transaction Spec §3.1).
+              No buildable items found — a kit needs a sub-assembly or finished good that has a bill
+              of materials. Define a BOM first, then open a kit.
             </RuleNote>
-          )}
+          ) : (
+            <>
+              <div>
+                <label htmlFor="kit-name" className="mb-1.5 block text-xs font-medium text-text-2">
+                  Kit / batch name
+                </label>
+                <Input
+                  id="kit-name"
+                  aria-label="Kit / batch name"
+                  value={kitNumber}
+                  onChange={(e) => setKitNumber(e.target.value)}
+                  placeholder="e.g. BR-2026-014"
+                />
+                <p className="mt-1 text-xs text-text-3">
+                  Use the batch or traveler number if you have one. This also names the lot the
+                  finished quantity is stocked under.
+                </p>
+              </div>
+              <div>
+                <label htmlFor="kit-item" className="mb-1.5 block text-xs font-medium text-text-2">
+                  Item
+                </label>
+                <SearchableSelect
+                  id="kit-item"
+                  aria-label="Item"
+                  modal
+                  options={itemOptions}
+                  value={itemId}
+                  onChange={setItemId}
+                  placeholder="Choose an item"
+                  searchPlaceholder="Search by number or description…"
+                  emptyText="No buildable items match."
+                />
+                {selected && (
+                  <p className="mt-1 text-xs text-text-3">
+                    {selected.bom_line_count} component
+                    {selected.bom_line_count === 1 ? '' : 's'} in the BOM.
+                  </p>
+                )}
+              </div>
 
-          {itemOf(parentId).tier === 'FG' && (
-            <RuleNote>
-              This finished good consumes sub-assemblies. Their own recipes show on the kit as a
-              read-only tree — this kit consumes AY stock, it does not explode the AY&apos;s BOM.
-            </RuleNote>
-          )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="kit-qty" className="mb-1.5 block text-xs font-medium text-text-2">
+                    Target quantity
+                  </label>
+                  <NumberInput
+                    aria-label="Target quantity"
+                    value={targetQty}
+                    min={1}
+                    onChange={setTargetQty}
+                    className="h-8 w-full text-sm"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="kit-loc" className="mb-1.5 block text-xs font-medium text-text-2">
+                    Production location
+                  </label>
+                  <LocationTreePicker
+                    aria-label="Production location"
+                    value={prodNodeId}
+                    onChange={setProdNodeId}
+                    // Transaction_Spec §2: material is moved to a production or
+                    // manufacturing location at kitting, so only those are valid
+                    // here — a warehouse shelf is not a production floor.
+                    areas={['production']}
+                    modal
+                    placeholder="Choose a production floor"
+                    emptyText="No production or lab floors are set up."
+                  />
+                  <p className="mt-1 text-xs text-text-3">
+                    Issued material moves here and is held as work-in-progress until close-out.
+                  </p>
+                </div>
+              </div>
 
-          {lastError && <p className="text-xs text-danger">{lastError}</p>}
+              <RuleNote>
+                Material transfers here from its storage location when the kit is issued. Issued
+                quantities default to what the BOM needs — you can adjust them on the kit before
+                issuing.
+              </RuleNote>
+
+              {error && <p className="text-xs text-danger">{error}</p>}
+            </>
+          )}
         </DialogBody>
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={submit}>
-            Open kit
+          <Button variant="primary" onClick={() => void submit()} disabled={submitting || noBuildable}>
+            {submitting ? 'Opening…' : 'Open kit'}
           </Button>
         </DialogFooter>
       </DialogContent>

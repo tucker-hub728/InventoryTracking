@@ -8,10 +8,12 @@ interface LayoutProps {
   params: { id: string };
 }
 
-export function generateMetadata({ params }: { params: { id: string } }): Metadata {
-  return { title: `${params.id} · Inventory` };
+// The route segment is the item's UUID, which is meaningless as a tab title —
+// the shell renders the real SKU in the page header once the item loads.
+export function generateMetadata(): Metadata {
+  return { title: 'Item · Inventory' };
 }
 
 export default function InventoryDetailLayout({ children, params }: LayoutProps) {
-  return <InventoryDetailShell itemNumber={params.id}>{children}</InventoryDetailShell>;
+  return <InventoryDetailShell itemKey={params.id}>{children}</InventoryDetailShell>;
 }
