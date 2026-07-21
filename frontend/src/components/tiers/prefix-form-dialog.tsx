@@ -29,7 +29,9 @@ interface Props {
   tierName: string;
   /** When set, edits this prefix; otherwise creates a new one in the tier. */
   prefix?: ApiPrefix | null;
-  onSaved: () => void;
+  /** Receives the saved prefix so callers can auto-select a freshly created one.
+   *  Callers that only need to refresh can ignore the argument. */
+  onSaved: (saved: ApiPrefix) => void;
 }
 
 /**
@@ -61,7 +63,7 @@ export function PrefixFormDialog({ open, onOpenChange, tierId, tierName, prefix,
 
   const openSign = () => {
     if (!code.trim()) {
-      setError('Code is required.');
+      setError('Prefix is required.');
       return;
     }
     setError(null);
@@ -71,26 +73,27 @@ export function PrefixFormDialog({ open, onOpenChange, tierId, tierName, prefix,
   const onConfirmed = async (evidence: ReauthResponse) => {
     const reason = evidence.comment ?? '';
     try {
+      let saved: ApiPrefix;
       if (prefix) {
-        await tiersApi.updatePrefix(tierId, prefix.id, {
+        saved = await tiersApi.updatePrefix(tierId, prefix.id, {
           code: code.trim().toUpperCase(),
           label: label.trim() ? label.trim() : null,
           is_default: isDefault,
           evidence_id: evidence.evidence_id,
           reason,
         });
-        toast.success('Prefix updated', { description: code.trim().toUpperCase() });
+        toast.success('Prefix updated', { description: saved.code });
       } else {
-        await tiersApi.createPrefix(tierId, {
+        saved = await tiersApi.createPrefix(tierId, {
           code: code.trim().toUpperCase(),
           label: label.trim() ? label.trim() : null,
           is_default: isDefault,
           evidence_id: evidence.evidence_id,
           reason,
         });
-        toast.success('Prefix created', { description: code.trim().toUpperCase() });
+        toast.success('Prefix created', { description: saved.code });
       }
-      onSaved();
+      onSaved(saved);
       onOpenChange(false);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -129,7 +132,7 @@ export function PrefixFormDialog({ open, onOpenChange, tierId, tierName, prefix,
           <DialogBody className="space-y-4">
             <div className="grid grid-cols-[120px_1fr] gap-3">
               <div className="space-y-1.5">
-                <Label htmlFor="pf-code">Code</Label>
+                <Label htmlFor="pf-code">Prefix</Label>
                 <Input
                   id="pf-code"
                   value={code}
@@ -158,7 +161,9 @@ export function PrefixFormDialog({ open, onOpenChange, tierId, tierName, prefix,
             <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
               <div className="space-y-0.5">
                 <Label htmlFor="pf-default">Default for this tier</Label>
-                <p className="text-xs text-text-3">Pre-filled when this tier is chosen on new items.</p>
+                <p className="text-xs text-text-3">
+                  Pre-filled when this tier is chosen on new items.
+                </p>
               </div>
               <Switch
                 id="pf-default"
@@ -176,7 +181,7 @@ export function PrefixFormDialog({ open, onOpenChange, tierId, tierName, prefix,
             {error && (
               <p
                 role="alert"
-                className="rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger"
+                className="border-danger/30 bg-danger/5 rounded-md border px-3 py-2 text-xs text-danger"
               >
                 {error}
               </p>

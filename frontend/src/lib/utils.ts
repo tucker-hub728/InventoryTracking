@@ -58,3 +58,16 @@ export function getInitials(name: string): string {
     .map((p) => p[0]!.toUpperCase())
     .join('');
 }
+
+/**
+ * True when a string looks like a canonical UUID.
+ *
+ * Item detail URLs carry the item's stable UUID, but older links (and anything
+ * a user bookmarked) carry the human-readable item number instead. Route
+ * handlers use this to decide which lookup to run before canonicalising the URL.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}

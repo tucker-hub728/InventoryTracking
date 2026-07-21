@@ -370,6 +370,18 @@ MovementType = Literal[
     "discard",
     "transfer_out",
     "transfer_in",
+    # Kitting / back-flush. These already exist in the DB CHECK and in
+    # ``app.models.inventory.MOVEMENT_TYPES``; omitting them here made the
+    # ledger endpoint fail to serialise any item that had been kitted
+    # (ValidationError on MovementRead). Keep this list in lock-step with
+    # MOVEMENT_TYPES.
+    "kit_issue",
+    "kit_additional_issue",
+    "production_output",
+    # Three distinct return events — see MOVEMENT_TYPES (kitting05).
+    "backflush",
+    "kit_return",
+    "kit_cancel_return",
 ]
 
 
@@ -407,6 +419,13 @@ class MovementRead(BaseModel):
     movement_type: MovementType
     qty_delta: int
     qty_abs: int
+
+    # The kit that caused this row, when there is one (kit_issue /
+    # kit_additional_issue / production_output / backflush). Drives the
+    # AY/FG ledger's Transaction column ("Made KIT-0034"). A transaction
+    # reference only — SRS §7 excludes finished-good → component-lot tracing.
+    kit_id: str | None = None
+    kit_number: str | None = None
 
     # Mandatory §3 comment captured on every e-signed movement.
     notes: str | None

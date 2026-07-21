@@ -10,11 +10,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
-import {
-  MOVEMENT_TYPE_LABEL,
-  type ApiMovement,
-  type MovementType,
-} from '@/lib/api/movements';
+import { MOVEMENT_TYPE_LABEL, type ApiMovement, type MovementType } from '@/lib/api/movements';
 import { ItemLink } from '@/components/inventory/item-link';
 import { LotLink } from '@/components/inventory/lot-link';
 import { cn } from '@/lib/utils';
@@ -35,6 +31,14 @@ const TYPE_STYLE: Record<MovementType, string> = {
   discard: 'border-danger/40 bg-danger/10 text-danger',
   transfer_out: 'border-warning/40 bg-warning/10 text-warning',
   adjustment: 'border-accent/40 bg-accent/10 text-accent',
+  // Kitting / back-flush: issues leave stock (warning), output + back-flush
+  // bring it back in (success).
+  kit_issue: 'border-warning/40 bg-warning/10 text-warning',
+  kit_additional_issue: 'border-warning/40 bg-warning/10 text-warning',
+  production_output: 'border-success/40 bg-success/10 text-success',
+  backflush: 'border-success/40 bg-success/10 text-success',
+  kit_return: 'border-accent/40 bg-accent/10 text-accent',
+  kit_cancel_return: 'border-warning/40 bg-warning/10 text-warning',
 };
 
 /**
@@ -54,16 +58,11 @@ export function MovementDetailSheet({ open, onOpenChange, movement }: Props) {
         <SheetHeader>
           <SheetTitle>Stock movement</SheetTitle>
           <SheetDescription>
-            Quantities, lot, locations, and the reason recorded with the
-            electronic signature.
+            Quantities, lot, locations, and the reason recorded with the electronic signature.
           </SheetDescription>
         </SheetHeader>
 
-        <SheetBody>
-          {movement ? (
-            <MovementBody movement={movement} />
-          ) : null}
-        </SheetBody>
+        <SheetBody>{movement ? <MovementBody movement={movement} /> : null}</SheetBody>
       </SheetContent>
     </Sheet>
   );
@@ -74,12 +73,7 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
   const qtyDelta = Number(movement.qty_delta);
   const qtyAbs = Number(movement.qty_abs).toLocaleString();
   const sign = qtyDelta > 0 ? '+' : qtyDelta < 0 ? '−' : '';
-  const signTint =
-    qtyDelta > 0
-      ? 'text-success'
-      : qtyDelta < 0
-        ? 'text-danger'
-        : 'text-text-2';
+  const signTint = qtyDelta > 0 ? 'text-success' : qtyDelta < 0 ? 'text-danger' : 'text-text-2';
 
   return (
     <div className="space-y-6 text-sm">
@@ -100,19 +94,12 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           </span>
         </div>
         <p className="text-xs text-text-3">
-          <span className="font-mono">
-            {new Date(movement.performed_at).toLocaleString()}
-          </span>{' '}
-          · by{' '}
+          <span className="font-mono">{new Date(movement.performed_at).toLocaleString()}</span> · by{' '}
           {movement.performed_by_user_name ? (
             <>
-              <span className="font-medium text-text-1">
-                {movement.performed_by_user_name}
-              </span>{' '}
+              <span className="text-text-1 font-medium">{movement.performed_by_user_name}</span>{' '}
               {movement.performed_by_user_email && (
-                <span className="text-text-3">
-                  ({movement.performed_by_user_email})
-                </span>
+                <span className="text-text-3">({movement.performed_by_user_email})</span>
               )}
             </>
           ) : (
@@ -128,12 +115,13 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           value={
             movement.item_number ? (
               <span>
-                <ItemLink itemNumber={movement.item_number} className="font-mono" />
+                <ItemLink
+                  itemNumber={movement.item_number}
+                  itemId={movement.item_id}
+                  className="font-mono"
+                />
                 {movement.item_description && (
-                  <span className="text-text-2">
-                    {' '}
-                    · {movement.item_description}
-                  </span>
+                  <span className="text-text-2"> · {movement.item_description}</span>
                 )}
               </span>
             ) : (
@@ -180,18 +168,11 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           }
         />
         {movement.notes && <KV label="Comment" value={movement.notes} />}
-        <KV
-          label="Movement ID"
-          value={<span className="font-mono text-xs">{movement.id}</span>}
-        />
+        <KV label="Movement ID" value={<span className="font-mono text-xs">{movement.id}</span>} />
         {movement.reauth_evidence_id && (
           <KV
             label="Evidence"
-            value={
-              <span className="font-mono text-xs">
-                {movement.reauth_evidence_id}
-              </span>
-            }
+            value={<span className="font-mono text-xs">{movement.reauth_evidence_id}</span>}
           />
         )}
       </KvGrid>
@@ -200,9 +181,7 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
 }
 
 function KvGrid({ children }: { children: React.ReactNode }) {
-  return (
-    <dl className="grid grid-cols-[100px_1fr] gap-x-4 gap-y-1.5">{children}</dl>
-  );
+  return <dl className="grid grid-cols-[100px_1fr] gap-x-4 gap-y-1.5">{children}</dl>;
 }
 
 function KV({ label, value }: { label: string; value: React.ReactNode }) {

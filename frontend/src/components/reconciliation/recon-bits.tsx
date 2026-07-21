@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 
 import { Badge } from '@/components/ui/badge';
 import { KIT_STATUS_LABEL, KIT_STATUS_TONE, type KitStatus } from '@/lib/api/kits';
@@ -14,22 +15,39 @@ export function KitStatusBadge({ status }: { status: KitStatus }) {
   );
 }
 
-/** Item number + description — the pairing used in every kit table. */
+/** Item number + description — the pairing used in every kit table.
+ *
+ *  With `itemId`, the number links to the item's Unit Ledger, matching how the
+ *  BOM and where-used tables link. Every tier has a ledger tab now, so
+ *  `/ledger` resolves for raw materials and built items alike. Without an id it
+ *  renders as plain text rather than a control that can only fail. */
 export function ItemCell({
   itemNumber,
   description,
+  itemId,
   indent = 0,
   badge,
 }: {
   itemNumber: string;
   description: string;
+  itemId?: string | null;
   indent?: number;
   badge?: React.ReactNode;
 }) {
   return (
     <div className="flex min-w-0 items-center gap-2" style={{ paddingLeft: indent * 18 }}>
       <div className="min-w-0">
-        <div className="font-mono text-xs font-medium text-text">{itemNumber}</div>
+        {itemId ? (
+          <Link
+            href={`/inventory/${itemId}/ledger`}
+            onClick={(e) => e.stopPropagation()}
+            className="rounded-sm font-mono text-xs font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            {itemNumber}
+          </Link>
+        ) : (
+          <div className="font-mono text-xs font-medium text-text">{itemNumber}</div>
+        )}
         <div className="truncate text-xs text-text-3" title={description}>
           {description}
         </div>

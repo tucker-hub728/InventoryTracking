@@ -8,7 +8,7 @@ cancel are unsigned.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -36,6 +36,19 @@ class _ESignFields(BaseModel):
 # ── Reads ───────────────────────────────────────────────────────────────
 
 
+class CellOption(BaseModel):
+    """One occupied grid cell in a box — always exactly one unit of one lot
+    (``uq_lot_allocations_cell``). The operator picks these to choose *which*
+    vials leave; the recorded location stays the box (D4)."""
+
+    allocation_id: str
+    grid_row: int
+    grid_col: int
+    lot_id: str
+    lot_number: str | None = None
+    expiration_date: date | None = None
+
+
 class KitLineSourceOption(BaseModel):
     """A location that currently holds the component, with its available qty."""
 
@@ -43,6 +56,13 @@ class KitLineSourceOption(BaseModel):
     name: str
     path: str
     qty: int
+    # Grid-bearing (LN2 box) nodes carry their cells so the Issue step can draw
+    # the grid. Bulk nodes (shelf / sub-location) leave these empty and keep the
+    # plain quantity input.
+    is_grid: bool = False
+    grid_rows: int | None = None
+    grid_cols: int | None = None
+    cells: list[CellOption] = Field(default_factory=list)
 
 
 class KitLineRead(BaseModel):
@@ -59,7 +79,13 @@ class KitLineRead(BaseModel):
     issued_qty: int
     additional_issued_qty: int
     used_qty: int | None = None
-    # Derived = issued + additional − used (null until used is entered).
+    # Returned to inventory before close-out (TRX-008).
+    early_returned_qty: int = 0
+    # Derived = issued + additional − early_returned: what is still on the
+    # production floor and must be reconciled at close-out.
+    on_floor_qty: int = 0
+    # Derived = on_floor − used (null until used is entered) — the close-out
+    # back-flush amount.
     returned_qty: int | None = None
     source_location_node_id: str | None = None
     return_location_node_id: str | None = None
@@ -112,6 +138,12 @@ class KitListItem(BaseModel):
     created_at: datetime
 
 
+class KitNumberSuggestion(BaseModel):
+    """A free ``KIT-####`` for the New-kit dialog to pre-fill."""
+
+    kit_number: str
+
+
 class KitListResponse(BaseModel):
     items: list[KitListItem] = Field(default_factory=list)
     total: int
@@ -146,6 +178,15 @@ class KitActivityResponse(BaseModel):
 class KitCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Operator-supplied, so the system record can carry the batch/traveler
+    # number the paper record uses — the spec leans on that link ("a kit is
+    # closed out using data from the traveler"). Also becomes the produced
+    # lot's number at close-out. The UI pre-fills a free KIT-#### suggestion.
+    kit_number: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Kit / batch name. Must be unique; also names the produced lot.",
+    )
     item_id: str = Field(description="The sub-assembly or finished good to build")
     target_qty: int = Field(gt=0, description="How many to build")
     production_location_node_id: str = Field(
@@ -171,6 +212,20 @@ class IssueLineInput(BaseModel):
     line_id: str
     issued_qty: int = Field(ge=0)
     source_location_node_id: str | None = None
+    # LN2 only: the exact cells to pull. Empty = bulk source, drain FIFO by
+    # expiry (unchanged for shelves). When present, ``issued_qty`` must equal
+    # its length — for a grid source the quantity is a consequence of the
+    # selection, never typed (D2).
+    cell_allocation_ids: list[str] = Field(default_factory=list)
+
+
+class ReturnCellInput(BaseModel):
+    """A free cell to place a returned unit into."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grid_row: int = Field(ge=1)
+    grid_col: int = Field(ge=1)
 
 
 class IssueRequest(BaseModel):
@@ -197,6 +252,22 @@ class AdditionalIssueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     qty: int = Field(gt=0, description="Extra quantity to issue mid-production")
+    # LN2 only: the exact cells to pull, same rule as the initial issue —
+    # ``qty`` must equal its length. Empty = bulk source, drain FIFO.
+    cell_allocation_ids: list[str] = Field(default_factory=list)
+
+
+class ReturnExcessRequest(BaseModel):
+    """Return excess material from the floor back into inventory
+    (REQ-2026-07-01-TRX-008) — no lot assignment, so stock is never stranded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    qty: int = Field(gt=0, description="How much to hand back (≤ on-floor qty)")
+    return_location_node_id: str = Field(description="Storage node the material goes back to")
+    # Required when the return target is a box: one free cell per returned unit.
+    return_cells: list[ReturnCellInput] = Field(default_factory=list)
+    reason: str | None = Field(default=None, max_length=512)
 
 
 class CloseOutLineInput(BaseModel):
@@ -207,6 +278,8 @@ class CloseOutLineInput(BaseModel):
     return_location_node_id: str | None = Field(
         default=None, description="Where leftover returns; defaults to the source"
     )
+    # Required when the leftover returns into a box: one free cell per unit.
+    return_cells: list[ReturnCellInput] = Field(default_factory=list)
 
 
 class CloseOutRequest(_ESignFields):
@@ -215,12 +288,33 @@ class CloseOutRequest(_ESignFields):
     good_qty: int = Field(ge=0, description="Good finished units produced")
     scrap_qty: int = Field(ge=0, description="Units scrapped in production")
     output_location_node_id: str = Field(description="Where the finished quantity is stocked")
+    # REQ-2026-07-01-INV-008 — the produced AY/FG must carry an expiration
+    # date. Optional on the wire so an item with no shelf life can close out,
+    # but the UI prompts for it.
+    output_expiration_date: date | None = Field(
+        default=None, description="Expiry of the produced AY/FG lot"
+    )
     lines: list[CloseOutLineInput] = Field(
         min_length=1, description="Actual used quantity per component line"
     )
+
+
+class CancelLineInput(BaseModel):
+    """Where one line's on-floor material goes when the kit is cancelled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: str
+    return_location_node_id: str
+    return_cells: list[ReturnCellInput] = Field(default_factory=list)
 
 
 class CancelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, max_length=512)
+    # Per-line return destinations (D1). Omitted → each line falls back to its
+    # return/source location, preserving the pre-kitting04 behaviour for
+    # scripted callers. When supplied it must cover every line still holding
+    # material, so the UI can never silently drop a component.
+    lines: list[CancelLineInput] = Field(default_factory=list)

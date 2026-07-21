@@ -104,12 +104,7 @@ const LN2_UNIT_IN_ENABLED = false;
 
 /** Plural noun for a node's children, used in the "N boxes" header. */
 function childUnit(nodeType: NodeType, n: number): string {
-  const label =
-    nodeType === 'tank_quadrant'
-      ? 'rack'
-      : nodeType === 'rack'
-        ? 'container'
-        : 'box';
+  const label = nodeType === 'tank_quadrant' ? 'rack' : nodeType === 'rack' ? 'container' : 'box';
   return `${label}${n === 1 ? '' : 's'}`;
 }
 
@@ -117,7 +112,14 @@ function childUnit(nodeType: NodeType, n: number): string {
 // captured once, as a required comment, inside the e-sign dialog and read back
 // from the signature evidence (``evidence.comment``) at submit time.
 type Pending =
-  | { kind: 'place'; lotId: string; nodeId: string; gridRow: number | null; gridCol: number | null; qty: number }
+  | {
+      kind: 'place';
+      lotId: string;
+      nodeId: string;
+      gridRow: number | null;
+      gridCol: number | null;
+      qty: number;
+    }
   | { kind: 'place-batch'; lotId: string; nodeId: string; cells: { row: number; col: number }[] }
   | {
       kind: 'transfer-batch';
@@ -208,10 +210,7 @@ export function NodeDetailPanel({
       if (node.node_type === 'flat') {
         const mv = await locationNodesApi.movements({ nodeId: node.id });
         setConsumedHere(
-          mv.filter(
-            (m) =>
-              m.movement_type === 'dispense' && m.to_location_node_id === node.id,
-          ),
+          mv.filter((m) => m.movement_type === 'dispense' && m.to_location_node_id === node.id),
         );
       } else {
         setConsumedHere([]);
@@ -286,7 +285,12 @@ export function NodeDetailPanel({
       }
     })();
     return () => ctrl.abort();
-  }, [node.dedicated_customer_id, node.dedicated_product_id, node.inherited_customer_id, node.inherited_product_id]);
+  }, [
+    node.dedicated_customer_id,
+    node.dedicated_product_id,
+    node.inherited_customer_id,
+    node.inherited_product_id,
+  ]);
 
   // Batch place = one lot into N selected box cells (1 unit each), signed once.
   const openBatchPlaceSign = () => {
@@ -460,8 +464,7 @@ export function NodeDetailPanel({
 
   // Would the current placement exceed the lot's remaining-to-place cap?
   const placingCount = isBox ? selectedCells.size : Number(placeQty) || 0;
-  const overPlaceCap =
-    placeAvail?.remaining != null && placingCount > placeAvail.remaining;
+  const overPlaceCap = placeAvail?.remaining != null && placingCount > placeAvail.remaining;
 
   return (
     <div className="min-w-0 flex-1 px-6 py-5 sm:px-8">
@@ -470,9 +473,7 @@ export function NodeDetailPanel({
         {path.map((p, i) => (
           <React.Fragment key={p.id}>
             {i > 0 && <ChevronRight size={12} className="opacity-60" />}
-            <span className={cn(i === path.length - 1 && 'font-medium text-text-2')}>
-              {p.name}
-            </span>
+            <span className={cn(i === path.length - 1 && 'font-medium text-text-2')}>{p.name}</span>
           </React.Fragment>
         ))}
       </nav>
@@ -485,7 +486,7 @@ export function NodeDetailPanel({
           </span>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-xl font-semibold text-text-1">{node.name}</h2>
+              <h2 className="text-text-1 text-xl font-semibold">{node.name}</h2>
               <Badge tone="neutral">{NODE_TYPE_LABEL[node.node_type]}</Badge>
               {isBox && gridRows > 0 && (
                 <Badge tone="neutral">
@@ -535,7 +536,6 @@ export function NodeDetailPanel({
         )}
       </div>
 
-
       {/* ── Container with children (quadrant / rack / cassette / cryo box rack) ── */}
       {isContainerWithKids && (
         <div className="rounded-lg border border-border bg-bg-elev">
@@ -546,9 +546,7 @@ export function NodeDetailPanel({
             {canWrite && childType.length > 0 && (
               <Button size="sm" variant="secondary" onClick={() => onAddChild(node)}>
                 <Plus size={14} />{' '}
-                {childType.length === 1
-                  ? `Add ${childUnit(node.node_type, 1)}`
-                  : 'Add container'}
+                {childType.length === 1 ? `Add ${childUnit(node.node_type, 1)}` : 'Add container'}
               </Button>
             )}
           </div>
@@ -574,9 +572,7 @@ export function NodeDetailPanel({
               <p className="text-sm font-medium text-text-2">
                 Unit map · {gridRows}×{gridCols}
               </p>
-              <span className="text-xs text-text-3">
-                Click a unit to move
-              </span>
+              <span className="text-xs text-text-3">Click a unit to move</span>
             </div>
             <BoxGrid
               rows={gridRows}
@@ -615,8 +611,7 @@ export function NodeDetailPanel({
               <div className="mt-3 rounded-md border border-border bg-surface p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium text-text-2">
-                    Placing into {selectedCells.size}{' '}
-                    {selectedCells.size === 1 ? 'cell' : 'cells'}
+                    Placing into {selectedCells.size} {selectedCells.size === 1 ? 'cell' : 'cells'}
                   </p>
                   <button
                     type="button"
@@ -682,7 +677,7 @@ export function NodeDetailPanel({
                             : '—'}
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm text-text-1">
+                          <span className="text-text-1 block truncate text-sm">
                             {a.item_number ?? '—'}
                           </span>
                           <span className="block truncate text-xs text-text-3">
@@ -722,7 +717,7 @@ export function NodeDetailPanel({
                       title="View details"
                     >
                       <div className="min-w-0">
-                        <span className="text-sm text-text-1">{a.item_number ?? '—'}</span>
+                        <span className="text-text-1 text-sm">{a.item_number ?? '—'}</span>
                         <span className="ml-2 font-mono text-xs text-accent">
                           {a.lot_number ?? a.lot_id.slice(0, 8)}
                         </span>
@@ -755,8 +750,7 @@ export function NodeDetailPanel({
             <div className="rounded-lg border border-border bg-bg-elev">
               <div className="border-b border-border px-4 py-3">
                 <p className="text-sm font-medium text-text-2">
-                  Consumed here{' '}
-                  <span className="text-text-3">· {consumedHere.length}</span>
+                  Consumed here <span className="text-text-3">· {consumedHere.length}</span>
                 </p>
                 <p className="text-xs text-text-3">
                   Units used up at this location (out of inventory).
@@ -764,13 +758,10 @@ export function NodeDetailPanel({
               </div>
               <ul className="divide-y divide-border">
                 {consumedHere.map((m) => (
-                  <li
-                    key={m.id}
-                    className="flex items-center gap-3 px-4 py-2.5 text-sm"
-                  >
+                  <li key={m.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-text-1">
-                        <ItemLink itemNumber={m.item_number} />
+                      <span className="text-text-1 block truncate">
+                        <ItemLink itemNumber={m.item_number} itemId={m.item_id} />
                       </span>
                       <span className="block truncate text-xs text-text-3">
                         <LotLink lotId={m.lot_id} lotNumber={m.lot_number} /> ·{' '}
@@ -860,7 +851,7 @@ function Stat({ label, value, dot }: { label: string; value: string; dot?: boole
   return (
     <div className="rounded-lg border border-border bg-bg-elev px-4 py-3">
       <p className="text-[11px] uppercase tracking-wide text-text-3">{label}</p>
-      <p className="mt-1 font-mono text-2xl text-text-1">
+      <p className="text-text-1 mt-1 font-mono text-2xl">
         {value}
         {dot && <span className="ml-1 align-middle text-accent">•</span>}
       </p>
@@ -872,9 +863,12 @@ function UtilStat({ pct }: { pct: number }) {
   return (
     <div className="rounded-lg border border-border bg-bg-elev px-4 py-3">
       <p className="text-[11px] uppercase tracking-wide text-text-3">Utilization</p>
-      <p className="mt-1 font-mono text-2xl text-text-1">{pct}%</p>
+      <p className="text-text-1 mt-1 font-mono text-2xl">{pct}%</p>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
-        <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(pct, 100)}%` }} />
+        <div
+          className="h-full rounded-full bg-accent"
+          style={{ width: `${Math.min(pct, 100)}%` }}
+        />
       </div>
     </div>
   );
@@ -895,14 +889,14 @@ function ChildCard({ child, onClick }: { child: NodeTree; onClick: () => void })
     <button
       type="button"
       onClick={onClick}
-      className="rounded-lg border border-border bg-surface p-3 text-left transition-colors hover:border-accent/50 hover:bg-surface/80"
+      className="hover:border-accent/50 hover:bg-surface/80 rounded-lg border border-border bg-surface p-3 text-left transition-colors"
     >
       <div className="mb-3 flex items-center gap-2">
         <span className="flex size-9 items-center justify-center rounded-md border border-border bg-bg-elev text-text-2">
           <Icon size={16} />
         </span>
         <span className="min-w-0">
-          <span className="block truncate text-sm font-semibold text-text-1">{child.name}</span>
+          <span className="text-text-1 block truncate text-sm font-semibold">{child.name}</span>
           <span className="block truncate text-xs text-text-3">{subtitle}</span>
         </span>
       </div>
@@ -911,7 +905,10 @@ function ChildCard({ child, onClick }: { child: NodeTree; onClick: () => void })
         <span>{pct}%</span>
       </div>
       <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-elev">
-        <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(pct, 100)}%` }} />
+        <div
+          className="h-full rounded-full bg-accent"
+          style={{ width: `${Math.min(pct, 100)}%` }}
+        />
       </div>
     </button>
   );
@@ -936,9 +933,7 @@ function LotCombobox({
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return lots;
-    return lots.filter((l) =>
-      `${l.lot_number} ${l.item_number ?? ''}`.toLowerCase().includes(q),
-    );
+    return lots.filter((l) => `${l.lot_number} ${l.item_number ?? ''}`.toLowerCase().includes(q));
   }, [lots, query]);
 
   return (
@@ -1000,9 +995,7 @@ function LotCombobox({
                   l.id === value && 'bg-surface',
                 )}
               >
-                <span className="truncate font-mono text-xs text-text-1">
-                  {l.lot_number}
-                </span>
+                <span className="text-text-1 truncate font-mono text-xs">{l.lot_number}</span>
                 {l.item_number && (
                   <span className="ml-2 shrink-0 text-text-3">{l.item_number}</span>
                 )}
@@ -1101,9 +1094,7 @@ function AllocationDetailSheet({
                 />
               </section>
               <section className="space-y-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-text-3">
-                  Lot
-                </p>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-text-3">Lot</p>
                 {loading ? (
                   <p className="text-xs text-text-3">Loading…</p>
                 ) : lot ? (
@@ -1129,12 +1120,15 @@ function AllocationDetailSheet({
                     />
                     <DetailRow
                       label="Item"
-                      value={<ItemLink itemNumber={lot.item_number} />}
+                      value={<ItemLink itemNumber={lot.item_number} itemId={lot.item_id} />}
                     />
                     <DetailRow label="Status" value={lot.status} />
                     <DetailRow label="Supplier" value={lot.supplier_name ?? '—'} />
                     <DetailRow label="PO reference" value={lot.po_reference ?? '—'} />
-                    <DetailRow label="Ordered qty" value={lot.ordered_qty == null ? '—' : `${lot.ordered_qty}`} />
+                    <DetailRow
+                      label="Ordered qty"
+                      value={lot.ordered_qty == null ? '—' : `${lot.ordered_qty}`}
+                    />
                     <DetailRow label="Manufactured" value={lot.manufacture_date ?? '—'} />
                     <DetailRow label="Expires" value={lot.expiration_date ?? '—'} />
                   </>
@@ -1150,17 +1144,11 @@ function AllocationDetailSheet({
   );
 }
 
-function DetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
       <span className="text-xs text-text-3">{label}</span>
-      <span className="text-right text-sm text-text-1">{value}</span>
+      <span className="text-text-1 text-right text-sm">{value}</span>
     </div>
   );
 }
@@ -1371,7 +1359,12 @@ function AllocationActions({
               <Label className="text-xs">
                 Destination cells — click up to {available} ({destCells.size} chosen)
               </Label>
-              <DestGridPicker node={destNode} value={destCells} onChange={setDestCells} max={available} />
+              <DestGridPicker
+                node={destNode}
+                value={destCells}
+                onChange={setDestCells}
+                max={available}
+              />
             </div>
           ) : destNode ? (
             <div className="w-24 space-y-1">
@@ -1402,7 +1395,9 @@ function AllocationActions({
             onChange={(e) => setQty(e.target.value)}
             className="w-24 font-mono"
           />
-          <p className="text-[11px] text-text-3">Used up here (out of inventory) at this location.</p>
+          <p className="text-[11px] text-text-3">
+            Used up here (out of inventory) at this location.
+          </p>
         </div>
       )}
 
@@ -1536,7 +1531,12 @@ function BatchOutPanel({
                   <Label className="text-xs">
                     Destination cells — pick exactly {count} ({destCells.size} chosen)
                   </Label>
-                  <DestGridPicker node={destNode} value={destCells} onChange={setDestCells} max={count} />
+                  <DestGridPicker
+                    node={destNode}
+                    value={destCells}
+                    onChange={setDestCells}
+                    max={count}
+                  />
                 </div>
               ) : destNode ? (
                 <p className="text-xs text-text-3">
@@ -1638,7 +1638,14 @@ function ResizeDialog({
           <div className="flex items-end gap-2">
             <div className="w-24 space-y-1">
               <Label className="text-xs">Rows</Label>
-              <Input type="number" min={1} step="1" value={rows} onChange={(e) => setRows(e.target.value)} className="font-mono" />
+              <Input
+                type="number"
+                min={1}
+                step="1"
+                value={rows}
+                onChange={(e) => setRows(e.target.value)}
+                className="font-mono"
+              />
             </div>
             <span className="pb-2 text-text-3">×</span>
             <div className="w-24 space-y-1">
@@ -1763,7 +1770,9 @@ function EditDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Edit {NODE_TYPE_LABEL[node.node_type]}</DialogTitle>
-          <DialogDescription>Rename this node{isQuadrant ? ' and set its dedication.' : '.'}</DialogDescription>
+          <DialogDescription>
+            Rename this node{isQuadrant ? ' and set its dedication.' : '.'}
+          </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3">
           <div className="space-y-1">
@@ -1800,7 +1809,9 @@ function EditDialog({
                 </div>
                 {kind !== 'none' && (
                   <div className="w-56 space-y-1">
-                    <Label className="text-xs">{kind === 'customer' ? 'Customer' : 'Product'}</Label>
+                    <Label className="text-xs">
+                      {kind === 'customer' ? 'Customer' : 'Product'}
+                    </Label>
                     <Select value={target} onValueChange={setTarget}>
                       <SelectTrigger>
                         <SelectValue placeholder={`Select ${kind}`} />

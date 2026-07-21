@@ -96,6 +96,8 @@ def _movement_to_read(
         movement_type=m.movement_type,  # type: ignore[arg-type]
         qty_delta=m.qty_delta,
         qty_abs=m.qty_abs,
+        kit_id=str(m.kit_id) if m.kit_id else None,
+        kit_number=m.kit.kit_number if m.kit else None,
         notes=m.notes,
         reauth_evidence_id=str(m.reauth_evidence_id) if m.reauth_evidence_id else None,
         performed_by_user_id=str(m.performed_by_user_id),
@@ -479,6 +481,18 @@ async def list_items(
             )
         ),
     ] = None,
+    min_bom_lines: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            description=(
+                "Filter to items whose BOM has at least this many distinct "
+                "components. Kitting passes 2: every composition rule in the "
+                "Transaction Spec is two-input, so a one-line BOM is an "
+                "incomplete recipe rather than something you can kit."
+            ),
+        ),
+    ] = None,
     below_reorder: Annotated[
         bool | None,
         Query(
@@ -506,6 +520,7 @@ async def list_items(
         prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
+        min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
         sort=sort,
         direction=direction,

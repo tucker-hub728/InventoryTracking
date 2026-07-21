@@ -259,7 +259,7 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                     <tr key={l.id} className="border-border/60 border-b">
                       <td className="px-4 py-2.5">
                         <Link
-                          href={`/inventory/${l.child_item_number}/ledger`}
+                          href={`/inventory/${l.child_item_id}/ledger`}
                           className="font-mono text-xs text-accent hover:underline"
                         >
                           {l.child_item_number}

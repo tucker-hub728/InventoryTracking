@@ -483,7 +483,7 @@ function ProductRow({ product, monthRuns, dirty, editable, onSet }: ProductRowPr
     <tr className="border-b border-border/60 hover:bg-surface/40">
       <td className="sticky left-0 z-10 bg-bg-elev px-3 py-1.5">
         <Link
-          href={`/inventory/${product.sku}/ledger`}
+          href={`/inventory/${product.id}/ledger`}
           className="font-mono text-xs text-accent hover:underline"
         >
           {product.sku}

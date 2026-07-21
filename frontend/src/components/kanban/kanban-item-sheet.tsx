@@ -79,7 +79,7 @@ export function KanbanItemSheet({ open, onOpenChange, selection }: Props) {
             Close
           </Button>
           <Button asChild variant="primary">
-            <Link href={`/inventory/${item.id}`}>
+            <Link href={`/inventory/${item.uuid}`}>
               Open item <ArrowRight size={14} />
             </Link>
           </Button>

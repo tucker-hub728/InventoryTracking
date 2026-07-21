@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { NODE_TYPE_LABEL, locationNodesApi, type NodeTree } from '@/lib/api/location-nodes';
 import { cn } from '@/lib/utils';
 
-export type LocationArea = 'ln2' | 'cold' | 'warehouse';
+export type LocationArea = 'ln2' | 'cold' | 'warehouse' | 'production';
 
 /** A node in the picker's unified forest. Synthetic group nodes wrap each area. */
 export interface PNode {
@@ -34,6 +34,7 @@ const AREA_LABEL: Record<LocationArea, string> = {
   ln2: 'LN2',
   cold: 'Cold Storage',
   warehouse: 'Warehouse',
+  production: 'Production / Lab',
 };
 
 // ── Cached forest (fetched once, shared across all picker instances) ─────────
@@ -69,10 +70,15 @@ function convertTree(
 }
 
 async function buildForest(): Promise<Forest> {
-  const [ln2, freezer, warehouse] = await Promise.all([
+  const [ln2, freezer, warehouse, production] = await Promise.all([
     locationNodesApi.ln2Tree(),
     locationNodesApi.freezerTree(),
     locationNodesApi.warehouseTree(),
+    // Production/lab floors (Clean Room 1/2, Manufacturing Floor, PD Lab
+    // One/Two) — a kit's production location must be one of these
+    // (Transaction_Spec §2). They are root `flat` nodes, so they have no
+    // children of their own.
+    locationNodesApi.flat({ category: 'production' }),
   ]);
   const byId = new Map<string, PNode>();
   const parentOf = new Map<string, string | null>();
@@ -105,6 +111,10 @@ async function buildForest(): Promise<Forest> {
     group('ln2', ln2),
     group('cold', freezer),
     group('warehouse', warehouse, true),
+    group(
+      'production',
+      production.map((n) => ({ ...n, children: [] })),
+    ),
   ].filter((g) => g.children.length > 0);
   return { roots, byId, parentOf, real };
 }
@@ -135,7 +145,9 @@ export function LocationTreePicker({
   areas = ALL_AREAS,
   allowedNodeIds,
   nodeQty,
-  selectable = (n) => n.canStore,
+  // Storage leaves, plus production floors (which are `flat` nodes, so
+  // `can_store` is false even though a kit legitimately targets them).
+  selectable = (n) => n.canStore || n.area === 'production',
   showPath = false,
   disabled,
   placeholder = 'Choose a location',
@@ -146,7 +158,9 @@ export function LocationTreePicker({
 }: {
   value: string;
   onChange: (id: string) => void;
-  /** Which area groups to show. Default: all. */
+  /** Which area groups to show. Default: the three storage areas — 'production'
+   *  is opt-in, since production floors are only valid as a kit's production
+   *  location, never as a storage source/return/output. */
   areas?: ReadonlyArray<LocationArea>;
   /** If given, only these node ids are selectable AND the tree is pruned to the
    *  branches leading to them (e.g. locations holding an item). */

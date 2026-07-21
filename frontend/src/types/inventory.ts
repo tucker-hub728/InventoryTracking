@@ -81,6 +81,11 @@ export interface LedgerEntry {
   movementId?: string;
   /** Underlying movement_type, for tooltips + the reverse attestation copy. */
   movementType?: string;
+  /** Kit that caused this row, when there is one — drives the AY/FG ledger's
+   *  Transaction chip ("Made KIT-0034"). A transaction reference only; SRS §7
+   *  excludes finished-good → component-lot traceability. */
+  kitNumber?: string | null;
+  kitId?: string | null;
   /** True if this row is itself a reversal of an earlier row. */
   isReversal?: boolean;
   /** True if a later row already reverses this one (one reversal per original). */

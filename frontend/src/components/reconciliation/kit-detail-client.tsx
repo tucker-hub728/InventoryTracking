@@ -9,6 +9,7 @@ import {
   PackageSearch,
   Plus,
   ScrollText,
+  Undo2,
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -16,6 +17,7 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { useConfirm } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
@@ -39,10 +41,12 @@ import {
   type ApiKitActivityRow,
   type ApiKitLine,
   type KitStatus,
+  type ReturnCellInput,
 } from '@/lib/api/kits';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { cn } from '@/lib/utils';
 
+import { BoxCellPicker, CellGridPicker, useBoxGrid } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
 import {
   ItemCell,
@@ -84,6 +88,8 @@ interface OutputDraft {
   good_qty: number | null;
   scrap_qty: number | null;
   output_location_node_id: string;
+  /** Expiry of the produced lot — REQ-2026-07-01-INV-008. */
+  output_expiration_date: string;
 }
 
 /** Draft edits for the Issue step — held locally and committed only when the
@@ -91,10 +97,25 @@ interface OutputDraft {
 interface LineDraft {
   issued_qty: number;
   source: string;
+  /** LN2 only: allocation ids of the chosen cells. Drives issued_qty. */
+  cells: string[];
 }
 
+const sourceOption = (line: ApiKitLine, source: string) =>
+  line.source_options.find((o) => o.node_id === source);
+
 const sourceQty = (line: ApiKitLine, source: string): number =>
-  line.source_options.find((o) => o.node_id === source)?.qty ?? 0;
+  sourceOption(line, source)?.qty ?? 0;
+
+/** A grid (LN2 box) source hands quantity control to the cell selection. */
+const isGridSource = (line: ApiKitLine, source: string): boolean =>
+  Boolean(sourceOption(line, source)?.is_grid);
+
+/** `"3:2"` → `{ grid_row: 3, grid_col: 2 }` — CellGridPicker's destination key. */
+const toCell = (key: string): ReturnCellInput => {
+  const [r, c] = key.split(':');
+  return { grid_row: Number(r ?? 0), grid_col: Number(c ?? 0) };
+};
 
 export function KitDetailClient({ kitId }: { kitId: string }) {
   const canSign = usePermission('inventory', 'sign');
@@ -111,14 +132,21 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const [activityOpen, setActivityOpen] = React.useState(false);
   const [reauthOpen, setReauthOpen] = React.useState(false);
   const [addingTo, setAddingTo] = React.useState<ApiKitLine | null>(null);
+  const [returningFrom, setReturningFrom] = React.useState<ApiKitLine | null>(null);
+  const [cancelOpen, setCancelOpen] = React.useState(false);
 
   const [output, setOutput] = React.useState<OutputDraft>({
     good_qty: null,
     scrap_qty: 0,
     output_location_node_id: '',
+    output_expiration_date: '',
   });
   const [used, setUsed] = React.useState<Record<string, number | null>>({});
   const [returnLoc, setReturnLoc] = React.useState<Record<string, string>>({});
+  /** Close-out back-flush cells per line, when the return target is a box. */
+  const [returnCells, setReturnCells] = React.useState<Record<string, string[]>>({});
+  /** Whether each line's return destination resolved to a box (grid) node. */
+  const [returnIsBox, setReturnIsBox] = React.useState<Record<string, boolean>>({});
   const [lineDraft, setLineDraft] = React.useState<Record<string, LineDraft>>({});
 
   const load = React.useCallback(
@@ -134,6 +162,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           scrap_qty: k.scrap_qty ?? prev.scrap_qty ?? 0,
           output_location_node_id:
             k.output_location_node_id ?? prev.output_location_node_id ?? '',
+          output_expiration_date: prev.output_expiration_date ?? '',
         }));
         setUsed(Object.fromEntries(k.lines.map((l) => [l.id, l.used_qty])));
         setReturnLoc(
@@ -149,7 +178,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           Object.fromEntries(
             k.lines.map((l) => [
               l.id,
-              { issued_qty: l.issued_qty, source: l.source_location_node_id ?? '' },
+              { issued_qty: l.issued_qty, source: l.source_location_node_id ?? '', cells: [] },
             ]),
           ),
         );
@@ -188,6 +217,19 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const placeableIds = React.useMemo(
     () => new Set(placeableOptions.map((o) => o.value)),
     [placeableOptions],
+  );
+  // Returns may also land in an LN2 box, provided free cells are chosen (D3).
+  const returnableIds = React.useMemo(
+    () =>
+      new Set(
+        nodes
+          .filter(
+            (n) =>
+              n.node_type === 'shelf' || n.node_type === 'sub_location' || n.node_type === 'box',
+          )
+          .map((n) => n.id),
+      ),
+    [nodes],
   );
   // The production location can be any node in the hierarchy (not just a
   // storage leaf), so resolve its name with a dedicated lookup.
@@ -268,11 +310,30 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     output.scrap_qty !== null &&
     output.good_qty + output.scrap_qty > 0 &&
     Boolean(output.output_location_node_id);
+  // The output location is required — close-out places the produced quantity
+  // there — so the Production step can't be left until it's chosen. A closed or
+  // cancelled kit is read-only, so navigation stays open.
+  const productionEditable = kit.status === 'issued' || kit.status === 'in_production';
+  const productionReady = !productionEditable || Boolean(output.output_location_node_id);
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
+  // Whether each line's chosen return destination turned out to be a box —
+  // reported by BoxCellPicker, which resolves it from the Location System.
+  // (The kit's source_options can't answer this: the operator may pick a box
+  // this kit never pulled from, and it wouldn't be listed there.)
+  const isBox = (lineId: string) => returnIsBox[lineId] === true;
+  // A back-flush into a box needs one free cell per returned unit.
+  const cellsIncomplete = kit.lines.some((l) => {
+    const u = used[l.id];
+    if (u == null) return false;
+    const ret = l.on_floor_qty - u;
+    if (ret <= 0) return false;
+    return isBox(l.id) ? (returnCells[l.id]?.length ?? 0) !== ret : false;
+  });
+  // The cap is what is still on the floor — net of anything already returned.
   const overUse = kit.lines.filter(
-    (l) => used[l.id] != null && (used[l.id] as number) > lineIssuedTotal(l),
+    (l) => used[l.id] != null && (used[l.id] as number) > l.on_floor_qty,
   );
-  const closeReady = outputReady && usedComplete && overUse.length === 0;
+  const closeReady = outputReady && usedComplete && overUse.length === 0 && !cellsIncomplete;
   // Task 2: can't issue more than the chosen source location holds — checked
   // against the local draft (nothing is saved until Issue is pressed).
   const issueBlocked =
@@ -281,6 +342,9 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       const d = lineDraft[l.id];
       if (!d || d.issued_qty <= 0) return false;
       if (!d.source) return true; // a line that issues needs a source
+      // For a box, quantity IS the cell count, so the only failure mode is
+      // picking nothing; bulk sources are capped by what the location holds.
+      if (isGridSource(l, d.source)) return d.cells.length === 0;
       return d.issued_qty > sourceQty(l, d.source);
     });
 
@@ -290,10 +354,13 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         kitsApi.issue(kit.id, {
           lines: kit.lines.map((l) => {
             const d = lineDraft[l.id];
+            const grid = d?.source ? isGridSource(l, d.source) : false;
             return {
               line_id: l.id,
-              issued_qty: d?.issued_qty ?? l.issued_qty,
+              // A box's quantity is the number of cells picked (D2).
+              issued_qty: grid ? (d?.cells.length ?? 0) : (d?.issued_qty ?? l.issued_qty),
               source_location_node_id: (d?.source ?? l.source_location_node_id) || null,
+              cell_allocation_ids: grid ? d?.cells : undefined,
             };
           }),
         }),
@@ -326,10 +393,12 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         good_qty: output.good_qty!,
         scrap_qty: output.scrap_qty!,
         output_location_node_id: output.output_location_node_id,
+        output_expiration_date: output.output_expiration_date || null,
         lines: kit.lines.map((l) => ({
           line_id: l.id,
           used_qty: used[l.id] as number,
           return_location_node_id: returnLoc[l.id] || null,
+          return_cells: isBox(l.id) ? (returnCells[l.id] ?? []).map(toCell) : undefined,
         })),
         evidence_id: evidence.evidence_id,
         reason: evidence.comment ?? '',
@@ -347,6 +416,12 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   };
 
   const onCancel = async () => {
+    // A draft has moved nothing, so a plain confirm is honest. Post-issue,
+    // material has to go somewhere specific — that needs a real dialog (D1).
+    if (!editableDraft) {
+      setCancelOpen(true);
+      return;
+    }
     const ok = await confirm({
       title: `Cancel ${kit.kit_number}?`,
       destructive: true,
@@ -378,7 +453,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <Button variant="secondary" onClick={() => setActivityOpen(true)}>
               <ScrollText size={14} /> Activity log
             </Button>
-            {editableDraft && canWrite && (
+            {(editableDraft || inProd) && canWrite && (
               <Button variant="danger" onClick={() => void onCancel()} disabled={busy}>
                 Cancel kit
               </Button>
@@ -455,18 +530,23 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             busy={busy}
             draft={lineDraft}
             onDraftChange={(lineId, patch) =>
-              setLineDraft((prev) => ({
-                ...prev,
-                [lineId]: {
-                  issued_qty:
-                    patch.issued_qty ??
-                    prev[lineId]?.issued_qty ??
-                    0,
-                  source: patch.source ?? prev[lineId]?.source ?? '',
-                },
-              }))
+              setLineDraft((prev) => {
+                const cur = prev[lineId];
+                // Changing the source invalidates any cell picks from the old one.
+                const sourceChanged = patch.source !== undefined && patch.source !== cur?.source;
+                const cells = patch.cells ?? (sourceChanged ? [] : (cur?.cells ?? []));
+                return {
+                  ...prev,
+                  [lineId]: {
+                    issued_qty: patch.issued_qty ?? cur?.issued_qty ?? 0,
+                    source: patch.source ?? cur?.source ?? '',
+                    cells,
+                  },
+                };
+              })
             }
             onIssueMore={(line) => setAddingTo(line)}
+            onReturn={(line) => setReturningFrom(line)}
           />
         )}
         {activeStep === 1 && (
@@ -478,8 +558,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             used={used}
             onUsed={(id, v) => setUsed((u) => ({ ...u, [id]: v }))}
             returnLoc={returnLoc}
-            onReturnLoc={(id, v) => setReturnLoc((r) => ({ ...r, [id]: v }))}
-            allowedIds={placeableIds}
+            onReturnLoc={(id, v) => {
+              setReturnLoc((r) => ({ ...r, [id]: v }));
+              // A new destination invalidates cells picked against the old one.
+              setReturnCells((c) => ({ ...c, [id]: [] }));
+            }}
+            returnCells={returnCells}
+            onReturnCells={(id, v) => setReturnCells((c) => ({ ...c, [id]: v }))}
+            returnIsBox={returnIsBox}
+            onReturnIsBox={(id, v) =>
+              setReturnIsBox((m) => (m[id] === v ? m : { ...m, [id]: v }))
+            }
+            allowedIds={returnableIds}
             overUse={overUse}
           />
         )}
@@ -499,6 +589,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             busy,
             closeReady,
             issueBlocked,
+            productionReady,
             onIssue,
             onNext: () => setActiveStep((s) => Math.min(model.reachable, s + 1)),
             onProductionNext,
@@ -514,6 +605,30 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         onDone={(k) => {
           setKit(k);
           setAddingTo(null);
+        }}
+      />
+
+      <CancelKitDialog
+        kit={kit}
+        open={cancelOpen}
+        allowedIds={returnableIds}
+        onOpenChange={setCancelOpen}
+        onDone={(k) => {
+          setCancelOpen(false);
+          setKit(k);
+          setActiveStep(stepModel(k.status).def);
+        }}
+      />
+
+      <ReturnExcessDialog
+        kit={kit}
+        line={returningFrom}
+        allowedIds={returnableIds}
+        onOpenChange={(o) => !o && setReturningFrom(null)}
+        onDone={(k) => {
+          setKit(k);
+          setUsed(Object.fromEntries(k.lines.map((l) => [l.id, l.used_qty])));
+          setReturningFrom(null);
         }}
       />
 
@@ -544,6 +659,7 @@ function footerPrimary(
     busy: boolean;
     closeReady: boolean;
     issueBlocked: boolean;
+    productionReady: boolean;
     onIssue: () => void;
     onNext: () => void;
     onProductionNext: () => void;
@@ -573,7 +689,12 @@ function footerPrimary(
   }
   if (activeStep === 1)
     return model.reachable > 1 ? (
-      <Button variant="primary" onClick={ctx.onProductionNext} disabled={ctx.busy}>
+      <Button
+        variant="primary"
+        onClick={ctx.onProductionNext}
+        disabled={ctx.busy || !ctx.productionReady}
+        title={ctx.productionReady ? undefined : 'Choose where to stock the output first'}
+      >
         Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
       </Button>
     ) : (
@@ -606,6 +727,7 @@ function IssueStep({
   draft,
   onDraftChange,
   onIssueMore,
+  onReturn,
 }: {
   kit: ApiKit;
   nodeOptions: SelectOption[];
@@ -615,6 +737,7 @@ function IssueStep({
   draft: Record<string, LineDraft>;
   onDraftChange: (lineId: string, patch: Partial<LineDraft>) => void;
   onIssueMore: (line: ApiKitLine) => void;
+  onReturn: (line: ApiKitLine) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -646,6 +769,8 @@ function IssueStep({
                 <th className="px-3 py-2 text-right font-medium">On hand</th>
                 <th className="px-3 py-2 text-right font-medium">Issued</th>
                 <th className="px-3 py-2 text-right font-medium">Additional</th>
+                {!editableDraft && <th className="px-3 py-2 text-right font-medium">Returned</th>}
+                {!editableDraft && <th className="px-3 py-2 text-right font-medium">On floor</th>}
                 <th className="px-3 py-2 font-medium">Source location</th>
                 <th className="px-3 py-2" />
               </tr>
@@ -655,7 +780,10 @@ function IssueStep({
                 const d = draft[line.id] ?? {
                   issued_qty: line.issued_qty,
                   source: line.source_location_node_id ?? '',
+                  cells: [],
                 };
+                const opt = line.source_options.find((o) => o.node_id === d.source);
+                const grid = Boolean(opt?.is_grid);
                 // Available at the chosen source: from the draft in edit mode,
                 // from the server-derived value once issued.
                 const hereQty = editableDraft
@@ -664,12 +792,17 @@ function IssueStep({
                     : null
                   : line.source_available;
                 const noSource = editableDraft && d.issued_qty > 0 && !d.source;
-                const over = editableDraft && Boolean(d.source) && d.issued_qty > sourceQty(line, d.source);
-                const invalid = over || noSource;
+                // A box can't be over-issued — quantity is the cell count — but
+                // it can be under-picked (zero cells chosen).
+                const over =
+                  editableDraft && Boolean(d.source) && !grid && d.issued_qty > sourceQty(line, d.source);
+                const noCells = editableDraft && grid && d.cells.length === 0;
+                const invalid = over || noSource || noCells;
                 return (
-                  <tr key={line.id} className={cn('border-b border-border/60', invalid && 'bg-danger-soft/30')}>
+                  <React.Fragment key={line.id}>
+                  <tr className={cn('border-b border-border/60', invalid && 'bg-danger-soft/30')}>
                     <td className="max-w-[300px] px-3 py-2">
-                      <ItemCell itemNumber={line.item_number} description={line.description} />
+                      <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
                     </td>
                     <td className="px-3 py-2 text-right">
                       <QtyCell value={Number(line.needed_qty)} title={`×${line.qty_per_unit} per unit`} />
@@ -695,12 +828,26 @@ function IssueStep({
                     </td>
                     <td className="px-3 py-2 text-right">
                       {editableDraft ? (
-                        <NumberInput
-                          aria-label={`Issued for ${line.item_number}`}
-                          value={d.issued_qty}
-                          invalid={invalid}
-                          onChange={(v) => onDraftChange(line.id, { issued_qty: v ?? 0 })}
-                        />
+                        grid ? (
+                          // LN2: the quantity is however many cells were picked,
+                          // so the input becomes a derived read-out (D2).
+                          <div className="flex flex-col items-end leading-tight">
+                            <QtyCell
+                              value={d.cells.length}
+                              tone={d.cells.length === 0 ? 'danger' : undefined}
+                            />
+                            <span className="mt-0.5 text-[10px] uppercase tracking-wide text-text-3">
+                              from cells
+                            </span>
+                          </div>
+                        ) : (
+                          <NumberInput
+                            aria-label={`Issued for ${line.item_number}`}
+                            value={d.issued_qty}
+                            invalid={invalid}
+                            onChange={(v) => onDraftChange(line.id, { issued_qty: v ?? 0 })}
+                          />
+                        )
                       ) : (
                         <QtyCell value={line.issued_qty} />
                       )}
@@ -711,6 +858,24 @@ function IssueStep({
                         tone={line.additional_issued_qty ? 'success' : 'muted'}
                       />
                     </td>
+                    {!editableDraft && (
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell
+                          value={line.early_returned_qty || null}
+                          tone={line.early_returned_qty ? 'success' : 'muted'}
+                          title="Already handed back to inventory"
+                        />
+                      </td>
+                    )}
+                    {!editableDraft && (
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell
+                          value={line.on_floor_qty}
+                          tone={line.on_floor_qty > 0 ? undefined : 'muted'}
+                          title="Still at the production location"
+                        />
+                      </td>
+                    )}
                     <td className="px-3 py-2">
                       {editableDraft ? (
                         <div className="w-56">
@@ -741,14 +906,63 @@ function IssueStep({
                         </span>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-right">
+                    <td className="whitespace-nowrap px-3 py-2 text-right">
                       {inProd && (
-                        <Button variant="ghost" size="sm" disabled={busy} onClick={() => onIssueMore(line)}>
-                          <Plus size={12} /> Issue more
-                        </Button>
+                        <>
+                          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onIssueMore(line)}>
+                            <Plus size={12} /> Issue more
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy || line.on_floor_qty <= 0}
+                            title={
+                              line.on_floor_qty > 0
+                                ? 'Return excess to inventory'
+                                : 'Nothing on the floor to return'
+                            }
+                            onClick={() => onReturn(line)}
+                          >
+                            <Undo2 size={12} /> Return
+                          </Button>
+                        </>
                       )}
                     </td>
                   </tr>
+                  {/* The cryobox grid gets its own full-width row. Nested in the
+                      224px Source cell it overflowed and forced a scrollbar —
+                      a 10×10 box needs ~320px.
+                      Draft only: once issued the source is locked, and the
+                      table also gains the Returned / On-floor columns, so the
+                      colSpan below would be wrong too. */}
+                  {editableDraft && grid && opt && (
+                    <tr className="border-b border-border/60 bg-surface/40">
+                      <td colSpan={7} className="px-3 pb-3 pt-1">
+                        <div className="max-w-xl">
+                          <p className="mb-2 text-xs text-text-2">
+                            <span className="font-mono text-text">{line.item_number}</span> in{' '}
+                            <span className="text-text">{opt.name}</span>
+                          </p>
+                          <CellGridPicker
+                            mode="source"
+                            rows={opt.grid_rows ?? 1}
+                            cols={opt.grid_cols ?? 1}
+                            cells={opt.cells}
+                            value={d.cells}
+                            onChange={(next) =>
+                              onDraftChange(line.id, { cells: next, issued_qty: next.length })
+                            }
+                          />
+                          {noCells && (
+                            <p className="mt-1 text-xs text-danger">
+                              Pick at least one vial, or set this line to another location.
+                            </p>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
                 );
               })}
             </tbody>
@@ -804,7 +1018,7 @@ function ProductionStep({
           <h2 className="text-sm font-medium text-text">Production output</h2>
           <p className="mt-0.5 text-xs text-text-3">{closed ? 'Posted at close-out.' : OUTPUT_HINT}</p>
         </div>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity made (good)</label>
             <NumberInput
@@ -826,7 +1040,24 @@ function ProductionStep({
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">Stock the output to</label>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">
+              Expiry of the produced {kit.item_number}
+            </label>
+            <Input
+              type="date"
+              aria-label="Output expiry date"
+              value={closed ? '' : output.output_expiration_date}
+              disabled={closed}
+              onChange={(e) => onChange({ ...output, output_expiration_date: e.target.value })}
+            />
+            <p className="mt-1 text-xs text-text-3">
+              Carried onto the produced lot so it appears in expiry reporting.
+            </p>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">
+              Stock the output to <span className="text-danger">*</span>
+            </label>
             <LocationTreePicker
               aria-label="Output location"
               value={(closed ? kit.output_location_node_id : output.output_location_node_id) ?? ''}
@@ -837,6 +1068,11 @@ function ProductionStep({
               showPath
               placeholder="Choose a location"
             />
+            {!closed && !output.output_location_node_id && (
+              <p className="mt-1 text-xs text-danger">
+                Required — the finished quantity is stocked here at close-out.
+              </p>
+            )}
           </div>
         </div>
       </Card>
@@ -859,6 +1095,10 @@ function CloseOutStep({
   onUsed,
   returnLoc,
   onReturnLoc,
+  returnCells,
+  onReturnCells,
+  returnIsBox,
+  onReturnIsBox,
   allowedIds,
   overUse,
 }: {
@@ -867,6 +1107,10 @@ function CloseOutStep({
   onUsed: (id: string, v: number | null) => void;
   returnLoc: Record<string, string>;
   onReturnLoc: (id: string, v: string) => void;
+  returnCells: Record<string, string[]>;
+  onReturnCells: (id: string, v: string[]) => void;
+  returnIsBox: Record<string, boolean>;
+  onReturnIsBox: (id: string, isBox: boolean) => void;
   allowedIds: Set<string>;
   overUse: ApiKitLine[];
 }) {
@@ -892,7 +1136,7 @@ function CloseOutStep({
   const returned = (l: ApiKitLine) => {
     const u = closed ? l.used_qty : used[l.id];
     if (u == null) return null;
-    return lineIssuedTotal(l) - u;
+    return l.on_floor_qty - u;
   };
   const totalReturned = kit.lines.reduce((a, l) => a + (returned(l) ?? 0), 0);
   const pending = kit.lines.filter((l) => (closed ? l.used_qty : used[l.id]) == null).length;
@@ -918,7 +1162,7 @@ function CloseOutStep({
             <thead>
               <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                 <th className="px-3 py-2 font-medium">Item</th>
-                <th className="px-3 py-2 text-right font-medium">Issued</th>
+                <th className="px-3 py-2 text-right font-medium">On floor</th>
                 <th className="px-3 py-2 text-right font-medium">Used</th>
                 <th className="px-3 py-2 text-right font-medium">Returned</th>
                 <th className="px-3 py-2 font-medium">Return location</th>
@@ -932,10 +1176,17 @@ function CloseOutStep({
                   <React.Fragment key={line.id}>
                     <tr className={cn('border-b border-border/60', over && 'bg-danger-soft/30')}>
                       <td className="max-w-[300px] px-3 py-2">
-                        <ItemCell itemNumber={line.item_number} description={line.description} />
+                        <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <QtyCell value={lineIssuedTotal(line)} />
+                        <QtyCell
+                          value={line.on_floor_qty}
+                          title={
+                            line.early_returned_qty
+                              ? `${lineIssuedTotal(line)} issued − ${line.early_returned_qty} already returned`
+                              : undefined
+                          }
+                        />
                       </td>
                       <td className="px-3 py-2 text-right">
                         {editable ? (
@@ -961,7 +1212,7 @@ function CloseOutStep({
                                 (editable ? returnLoc[line.id] : line.return_location_node_id) ?? ''
                               }
                               onChange={(v) => onReturnLoc(line.id, v)}
-                              areas={['cold', 'warehouse']}
+                              areas={['ln2', 'cold', 'warehouse']}
                               allowedNodeIds={allowedIds}
                               disabled={!editable}
                               showPath
@@ -977,8 +1228,37 @@ function CloseOutStep({
                     {over && (
                       <tr className="bg-danger-soft/30">
                         <td colSpan={5} className="px-3 pb-2 text-xs text-danger">
-                          Used exceeds issued by {(used[line.id] as number) - lineIssuedTotal(line)}. Record an
-                          additional issue to cover it.
+                          Used exceeds what is on the floor by{' '}
+                          {(used[line.id] as number) - line.on_floor_qty}. Record an additional
+                          issue to cover it.
+                        </td>
+                      </tr>
+                    )}
+                    {/* Full-width row for the cryobox grid — it doesn't fit the
+                        224px Return-location cell without a scrollbar. */}
+                    {editable && ret !== null && ret > 0 && (
+                      <tr
+                        className={cn(
+                          'border-b border-border/60',
+                          returnIsBox[line.id] && 'bg-surface/40',
+                        )}
+                      >
+                        {/* The picker must stay mounted to resolve whether the
+                            destination is a box, so collapse the padding rather
+                            than the row when it turns out to be bulk. */}
+                        <td
+                          colSpan={5}
+                          className={cn(returnIsBox[line.id] ? 'px-3 pb-3 pt-0' : 'p-0')}
+                        >
+                          <div className="max-w-xl">
+                            <BoxCellPicker
+                              nodeId={returnLoc[line.id]}
+                              qty={ret}
+                              value={returnCells[line.id] ?? []}
+                              onChange={(v) => onReturnCells(line.id, v)}
+                              onResolved={(isBox) => onReturnIsBox(line.id, isBox)}
+                            />
+                          </div>
                         </td>
                       </tr>
                     )}
@@ -1021,24 +1301,35 @@ function AdditionalIssueDialog({
   onDone: (kit: ApiKit) => void;
 }) {
   const [qty, setQty] = React.useState<number | null>(1);
+  const [cells, setCells] = React.useState<string[]>([]);
   const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
-    if (line) setQty(1);
+    if (!line) return;
+    setQty(1);
+    setCells([]);
   }, [line?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!line) return null;
 
   const issuedSoFar = lineIssuedTotal(line);
-  const sourceOption = line.source_options.find((o) => o.node_id === line.source_location_node_id);
+  const srcOption = line.source_options.find((o) => o.node_id === line.source_location_node_id);
   const available = line.source_available;
-  const over = (qty ?? 0) > available;
+  // Same rule as the initial issue (D2): pulling from a box means picking
+  // vials, and the quantity is however many you picked.
+  const grid = Boolean(srcOption?.is_grid);
+  const effectiveQty = grid ? cells.length : (qty ?? 0);
+  const over = effectiveQty > available;
+  const ready = effectiveQty > 0 && !over;
 
   const submit = async () => {
-    if (!qty || qty <= 0 || over) return;
+    if (!ready) return;
     setBusy(true);
     try {
-      const k = await kitsApi.additionalIssue(kit.id, line.id, { qty });
+      const k = await kitsApi.additionalIssue(kit.id, line.id, {
+        qty: effectiveQty,
+        cell_allocation_ids: grid ? cells : undefined,
+      });
       toast.success('Additional material issued', {
         description: `${qty} × ${line.item_number}.`,
       });
@@ -1054,7 +1345,7 @@ function AdditionalIssueDialog({
 
   return (
     <Dialog open={line !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Issue more to {kit.kit_number}</DialogTitle>
           <DialogDescription>
@@ -1064,7 +1355,7 @@ function AdditionalIssueDialog({
         </DialogHeader>
         <DialogBody className="space-y-3">
           <div className="rounded-md border border-border bg-surface p-3">
-            <ItemCell itemNumber={line.item_number} description={line.description} />
+            <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
           </div>
           <dl className="grid grid-cols-3 gap-2 text-center">
             <div className="rounded-md border border-border bg-bg-elev p-2">
@@ -1088,34 +1379,345 @@ function AdditionalIssueDialog({
             </div>
           </dl>
           <p className="text-xs text-text-3">
-            Source: <span className="text-text-2">{sourceOption?.path ?? sourceOption?.name ?? '—'}</span>
+            Source: <span className="text-text-2">{srcOption?.path ?? srcOption?.name ?? '—'}</span>
           </p>
+          {grid && srcOption ? (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-text-2">
+                Pick the vials to pull
+              </label>
+              <CellGridPicker
+                mode="source"
+                rows={srcOption.grid_rows ?? 1}
+                cols={srcOption.grid_cols ?? 1}
+                cells={srcOption.cells}
+                value={cells}
+                onChange={setCells}
+              />
+              {cells.length === 0 && (
+                <p className="mt-1 text-xs text-danger">Pick at least one vial.</p>
+              )}
+            </div>
+          ) : (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-text-2">Issue now</label>
+              <NumberInput
+                aria-label="Additional quantity"
+                value={qty}
+                min={1}
+                invalid={over}
+                onChange={setQty}
+              />
+              {over && (
+                <p className="mt-1 text-xs text-danger">
+                  Only {available} available at the source location.
+                </p>
+              )}
+            </div>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={busy || !ready}>
+            Issue {effectiveQty}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Return excess dialog (REQ-2026-07-01-TRX-008) ───────────────────────────
+
+function ReturnExcessDialog({
+  kit,
+  line,
+  allowedIds,
+  onOpenChange,
+  onDone,
+}: {
+  kit: ApiKit;
+  line: ApiKitLine | null;
+  allowedIds: Set<string>;
+  onOpenChange: (open: boolean) => void;
+  onDone: (kit: ApiKit) => void;
+}) {
+  const [qty, setQty] = React.useState<number | null>(1);
+  const [node, setNode] = React.useState('');
+  const [reason, setReason] = React.useState('');
+  const [cells, setCells] = React.useState<string[]>([]);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!line) return;
+    setQty(line.on_floor_qty > 0 ? 1 : null);
+    setNode(line.return_location_node_id ?? line.source_location_node_id ?? '');
+    setReason('');
+    setCells([]);
+  }, [line?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Changing the destination invalidates cell picks made against the old box.
+  React.useEffect(() => setCells([]), [node]);
+
+  // Geometry + occupancy come from the LOCATION, not the kit's source options —
+  // you can return into any box, including one this kit never pulled from.
+  const { grid: destBox } = useBoxGrid(node || null);
+  const destGrid = destBox !== null;
+
+  if (!line) return null;
+
+  const onFloor = line.on_floor_qty;
+  const over = (qty ?? 0) > onFloor;
+  const cellsReady = !destGrid || cells.length === (qty ?? 0);
+  const ready = Boolean(qty && qty > 0 && !over && node && cellsReady);
+
+  const submit = async () => {
+    if (!ready) return;
+    setBusy(true);
+    try {
+      const k = await kitsApi.returnExcess(kit.id, line.id, {
+        qty: qty as number,
+        return_location_node_id: node,
+        return_cells: destGrid
+          ? cells.map(toCell)
+          : undefined,
+        reason: reason.trim() || null,
+      });
+      toast.success('Returned to inventory', {
+        description: `${qty} × ${line.item_number} back in stock.`,
+      });
+      onDone(k);
+    } catch (err) {
+      toast.error('Could not return', {
+        description: err instanceof ApiError ? err.message : undefined,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={line !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Return excess from {kit.kit_number}</DialogTitle>
+          <DialogDescription>
+            Hand unused material back to inventory without closing the kit. It posts as an
+            explicit back-flush and returns without a lot assignment, so it is never stranded.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="space-y-3">
+          <div className="rounded-md border border-border bg-surface p-3">
+            <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
+          </div>
+          <dl className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-md border border-border bg-bg-elev p-2">
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">Issued</dt>
+              <dd className="mt-0.5 font-mono text-sm text-text">{lineIssuedTotal(line)}</dd>
+            </div>
+            <div className="rounded-md border border-border bg-bg-elev p-2">
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">Returned</dt>
+              <dd className="mt-0.5 font-mono text-sm text-text">{line.early_returned_qty}</dd>
+            </div>
+            <div className="rounded-md border border-border bg-bg-elev p-2">
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">On floor</dt>
+              <dd
+                className={cn('mt-0.5 font-mono text-sm', onFloor <= 0 ? 'text-danger' : 'text-text')}
+              >
+                {onFloor}
+              </dd>
+            </div>
+          </dl>
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">Issue now</label>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">Return quantity</label>
             <NumberInput
-              aria-label="Additional quantity"
+              aria-label="Return quantity"
               value={qty}
               min={1}
               invalid={over}
               onChange={setQty}
             />
             {over && (
-              <p className="mt-1 text-xs text-danger">
-                Only {available} available at the source location.
-              </p>
+              <p className="mt-1 text-xs text-danger">Only {onFloor} on the production floor.</p>
             )}
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">Return to</label>
+            <LocationTreePicker
+              aria-label="Return location"
+              value={node}
+              onChange={setNode}
+              areas={['ln2', 'cold', 'warehouse']}
+              allowedNodeIds={allowedIds}
+              modal
+              showPath
+            />
+            <BoxCellPicker nodeId={node} qty={qty ?? 0} value={cells} onChange={setCells} />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">
+              Reason <span className="text-text-3">(optional)</span>
+            </label>
+            <Input
+              aria-label="Reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Over-pulled at staging"
+            />
           </div>
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            variant="primary"
-            onClick={() => void submit()}
-            disabled={busy || !qty || qty <= 0 || over}
-          >
-            Issue {qty ?? 0}
+          <Button variant="primary" onClick={() => void submit()} disabled={busy || !ready}>
+            Return {qty ?? 0}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Cancel dialog (per-line returns, D1) ────────────────────────────────────
+
+function CancelKitDialog({
+  kit,
+  open,
+  allowedIds,
+  onOpenChange,
+  onDone,
+}: {
+  kit: ApiKit;
+  open: boolean;
+  allowedIds: Set<string>;
+  onOpenChange: (open: boolean) => void;
+  onDone: (kit: ApiKit) => void;
+}) {
+  const lines = React.useMemo(() => kit.lines.filter((l) => l.on_floor_qty > 0), [kit.lines]);
+  const [loc, setLoc] = React.useState<Record<string, string>>({});
+  const [cells, setCells] = React.useState<Record<string, string[]>>({});
+  const [reason, setReason] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+
+  // Default each line to where it was pulled from (D1).
+  React.useEffect(() => {
+    if (!open) return;
+    setLoc(
+      Object.fromEntries(
+        lines.map((l) => [l.id, l.return_location_node_id ?? l.source_location_node_id ?? '']),
+      ),
+    );
+    setCells({});
+    setReason('');
+  }, [open, lines]);
+
+  // Resolved per line by BoxCellPicker (from the Location System), because the
+  // operator can return into a box this kit never pulled from.
+  const [isBoxMap, setIsBoxMap] = React.useState<Record<string, boolean>>({});
+  const ready = lines.every((l) => {
+    const node = loc[l.id];
+    if (!node) return false;
+    return isBoxMap[l.id] ? (cells[l.id]?.length ?? 0) === l.on_floor_qty : true;
+  });
+  const totalUnits = lines.reduce((a, l) => a + l.on_floor_qty, 0);
+
+  const submit = async () => {
+    if (!ready) return;
+    setBusy(true);
+    try {
+      const k = await kitsApi.cancel(kit.id, {
+        reason: reason.trim() || null,
+        lines: lines.map((l) => {
+          const node = loc[l.id] ?? '';
+          return {
+            line_id: l.id,
+            return_location_node_id: node,
+            return_cells: isBoxMap[l.id] ? (cells[l.id] ?? []).map(toCell) : undefined,
+          };
+        }),
+      });
+      toast.success(`${k.kit_number} cancelled`, {
+        description: `${totalUnits} unit${totalUnits === 1 ? '' : 's'} returned to inventory.`,
+      });
+      onDone(k);
+    } catch (err) {
+      toast.error('Could not cancel', {
+        description: err instanceof ApiError ? err.message : undefined,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Cancel {kit.kit_number}?</DialogTitle>
+          <DialogDescription>
+            {totalUnits} unit{totalUnits === 1 ? '' : 's'} still on the production floor will be
+            returned to inventory as a back-flush. Choose where each component goes — each is
+            pre-set to where it was pulled from. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="max-h-[55vh] space-y-3 overflow-y-auto">
+          {lines.map((line) => {
+            const node = loc[line.id] ?? '';
+            const picked = cells[line.id] ?? [];
+            return (
+              <div key={line.id} className="rounded-md border border-border bg-surface p-3">
+                <div className="mb-2 flex items-start justify-between gap-3">
+                  <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
+                  <span className="shrink-0 font-mono text-sm tabular-nums text-text">
+                    {line.on_floor_qty}
+                  </span>
+                </div>
+                <LocationTreePicker
+                  aria-label={`Return location for ${line.item_number}`}
+                  value={node}
+                  onChange={(v) => {
+                    setLoc((p) => ({ ...p, [line.id]: v }));
+                    setCells((p) => ({ ...p, [line.id]: [] }));
+                  }}
+                  areas={['ln2', 'cold', 'warehouse']}
+                  allowedNodeIds={allowedIds}
+                  modal
+                  showPath
+                />
+                <BoxCellPicker
+                  nodeId={node}
+                  qty={line.on_floor_qty}
+                  value={picked}
+                  onChange={(v) => setCells((p) => ({ ...p, [line.id]: v }))}
+                  onResolved={(isBox) =>
+                    setIsBoxMap((m) => (m[line.id] === isBox ? m : { ...m, [line.id]: isBox }))
+                  }
+                />
+                {!node && <p className="mt-1 text-xs text-danger">Choose a return location.</p>}
+              </div>
+            );
+          })}
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">
+              Reason <span className="text-text-3">(optional)</span>
+            </label>
+            <Input
+              aria-label="Cancellation reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Batch aborted — contamination"
+            />
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Keep kit
+          </Button>
+          <Button variant="danger" onClick={() => void submit()} disabled={busy || !ready}>
+            Cancel kit &amp; return {totalUnits}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1186,9 +1788,12 @@ function ActivitySheet({
                     <td className="px-3 py-2.5">
                       <Badge
                         tone={
-                          e.movement_type === 'backflush' || e.movement_type === 'production_output'
+                          e.movement_type === 'backflush' ||
+                          e.movement_type === 'kit_return' ||
+                          e.movement_type === 'production_output'
                             ? 'success'
-                            : e.movement_type === 'kit_additional_issue'
+                            : e.movement_type === 'kit_additional_issue' ||
+                                e.movement_type === 'kit_cancel_return'
                               ? 'warning'
                               : 'neutral'
                         }

@@ -86,9 +86,9 @@ export function ReceivingPageClient({
   const [orders, setOrders] = React.useState<Order[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = React.useState<
-    OrderStatus | typeof STATUS_ALL
-  >(STATUS_ALL);
+  const [statusFilter, setStatusFilter] = React.useState<OrderStatus | typeof STATUS_ALL>(
+    STATUS_ALL,
+  );
 
   const [query, setQuery] = React.useState('');
   const [page, setPage] = React.useState(1);
@@ -111,9 +111,7 @@ export function ReceivingPageClient({
         setOrders(resp.items);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
-        setLoadError(
-          err instanceof ApiError ? err.message : 'Failed to load orders.',
-        );
+        setLoadError(err instanceof ApiError ? err.message : 'Failed to load orders.');
       } finally {
         setLoading(false);
       }
@@ -254,23 +252,14 @@ export function ReceivingPageClient({
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <Select
               value={statusFilter}
-              onValueChange={(v) =>
-                setStatusFilter(v as OrderStatus | typeof STATUS_ALL)
-              }
+              onValueChange={(v) => setStatusFilter(v as OrderStatus | typeof STATUS_ALL)}
             >
               <SelectTrigger className="w-[200px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={STATUS_ALL}>All statuses</SelectItem>
-                {(
-                  [
-                    'open',
-                    'partially_received',
-                    'received',
-                    'cancelled',
-                  ] as const
-                ).map((s) => (
+                {(['open', 'partially_received', 'received', 'cancelled'] as const).map((s) => (
                   <SelectItem key={s} value={s}>
                     {ORDER_STATUS_LABEL[s]}
                   </SelectItem>
@@ -304,7 +293,7 @@ export function ReceivingPageClient({
           {loadError && (
             <p
               role="alert"
-              className="mb-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger"
+              className="border-danger/30 bg-danger/5 mb-3 rounded-md border px-3 py-2 text-sm text-danger"
             >
               {loadError}
             </p>
@@ -349,8 +338,7 @@ export function ReceivingPageClient({
               />
               {orders.length >= ORDER_LIMIT && (
                 <p className="mt-3 text-xs text-text-3">
-                  Showing the {ORDER_LIMIT} most recent orders — search and paging
-                  cover these only.
+                  Showing the {ORDER_LIMIT} most recent orders — search and paging cover these only.
                 </p>
               )}
               <ReceiptPagination
@@ -368,11 +356,7 @@ export function ReceivingPageClient({
         </Card>
       </div>
 
-      <ReceiptIntakeDialog
-        open={intakeOpen}
-        onOpenChange={setIntakeOpen}
-        onCreated={upsert}
-      />
+      <ReceiptIntakeDialog open={intakeOpen} onOpenChange={setIntakeOpen} onCreated={upsert} />
 
       <ReceiveDialog
         open={receiveTarget !== null}
@@ -441,10 +425,7 @@ function ReceiptPagination({
   }, [pageCount, page]);
 
   return (
-    <nav
-      aria-label="Pagination"
-      className="mt-3 flex flex-wrap items-center justify-between gap-3"
-    >
+    <nav aria-label="Pagination" className="mt-3 flex flex-wrap items-center justify-between gap-3">
       <div className="text-xs text-text-3">
         Showing{' '}
         <strong className="text-text-2">
@@ -546,9 +527,7 @@ function OrderDetailSheet({
   const [editLotId, setEditLotId] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
   // Cancel / delete are e-signed: this drives one shared reauth dialog.
-  const [reauthAction, setReauthAction] = React.useState<'cancel' | 'delete' | null>(
-    null,
-  );
+  const [reauthAction, setReauthAction] = React.useState<'cancel' | 'delete' | null>(null);
 
   React.useEffect(() => setCurrent(order), [order]);
 
@@ -603,9 +582,7 @@ function OrderDetailSheet({
             <>
               <SheetHeader>
                 <SheetTitle>
-                  <span className="font-mono text-sm text-accent">
-                    {current.po_reference}
-                  </span>{' '}
+                  <span className="font-mono text-sm text-accent">{current.po_reference}</span>{' '}
                   <Badge tone={STATUS_TONE[current.status]} dot className="ml-1 align-middle">
                     {ORDER_STATUS_LABEL[current.status]}
                   </Badge>
@@ -626,22 +603,13 @@ function OrderDetailSheet({
                 {/* Action bar */}
                 <div className="flex flex-wrap gap-2">
                   {canReceive &&
-                    (current.status === 'open' ||
-                      current.status === 'partially_received') && (
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        onClick={() => onReceive(current)}
-                      >
+                    (current.status === 'open' || current.status === 'partially_received') && (
+                      <Button size="sm" variant="primary" onClick={() => onReceive(current)}>
                         <PackageCheck size={14} /> Receive
                       </Button>
                     )}
                   {canCreate && isOpen && (
-                    <Button
-                      size="sm"
-                      variant="default"
-                      onClick={() => setEditOrder(current)}
-                    >
+                    <Button size="sm" variant="default" onClick={() => setEditOrder(current)}>
                       <Pencil size={13} /> Edit
                     </Button>
                   )}
@@ -681,11 +649,10 @@ function OrderDetailSheet({
                         <div className="flex items-center justify-between">
                           <ItemLink
                             itemNumber={l.item_number}
+                            itemId={l.item_id}
                             className="font-mono text-xs"
                           />
-                          <span className="text-xs text-text-3">
-                            {l.supplier_name ?? '—'}
-                          </span>
+                          <span className="text-xs text-text-3">{l.supplier_name ?? '—'}</span>
                         </div>
                         {l.item_description && (
                           <p className="mt-0.5 text-text-2">{l.item_description}</p>
@@ -701,15 +668,11 @@ function OrderDetailSheet({
                           </div>
                           <div>
                             <dt className="text-text-3">Outstanding</dt>
-                            <dd className="font-mono tabular-nums">
-                              {l.outstanding_qty}
-                            </dd>
+                            <dd className="font-mono tabular-nums">{l.outstanding_qty}</dd>
                           </div>
                           <div>
                             <dt className="text-text-3">Unit price</dt>
-                            <dd className="font-mono tabular-nums">
-                              {l.unit_price_amount ?? '—'}
-                            </dd>
+                            <dd className="font-mono tabular-nums">{l.unit_price_amount ?? '—'}</dd>
                           </div>
                         </dl>
                       </div>
@@ -732,25 +695,17 @@ function OrderDetailSheet({
                           className="rounded-md border border-border bg-surface p-3 text-sm"
                         >
                           <div className="flex items-center justify-between">
-                            <span className="font-medium text-text-2">
-                              {ev.received_at}
-                            </span>
+                            <span className="font-medium text-text-2">{ev.received_at}</span>
                             <span className="text-xs text-text-3">
                               by{' '}
-                              {ev.received_by_user_name ??
-                                `${ev.received_by_user_id.slice(0, 8)}…`}
+                              {ev.received_by_user_name ?? `${ev.received_by_user_id.slice(0, 8)}…`}
                             </span>
                           </div>
                           <ul className="mt-2 space-y-1 text-xs">
                             {ev.lines.map((el) => {
-                              const orderLine = current.lines.find(
-                                (l) => l.id === el.line_id,
-                              );
+                              const orderLine = current.lines.find((l) => l.id === el.line_id);
                               return (
-                                <li
-                                  key={el.id}
-                                  className="flex flex-wrap items-center gap-2"
-                                >
+                                <li key={el.id} className="flex flex-wrap items-center gap-2">
                                   <span className="font-mono text-accent">
                                     {el.lot_number ?? '—'}
                                   </span>
@@ -758,6 +713,7 @@ function OrderDetailSheet({
                                     <span className="text-text-2">
                                       <ItemLink
                                         itemNumber={orderLine.item_number}
+                                        itemId={orderLine.item_id}
                                         className="font-mono"
                                       />
                                       {orderLine.item_description
@@ -769,9 +725,7 @@ function OrderDetailSheet({
                                     +{el.qty_received}
                                   </span>
                                   {orderLine?.supplier_name && (
-                                    <span className="text-text-3">
-                                      ({orderLine.supplier_name})
-                                    </span>
+                                    <span className="text-text-3">({orderLine.supplier_name})</span>
                                   )}
                                   {el.over_receipt_reason && (
                                     <span className="text-warning">

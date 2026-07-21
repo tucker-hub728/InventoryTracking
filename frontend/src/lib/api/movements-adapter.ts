@@ -89,6 +89,8 @@ export function apiMovementsToLedgerEntries(
       reason: m.notes ?? m.movement_type,
       movementId: m.id,
       movementType: m.movement_type,
+      kitId: m.kit_id ?? null,
+      kitNumber: m.kit_number ?? null,
       isReversal: false,
       isReversed: false,
     };

@@ -106,6 +106,8 @@ export interface ListItemsParams {
   is_consumable?: boolean | null;
   /** ``false`` selects items with no bill of materials ("missing BOM"). */
   has_bom?: boolean | null;
+  /** Only items whose BOM has at least this many distinct components. */
+  min_bom_lines?: number | null;
   /**
    * ``true`` selects items at or below their reorder threshold. Broader than
    * ``status: 'low_stock'``, which excludes zero-stock items (the view tests
@@ -170,6 +172,7 @@ export const itemsApi = {
         status: params.status ?? undefined,
         is_consumable: params.is_consumable ?? undefined,
         has_bom: params.has_bom ?? undefined,
+        min_bom_lines: params.min_bom_lines ?? undefined,
         below_reorder: params.below_reorder ?? undefined,
         sort: params.sort,
         direction: params.direction,
@@ -193,8 +196,7 @@ export const itemsApi = {
       signal: opts?.signal,
     }),
 
-  create: (input: ItemCreateInput) =>
-    api.post<ApiItem>('/items', { json: input }),
+  create: (input: ItemCreateInput) => api.post<ApiItem>('/items', { json: input }),
 
   /** Partial update; writes an audit row server-side. */
   update: (id: string, input: ItemUpdateInput) =>

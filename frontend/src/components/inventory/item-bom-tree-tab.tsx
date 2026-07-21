@@ -132,7 +132,7 @@ function BomNode({ line, depth }: { line: ApiBomLine; depth: number }) {
 
         <span className="min-w-0 flex-1 truncate">
           <Link
-            href={`/inventory/${line.child_item_number}/ledger`}
+            href={`/inventory/${line.child_item_id}/ledger`}
             className="font-mono text-xs text-accent hover:underline"
           >
             {line.child_item_number}

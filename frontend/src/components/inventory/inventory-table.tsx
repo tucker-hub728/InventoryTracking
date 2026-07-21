@@ -131,8 +131,8 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
           // Products open on their Structure tab; Purchased on the Ledger.
           const detailHref =
             isBuiltTier(item.tierType)
-              ? `/inventory/${item.id}/structure`
-              : `/inventory/${item.id}/ledger`;
+              ? `/inventory/${item.uuid}/structure`
+              : `/inventory/${item.uuid}/ledger`;
           return (
             <TableRow key={item.id} className="group">
               <TableCell className="font-mono text-xs">

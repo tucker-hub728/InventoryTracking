@@ -163,6 +163,9 @@ class AllocationRead(BaseModel):
     id: str
     lot_id: str
     lot_number: str | None = None
+    # The item's UUID — item detail URLs key on it, so the UI can link straight
+    # to the canonical page instead of resolving the (derived) number first.
+    item_id: str | None = None
     item_number: str | None = None
     location_node_id: str
     location_name: str | None = None
@@ -347,6 +350,8 @@ class NodeMovementRead(BaseModel):
     id: str
     lot_id: str | None = None
     lot_number: str | None = None
+    # See ``AllocationRead.item_id`` — lets the UI deep-link by UUID.
+    item_id: str | None = None
     item_number: str | None = None
     movement_type: MovementType
     from_location_node_id: str | None = None

@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { lotsApi } from '@/lib/api/lots';
+import { movementsApi } from '@/lib/api/movements';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -17,8 +18,15 @@ interface Props {
 }
 
 /**
- * A lot number that navigates to the receiving order that created it, opening
- * that order's detail sheet at `/receiving/<transaction id>`.
+ * A lot number that navigates to whatever created it:
+ *
+ *  * received stock → the receiving order, at `/receiving/<transaction id>`
+ *  * manufactured stock → the kit that produced it, at `/reconciliation/<kit id>`
+ *
+ * Kitting made the second case common — a close-out mints a lot for the
+ * produced AY/FG, which has no receipt behind it. Treating that as "no
+ * receiving order" was accurate but a dead end, since the kit is exactly the
+ * origin the operator is looking for.
  *
  * The owning order is resolved on click rather than on render: most callers
  * have only a `lot_id` in scope (movements and allocations don't carry the
@@ -45,13 +53,23 @@ export function LotLink({ lotId, lotNumber, className }: Props) {
     setBusy(true);
     try {
       const lot = await lotsApi.get(lotId);
-      if (!lot.receipt_transaction_id) {
-        toast.info('No receiving order', {
-          description: `Lot ${lot.lot_number} wasn't created by a receipt.`,
-        });
+      if (lot.receipt_transaction_id) {
+        router.push(`/receiving/${lot.receipt_transaction_id}`);
         return;
       }
-      router.push(`/receiving/${lot.receipt_transaction_id}`);
+      // Not received — it may have been *manufactured*. A kit's close-out mints
+      // a lot for the produced AY/FG, so the equivalent "where did this come
+      // from" answer is the kit, not a receiving order. Resolved through the
+      // ledger because lots carry no kit reference of their own.
+      const { items } = await movementsApi.list({ lotId, limit: 50 });
+      const madeBy = items.find((m) => m.movement_type === 'production_output' && m.kit_id);
+      if (madeBy?.kit_id) {
+        router.push(`/reconciliation/${madeBy.kit_id}`);
+        return;
+      }
+      toast.info('No order or kit', {
+        description: `Lot ${lot.lot_number} wasn't created by a receipt or a kit — it was entered directly.`,
+      });
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : 'Could not open the order for this lot.',
@@ -66,7 +84,7 @@ export function LotLink({ lotId, lotNumber, className }: Props) {
       type="button"
       onClick={go}
       disabled={busy}
-      title={`Open the receiving order for lot ${label}`}
+      title={`Open where lot ${label} came from`}
       className={cn(
         'text-accent underline-offset-2 transition-opacity hover:underline hover:opacity-80 disabled:opacity-50',
         className,

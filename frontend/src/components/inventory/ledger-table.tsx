@@ -32,6 +32,7 @@ import {
 import { EmptyState } from '@/components/shared/empty-state';
 import { LotLink } from '@/components/inventory/lot-link';
 import type { LedgerEntry } from '@/types/inventory';
+import type { BadgeTone } from '@/types/ui';
 import { expiryStatus } from '@/lib/inventory-helpers';
 import { cn, daysFromNow } from '@/lib/utils';
 
@@ -56,6 +57,43 @@ interface LotGroup {
 
 /** Tri-state expiry sort: off → soonest-first → latest-first → off. */
 type SortDir = 'asc' | 'desc' | null;
+/**
+ * Movement type → the Transaction chip.
+ *
+ * Shown for every tier. It started as an AY/FG-only column (Made / Kitted /
+ * Returned all touch the same lot, so only the type distinguishes them), but a
+ * raw material's ledger reads better with it too — and it replaces the
+ * "Transfer" badge that used to be crammed into the Location column.
+ */
+const TXN_LABEL: Record<string, { label: string; tone: BadgeTone }> = {
+  production_output: { label: 'Made', tone: 'success' },
+  kit_issue: { label: 'Kitted', tone: 'danger' },
+  kit_additional_issue: { label: 'Kitted +', tone: 'danger' },
+  // Three distinct return events — physically identical, different meaning.
+  backflush: { label: 'Back-flushed', tone: 'accent' },
+  kit_return: { label: 'Returned', tone: 'accent' },
+  kit_cancel_return: { label: 'Cancel return', tone: 'warning' },
+  receipt: { label: 'Received', tone: 'success' },
+  dispense: { label: 'Used', tone: 'danger' },
+  discard: { label: 'Discarded', tone: 'danger' },
+  adjustment: { label: 'Adjusted', tone: 'warning' },
+  transfer_in: { label: 'Transfer in', tone: 'neutral' },
+  transfer_out: { label: 'Transfer out', tone: 'neutral' },
+};
+
+function TransactionCell({ entry }: { entry: LedgerEntry }) {
+  const meta = entry.movementType ? TXN_LABEL[entry.movementType] : undefined;
+  if (!meta) return <span className="text-xs text-text-3">—</span>;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Badge tone={meta.tone}>{meta.label}</Badge>
+      {entry.kitNumber && (
+        <span className="font-mono text-[11px] text-text-3">{entry.kitNumber}</span>
+      )}
+    </span>
+  );
+}
+
 /** Expiry-status filter; ``all`` disables it. */
 type StatusFilter = 'all' | 'expired' | 'near' | 'ok';
 
@@ -335,7 +373,8 @@ export function LedgerTable({
   const grandIn = groups.reduce((s, g) => s + g.totalIn, 0);
   const grandOut = groups.reduce((s, g) => s + g.totalOut, 0);
   const grandBalance = grandIn - grandOut;
-  const cols = showActions ? 9 : 8;
+  // Date, Transaction, In, Out, Balance, Location, Lot, Expiry, By (+ actions)
+  const cols = 9 + (showActions ? 1 : 0);
 
   const SortIcon = sortDir === 'asc' ? ArrowUp : sortDir === 'desc' ? ArrowDown : ChevronsUpDown;
   const sortAria = sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none';
@@ -345,6 +384,7 @@ export function LedgerTable({
       <TableHeader>
         <TableRow>
           <TableHead className="w-[120px]">Date</TableHead>
+          <TableHead className="w-[150px]">Transaction</TableHead>
           <TableHead className="w-[90px] text-right">Units In</TableHead>
           <TableHead className="w-[90px] text-right">Units Out</TableHead>
           <TableHead className="w-[100px] text-right">Balance</TableHead>
@@ -397,6 +437,9 @@ export function LedgerTable({
                   )}
                 >
                   <TableCell className="font-mono text-xs">{e.date}</TableCell>
+                  <TableCell>
+                    <TransactionCell entry={e} />
+                  </TableCell>
                   <TableCell className="text-right font-mono text-xs">
                     {e.in > 0 ? (
                       <span className="inline-flex items-center gap-1 text-success">
@@ -417,16 +460,12 @@ export function LedgerTable({
                   </TableCell>
                   {/* Per-row balance lives on the lot Total row, like the workbook. */}
                   <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
+                  {/* Just the location. The "Transfer" badge that used to sit
+                      here is now a proper chip in the Transaction column; the
+                      row tint still flags transfers at a glance. */}
                   <TableCell className="text-xs text-text-2">
-                    <span className="flex items-center gap-1.5">
-                      {isTransfer && (
-                        <span className="shrink-0 rounded bg-accent-soft px-1 py-px text-[9px] font-medium uppercase tracking-wide text-accent">
-                          Transfer
-                        </span>
-                      )}
-                      <span className="truncate" title={e.locationPath ?? undefined}>
-                        {e.location}
-                      </span>
+                    <span className="block truncate" title={e.locationPath ?? undefined}>
+                      {e.location}
                     </span>
                   </TableCell>
                   <TableCell className="font-mono text-xs text-text-2">
@@ -476,6 +515,7 @@ export function LedgerTable({
               <TableCell className="text-[11px] uppercase tracking-wide text-warning">
                 Total
               </TableCell>
+              <TableCell />
               <TableCell className="text-right font-mono text-xs text-success">
                 {group.totalIn}
               </TableCell>
@@ -499,10 +539,13 @@ export function LedgerTable({
           <TableCell className="text-[11px] uppercase tracking-wide">
             {filtersActive ? 'Filtered total' : 'Item total'}
           </TableCell>
+          {/* Transaction spacer — without it the totals shift a column left. */}
+          <TableCell />
           <TableCell className="text-right font-mono text-sm text-success">{grandIn}</TableCell>
           <TableCell className="text-right font-mono text-sm text-danger">{grandOut}</TableCell>
           <TableCell className="text-right font-mono text-sm">{grandBalance}</TableCell>
-          <TableCell colSpan={cols - 4} />
+          {/* label + spacer + the three totals = 5 cells already rendered. */}
+          <TableCell colSpan={cols - 5} />
         </TableRow>
       </TableBody>
     </Table>

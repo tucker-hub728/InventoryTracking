@@ -6,25 +6,33 @@ import Link from 'next/link';
 import { cn } from '@/lib/utils';
 
 interface Props {
-  /** Item *number* — plain text is rendered when absent. */
+  /** Item *number* — the visible text. Plain text is rendered when absent. */
   itemNumber: string | null | undefined;
+  /** Item UUID. Strongly preferred: `/inventory/[id]` keys on the UUID, so
+   *  passing it links straight to the canonical URL. Without it the link falls
+   *  back to the number, which still resolves but costs an extra redirect
+   *  (and the number changes whenever its prefix is renamed). */
+  itemId?: string | null;
   className?: string;
 }
 
 /**
  * An item number that navigates to that item's ledger.
  *
- * `/inventory/[id]` keys on the human item number, not the UUID — the shell
- * resolves it with `itemsApi.getByNumber` and `notFound()`s on a miss — so the
- * href builds straight from the number with no lookup. It is encoded because
- * item numbers are free text.
+ * `/inventory/[id]` keys on the item's stable UUID. Pass `itemId` wherever it
+ * is available so the link lands directly; the number-based href is only a
+ * compatibility fallback (the detail shell resolves it and rewrites the URL).
  */
-export function ItemLink({ itemNumber, className }: Props) {
+export function ItemLink({ itemNumber, itemId, className }: Props) {
   if (!itemNumber) return <span className={className}>—</span>;
+
+  const href = itemId
+    ? `/inventory/${itemId}/ledger`
+    : `/inventory/${encodeURIComponent(itemNumber)}/ledger`;
 
   return (
     <Link
-      href={`/inventory/${encodeURIComponent(itemNumber)}/ledger`}
+      href={href}
       // Several call sites sit inside rows that have their own click handler.
       onClick={(e) => e.stopPropagation()}
       title={`Open the ledger for ${itemNumber}`}

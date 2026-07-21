@@ -115,8 +115,7 @@ export const tiersApi = {
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiTier>(`/item-tiers/${id}`, { signal: opts?.signal }),
 
-  create: (input: TierCreateInput) =>
-    api.post<ApiTier>('/item-tiers', { json: input }),
+  create: (input: TierCreateInput) => api.post<ApiTier>('/item-tiers', { json: input }),
 
   update: (id: string, input: TierUpdateInput) =>
     api.patch<ApiTier>(`/item-tiers/${id}`, { json: input }),

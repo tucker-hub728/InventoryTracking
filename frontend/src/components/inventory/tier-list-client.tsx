@@ -314,7 +314,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
                     <TableRow key={row.uuid} interactive className="group">
                       <TableCell className="font-mono">
                         <Link
-                          href={`/inventory/${encodeURIComponent(row.id)}/${config.detailSegment}`}
+                          href={`/inventory/${row.uuid}/${config.detailSegment}`}
                           className="rounded-sm text-text hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                         >
                           {row.id}
@@ -333,7 +333,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
                       {showBom && (
                         <TableCell>
                           <Link
-                            href={`/inventory/${encodeURIComponent(row.id)}/bom`}
+                            href={`/inventory/${row.uuid}/bom`}
                             className={cn(
                               'rounded-sm tabular-nums hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
                               row.bomLineCount > 0 ? 'text-text' : 'text-text-3',

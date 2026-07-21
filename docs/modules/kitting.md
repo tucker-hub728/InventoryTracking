@@ -1,7 +1,7 @@
 # Kitting, Back-Flush & Reconciliation — Backend Table Brief
 
 > **Route:** `/reconciliation` (page title **"Kitting & Reconciliation"**) · **Frontend entry:** `frontend/src/components/reconciliation/*` (currently a frontend-only mock; store `reconciliation-store.ts`, pure rules `reconciliation-engine.ts`).
-> **Status:** `draft 2026-07-17` — table design for review. **No migration written yet.** Nothing below is implemented.
+> **Status:** `built 2026-07-21` — `kitting01`, `kitting02`, **`kitting03`** applied on dev; API + UI live. The §0.3a correction is **implemented**: issue now moves material to the production node, excess can be returned mid-production (TRX-008), and post-issue cancel returns everything. Delivery detail + test results: [`kitting-wip-build.md`](kitting-wip-build.md).
 > **Spec sources:** `CellReady_Transaction_Spec_2026-07-01` §1–§4 · `CellReady_SRS_2026-07-01` §3–§4 · SRS Amendment 3 (2026-07-09) §8 · Amendment 4 (2026-07-15) §8 (SEQ-002 puts kitting + back-flush in this build slot).
 
 This brief proposes the tables for the kit lifecycle **Draft → Issued → In Production → Closed** (plus **Cancelled**), the back-flush of unused material, and the yield/scrap capture at close-out. It reuses the existing append-only `app.stock_movements` ledger for every quantity change rather than inventing a parallel stock table — on-hand stays derived through `app.v_item_stock`.
@@ -14,13 +14,32 @@ These are already settled in the mock and carry into the backend unless flagged 
 
 1. **Three tiers, prefix-agnostic.** A kit builds a **sub-assembly (AY)** or a **finished good (FG)**; its BOM lines are **raw materials (CR)** and/or nested AYs. Eligibility comes from `item_tiers.type`, never the ID prefix.
 2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99).
-3. **Kitted material stops counting as on-hand at issue time** (REQ-2026-07-09-TRX-001). Issue is a stock-**out** of the source location; the production location is advisory, not a stock-holding node.
+3. **Kitted material stops counting as available on-hand at issue time** (REQ-2026-07-09-TRX-001) **and physically moves to the production location** (`Transaction_Spec` §2). Issue is a stock-**out** of the *available* balance and a **relocation** of the material to the production node. See §0.3a.
+
 4. **Material is never bound to a production lot at kitting time** (REQ-2026-07-09-TRX-002) — which is exactly why a cancelled kit can always hand its material back with nothing stranded.
 5. **Returns post as an explicit back-flush**, never a plain receipt (REQ-2026-07-09-TRX-003) → a distinct `backflush` movement type so the ledger self-explains (*issued 15, used 12, backflushed 3*).
 6. **Reconciliation happens at transact-into-inventory, not at shipment** (REQ-2026-07-01-BFL-002) — the production output and the back-flush commit together, in one transaction, at close-out.
 7. **Over-use is blocked, not absorbed.** `used_qty` may not exceed `issued_qty + additional_issued_qty`; the operator records an explicit additional issue instead (keeps the ledger honest, REQ-2026-07-09-TRX-003). Enforced by a DB CHECK.
 8. **Scrap/yield captured at close-out** (REQ-2026-07-01-BFL-004): `good_qty` (good units) + `scrap_qty`; yield derived.
 9. **FG → customer shipment is out of scope here** — a separate terminal transaction (TRX-005/006), its own screen.
+
+### 0.3a Correction — the production location holds the WIP (2026-07-21)
+
+**The original §0.3 was wrong, and the shipped build follows the wrong version.** It read "the production location is advisory, not a stock-holding node", attributed to *client 2026-07-20*. **That attribution was incorrect — no client document says it.** It originated in an in-session choice framed on a misreading of TRX-001, and it **contradicts the Transaction Spec**.
+
+**Source of truth — `CellReady_Transaction_Spec_2026-07-01` §2 "Kitting for Inventory (AY or FG)"**, the note under *Table 1 — Kit Structure*:
+
+> "Note: **Location must be updated from the storage location an item was originally assigned to the production or manufacturing location it is moved to for kitting.**"
+
+**REQ-2026-07-09-TRX-001 does not conflict with it** — that was the misread:
+
+> "Kitted product items shall be visible as consumed **from source inventory** at issue time: if fifty are on hand and twenty-five are **kitted to manufacturing**, the system shall report twenty-five on hand."
+
+"Consumed *from source*" ≠ "ceases to exist". Available on-hand falls 50 → 25 because the other 25 is **WIP at the production location**, and "kitted **to** manufacturing" names the destination outright. One model satisfies both requirements:
+
+> **Issue moves the material source → production node; the production node is excluded from the available balance.**
+
+This keeps `v_item_stock` meaning *available* stock — so the on-hand arithmetic in §4.3/§5 is **unchanged** — while making "what is physically on the floor right now?" answerable from `lot_allocations`, which today it is not.
 
 ---
 
@@ -105,7 +124,7 @@ stateDiagram-v2
 | `item_id` | `UUID NOT NULL FK → app.items(id)` `RESTRICT` | the AY/FG being built (table-qualify vs `kit_lines.item_id`, which is a component); API validates its tier is built + has a BOM. **Tier is derived `item → item_prefixes → item_tiers` (`items.tier_id` was dropped 2026-07-20); eligibility still reads `item_tiers.type`.** |
 | `target_qty` | `INTEGER NOT NULL` | `ck_kits_target_qty_positive` (`> 0`) |
 | `status` | `app.kit_status NOT NULL DEFAULT 'draft'` | native PG enum (client 2026-07-20); values = `KIT_STATUSES` |
-| `production_location_node_id` | `UUID NOT NULL FK → meta.location_nodes(id)` `RESTRICT` | **must reference a real seeded node** (client, 2026-07-20) — no free-text. Clean Room 1/2, Manufacturing Floor, PD Lab One/Two seeded as `flat` nodes (new `flat_category = 'production'`). **Advisory only — holds no WIP stock balance** (§99.3): issued components leave inventory at issue and are tracked on the kit. |
+| `production_location_node_id` | `UUID NOT NULL FK → meta.location_nodes(id)` `RESTRICT` | **must reference a real seeded node** (client, 2026-07-20) — no free-text. Clean Room 1/2, Manufacturing Floor, PD Lab One/Two seeded as `flat` nodes (new `flat_category = 'production'`). **Holds the WIP** (§0.3a, `Transaction_Spec` §2): issued components are *relocated here* at issue and hold `lot_allocations` until close-out. Excluded from the available balance, so TRX-001 still reports 50 → 25. ~~*Was: "Advisory only — holds no WIP stock balance"; corrected 2026-07-21, see §99.3.*~~ |
 | `output_location_node_id` | `UUID NULL FK → meta.location_nodes(id)` `RESTRICT` | set at close-out; must be a storable node (`STORAGE_NODE_TYPES`) — enforced in API |
 | `good_qty` | `INTEGER NULL` | good units, set at close-out; `ck_kits_good_qty_nonneg` (`>= 0`) |
 | `scrap_qty` | `INTEGER NULL` | scrap units, set at close-out; `ck_kits_scrap_qty_nonneg` (`>= 0`) |
@@ -162,14 +181,27 @@ The kit writes into the existing append-only ledger. Additions only:
 
 **New `movement_type` values** and how each maps to sign + location (extending `ck_movements_type`, `ck_movements_type_sign`, `ck_movements_locations`):
 
+**Corrected 2026-07-21 (§0.3a).** The `to`/`from` columns below now record the move to and from the production node. The **signs are unchanged**, so `v_item_stock` arithmetic and every existing on-hand test still hold.
+
 | `movement_type` | `item_id` | Sign (`qty_delta`) | `from_location_node_id` | `to_location_node_id` |
 |--|--|--|--|--|
-| `kit_issue` | component | **negative** (out) | source node (set) | NULL |
-| `kit_additional_issue` | component | **negative** (out) | source node (set) | NULL |
+| `kit_issue` | component | **negative** (out of available) | source node (set) | **production node (set)** ← *was NULL* |
+| `kit_additional_issue` | component | **negative** (out of available) | source node (set) | **production node (set)** ← *was NULL* |
 | `production_output` | parent AY/FG | **positive** (in) | NULL | output node (set) |
-| `backflush` | component | **positive** (in) | NULL | return node (set) |
+| `backflush` | component | **positive** (in) | **production node (set)** ← *was NULL* | return node (set) |
 
-These follow the existing out=from-only / in=to-only rule, so the three CHECK constraints just gain the new cases. No change to `qty_abs`, immutability triggers, or `v_item_stock` (it already `SUM`s all `qty_delta`).
+The two issue types are now *"leaves the available balance, and here is where it physically went"*; `backflush` is *"comes back from the floor to this storage node"*. `production_output` is genuine creation, so it stays to-only.
+
+**This breaks the existing out=from-only / in=to-only rule**, so `ck_movements_locations` must be relaxed for these three types — that is the substance of migration `kitting03` (§10). `qty_abs`, the immutability triggers, and `v_item_stock` are **untouched**.
+
+**Where the WIP lives.** The ledger records the move; the *balance* is `app.lot_allocations` rows at the production node — the same mechanism used everywhere else. Issue reduces the source allocation and creates one at the production node **on the same lot**, preserving traceability (this does not violate TRX-002, which forbids binding to a *production output* lot at kitting time, not retaining the source lot).
+
+**Draining the WIP at close-out.** For each line, `used + returned = issued + additional`, so the production-node allocation always empties:
+
+| Portion | Allocation | Movement |
+|--|--|--|
+| `used_qty` | production allocation reduced | **none** — it already left `v_item_stock` at issue (consistent with §5) |
+| `returned_qty` | production → return node | one `backflush` (+qty, from production, to return) |
 
 New partial index: `ix_movements_kit_id` on `kit_id` where `kit_id IS NOT NULL`.
 
@@ -205,10 +237,10 @@ New partial index: `ix_movements_kit_id` on `kit_id` where `kit_id IS NOT NULL`.
 |--|--|--|
 | **Create (draft)** | insert `kits` (status `draft`) + `kit_lines` from exploded BOM; default `issued_qty = needed_qty` | none |
 | **Edit draft** | update `kit_lines.issued_qty`, `source_location_node_id`; `kits.production_location_node_id` | none |
-| **Issue** *(not signed)* | `status → issued` (API may advance to `in_production`), `issued_at/by` | one `kit_issue` per line with `issued_qty > 0` (from source, −qty), `reauth_evidence_id NULL` |
-| **Additional issue** *(not signed)* | `kit_lines.additional_issued_qty += n` | one `kit_additional_issue` (from source, −n), `reauth_evidence_id NULL` |
+| **Issue** *(not signed)* | `status → issued` (API may advance to `in_production`), `issued_at/by` | one `kit_issue` per line with `issued_qty > 0` (from source, **to production node**, −qty), `reauth_evidence_id NULL`. **Allocation:** source reduced (FIFO by expiry), same lot re-allocated to the production node |
+| **Additional issue** *(not signed)* | `kit_lines.additional_issued_qty += n` | one `kit_additional_issue` (from source, **to production node**, −n), `reauth_evidence_id NULL`. Same allocation move |
 | **Enter used qty** | `kit_lines.used_qty` (blocked if it breaks `ck_kit_lines_no_overuse`) | none |
-| **Close-out** *(E-SIGNED, atomic)* | `status → closed`, `good_qty`, `scrap_qty`, `output_location_node_id`, `closed_at/by` | one `production_output` (parent, +good_qty, to output) **+** one `backflush` per line where `returned_qty > 0` (component, +returned, to return node). **All rows carry the close-out `reauth_evidence_id`.** |
+| **Close-out** *(E-SIGNED, atomic)* | `status → closed`, `good_qty`, `scrap_qty`, `output_location_node_id`, `closed_at/by` | one `production_output` (parent, +good_qty, to output) **+** one `backflush` per line where `returned_qty > 0` (component, +returned, **from production node**, to return node). **Allocations:** the production-node allocation is drained — `used_qty` reduced away (no movement), `returned_qty` moved to the return node. **All rows carry the close-out `reauth_evidence_id`.** |
 | **Cancel** *(not signed, **draft-only**)* | `status → cancelled`, `closed_at/by`; rejected if not `draft` | none (nothing was issued) |
 
 ---
@@ -373,6 +405,32 @@ No data backfill — new feature, empty tables.
 
 **Follow-up `kitting02`** (applied on dev): `CREATE TYPE app.kit_status` and cast `kits.status` from TEXT+CHECK to the enum (client 2026-07-20). Split from `kitting01` because that was already applied and `stock_movements` is append-only, so a downgrade to fold it in wasn't possible — a forward step mirrors the repo's `prefixes01`/`prefixes02`.
 
+### 10.1 Proposed `kitting03` — WIP at the production node (§0.3a) · NOT WRITTEN
+
+> **→ Superseded by the agreed delivery plan: [`kitting-wip-build.md`](kitting-wip-build.md) (2026-07-21).** That doc carries the locked scope (partial return + post-issue cancel per TRX-008, production/lab-only production locations), the full migration steps, and the test plan. The sketch below is kept for context.
+
+`down_revision = "kitting02"`. Forward-only (the ledger is append-only), same reasoning as `kitting02`.
+
+**Schema (1 change only):**
+
+1. **Drop & recreate `ck_movements_locations`** so the three types may set both ends:
+   - `kit_issue`, `kit_additional_issue` — `from` **and** `to` both NOT NULL (was: `to` must be NULL).
+   - `backflush` — `from` **and** `to` both NOT NULL (was: `from` must be NULL).
+   - All other types unchanged. `ck_movements_type` and `ck_movements_type_sign` are **untouched** — signs do not change.
+
+**No other DDL.** `lot_allocations` already accepts any `location_node_id`, so production nodes need no schema change; `flat_category='production'` nodes are already seeded (`kitting01`).
+
+**Application changes (the real work):**
+
+2. `_PLACEABLE_NODE_TYPES` — production `flat` nodes become valid allocation targets for the *issue* path (still **not** valid for output/return, which must stay storage leaves).
+3. `_consume_from_source` → **`_move_to_production`**: reduce the source allocation FIFO, then `create_allocation` on the **same lot** at `kit.production_location_node_id`, and set `to_location_node_id` on the movement.
+4. **Close-out** — drain the production allocation per line: reduce by `used_qty` (no movement), and return `returned_qty` to the return node with the `backflush` row now carrying `from = production node`. **Move the material back on its ORIGINAL lot.** *(Settled 2026-07-21 after testing, client decision. This flip-flopped twice: first "move the lot back", then "mint a fresh unassigned lot per TRX-008", now back to moving. The deciding evidence was empirical — minting a fresh lot **silently dropped the expiry date**: material expiring 2026-08-22 returned as `expiration_date = NULL` and would never fire an expiry alert. TRX-008's "without assigning them to a lot number" targets binding to a **production** lot and never requires an operator to assign one; it does not require discarding the material's own incoming lot, and returning to a live lot strands nothing. Only the production **output** mints a new lot — that item was genuinely just made.)*
+5. **Available-balance guard** — exclude production nodes wherever per-node stock feeds "available" (`item_stock_by_node`, the Issue-step source picker), so WIP is never offered as a source. `v_item_stock` is unaffected (signs unchanged).
+
+**Data backfill: RESOLVED 2026-07-21 — no backfill script.** Kits currently `issued`/`in_production` were issued under the withdrawn model, so their material has no allocation anywhere. **Close out or cancel them first**, returning the material to inventory with **no lot assignment** — which is not a workaround but the capability **REQ-2026-07-01-TRX-008** mandates ("return excess items back into inventory … without assigning them to a lot number, so returned stock is never stranded"). Then migrate against a clean slate.
+
+**Risk:** medium. One CHECK swap, but it changes a *shipped, exercised* write path. The 18-check and 11-check BFF suites must be re-run, plus a new assertion that the production node holds the WIP between issue and close-out and is empty after.
+
 ---
 
 ## 11. Cross-module references
@@ -389,9 +447,11 @@ No data backfill — new feature, empty tables.
 
 1. ~~**E-signature scope.**~~ **RESOLVED (client, 2026-07-20): close-out only.** Issue / additional issue / cancel are unsigned; see §6.
 2. ~~**Production location as a real node.**~~ **RESOLVED (client, 2026-07-20): must pick a real seeded node.** Needs Clean Room 1/2, Manufacturing Floor, PD Lab One/Two seeded (new `flat_category = 'production'`). Sub-point tied to #3: is it a *storable* node (holds WIP) or advisory?
-3. ~~**On-hand timing / WIP model.**~~ **RESOLVED (client, 2026-07-20): no WIP bucket (model A).** Issue removes from source (`kit_issue`, −qty) so available on-hand drops at issue (TRX-001); the kit is the record of what's on the floor; close-out back-flushes the leftover, so final consumed = used; AY/FG gets a `production_output` unit-in. The production location is advisory (holds no stock). No `v_item_stock` change. This is the model in §4.3/§7.
+3. ~~**On-hand timing / WIP model.** RESOLVED (client, 2026-07-20): no WIP bucket (model A).~~ **↑ SUPERSEDED / WITHDRAWN 2026-07-21 — this resolution was invalid.** It stated "the production location is advisory (holds no stock)" and credited *client, 2026-07-20*. **No client document supports that**; it originated in an in-session choice framed on a misreading of TRX-001, and it contradicts `Transaction_Spec` §2 ("Location must be updated … to the production or manufacturing location it is moved to for kitting"). **Correct model: WIP at the production node — see §0.3a.** Retained here rather than deleted so the shipped-then-corrected history stays auditable. The build still implements the withdrawn model until `kitting03` (§10) lands.
 4. ~~**Fractional quantities.**~~ **RESOLVED (client, 2026-07-20): whole units.** `issued_qty/additional/used` stay `INTEGER`; `qty_per_unit` stays `NUMERIC(14,3)` (the BOM ratio); `needed_qty` is derived and may be fractional for display but issued/used are whole.
 5. **Consumables reconciliation** (Transaction Spec §4.3) — the Kanban physical-count/adjustment flow was removed from the UI ("not right now"). Out of scope for this migration? (Proposed: yes; revisit as an `adjustment`-movement feature later.)
-6. **Kit numbering format** — `KIT-0001` zero-padded from a sequence, matching the mock. Confirm the prefix/width.
+6. ~~**Kit numbering format** — `KIT-0001` zero-padded from a sequence, matching the mock. Confirm the prefix/width.~~ **RESOLVED (client, 2026-07-21): the kit name is operator-supplied free text, and it also names the produced lot.**
+   The auto-generated `KIT-0001` came from the frontend mock — no client document ever specified kit numbering — and `KIT-0034-OUT` made an ugly lot number out of it. Free text is *better* aligned with the spec, not a deviation: the traceability model leans on the paper record throughout (*"a kit is closed out using data from the traveler"*, *"reconciliation shall remain on paper batch records"*, *"refer to the official paper traveler/batch record"*), and an auto number has no relationship to the traveler while a typed batch number **is** that link. Free-text identifiers already have precedent — the 2026-07-09 amendment fixed the shipping/transaction number as *"free text for now"*.
+   **Shape:** required and unique, with a free `KIT-####` pre-filled by `GET /kits/next-number` (which *peeks* at the sequence rather than consuming it, so opening the dialog never burns numbers). Duplicates are rejected `409 kit_number_conflict`. At close-out the produced lot takes the kit name verbatim — safe because `kit_number` is globally unique and lot numbers are unique per `(item, lot_number)`.
 7. **Planning link** — kits are ad-hoc (pick item + qty). When Planning (REQ-2026-07-09-PLN-001) lands, add an optional `kits.plan_entry_id`? (Not in this migration.)
 8. **Post-issue cancel — DEFERRED (client, 2026-07-20).** For now Cancel is draft-only (§6). Cancelling an issued/in-production kit — which would back-flush every issued unit to its return node (§0.4, safe because nothing is lot-bound) — is a later addition. The `backflush` movement type already exists for it, so it's an API/service change only, no schema change.

@@ -136,6 +136,7 @@ def _apply_filters(
     prefix_id: uuid.UUID | None = None,
     is_consumable: bool | None = None,
     has_bom: bool | None = None,
+    min_bom_lines: int | None = None,
     below_reorder: bool | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
@@ -157,6 +158,18 @@ def _apply_filters(
         stmt = stmt.where(
             Item.id.in_(with_bom) if has_bom else Item.id.not_in(with_bom)
         )
+    if min_bom_lines is not None and min_bom_lines > 0:
+        # Items whose BOM has at least N distinct components. Kitting uses this
+        # with N=2: every composition rule in Transaction_Spec §1.1 is
+        # two-input (CR+CR→AY, AY+AY→AY, CR+AY→FG), so a one-line "recipe" is
+        # an incomplete BOM, not something you can gather a kit for.
+        enough_lines = (
+            select(BomLine.parent_item_id)
+            .where(BomLine.deleted_at.is_(None))
+            .group_by(BomLine.parent_item_id)
+            .having(func.count(BomLine.id) >= min_bom_lines)
+        )
+        stmt = stmt.where(Item.id.in_(enough_lines))
     if supplier_id is not None:
         # Suppliers live in ``meta.item_suppliers`` now — filter items that have
         # the requested supplier in their assigned list.
@@ -219,6 +232,7 @@ async def list_items(
     prefix_id: uuid.UUID | None = None,
     is_consumable: bool | None = None,
     has_bom: bool | None = None,
+    min_bom_lines: int | None = None,
     below_reorder: bool | None = None,
     sort: SortField = "item_number",
     direction: SortDirection = "asc",
@@ -238,6 +252,7 @@ async def list_items(
         prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
+        min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
     )
     count_stmt = _apply_filters(
@@ -249,6 +264,7 @@ async def list_items(
         prefix_id=prefix_id,
         is_consumable=is_consumable,
         has_bom=has_bom,
+        min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
     )
     total = int((await session.execute(count_stmt)).scalar_one())
@@ -268,10 +284,14 @@ async def get_item(session: AsyncSession, item_id: uuid.UUID) -> Item | None:
 async def get_item_by_prefix_suffix(
     session: AsyncSession, prefix_id: uuid.UUID, sku_suffix: str
 ) -> Item | None:
-    """Live item with this (prefix, suffix) — the uniqueness pair."""
+    """Live item with this (prefix, suffix) — the uniqueness pair.
+
+    Matched case-insensitively: suffixes are stored upper-cased by the schema
+    validator, so a differently-cased URL still resolves.
+    """
     stmt = select(Item).where(
         Item.prefix_id == prefix_id,
-        Item.sku_suffix == sku_suffix,
+        func.lower(Item.sku_suffix) == sku_suffix.lower(),
         Item.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
@@ -280,24 +300,45 @@ async def get_item_by_prefix_suffix(
 async def get_item_by_number(session: AsyncSession, item_number: str) -> Item | None:
     """Resolve a full SKU (``<prefix code>-<suffix>``) back to its item.
 
-    The number is derived, not stored, so split on the first ``-`` into the
-    prefix code and the suffix, resolve the (live) prefix by code, then the item
-    by ``(prefix_id, suffix)``.
+    The number is derived, not stored, so it has to be split back into a prefix
+    code and a suffix — but the split point is **ambiguous**, because a prefix
+    code may itself contain ``-`` (e.g. ``AS-TEST-002`` is ``AS-TEST`` + ``002``,
+    not ``AS`` + ``TEST-002``). Splitting on the first ``-`` therefore fails for
+    such codes.
+
+    Instead, match the number against the real (live) prefix list: try every
+    code the number starts with, longest first, and return the first one that
+    actually resolves to an item. That is deterministic, handles dashed codes,
+    and — because it verifies the item exists — still finds the right row when
+    two codes overlap (``AS`` and ``AS-TEST`` both present).
+
+    The prefix table is small (one row per admin-defined code), so loading it is
+    cheap compared with guessing.
     """
-    code, sep, suffix = item_number.partition("-")
-    if not sep:
+    number = item_number.strip()
+    if not number:
         return None
-    prefix = (
-        await session.execute(
-            select(ItemPrefix).where(
-                func.lower(ItemPrefix.code) == code.lower(),
-                ItemPrefix.deleted_at.is_(None),
+    prefixes = (
+        (
+            await session.execute(
+                select(ItemPrefix).where(ItemPrefix.deleted_at.is_(None))
             )
         )
-    ).scalar_one_or_none()
-    if prefix is None:
-        return None
-    return await get_item_by_prefix_suffix(session, prefix.id, suffix)
+        .scalars()
+        .all()
+    )
+    lowered = number.lower()
+    candidates = [p for p in prefixes if lowered.startswith(f"{p.code.lower()}-")]
+    # Longest code first: 'AS-TEST' must win over 'AS' for 'AS-TEST-002'.
+    candidates.sort(key=lambda p: len(p.code), reverse=True)
+    for prefix in candidates:
+        suffix = number[len(prefix.code) + 1 :]
+        if not suffix:
+            continue
+        item = await get_item_by_prefix_suffix(session, prefix.id, suffix)
+        if item is not None:
+            return item
+    return None
 
 
 async def create_item(

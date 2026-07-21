@@ -725,12 +725,20 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     "transfer_out",
     "transfer_in",
     # Kitting / back-flush (docs/modules/kitting.md §4.3). Issue types are
-    # unit-OUT (from source, qty_delta < 0); output/backflush are unit-IN
-    # (to a node, qty_delta > 0).
+    # unit-OUT (from source, qty_delta < 0); output and the three return types
+    # are unit-IN (to a node, qty_delta > 0).
     "kit_issue",
     "kit_additional_issue",
     "production_output",
+    # Three distinct return events, kept apart the same way kit_issue and
+    # kit_additional_issue are — physically identical, different business
+    # meaning, and the ledger has to say which happened (kitting05):
+    #   backflush         — the signed close-out reconciliation (TRX-003)
+    #   kit_return        — excess handed back mid-production (TRX-008)
+    #   kit_cancel_return — the kit was abandoned and everything came back
     "backflush",
+    "kit_return",
+    "kit_cancel_return",
 )
 
 
@@ -864,6 +872,20 @@ class StockMovement(Base):
     # ── Relationships (read-only views) ────────────────────────────────
     item: Mapped[Item] = relationship(lazy="joined", viewonly=True)
     lot: Mapped[Lot | None] = relationship(lazy="joined", viewonly=True)
+    # Referenced by class name so this module doesn't import the kitting
+    # models (they already import from here). Joined eagerly so the AY/FG
+    # ledger can label each row with the kit that caused it — "Made KIT-0034"
+    # — without an N+1. This is a transaction reference, NOT lot genealogy:
+    # SRS §7 explicitly excludes finished-good → component-lot traceability.
+    # Quoted on purpose: `Kit` is defined in app.models.kitting and is never
+    # imported here (that module imports from this one), so the name only ever
+    # resolves through SQLAlchemy's registry, not Python's.
+    kit: Mapped["Kit | None"] = relationship(  # noqa: F821, UP037
+        "Kit",
+        foreign_keys=[kit_id],
+        lazy="joined",
+        viewonly=True,
+    )
     # Joined eagerly so the ledger and audit-timeline can show "by
     # <full_name>" without a per-row N+1.
     performed_by: Mapped[User] = relationship(

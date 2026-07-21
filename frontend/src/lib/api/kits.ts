@@ -34,11 +34,32 @@ export const KIT_STATUS_TONE: Record<KitStatus, BadgeTone> = {
   cancelled: 'danger',
 };
 
+/** One occupied cell in an LN2 box — always exactly one unit of one lot. */
+export interface CellOption {
+  allocation_id: string;
+  grid_row: number;
+  grid_col: number;
+  lot_id: string;
+  lot_number: string | null;
+  expiration_date: string | null;
+}
+
 export interface KitLineSourceOption {
   node_id: string;
   name: string;
   path: string;
   qty: number;
+  /** LN2 box: the operator picks cells, and quantity follows the selection. */
+  is_grid: boolean;
+  grid_rows: number | null;
+  grid_cols: number | null;
+  cells: CellOption[];
+}
+
+/** A free cell to place a returned unit into. */
+export interface ReturnCellInput {
+  grid_row: number;
+  grid_col: number;
 }
 
 export interface ApiKitLine {
@@ -54,6 +75,11 @@ export interface ApiKitLine {
   issued_qty: number;
   additional_issued_qty: number;
   used_qty: number | null;
+  /** Handed back to inventory before close-out (TRX-008). */
+  early_returned_qty: number;
+  /** issued + additional − early_returned: what is still on the production floor. */
+  on_floor_qty: number;
+  /** on_floor − used: the close-out back-flush amount (null until used entered). */
   returned_qty: number | null;
   source_location_node_id: string | null;
   return_location_node_id: string | null;
@@ -128,6 +154,8 @@ export interface ApiKitActivityResponse {
 // ── Write inputs ─────────────────────────────────────────────────────────
 
 export interface KitCreateInput {
+  /** Operator-supplied kit / batch name. Also names the produced lot. */
+  kit_number: string;
   item_id: string;
   target_qty: number;
   production_location_node_id: string;
@@ -143,6 +171,8 @@ export interface IssueLineInput {
   line_id: string;
   issued_qty: number;
   source_location_node_id?: string | null;
+  /** LN2 only: the exact cells to pull. Length must equal issued_qty. */
+  cell_allocation_ids?: string[];
 }
 
 export interface IssueInput {
@@ -157,33 +187,60 @@ export interface ProductionDraftInput {
 
 export interface AdditionalIssueInput {
   qty: number;
+  /** LN2 only: the exact cells to pull. Length must equal qty. */
+  cell_allocation_ids?: string[];
+}
+
+/** REQ-2026-07-01-TRX-008 — return excess from the floor, no lot assignment. */
+export interface ReturnExcessInput {
+  qty: number;
+  return_location_node_id: string;
+  /** Required when returning into a box: one free cell per unit. */
+  return_cells?: ReturnCellInput[];
+  reason?: string | null;
 }
 
 export interface CloseOutLineInput {
   line_id: string;
   used_qty: number;
   return_location_node_id?: string | null;
+  return_cells?: ReturnCellInput[];
 }
 
 export interface CloseOutInput {
   good_qty: number;
   scrap_qty: number;
   output_location_node_id: string;
+  /** Expiry of the produced lot (REQ-2026-07-01-INV-008). ISO yyyy-mm-dd. */
+  output_expiration_date?: string | null;
   lines: CloseOutLineInput[];
   /** Signed write. */
   evidence_id: string;
   reason: string;
 }
 
+export interface CancelLineInput {
+  line_id: string;
+  return_location_node_id: string;
+  return_cells?: ReturnCellInput[];
+}
+
 export interface CancelInput {
   reason?: string | null;
+  /** Per-line return destinations. Must cover every line still on the floor. */
+  lines?: CancelLineInput[];
 }
 
 export const MOVEMENT_TYPE_LABEL: Record<string, string> = {
   kit_issue: 'Kit issue',
   kit_additional_issue: 'Additional issue',
   production_output: 'Production output',
-  backflush: 'Backflushed',
+  // Three distinct return events (kitting05): the signed close-out
+  // reconciliation, an operator handing excess back mid-production, and a
+  // cancelled kit giving everything back.
+  backflush: 'Back-flushed',
+  kit_return: 'Returned',
+  kit_cancel_return: 'Cancel return',
   receipt: 'Unit in',
   dispense: 'Unit out',
   adjustment: 'Adjustment',
@@ -212,6 +269,10 @@ export const kitsApi = {
   activity: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiKitActivityResponse>(`/kits/${id}/activity`, { signal: opts?.signal }),
 
+  /** A free KIT-#### to pre-fill the name field. Peeks, never consumes. */
+  nextNumber: (opts?: { signal?: AbortSignal }) =>
+    api.get<{ kit_number: string }>('/kits/next-number', { signal: opts?.signal }),
+
   create: (input: KitCreateInput) => api.post<ApiKit>('/kits', { json: input }),
 
   updateLine: (id: string, lineId: string, input: KitLineUpdateInput) =>
@@ -225,6 +286,9 @@ export const kitsApi = {
 
   additionalIssue: (id: string, lineId: string, input: AdditionalIssueInput) =>
     api.post<ApiKit>(`/kits/${id}/lines/${lineId}/additional-issue`, { json: input }),
+
+  returnExcess: (id: string, lineId: string, input: ReturnExcessInput) =>
+    api.post<ApiKit>(`/kits/${id}/lines/${lineId}/return`, { json: input }),
 
   closeOut: (id: string, input: CloseOutInput) =>
     api.post<ApiKit>(`/kits/${id}/close-out`, { json: input }),

@@ -11,13 +11,17 @@ from __future__ import annotations
 import uuid
 from decimal import ROUND_CEILING, Decimal
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.inventory import BomLine, Item, ItemPrefix, ItemTier, Lot, StockMovement
 from app.models.kitting import Kit, KitLine
 from app.models.locations import LocationNode, LotAllocation
+
+# Flat-category marking a production/lab floor. Allocations here are WIP held
+# by an open kit, never available stock (§0.3a).
+PRODUCTION_CATEGORY = "production"
 
 # ── Reads / lookups ─────────────────────────────────────────────────────
 
@@ -48,28 +52,32 @@ async def list_bom_children(session: AsyncSession, parent_item_id: uuid.UUID) ->
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def default_source_node_id(session: AsyncSession) -> uuid.UUID | None:
-    """A sensible default source: the first active warehouse shelf. The
-    operator can override per line before issuing."""
-    stmt = (
-        select(LocationNode.id)
-        .where(LocationNode.node_type == "shelf", LocationNode.is_active.is_(True))
-        .order_by(LocationNode.code)
-        .limit(1)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
 async def storage_node_exists(session: AsyncSession, node_id: uuid.UUID) -> bool:
     stmt = select(LocationNode.id).where(LocationNode.id == node_id)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+async def production_node_exists(session: AsyncSession, node_id: uuid.UUID) -> bool:
+    """A kit's production location must be a real production/lab floor
+    (``Transaction_Spec`` §2) — not a warehouse shelf."""
+    stmt = select(LocationNode.id).where(
+        LocationNode.id == node_id,
+        LocationNode.flat_category == PRODUCTION_CATEGORY,
+        LocationNode.is_active.is_(True),
+    )
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def item_stock_by_node(
     session: AsyncSession, item_ids: set[uuid.UUID]
 ) -> dict[uuid.UUID, dict[uuid.UUID, int]]:
-    """Per-item, per-node available stock from the Location System —
-    ``{item_id: {node_id: qty}}`` over active, positive lot allocations."""
+    """Per-item, per-node **available** stock from the Location System —
+    ``{item_id: {node_id: qty}}`` over active, positive lot allocations.
+
+    Production nodes are excluded: material sitting on a production floor is
+    WIP owned by an open kit (§0.3a), not available stock, so it must never be
+    offered as an issue source nor counted as on-hand for the picker.
+    """
     if not item_ids:
         return {}
     stmt = (
@@ -80,10 +88,12 @@ async def item_stock_by_node(
         )
         .select_from(LotAllocation)
         .join(Lot, Lot.id == LotAllocation.lot_id)
+        .join(LocationNode, LocationNode.id == LotAllocation.location_node_id)
         .where(
             Lot.item_id.in_(item_ids),
             LotAllocation.is_active.is_(True),
             LotAllocation.qty > 0,
+            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
         )
         .group_by(Lot.item_id, LotAllocation.location_node_id)
     )
@@ -91,6 +101,96 @@ async def item_stock_by_node(
     for item_id, node_id, qty in (await session.execute(stmt)).all():
         out.setdefault(item_id, {})[node_id] = int(qty)
     return out
+
+
+async def item_cells_by_node(
+    session: AsyncSession, item_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, dict[uuid.UUID, list[LotAllocation]]]:
+    """Occupied **grid cells** holding these items, ``{item: {box_node: [alloc]}}``.
+
+    Only grid-bearing nodes (the Box) appear — a cell is one unit of one lot at
+    a ``(grid_row, grid_col)``, enforced single-occupancy by
+    ``uq_lot_allocations_cell``. Lets the Issue step show the box's grid so the
+    operator picks the exact vials (D2), while the *recorded* location stays the
+    box itself (D4).
+
+    Production nodes are excluded for the same reason as
+    :func:`item_stock_by_node` — WIP is not available stock.
+    """
+    if not item_ids:
+        return {}
+    stmt = (
+        select(LotAllocation)
+        .join(Lot, Lot.id == LotAllocation.lot_id)
+        .join(LocationNode, LocationNode.id == LotAllocation.location_node_id)
+        .where(
+            Lot.item_id.in_(item_ids),
+            LotAllocation.is_active.is_(True),
+            LotAllocation.qty > 0,
+            LotAllocation.grid_row.is_not(None),
+            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
+        )
+        .order_by(LotAllocation.grid_row, LotAllocation.grid_col)
+    )
+    rows = (await session.execute(stmt)).scalars().unique().all()
+    lots = (
+        {
+            lot.id: lot
+            for lot in (
+                await session.execute(select(Lot).where(Lot.id.in_([r.lot_id for r in rows])))
+            )
+            .scalars()
+            .unique()
+            .all()
+        }
+        if rows
+        else {}
+    )
+    out: dict[uuid.UUID, dict[uuid.UUID, list[LotAllocation]]] = {}
+    for alloc in rows:
+        lot = lots.get(alloc.lot_id)
+        if lot is None:
+            continue
+        out.setdefault(lot.item_id, {}).setdefault(alloc.location_node_id, []).append(alloc)
+    return out
+
+
+async def grid_nodes(
+    session: AsyncSession, node_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, LocationNode]:
+    """The grid-bearing (Box) nodes among ``node_ids``, keyed by id — used to
+    surface ``grid_rows × grid_cols`` so the picker can draw the grid."""
+    if not node_ids:
+        return {}
+    stmt = select(LocationNode).where(
+        LocationNode.id.in_(node_ids), LocationNode.grid_rows.is_not(None)
+    )
+    return {n.id: n for n in (await session.execute(stmt)).scalars().unique().all()}
+
+
+async def allocations_by_ids(
+    session: AsyncSession, allocation_ids: list[uuid.UUID]
+) -> list[LotAllocation]:
+    """Active allocations by id, for validating an explicit cell selection."""
+    if not allocation_ids:
+        return []
+    stmt = select(LotAllocation).where(
+        LotAllocation.id.in_(allocation_ids),
+        LotAllocation.is_active.is_(True),
+        LotAllocation.qty > 0,
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def occupied_cells(session: AsyncSession, node_id: uuid.UUID) -> set[tuple[int, int]]:
+    """``{(row, col)}`` already taken in a box — the free-cell check for returns
+    (``uq_lot_allocations_cell`` is the backstop; this gives a clean 422)."""
+    stmt = select(LotAllocation.grid_row, LotAllocation.grid_col).where(
+        LotAllocation.location_node_id == node_id,
+        LotAllocation.is_active.is_(True),
+        LotAllocation.grid_row.is_not(None),
+    )
+    return {(int(r), int(c)) for r, c in (await session.execute(stmt)).all()}
 
 
 async def allocations_for_item_at_node(
@@ -179,6 +279,38 @@ async def load_item_map(session: AsyncSession, item_ids: set[uuid.UUID]) -> dict
 async def next_kit_number(session: AsyncSession) -> str:
     n = (await session.execute(select(func.nextval("app.kit_number_seq")))).scalar_one()
     return f"KIT-{int(n):04d}"
+
+
+async def suggest_kit_number(session: AsyncSession) -> str:
+    """A free ``KIT-####`` to pre-fill the New-kit field with.
+
+    Peeks at the sequence rather than calling ``nextval`` — this runs on every
+    dialog open, and consuming a value each time would burn numbers for kits
+    that are never created. Because the operator may also type a name by hand,
+    the candidate is walked forward until it is actually free. The create
+    endpoint still enforces uniqueness, so this only has to be a good guess.
+    """
+    row = (
+        await session.execute(text("SELECT last_value, is_called FROM app.kit_number_seq"))
+    ).one()
+    nxt = int(row[0]) + 1 if row[1] else int(row[0])
+    for candidate_n in range(nxt, nxt + 1000):
+        candidate = f"KIT-{candidate_n:04d}"
+        if not await kit_number_taken(session, candidate):
+            return candidate
+    return f"KIT-{nxt:04d}"
+
+
+async def kit_number_taken(session: AsyncSession, kit_number: str) -> bool:
+    """Mirrors the partial unique index ``uq_kits_kit_number`` (``deleted_at IS
+    NULL``), so only a **soft-deleted** kit frees its name.
+
+    A *cancelled* kit keeps it: cancelling abandons the batch but the record —
+    and the movements that returned its material — remain, so reusing that batch
+    number would make the ledger ambiguous.
+    """
+    stmt = select(Kit.id).where(Kit.kit_number == kit_number, Kit.deleted_at.is_(None))
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def create_kit(

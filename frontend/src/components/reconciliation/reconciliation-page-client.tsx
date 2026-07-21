@@ -2,13 +2,14 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { ChevronRight, FlaskConical, Plus, RefreshCw, Search } from 'lucide-react';
+import { ChevronRight, FlaskConical, Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Pagination, usePagination } from '@/components/ui/pagination';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -82,22 +83,28 @@ export function ReconciliationPageClient() {
     );
   }, [kits, filter, query]);
 
+  // Client-side, over the already-filtered list — same idiom as the users and
+  // invitations tables. The fetch pulls up to 200 kits in one go, so paging
+  // never needs a round trip.
+  const pager = usePagination(visible, 15);
+
+  // Searching or switching status should land you on page 1, not on an empty
+  // page left over from the previous result set.
+  React.useEffect(() => {
+    pager.setPage(1);
+  }, [query, filter]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <>
       <PageHeader
         title="Kitting & Reconciliation"
         subtitle="Gather material for a build, issue it to production, then reconcile what was actually used and back-flush the rest."
         actions={
-          <>
-            <Button variant="ghost" onClick={() => void load()} disabled={loading}>
-              <RefreshCw size={14} className={loading ? 'animate-spin' : undefined} /> Refresh
+          canCreate ? (
+            <Button variant="primary" onClick={() => setCreating(true)}>
+              <Plus size={14} /> New kit
             </Button>
-            {canCreate && (
-              <Button variant="primary" onClick={() => setCreating(true)}>
-                <Plus size={14} /> New kit
-              </Button>
-            )}
-          </>
+          ) : undefined
         }
       />
 
@@ -166,7 +173,7 @@ export function ReconciliationPageClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.map((kit) => {
+                  {pager.pageItems.map((kit) => {
                     const y = kitYield(kit.good_qty, kit.scrap_qty);
                     return (
                       <tr
@@ -182,7 +189,7 @@ export function ReconciliationPageClient() {
                           </Link>
                         </td>
                         <td className="max-w-[280px] px-3 py-2.5">
-                          <ItemCell itemNumber={kit.item_number} description={kit.description} />
+                          <ItemCell itemNumber={kit.item_number} description={kit.description} itemId={kit.item_id} />
                         </td>
                         <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
                           {kit.target_qty}
@@ -217,6 +224,19 @@ export function ReconciliationPageClient() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+          {!loading && visible.length > 0 && (
+            <div className="border-t border-border px-1 pt-3">
+              <Pagination
+                page={pager.page}
+                pageCount={pager.pageCount}
+                total={pager.total}
+                rangeStart={pager.rangeStart}
+                rangeEnd={pager.rangeEnd}
+                onPageChange={pager.setPage}
+                noun="kit"
+              />
             </div>
           )}
         </Card>

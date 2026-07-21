@@ -9,11 +9,15 @@ tables hold the kit's own state, not stock — on-hand stays derived through
 
 Design decisions (see the module doc §0):
   * Consumables are never in a BOM, so a kit line is never a consumable.
-  * Kitted material leaves the source location at issue (TRX-001); the
-    production location is advisory and holds no stock (§99.3).
-  * ``used_qty`` may not exceed ``issued_qty + additional_issued_qty`` — the
+  * Kitted material leaves *available* stock at issue (TRX-001) and MOVES to
+    the production node, which holds the WIP until close-out (§0.3a,
+    Transaction_Spec §2). Corrected 2026-07-21 — the production location is
+    NOT advisory; the old §99.3 "no WIP bucket" resolution was withdrawn.
+  * ``used_qty`` may not exceed ``issued + additional - early_returned`` — the
     over-use guard is a DB CHECK (§0.7).
-  * Cancel is draft-only for now (§6); post-issue cancel is deferred (§99.8).
+  * Excess may be returned to inventory at any point in production, with no lot
+    assignment (``early_returned_qty``, REQ-2026-07-01-TRX-008).
+  * Cancel works from draft (no movements) and post-issue (returns everything).
 """
 
 from __future__ import annotations
@@ -50,9 +54,7 @@ KIT_STATUSES: tuple[str, ...] = (
     "cancelled",
 )
 
-kit_status_enum = ENUM(
-    *KIT_STATUSES, name="kit_status", schema="app", create_type=False
-)
+kit_status_enum = ENUM(*KIT_STATUSES, name="kit_status", schema="app", create_type=False)
 
 
 class Kit(Base):
@@ -94,7 +96,9 @@ class Kit(Base):
     status: Mapped[str] = mapped_column(
         kit_status_enum, nullable=False, server_default=text("'draft'::app.kit_status")
     )
-    # Advisory — where the build happens; holds no WIP stock (§99.3).
+    # Where the build happens — and it HOLDS the WIP: issue relocates material
+    # here and close-out drains it (§0.3a). The old "advisory, holds no stock"
+    # note was the withdrawn §99.3 resolution.
     production_location_node_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
@@ -165,9 +169,16 @@ class KitLine(Base):
             name="ck_kit_lines_additional_issued_qty_nonneg",
         ),
         CheckConstraint("used_qty IS NULL OR used_qty >= 0", name="ck_kit_lines_used_qty_nonneg"),
-        # The over-use guard (§0.7): actual usage may not exceed what was issued.
+        CheckConstraint("early_returned_qty >= 0", name="ck_kit_lines_early_returned_qty_nonneg"),
+        # You can't hand back more than you pulled (TRX-008 return guard).
         CheckConstraint(
-            "used_qty IS NULL OR used_qty <= issued_qty + additional_issued_qty",
+            "early_returned_qty <= issued_qty + additional_issued_qty",
+            name="ck_kit_lines_return_le_issued",
+        ),
+        # The over-use guard (§0.7), net of anything already returned (TRX-008).
+        CheckConstraint(
+            "used_qty IS NULL "
+            "OR used_qty <= issued_qty + additional_issued_qty - early_returned_qty",
             name="ck_kit_lines_no_overuse",
         ),
         {"schema": "app"},
@@ -199,6 +210,11 @@ class KitLine(Base):
         Integer, nullable=False, server_default=text("0")
     )
     used_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Handed back to inventory BEFORE close-out (TRX-008). On-floor quantity is
+    # ``issued + additional - early_returned``.
+    early_returned_qty: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     source_location_node_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),

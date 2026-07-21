@@ -4,6 +4,7 @@ import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { Plus } from 'lucide-react';
 
 import {
   Dialog,
@@ -37,8 +38,15 @@ import {
   TIER_TYPE_LABELS,
   type ApiTier,
 } from '@/lib/api/tiers';
+import { usePermission } from '@/hooks/use-permission';
+import { PrefixFormDialog } from '@/components/tiers/prefix-form-dialog';
 
 import { SupplierMultiSelect } from './supplier-multi-select';
+
+/** Sentinel value for the dropdown's "New prefix…" entry. Prefixes stay
+ *  admin-governed (REQ-2026-07-09-ITM-003) — this just opens the e-signed
+ *  prefix dialog inline instead of sending the operator to the admin screen. */
+const NEW_PREFIX_VALUE = '__new_prefix__';
 
 // ── Form schema ────────────────────────────────────────────────────────
 
@@ -121,6 +129,9 @@ export function NewItemDialog({
   const [suppliersError, setSuppliersError] = React.useState<string | null>(null);
 
   const [tiers, setTiers] = React.useState<ApiTier[]>([]);
+  // Creating a prefix is an e-signed admin action — only offer it to signers.
+  const canManagePrefixes = usePermission('inventory', 'sign');
+  const [addingPrefix, setAddingPrefix] = React.useState(false);
 
   const [submitError, setSubmitError] = React.useState<string | null>(null);
 
@@ -154,9 +165,17 @@ export function NewItemDialog({
   const suffix = watch('suffix');
 
   // The tier whose prefixes scope the picker, and the chosen prefix within it.
-  const selectedTier = lockedTier ?? tiers.find((c) => c.id === tierId);
+  // A locked tier is re-resolved from the fetched list so a prefix added from
+  // this dialog shows up immediately (the prop itself is a stale snapshot).
+  const resolvedLocked = lockedTier
+    ? (tiers.find((t) => t.id === lockedTier.id) ?? lockedTier)
+    : null;
+  const selectedTier = resolvedLocked ?? tiers.find((c) => c.id === tierId);
   const tierPrefixes = selectedTier?.prefixes ?? [];
   const selectedPrefix = tierPrefixes.find((p) => p.id === prefixId) ?? null;
+  // Offer the picker when there's a real choice, or when the operator may add
+  // one inline. Otherwise the single prefix renders as a static addon.
+  const canPickPrefix = Boolean(selectedTier) && (tierPrefixes.length > 1 || canManagePrefixes);
 
   // The SKU is fronted with the chosen prefix code; the operator types the tail.
   const skuPrefix = selectedPrefix?.code ?? '';
@@ -197,27 +216,35 @@ export function NewItemDialog({
     return () => ctrl.abort();
   }, [open]);
 
-  // Load tiers once when the dialog opens — skipped when the tier is
-  // fixed by the host page (no picker to populate).
-  React.useEffect(() => {
-    if (!open || lockedTier) return;
-    const ctrl = new AbortController();
-    tiersApi
-      .list({ signal: ctrl.signal })
-      .then(setTiers)
-      .catch(() => {
-        /* surfaced via the empty dropdown */
-      });
-    return () => ctrl.abort();
-  }, [open, lockedTier]);
-
-  // Keep the locked tier + its default prefix selected while the dialog is open.
-  React.useEffect(() => {
-    if (open && lockedTier) {
-      setValue('tierId', lockedTier.id, { shouldValidate: true });
-      setValue('prefixId', defaultPrefix(lockedTier)?.id ?? '', { shouldValidate: true });
+  // Refetch the tiers (and their prefixes). Also called after adding a prefix
+  // inline so the new one appears in the picker straight away.
+  const reloadTiers = React.useCallback(async (signal?: AbortSignal) => {
+    try {
+      setTiers(await tiersApi.list({ signal }));
+    } catch {
+      /* surfaced via the empty dropdown */
     }
-  }, [open, lockedTier, setValue]);
+  }, []);
+
+  // Load tiers when the dialog opens. Fetched even for a locked tier so the
+  // prefix list stays fresh after an inline "New prefix".
+  React.useEffect(() => {
+    if (!open) return;
+    const ctrl = new AbortController();
+    void reloadTiers(ctrl.signal);
+    return () => ctrl.abort();
+  }, [open, reloadTiers]);
+
+  // Seed the locked tier + its default prefix when the dialog opens. Keyed on
+  // the ids (not the prop object) so a re-render can't clobber a prefix the
+  // operator just picked or created inline.
+  const lockedTierId = lockedTier?.id ?? null;
+  const lockedDefaultPrefixId = lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '';
+  React.useEffect(() => {
+    if (!open || !lockedTierId) return;
+    setValue('tierId', lockedTierId, { shouldValidate: true });
+    setValue('prefixId', lockedDefaultPrefixId, { shouldValidate: true });
+  }, [open, lockedTierId, lockedDefaultPrefixId, setValue]);
 
   // When the operator picks a different tier, jump the prefix to that tier's
   // default (a prefix can't cross tiers). Skipped when the tier is locked.
@@ -275,9 +302,7 @@ export function NewItemDialog({
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === 'item_number_conflict') {
-          setSubmitError(
-            `${fullSku} is already in use. Pick a different number.`,
-          );
+          setSubmitError(`${fullSku} is already in use. Pick a different number.`);
           return;
         }
         if (err.code === 'request_invalid' || err.code === 'item_number_invalid') {
@@ -295,226 +320,266 @@ export function NewItemDialog({
   // disabled state.
   const busy = isSubmitting || createPending;
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <form onSubmit={handleSubmit(onSubmit)}>
-          <DialogHeader>
-            <DialogTitle>{title ?? 'New inventory item'}</DialogTitle>
-            {description && <DialogDescription>{description}</DialogDescription>}
-          </DialogHeader>
-          <DialogBody className="space-y-5">
-            {/* Tier (non-locked): scopes the prefix choices and decides
-                Product (can have a BOM) vs Purchased. */}
-            {!lockedTier && (
-              <Field id="ni-tier" label="Tier" error={errors.tierId?.message}>
-                <Select
-                  value={tierId}
-                  onValueChange={(v) => setValue('tierId', v, { shouldValidate: true })}
-                >
-                  <SelectTrigger id="ni-tier" aria-label="Tier">
-                    <SelectValue placeholder="Pick a tier" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {tiers.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>
-                        <span className="flex items-center gap-2">
-                          <span className="truncate">{c.name}</span>
-                          <Badge tone={isBuiltTier(c.type) ? 'accent' : 'neutral'}>
-                            {TIER_TYPE_LABELS[c.type]}
-                          </Badge>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-            )}
+  // A prefix created inline is a real (e-signed) prefix row — refetch so it
+  // appears in the picker, then select it.
+  const onPrefixCreated = async (saved: { id: string }) => {
+    await reloadTiers();
+    setValue('prefixId', saved.id, { shouldValidate: true });
+  };
 
-            <div className={lockedTier ? 'space-y-5' : 'grid gap-4 sm:grid-cols-[minmax(0,260px)_1fr]'}>
-              {/* Item # = inline prefix dropdown + suffix. The full number is
+  return (
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-w-2xl">
+          <form onSubmit={handleSubmit(onSubmit)}>
+            <DialogHeader>
+              <DialogTitle>{title ?? 'New inventory item'}</DialogTitle>
+              {description && <DialogDescription>{description}</DialogDescription>}
+            </DialogHeader>
+            <DialogBody className="space-y-5">
+              {/* Tier (non-locked): scopes the prefix choices and decides
+                Product (can have a BOM) vs Purchased. */}
+              {!lockedTier && (
+                <Field id="ni-tier" label="Tier" error={errors.tierId?.message}>
+                  <Select
+                    value={tierId}
+                    onValueChange={(v) => setValue('tierId', v, { shouldValidate: true })}
+                  >
+                    <SelectTrigger id="ni-tier" aria-label="Tier">
+                      <SelectValue placeholder="Pick a tier" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {tiers.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          <span className="flex items-center gap-2">
+                            <span className="truncate">{c.name}</span>
+                            <Badge tone={isBuiltTier(c.type) ? 'accent' : 'neutral'}>
+                              {TIER_TYPE_LABELS[c.type]}
+                            </Badge>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
+
+              <div
+                className={
+                  lockedTier ? 'space-y-5' : 'grid gap-4 sm:grid-cols-[minmax(0,260px)_1fr]'
+                }
+              >
+                {/* Item # = inline prefix dropdown + suffix. The full number is
                   derived (prefix code + suffix), so renaming the prefix later
                   re-labels the item. */}
-              <Field
-                id="ni-suffix"
-                label="Item #"
-                error={errors.suffix?.message ?? errors.prefixId?.message}
-              >
-                <div className="flex">
-                  {tierPrefixes.length > 1 ? (
-                    <Select
-                      value={prefixId}
-                      onValueChange={(v) => setValue('prefixId', v, { shouldValidate: true })}
-                    >
-                      <SelectTrigger
-                        aria-label="Prefix"
-                        className="w-auto shrink-0 gap-1 rounded-r-none border-r-0 font-mono"
+                <Field
+                  id="ni-suffix"
+                  label="Item #"
+                  error={errors.suffix?.message ?? errors.prefixId?.message}
+                >
+                  <div className="flex">
+                    {canPickPrefix ? (
+                      <Select
+                        value={prefixId}
+                        onValueChange={(v) => {
+                          // "New prefix…" opens the e-signed admin dialog rather
+                          // than selecting a value.
+                          if (v === NEW_PREFIX_VALUE) {
+                            setAddingPrefix(true);
+                            return;
+                          }
+                          setValue('prefixId', v, { shouldValidate: true });
+                        }}
                       >
-                        <span className="font-mono">{skuPrefix ? `${skuPrefix}-` : 'Prefix'}</span>
-                      </SelectTrigger>
-                      <SelectContent>
-                        {tierPrefixes.map((p) => (
-                          <SelectItem key={p.id} value={p.id}>
-                            <span className="flex items-center gap-2">
-                              <span className="font-mono">{p.code}</span>
-                              {p.label && <span className="text-text-3">{p.label}</span>}
-                              {p.is_default && <Badge tone="neutral">default</Badge>}
-                            </span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
-                      {skuPrefix || '—'}-
-                    </span>
-                  )}
-                  <Input
-                    id="ni-suffix"
-                    placeholder="001"
-                    className="rounded-l-none font-mono"
-                    aria-invalid={Boolean(errors.suffix)}
-                    {...register('suffix')}
-                  />
-                </div>
-                <p className="text-xs text-text-3">
-                  Full SKU: <span className="font-mono text-text-2">{fullSku || '—'}</span>
-                  {tierPrefixes.length > 1 && ' · prefix follows renames'}
-                </p>
-              </Field>
-              <Field
-                id="ni-desc"
-                label={lockedTier ? 'Name' : 'Description'}
-                error={errors.desc?.message}
-              >
-                <Input
-                  id="ni-desc"
-                  placeholder="e.g. Medical Tube, PVC 6mm"
-                  aria-invalid={Boolean(errors.desc)}
-                  {...register('desc')}
-                />
-              </Field>
-            </div>
-
-            {/* Unit + Reorder threshold are the two fields every tier shows, so
-                they pair up here. The purchasing-only fields (consumable flag,
-                suppliers, lead time, near-expiry) live in the block below. */}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
-                <Input
-                  id="ni-uom"
-                  placeholder="each, mL, box…"
-                  aria-invalid={Boolean(errors.uom)}
-                  {...register('uom')}
-                />
-              </Field>
-              <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
-                <Input
-                  id="ni-thr"
-                  type="number"
-                  inputMode="numeric"
-                  min={0}
-                  placeholder="e.g. 5"
-                  {...register('threshold')}
-                />
-              </Field>
-            </div>
-
-            {showPurchasing && (
-              <>
-                <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
-                  <div className="space-y-0.5">
-                    <Label htmlFor="ni-consumable">Consumable</Label>
-                    <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+                        <SelectTrigger
+                          aria-label="Prefix"
+                          className="w-auto shrink-0 gap-1 rounded-r-none border-r-0 font-mono"
+                        >
+                          <span className="font-mono">
+                            {skuPrefix ? `${skuPrefix}-` : 'Prefix'}
+                          </span>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {tierPrefixes.map((p) => (
+                            <SelectItem key={p.id} value={p.id}>
+                              <span className="flex items-center gap-2">
+                                <span className="font-mono">{p.code}</span>
+                                {p.label && <span className="text-text-3">{p.label}</span>}
+                                {p.is_default && <Badge tone="neutral">default</Badge>}
+                              </span>
+                            </SelectItem>
+                          ))}
+                          {canManagePrefixes && (
+                            <SelectItem value={NEW_PREFIX_VALUE}>
+                              <span className="flex items-center gap-1.5 text-accent">
+                                <Plus size={13} /> New prefix…
+                              </span>
+                            </SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <span className="inline-flex select-none items-center rounded-l-md border border-r-0 border-border bg-surface px-3 font-mono text-sm text-text-2">
+                        {skuPrefix || '—'}-
+                      </span>
+                    )}
+                    <Input
+                      id="ni-suffix"
+                      placeholder="001"
+                      className="rounded-l-none font-mono"
+                      aria-invalid={Boolean(errors.suffix)}
+                      {...register('suffix')}
+                    />
                   </div>
-                  <Switch
-                    id="ni-consumable"
-                    checked={isConsumable}
-                    onCheckedChange={(v) => setValue('isConsumable', v)}
-                  />
-                </div>
-
-                <Field id="ni-suppliers" label="Suppliers" error={errors.supplierIds?.message}>
-                  <SupplierMultiSelect
-                    id="ni-suppliers"
-                    modal
-                    suppliers={suppliers}
-                    value={supplierIds}
-                    onChange={(next) => setValue('supplierIds', next, { shouldValidate: true })}
-                    loading={suppliersLoading}
-                    error={suppliersError}
-                  />
                   <p className="text-xs text-text-3">
-                    Only these suppliers can be selected when receiving stock for this item.
+                    Full SKU: <span className="font-mono text-text-2">{fullSku || '—'}</span>
+                    {tierPrefixes.length > 1 && ' · prefix follows renames'}
                   </p>
                 </Field>
+                <Field
+                  id="ni-desc"
+                  label={lockedTier ? 'Name' : 'Description'}
+                  error={errors.desc?.message}
+                >
+                  <Input
+                    id="ni-desc"
+                    placeholder="e.g. Medical Tube, PVC 6mm"
+                    aria-invalid={Boolean(errors.desc)}
+                    {...register('desc')}
+                  />
+                </Field>
+              </div>
 
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
-                    <Input
-                      id="ni-lead"
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      {...register('leadDays')}
+              {/* Unit + Reorder threshold are the two fields every tier shows, so
+                they pair up here. The purchasing-only fields (consumable flag,
+                suppliers, lead time, near-expiry) live in the block below. */}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
+                  <Input
+                    id="ni-uom"
+                    placeholder="each, mL, box…"
+                    aria-invalid={Boolean(errors.uom)}
+                    {...register('uom')}
+                  />
+                </Field>
+                <Field id="ni-thr" label="Reorder threshold" error={errors.threshold?.message}>
+                  <Input
+                    id="ni-thr"
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    placeholder="e.g. 5"
+                    {...register('threshold')}
+                  />
+                </Field>
+              </div>
+
+              {showPurchasing && (
+                <>
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="ni-consumable">Consumable</Label>
+                      <p className="text-xs text-text-3">Blind-consumed, no lot traceability</p>
+                    </div>
+                    <Switch
+                      id="ni-consumable"
+                      checked={isConsumable}
+                      onCheckedChange={(v) => setValue('isConsumable', v)}
                     />
+                  </div>
+
+                  <Field id="ni-suppliers" label="Suppliers" error={errors.supplierIds?.message}>
+                    <SupplierMultiSelect
+                      id="ni-suppliers"
+                      modal
+                      suppliers={suppliers}
+                      value={supplierIds}
+                      onChange={(next) => setValue('supplierIds', next, { shouldValidate: true })}
+                      loading={suppliersLoading}
+                      error={suppliersError}
+                    />
+                    <p className="text-xs text-text-3">
+                      Only these suppliers can be selected when receiving stock for this item.
+                    </p>
                   </Field>
-                  {/* Near-expiry: purchased tiers only for now. INV-008 /
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field id="ni-lead" label="Lead time (days)" error={errors.leadDays?.message}>
+                      <Input
+                        id="ni-lead"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        {...register('leadDays')}
+                      />
+                    </Field>
+                    {/* Near-expiry: purchased tiers only for now. INV-008 /
                       Transaction Spec §3.1 want a tracked expiry on finished
                       goods, but nothing reads the window on AY/FG until manual
                       transact-in ships, so it is deferred (the column keeps its
                       30-day default). Re-show this field to restore it. */}
-                  <Field
-                    id="ni-near-expiry"
-                    label="Near expiry threshold (days)"
-                    error={errors.nearExpiryThresholdDays?.message}
-                  >
-                    <Input
+                    <Field
                       id="ni-near-expiry"
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={3650}
-                      step={1}
-                      placeholder="e.g. 30"
-                      {...register('nearExpiryThresholdDays')}
-                    />
-                  </Field>
-                </div>
-              </>
-            )}
+                      label="Near expiry threshold (days)"
+                      error={errors.nearExpiryThresholdDays?.message}
+                    >
+                      <Input
+                        id="ni-near-expiry"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={3650}
+                        step={1}
+                        placeholder="e.g. 30"
+                        {...register('nearExpiryThresholdDays')}
+                      />
+                    </Field>
+                  </div>
+                </>
+              )}
 
-            <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
-              {showPurchasing
-                ? 'After creating, you’ll be able to record the first unit in to bring the item into stock. The item is initially created with zero balance.'
-                : 'After creating, open the item’s detail page to define its bill of materials. The item is initially created with zero balance.'}
-            </p>
-
-            {submitError && (
-              <p
-                role="alert"
-                className="border-danger/30 bg-danger/5 rounded-md border px-3 py-2 text-xs text-danger"
-              >
-                {submitError}
+              <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">
+                {showPurchasing
+                  ? 'After creating, you’ll be able to record the first unit in to bring the item into stock. The item is initially created with zero balance.'
+                  : 'After creating, open the item’s detail page to define its bill of materials. The item is initially created with zero balance.'}
               </p>
-            )}
-          </DialogBody>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="default"
-              onClick={() => onOpenChange(false)}
-              disabled={busy}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" disabled={busy}>
-              {busy ? 'Creating…' : (submitLabel ?? 'Create item')}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+
+              {submitError && (
+                <p
+                  role="alert"
+                  className="border-danger/30 bg-danger/5 rounded-md border px-3 py-2 text-xs text-danger"
+                >
+                  {submitError}
+                </p>
+              )}
+            </DialogBody>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="default"
+                onClick={() => onOpenChange(false)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" disabled={busy}>
+                {busy ? 'Creating…' : (submitLabel ?? 'Create item')}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Inline "New prefix…" — a real, e-signed prefix in the selected tier, so
+        renames still cascade and per-prefix counts/filtering keep working. */}
+      <PrefixFormDialog
+        open={addingPrefix}
+        onOpenChange={setAddingPrefix}
+        tierId={selectedTier?.id ?? ''}
+        tierName={selectedTier?.name ?? ''}
+        onSaved={(saved) => void onPrefixCreated(saved)}
+      />
+    </>
   );
 }
 

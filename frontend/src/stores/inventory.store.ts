@@ -13,6 +13,7 @@ import {
   type ItemCreateInput,
 } from '@/lib/api/items';
 import { apiItemToInventoryItem } from '@/lib/api/items-adapter';
+import { isUuid } from '@/lib/utils';
 import type { InventoryItem, InventoryStatus } from '@/types/inventory';
 
 /**
@@ -97,13 +98,14 @@ interface InventoryStore extends FilterState, DataState {
   /** Refetch using the current filter / sort / pagination state. */
   fetch: (opts?: { signal?: AbortSignal }) => Promise<void>;
   /**
-   * Fetch a single item by its human-readable number (URL form). Returns
-   * ``null`` when the backend 404s (item doesn't exist / was archived);
+   * Fetch a single item by its stable UUID *or* its human-readable number —
+   * item URLs use the UUID, but older/bookmarked links still carry the number.
+   * Returns ``null`` when the backend 404s (item doesn't exist / was archived);
    * re-throws everything else so the caller can surface a real error.
    * Does *not* mutate any store slice — the detail page is its own scope.
    */
   fetchOne: (
-    itemNumber: string,
+    key: string,
     opts?: { signal?: AbortSignal },
   ) => Promise<InventoryItem | null>;
   /** Create an item, refetch the list, and return the created row. */
@@ -202,9 +204,13 @@ export const useInventoryStore = create<InventoryStore>()(
         }
       },
 
-      fetchOne: async (itemNumber, opts) => {
+      fetchOne: async (key, opts) => {
         try {
-          const row = await itemsApi.getByNumber(itemNumber, { signal: opts?.signal });
+          // Item URLs carry the stable UUID; legacy links still carry the
+          // human number, so accept either and let the caller canonicalise.
+          const row = isUuid(key)
+            ? await itemsApi.get(key, { signal: opts?.signal })
+            : await itemsApi.getByNumber(key, { signal: opts?.signal });
           return apiItemToInventoryItem(row);
         } catch (err) {
           if (err instanceof ApiError && err.status === 404) return null;
