@@ -1,6 +1,7 @@
 import {
   Building2,
   Contact,
+  Factory,
   FlaskConical,
   History,
   Layers,
@@ -59,18 +60,16 @@ export const navSections: readonly NavSection[] = [
     title: 'Operations',
     items: [
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
-      // Clickable, but pilled as WIP — tiers are seed-only for now (create /
-      // edit / delete are hidden behind ``TIER_ACTIONS_ENABLED``).
-      { id: 'tiers', label: 'Tiers', href: '/tiers', icon: Tags, resource: 'inventory', comingSoon: true },
-      // Frontend-only model of the kitting / back-flush flow (Transaction Spec
-      // §2-§4). Mock data, no backend — pilled as WIP until it's wired up.
+      // Tiers are seed-only for now (create / edit / delete hidden behind
+      // ``TIER_ACTIONS_ENABLED``).
+      { id: 'tiers', label: 'Tiers', href: '/tiers', icon: Tags, resource: 'inventory' },
+      // Kitting / back-flush flow, wired to the real backend (Transaction Spec §2-§4).
       {
         id: 'reconciliation',
-        label: 'Kitting & Reconciliation',
+        label: 'Kitting',
         href: '/reconciliation',
         icon: Scale,
         resource: 'inventory',
-        comingSoon: true,
       },
       {
         id: 'customers',
@@ -101,6 +100,9 @@ export const navSections: readonly NavSection[] = [
       { id: 'ln2', label: 'LN2', href: '/ln2', icon: Snowflake, resource: 'inventory' },
       { id: 'freezer', label: 'Freezers', href: '/freezer', icon: Refrigerator, resource: 'inventory' },
       { id: 'warehouse', label: 'Warehouse', href: '/warehouse', icon: Warehouse, resource: 'inventory' },
+      // View-only: the 5 seeded production floors and the WIP currently on them
+      // (client 2026-07-22). Material moves only through a kit's issue/close-out.
+      { id: 'production', label: 'Production', href: '/production', icon: Factory, resource: 'inventory' },
     ],
   },
   {

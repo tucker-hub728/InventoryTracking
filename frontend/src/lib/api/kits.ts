@@ -121,6 +121,10 @@ export interface ApiKitListItem {
   target_qty: number;
   status: KitStatus;
   production_location_node_id: string;
+  /** Human path of the production floor (e.g. "Manufacturing Floor"). */
+  production_location: string | null;
+  /** Human path of where the output was stocked — null until close-out. */
+  output_location: string | null;
   good_qty: number | null;
   scrap_qty: number | null;
   line_count: number;
@@ -147,9 +151,89 @@ export interface ApiKitActivityRow {
   performed_by_user_id: string;
 }
 
+/** One audit-trail event for a kit — carries good/scrap and per-line changes
+ *  the stock ledger can't show (scrap never moves stock). Client 2026-07-22. */
+export interface ApiKitAuditEvent {
+  id: string;
+  occurred_at: string;
+  /** create | edit_line | issue | additional_issue | early_return |
+   *  production_draft | close_out | cancel (falls back to the audit action). */
+  operation: string;
+  action: string;
+  actor_user_id: string | null;
+  good_qty: number | null;
+  scrap_qty: number | null;
+  /** Close-out only: where the produced output was stocked + its lot expiry. */
+  output_location: string | null;
+  output_expiration_date: string | null;
+  diff: Record<string, { before: unknown; after: unknown }> | null;
+}
+
 export interface ApiKitActivityResponse {
   items: ApiKitActivityRow[];
+  /** Full-snapshot audit events for the kit, newest first. */
+  events: ApiKitAuditEvent[];
 }
+
+export interface ApiFloorKitLine {
+  item_id: string;
+  item_number: string;
+  description: string;
+  on_floor_qty: number;
+}
+
+/** An open kit building on a production floor, with its on-floor material. */
+export interface ApiFloorKit {
+  id: string;
+  kit_number: string;
+  item_id: string;
+  item_number: string;
+  description: string;
+  target_qty: number;
+  status: KitStatus;
+  on_floor_total: number;
+  lines: ApiFloorKitLine[];
+}
+
+export interface ApiFloorKitConsumedLine {
+  item_id: string;
+  item_number: string;
+  description: string;
+  used_qty: number;
+}
+
+/** A closed kit that built on a floor — what it consumed and yielded. */
+export interface ApiFloorKitConsumed {
+  id: string;
+  kit_number: string;
+  item_id: string;
+  item_number: string;
+  description: string;
+  target_qty: number;
+  good_qty: number | null;
+  scrap_qty: number | null;
+  closed_at: string | null;
+  consumed_total: number;
+  lines: ApiFloorKitConsumedLine[];
+}
+
+export interface ApiFloorKitsResponse {
+  /** Open kits with material still on the floor. */
+  active: ApiFloorKit[];
+  /** Recently closed kits that built here — what they consumed. */
+  completed: ApiFloorKitConsumed[];
+}
+
+export const KIT_OPERATION_LABEL: Record<string, string> = {
+  create: 'Kit created',
+  edit_line: 'Draft line edited',
+  issue: 'Issued to production',
+  additional_issue: 'Additional issue',
+  early_return: 'Excess returned',
+  production_draft: 'Production figures saved',
+  close_out: 'Closed out',
+  cancel: 'Cancelled',
+};
 
 // ── Write inputs ─────────────────────────────────────────────────────────
 
@@ -160,6 +244,13 @@ export interface KitCreateInput {
   target_qty: number;
   production_location_node_id: string;
   notes?: string | null;
+}
+
+export interface KitUpdateInput {
+  /** New name (editable while the kit is open, not closed/cancelled). */
+  kit_number?: string;
+  /** New target (editable only while draft — it drives every line's need). */
+  target_qty?: number;
 }
 
 export interface KitLineUpdateInput {
@@ -269,11 +360,17 @@ export const kitsApi = {
   activity: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiKitActivityResponse>(`/kits/${id}/activity`, { signal: opts?.signal }),
 
+  /** Open kits building on a production floor + their on-floor material. */
+  onFloor: (nodeId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiFloorKitsResponse>(`/kits/floor/${nodeId}`, { signal: opts?.signal }),
+
   /** A free KIT-#### to pre-fill the name field. Peeks, never consumes. */
   nextNumber: (opts?: { signal?: AbortSignal }) =>
     api.get<{ kit_number: string }>('/kits/next-number', { signal: opts?.signal }),
 
   create: (input: KitCreateInput) => api.post<ApiKit>('/kits', { json: input }),
+
+  update: (id: string, input: KitUpdateInput) => api.patch<ApiKit>(`/kits/${id}`, { json: input }),
 
   updateLine: (id: string, lineId: string, input: KitLineUpdateInput) =>
     api.patch<ApiKit>(`/kits/${id}/lines/${lineId}`, { json: input }),

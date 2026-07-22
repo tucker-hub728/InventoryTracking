@@ -515,6 +515,61 @@ async def create_allocation(
     return refreshed
 
 
+async def create_or_merge_allocation(
+    session: AsyncSession,
+    *,
+    lot_id: uuid.UUID,
+    location_node_id: uuid.UUID,
+    qty: Decimal,
+    created_by_user_id: uuid.UUID,
+    grid_row: int | None = None,
+    grid_col: int | None = None,
+    notes: str | None = None,
+) -> LotAllocation:
+    """Place ``qty`` of a lot at a node, MERGING into an existing active
+    allocation of the same lot when the placement is bulk (non-grid).
+
+    A shelf can legally hold many allocations of one lot, but showing the same
+    (item, lot) as several rows is confusing — so a bulk placement adds to the
+    lot's existing row instead of opening another. Grid (box cell) placements
+    always create a fresh row: a cell holds exactly one unit and is
+    single-occupancy (``uq_lot_allocations_cell``), so they must never merge.
+    """
+    if grid_row is None and grid_col is None:
+        existing = (
+            (
+                await session.execute(
+                    select(LotAllocation)
+                    .where(
+                        LotAllocation.lot_id == lot_id,
+                        LotAllocation.location_node_id == location_node_id,
+                        LotAllocation.grid_row.is_(None),
+                        LotAllocation.grid_col.is_(None),
+                        LotAllocation.is_active.is_(True),
+                    )
+                    .order_by(LotAllocation.created_at.asc())
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing is not None:
+            existing.qty = existing.qty + qty
+            await session.flush()
+            return existing
+    return await create_allocation(
+        session,
+        lot_id=lot_id,
+        location_node_id=location_node_id,
+        qty=qty,
+        created_by_user_id=created_by_user_id,
+        grid_row=grid_row,
+        grid_col=grid_col,
+        notes=notes,
+    )
+
+
 async def reduce_allocation(
     session: AsyncSession, *, allocation: LotAllocation, qty: Decimal
 ) -> LotAllocation:

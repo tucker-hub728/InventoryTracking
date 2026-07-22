@@ -32,7 +32,7 @@ interface Forest {
 
 const AREA_LABEL: Record<LocationArea, string> = {
   ln2: 'LN2',
-  cold: 'Cold Storage',
+  cold: 'Freezers',
   warehouse: 'Warehouse',
   production: 'Production / Lab',
 };

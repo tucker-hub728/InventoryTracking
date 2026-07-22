@@ -15,6 +15,7 @@ from sqlalchemy import Select, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from app.models.audit import AuditEvent
 from app.models.inventory import BomLine, Item, ItemPrefix, ItemTier, Lot, StockMovement
 from app.models.kitting import Kit, KitLine
 from app.models.locations import LocationNode, LotAllocation
@@ -260,6 +261,57 @@ async def kit_movements(session: AsyncSession, kit_id: uuid.UUID) -> list[StockM
         select(StockMovement)
         .where(StockMovement.kit_id == kit_id)
         .order_by(StockMovement.performed_at.desc(), StockMovement.created_at.desc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def kits_on_floor(session: AsyncSession, node_id: uuid.UUID) -> list[Kit]:
+    """Open kits (issued / in production) whose production floor is ``node_id``,
+    with their lines — so the Production view can show which kit the WIP on a
+    floor belongs to."""
+    stmt = (
+        select(Kit)
+        .where(
+            Kit.production_location_node_id == node_id,
+            Kit.status.in_(("issued", "in_production")),
+            Kit.deleted_at.is_(None),
+        )
+        .options(selectinload(Kit.lines))
+        .order_by(Kit.created_at.desc())
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def kits_completed_on_floor(
+    session: AsyncSession, node_id: uuid.UUID, *, limit: int = 25
+) -> list[Kit]:
+    """Recently CLOSED kits that built on ``node_id`` — their lines carry the
+    ``used_qty`` consumed on the floor. Newest first, capped."""
+    stmt = (
+        select(Kit)
+        .where(
+            Kit.production_location_node_id == node_id,
+            Kit.status == "closed",
+            Kit.deleted_at.is_(None),
+        )
+        .options(selectinload(Kit.lines))
+        .order_by(Kit.closed_at.desc().nullslast())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def kit_audit_events(session: AsyncSession, kit_id: uuid.UUID) -> list[AuditEvent]:
+    """Every ``audit.audit_events`` row for a kit, newest first — the full
+    activity trail (carries good/scrap and per-line changes the stock ledger
+    can't record)."""
+    stmt = (
+        select(AuditEvent)
+        .where(
+            AuditEvent.subject_table == "app.kits",
+            AuditEvent.subject_id == kit_id,
+        )
+        .order_by(AuditEvent.occurred_at.desc())
     )
     return list((await session.execute(stmt)).scalars().all())
 

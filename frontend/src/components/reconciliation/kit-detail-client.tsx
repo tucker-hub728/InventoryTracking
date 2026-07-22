@@ -5,11 +5,18 @@ import Link from 'next/link';
 import {
   ArrowRight,
   Check,
+  CheckCircle2,
   ChevronLeft,
+  FlaskConical,
+  PackagePlus,
   PackageSearch,
+  Pencil,
   Plus,
   ScrollText,
+  Send,
   Undo2,
+  XCircle,
+  type LucideIcon,
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -35,12 +42,13 @@ import { usePermission } from '@/hooks/use-permission';
 import type { ReauthResponse } from '@/lib/api/auth';
 import { ApiError } from '@/lib/api/client';
 import {
-  MOVEMENT_TYPE_LABEL,
   kitsApi,
   type ApiKit,
   type ApiKitActivityRow,
+  type ApiKitAuditEvent,
   type ApiKitLine,
   type KitStatus,
+  type KitUpdateInput,
   type ReturnCellInput,
 } from '@/lib/api/kits';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
@@ -117,6 +125,12 @@ const toCell = (key: string): ReturnCellInput => {
   return { grid_row: Number(r ?? 0), grid_col: Number(c ?? 0) };
 };
 
+/** Today as a local `yyyy-mm-dd` — the earliest a produced lot may expire. */
+const todayStr = (): string => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 export function KitDetailClient({ kitId }: { kitId: string }) {
   const canSign = usePermission('inventory', 'sign');
   const canWrite = usePermission('inventory', 'create');
@@ -130,6 +144,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const [busy, setBusy] = React.useState(false);
 
   const [activityOpen, setActivityOpen] = React.useState(false);
+  const [editOpen, setEditOpen] = React.useState(false);
   const [reauthOpen, setReauthOpen] = React.useState(false);
   const [addingTo, setAddingTo] = React.useState<ApiKitLine | null>(null);
   const [returningFrom, setReturningFrom] = React.useState<ApiKitLine | null>(null);
@@ -244,6 +259,26 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     return () => ctrl.abort();
   }, [kit?.production_location_node_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Persist the current production figures (good/scrap/output) so the dynamic
+  // "needed" is the same on the server as on screen before an issue-more/return
+  // from the Production step. Returns whether it saved.
+  const persistProduction = async (): Promise<boolean> => {
+    try {
+      const k = await kitsApi.saveProduction(kit!.id, {
+        good_qty: output.good_qty,
+        scrap_qty: output.scrap_qty,
+        output_location_node_id: output.output_location_node_id || null,
+      });
+      setKit(k);
+      return true;
+    } catch (err) {
+      toast.error('Could not save production figures', {
+        description: err instanceof ApiError ? err.message : undefined,
+      });
+      return false;
+    }
+  };
+
   const run = async (fn: () => Promise<ApiKit>, ok: string, next?: number) => {
     setBusy(true);
     try {
@@ -267,7 +302,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       <>
         <PageHeader
           title="Loading kit…"
-          crumbs={[{ label: 'Kitting & Reconciliation', href: '/reconciliation' }]}
+          crumbs={[{ label: 'Kitting', href: '/reconciliation' }]}
         />
         <div className="px-6 py-5 sm:px-8">
           <Card className="p-8 text-center text-sm text-text-3">Loading…</Card>
@@ -281,7 +316,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       <>
         <PageHeader
           title="Kit not found"
-          crumbs={[{ label: 'Kitting & Reconciliation', href: '/reconciliation' }]}
+          crumbs={[{ label: 'Kitting', href: '/reconciliation' }]}
         />
         <div className="px-6 py-5 sm:px-8">
           <Card className="p-4">
@@ -305,16 +340,28 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const editableDraft = kit.status === 'draft';
   const inProd = kit.status === 'issued' || kit.status === 'in_production';
 
+  // Good units can never be zero — you must have produced something (Task 3).
+  const goodValid = (output.good_qty ?? 0) >= 1;
+  // The produced lot's expiry, when given, can't be in the past.
+  const expiryValid = !output.output_expiration_date || output.output_expiration_date >= todayStr();
   const outputReady =
-    output.good_qty !== null &&
+    goodValid &&
     output.scrap_qty !== null &&
-    output.good_qty + output.scrap_qty > 0 &&
-    Boolean(output.output_location_node_id);
+    Boolean(output.output_location_node_id) &&
+    expiryValid;
   // The output location is required — close-out places the produced quantity
-  // there — so the Production step can't be left until it's chosen. A closed or
-  // cancelled kit is read-only, so navigation stays open.
+  // there. Production also can't advance while any line is SHORT of its dynamic
+  // need: the operator must issue more first (Task 2). A closed/cancelled kit is
+  // read-only, so navigation stays open.
   const productionEditable = kit.status === 'issued' || kit.status === 'in_production';
-  const productionReady = !productionEditable || Boolean(output.output_location_node_id);
+  const prodAttempted = (output.good_qty ?? 0) + (output.scrap_qty ?? 0);
+  const prodEffTarget = prodAttempted > 0 ? prodAttempted : kit.target_qty;
+  const materialShort = kit.lines.some(
+    (l) => l.on_floor_qty < Math.ceil(Number(l.qty_per_unit) * prodEffTarget),
+  );
+  const productionReady =
+    !productionEditable ||
+    (Boolean(output.output_location_node_id) && goodValid && expiryValid && !materialShort);
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
   // Whether each line's chosen return destination turned out to be a box —
   // reported by BoxCellPicker, which resolves it from the Location System.
@@ -333,18 +380,41 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const overUse = kit.lines.filter(
     (l) => used[l.id] != null && (used[l.id] as number) > l.on_floor_qty,
   );
-  const closeReady = outputReady && usedComplete && overUse.length === 0 && !cellsIncomplete;
-  // Task 2: can't issue more than the chosen source location holds — checked
-  // against the local draft (nothing is saved until Issue is pressed).
+  // The close-out "needed" is driven by what the build actually yielded — good +
+  // scrap — not the original target, so it updates live as those are entered.
+  // (Backend yield gate: issued+additional must cover it, else issued_below_yield.)
+  const attemptedTotal = (() => {
+    const g = kit.status === 'closed' ? kit.good_qty : output.good_qty;
+    const s = kit.status === 'closed' ? kit.scrap_qty : output.scrap_qty;
+    return g == null && s == null ? null : (g ?? 0) + (s ?? 0);
+  })();
+  const lineNeeded = (l: ApiKitLine) =>
+    attemptedTotal == null ? 0 : Math.ceil(Number(l.qty_per_unit) * attemptedTotal);
+  // Task 5.1: used can never be below needed — that much material is required to
+  // make the claimed output (backend code used_below_need). Blocks close-out.
+  const underUse = kit.lines.filter(
+    (l) => used[l.id] != null && (used[l.id] as number) < lineNeeded(l),
+  );
+  const closeReady =
+    outputReady && usedComplete && overUse.length === 0 && underUse.length === 0 && !cellsIncomplete;
+  // The hard issue gate (client 2026-07-22): every line must issue AT LEAST its
+  // BOM need, from a source that physically holds the need — a short kit can't
+  // be issued at all. Checked against the local draft (nothing is saved until
+  // Issue is pressed) so the button disables before the server 422s.
   const issueBlocked =
     editableDraft &&
     kit.lines.some((l) => {
       const d = lineDraft[l.id];
-      if (!d || d.issued_qty <= 0) return false;
-      if (!d.source) return true; // a line that issues needs a source
-      // For a box, quantity IS the cell count, so the only failure mode is
-      // picking nothing; bulk sources are capped by what the location holds.
-      if (isGridSource(l, d.source)) return d.cells.length === 0;
+      if (!d) return true;
+      const needed = Number(l.needed_qty);
+      if (!d.source) return true; // every line needs a source
+      if (isGridSource(l, d.source)) {
+        // For a box the quantity IS the cell count: must pick at least `needed`.
+        return d.cells.length < needed;
+      }
+      // Bulk: issue ≥ need, and the source must hold ≥ need (and ≥ what's typed).
+      if (d.issued_qty < needed) return true;
+      if (sourceQty(l, d.source) < needed) return true;
       return d.issued_qty > sourceQty(l, d.source);
     });
 
@@ -436,7 +506,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   return (
     <>
       <PageHeader
-        crumbs={[{ label: 'Kitting & Reconciliation', href: '/reconciliation' }, { label: kit.kit_number }]}
+        crumbs={[{ label: 'Kitting', href: '/reconciliation' }, { label: kit.kit_number }]}
         title={kit.kit_number}
         subtitle={
           <span className="flex flex-wrap items-center gap-2">
@@ -450,6 +520,11 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         }
         actions={
           <>
+            {canWrite && kit.status !== 'closed' && kit.status !== 'cancelled' && (
+              <Button variant="secondary" onClick={() => setEditOpen(true)} disabled={busy}>
+                <Pencil size={14} /> Edit
+              </Button>
+            )}
             <Button variant="secondary" onClick={() => setActivityOpen(true)}>
               <ScrollText size={14} /> Activity log
             </Button>
@@ -550,7 +625,19 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           />
         )}
         {activeStep === 1 && (
-          <ProductionStep kit={kit} output={output} onChange={setOutput} allowedIds={placeableIds} />
+          <ProductionStep
+            kit={kit}
+            output={output}
+            onChange={setOutput}
+            allowedIds={placeableIds}
+            canWrite={canWrite}
+            onIssueMore={async (l) => {
+              if (await persistProduction()) setAddingTo(l);
+            }}
+            onReturn={async (l) => {
+              if (await persistProduction()) setReturningFrom(l);
+            }}
+          />
         )}
         {activeStep === 2 && (
           <CloseOutStep
@@ -571,6 +658,9 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             }
             allowedIds={returnableIds}
             overUse={overUse}
+            attemptedTotal={attemptedTotal}
+            goodQty={kit.status === 'closed' ? kit.good_qty : output.good_qty}
+            scrapQty={kit.status === 'closed' ? kit.scrap_qty : output.scrap_qty}
           />
         )}
 
@@ -644,8 +734,107 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       />
 
       <ActivitySheet kitId={kit.id} kitNumber={kit.kit_number} open={activityOpen} onOpenChange={setActivityOpen} />
+      <EditKitDialog kit={kit} open={editOpen} onOpenChange={setEditOpen} onDone={(k) => setKit(k)} />
       {confirmDialog}
     </>
+  );
+}
+
+// ── Edit kit (name / target) ────────────────────────────────────────────────
+
+function EditKitDialog({
+  kit,
+  open,
+  onOpenChange,
+  onDone,
+}: {
+  kit: ApiKit;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onDone: (kit: ApiKit) => void;
+}) {
+  const draft = kit.status === 'draft';
+  const [name, setName] = React.useState(kit.kit_number);
+  const [target, setTarget] = React.useState<number | null>(kit.target_qty);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) {
+      setName(kit.kit_number);
+      setTarget(kit.target_qty);
+    }
+  }, [open, kit.kit_number, kit.target_qty]);
+
+  const nameChanged = name.trim() !== kit.kit_number;
+  const targetChanged = draft && target !== null && target !== kit.target_qty;
+  const ready =
+    name.trim().length > 0 && (!draft || (target !== null && target > 0)) && (nameChanged || targetChanged);
+
+  const submit = async () => {
+    if (!ready) return;
+    setBusy(true);
+    try {
+      const input: KitUpdateInput = {};
+      if (nameChanged) input.kit_number = name.trim();
+      if (targetChanged) input.target_qty = target as number;
+      const k = await kitsApi.update(kit.id, input);
+      toast.success('Kit updated');
+      onDone(k);
+      onOpenChange(false);
+    } catch (err) {
+      toast.error('Could not update the kit', {
+        description: err instanceof ApiError ? err.message : undefined,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit {kit.kit_number}</DialogTitle>
+          <DialogDescription>
+            Rename the kit{draft ? ' or change how many to build' : ''}.
+            {draft ? '' : ' The target is locked once the kit is issued.'}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="space-y-3">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">Kit name</label>
+            <Input aria-label="Kit name" value={name} onChange={(e) => setName(e.target.value)} />
+            <p className="mt-1 text-[11px] text-text-3">Also names the produced lot. Must be unique.</p>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">
+              Target quantity{' '}
+              {!draft && <span className="font-normal text-text-3">(locked after issue)</span>}
+            </label>
+            <NumberInput
+              aria-label="Target quantity"
+              value={target}
+              min={1}
+              disabled={!draft}
+              onChange={setTarget}
+            />
+            {targetChanged && (
+              <p className="mt-1 text-[11px] text-text-3">
+                Changing the target resets each line’s suggested issue quantity.
+              </p>
+            )}
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={busy || !ready}>
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -693,7 +882,11 @@ function footerPrimary(
         variant="primary"
         onClick={ctx.onProductionNext}
         disabled={ctx.busy || !ctx.productionReady}
-        title={ctx.productionReady ? undefined : 'Choose where to stock the output first'}
+        title={
+          ctx.productionReady
+            ? undefined
+            : 'Issue more so no line is short, enter at least 1 good unit, and choose the output location'
+        }
       >
         Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
       </Button>
@@ -744,9 +937,9 @@ function IssueStep({
       <div className="grid gap-3 sm:grid-cols-3">
         <Stat label="Components" value={kit.lines.length} hint="BOM lines" />
         <Stat
-          label="Total issued"
-          value={kit.lines.reduce((a, l) => a + lineIssuedTotal(l), 0)}
-          hint="Units out of storage"
+          label="Needed"
+          value={kit.lines.reduce((a, l) => a + Number(l.needed_qty), 0)}
+          hint={`To build ${kit.target_qty}`}
         />
         <Stat label="Status" value={editableDraft ? 'Draft' : 'Issued'} hint={editableDraft ? 'Nothing moved yet' : 'Stock decremented'} />
       </div>
@@ -756,7 +949,7 @@ function IssueStep({
           <h2 className="text-sm font-medium text-text">Kit structure</h2>
           <p className="mt-0.5 text-xs text-text-3">
             {editableDraft
-              ? 'Quantity Needed comes from the BOM. Quantity Issued is what you pull — edit it, then press Issue material to commit.'
+              ? 'Quantity Needed comes from the BOM. Quantity Issued is what you pull — it must be at least the Needed amount, and the source location must hold that much, or the kit can’t be issued. Edit, then press Issue material to commit.'
               : 'Issued and locked. Extra material during production goes through an additional issue.'}
           </p>
         </div>
@@ -768,7 +961,7 @@ function IssueStep({
                 <th className="px-3 py-2 text-right font-medium">Needed</th>
                 <th className="px-3 py-2 text-right font-medium">On hand</th>
                 <th className="px-3 py-2 text-right font-medium">Issued</th>
-                <th className="px-3 py-2 text-right font-medium">Additional</th>
+                {!editableDraft && <th className="px-3 py-2 text-right font-medium">Additional</th>}
                 {!editableDraft && <th className="px-3 py-2 text-right font-medium">Returned</th>}
                 {!editableDraft && <th className="px-3 py-2 text-right font-medium">On floor</th>}
                 <th className="px-3 py-2 font-medium">Source location</th>
@@ -791,13 +984,20 @@ function IssueStep({
                     ? sourceQty(line, d.source)
                     : null
                   : line.source_available;
-                const noSource = editableDraft && d.issued_qty > 0 && !d.source;
+                const noSource = editableDraft && !d.source;
+                const needed = Number(line.needed_qty);
                 // A box can't be over-issued — quantity is the cell count — but
-                // it can be under-picked (zero cells chosen).
+                // it can be under-picked (fewer cells than needed).
                 const over =
                   editableDraft && Boolean(d.source) && !grid && d.issued_qty > sourceQty(line, d.source);
                 const noCells = editableDraft && grid && d.cells.length === 0;
-                const invalid = over || noSource || noCells;
+                // Hard gate (2026-07-22): issued ≥ need, and the source holds ≥ need.
+                const belowNeed = editableDraft && !grid && d.issued_qty < needed;
+                const gridBelowNeed = editableDraft && grid && d.cells.length < needed;
+                const sourceShort =
+                  editableDraft && Boolean(d.source) && !grid && sourceQty(line, d.source) < needed;
+                const invalid =
+                  over || noSource || noCells || belowNeed || gridBelowNeed || sourceShort;
                 return (
                   <React.Fragment key={line.id}>
                   <tr className={cn('border-b border-border/60', invalid && 'bg-danger-soft/30')}>
@@ -818,10 +1018,10 @@ function IssueStep({
                           <span
                             className={cn(
                               'mt-0.5 text-[11px] tabular-nums',
-                              over ? 'text-danger' : 'text-text-3',
+                              over || sourceShort ? 'text-danger' : 'text-text-3',
                             )}
                           >
-                            {hereQty} at source
+                            {hereQty} at source{sourceShort && ` · need ${needed}`}
                           </span>
                         )}
                       </div>
@@ -830,34 +1030,48 @@ function IssueStep({
                       {editableDraft ? (
                         grid ? (
                           // LN2: the quantity is however many cells were picked,
-                          // so the input becomes a derived read-out (D2).
+                          // so the input becomes a derived read-out (D2). Flags
+                          // red when fewer cells than the BOM need are selected.
                           <div className="flex flex-col items-end leading-tight">
                             <QtyCell
                               value={d.cells.length}
-                              tone={d.cells.length === 0 ? 'danger' : undefined}
+                              tone={gridBelowNeed ? 'danger' : undefined}
                             />
-                            <span className="mt-0.5 text-[10px] uppercase tracking-wide text-text-3">
-                              from cells
-                            </span>
+                            {gridBelowNeed ? (
+                              <span className="mt-0.5 text-[10px] text-danger">
+                                pick {needed} cell{needed === 1 ? '' : 's'}
+                              </span>
+                            ) : (
+                              <span className="mt-0.5 text-[10px] uppercase tracking-wide text-text-3">
+                                from cells
+                              </span>
+                            )}
                           </div>
                         ) : (
-                          <NumberInput
-                            aria-label={`Issued for ${line.item_number}`}
-                            value={d.issued_qty}
-                            invalid={invalid}
-                            onChange={(v) => onDraftChange(line.id, { issued_qty: v ?? 0 })}
-                          />
+                          <div className="flex flex-col items-end leading-tight">
+                            <NumberInput
+                              aria-label={`Issued for ${line.item_number}`}
+                              value={d.issued_qty}
+                              invalid={invalid}
+                              onChange={(v) => onDraftChange(line.id, { issued_qty: v ?? 0 })}
+                            />
+                            {belowNeed && (
+                              <span className="mt-0.5 text-[10px] text-danger">min {needed}</span>
+                            )}
+                          </div>
                         )
                       ) : (
                         <QtyCell value={line.issued_qty} />
                       )}
                     </td>
-                    <td className="px-3 py-2 text-right">
-                      <QtyCell
-                        value={line.additional_issued_qty || null}
-                        tone={line.additional_issued_qty ? 'success' : 'muted'}
-                      />
-                    </td>
+                    {!editableDraft && (
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell
+                          value={line.additional_issued_qty || null}
+                          tone={line.additional_issued_qty ? 'success' : 'muted'}
+                        />
+                      </td>
+                    )}
                     {!editableDraft && (
                       <td className="px-3 py-2 text-right">
                         <QtyCell
@@ -987,17 +1201,29 @@ function ProductionStep({
   output,
   onChange,
   allowedIds,
+  canWrite,
+  onIssueMore,
+  onReturn,
 }: {
   kit: ApiKit;
   output: OutputDraft;
   onChange: (o: OutputDraft) => void;
   allowedIds: Set<string>;
+  canWrite: boolean;
+  onIssueMore: (line: ApiKitLine) => void;
+  onReturn: (line: ApiKitLine) => void;
 }) {
   const closed = kit.status === 'closed' || kit.status === 'cancelled';
+  const editable = kit.status === 'issued' || kit.status === 'in_production';
   const made = closed ? kit.good_qty : output.good_qty;
   const scrap = closed ? kit.scrap_qty : output.scrap_qty;
   const total = (made ?? 0) + (scrap ?? 0);
   const yieldPct = total > 0 ? (made ?? 0) / total : null;
+  // Dynamic need: producing more than planned raises it, so more material must
+  // be on the floor before close-out (client 2026-07-22, Task 4). Uses the live
+  // good+scrap once entered, else the planned target.
+  const effTarget = total > 0 ? total : kit.target_qty;
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * effTarget);
 
   return (
     <div className="space-y-4">
@@ -1024,10 +1250,17 @@ function ProductionStep({
             <NumberInput
               aria-label="Quantity made"
               value={made}
+              min={1}
               disabled={closed}
+              invalid={!closed && (made ?? 0) < 1}
               onChange={(v) => onChange({ ...output, good_qty: v })}
               className="h-8 w-full text-sm"
             />
+            {!closed && (made ?? 0) < 1 && (
+              <p className="mt-1 text-xs text-danger">
+                Must be at least 1 — a kit has to yield some good units.
+              </p>
+            )}
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity scrapped</label>
@@ -1047,12 +1280,19 @@ function ProductionStep({
               type="date"
               aria-label="Output expiry date"
               value={closed ? '' : output.output_expiration_date}
+              min={todayStr()}
               disabled={closed}
               onChange={(e) => onChange({ ...output, output_expiration_date: e.target.value })}
             />
-            <p className="mt-1 text-xs text-text-3">
-              Carried onto the produced lot so it appears in expiry reporting.
-            </p>
+            {!closed && output.output_expiration_date && output.output_expiration_date < todayStr() ? (
+              <p className="mt-1 text-xs text-danger">
+                Expiry must be today or later — a produced lot can’t already be expired.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-text-3">
+                Carried onto the produced lot so it appears in expiry reporting.
+              </p>
+            )}
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">
@@ -1076,6 +1316,90 @@ function ProductionStep({
           </div>
         </div>
       </Card>
+
+      {editable && (
+        <Card className="p-4">
+          <div className="mb-3">
+            <h2 className="text-sm font-medium text-text">Material on the floor</h2>
+            <p className="mt-0.5 text-xs text-text-3">
+              Needed updates from what you’re producing — {total > 0 ? total : kit.target_qty} unit
+              {(total > 0 ? total : kit.target_qty) === 1 ? '' : 's'} × per-unit BOM. Each line must
+              hold at least its need before close-out; issue more if short, return the surplus.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
+                  <th className="px-3 py-2 font-medium">Item</th>
+                  <th className="px-3 py-2 text-right font-medium">Needed</th>
+                  <th className="px-3 py-2 text-right font-medium">On floor</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 text-right font-medium">Adjust</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kit.lines.map((line) => {
+                  const need = lineNeed(line);
+                  const floor = line.on_floor_qty;
+                  const short = floor < need;
+                  const surplus = floor - need;
+                  return (
+                    <tr
+                      key={line.id}
+                      className={cn('border-b border-border/60', short && 'bg-danger-soft/30')}
+                    >
+                      <td className="max-w-[280px] px-3 py-2">
+                        <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell value={need} tone={short ? 'danger' : undefined} />
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell value={floor} />
+                      </td>
+                      <td className="px-3 py-2">
+                        {short ? (
+                          <span className="text-xs font-medium text-danger">
+                            Short {need - floor} — issue more
+                          </span>
+                        ) : surplus > 0 ? (
+                          <span className="text-xs text-text-3">Surplus {surplus}</span>
+                        ) : (
+                          <span className="text-xs text-success">Exact</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={!canWrite}
+                          onClick={() => onIssueMore(line)}
+                        >
+                          <Plus size={12} /> Issue more
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={!canWrite || surplus <= 0}
+                          title={
+                            surplus > 0
+                              ? 'Return the surplus to inventory'
+                              : 'No surplus above the need to return'
+                          }
+                          onClick={() => onReturn(line)}
+                        >
+                          <Undo2 size={12} /> Return
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {!closed && (
         <RuleNote>
@@ -1101,6 +1425,9 @@ function CloseOutStep({
   onReturnIsBox,
   allowedIds,
   overUse,
+  attemptedTotal,
+  goodQty,
+  scrapQty,
 }: {
   kit: ApiKit;
   used: Record<string, number | null>;
@@ -1113,6 +1440,10 @@ function CloseOutStep({
   onReturnIsBox: (id: string, isBox: boolean) => void;
   allowedIds: Set<string>;
   overUse: ApiKitLine[];
+  /** good + scrap (null until entered) — drives the live close-out "needed". */
+  attemptedTotal: number | null;
+  goodQty: number | null;
+  scrapQty: number | null;
 }) {
   const closed = kit.status === 'closed';
   const cancelled = kit.status === 'cancelled';
@@ -1143,8 +1474,14 @@ function CloseOutStep({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <Stat label="Lines to reconcile" value={kit.lines.length} />
+      <div className="grid gap-3 sm:grid-cols-4">
+        <Stat label="Good units" value={goodQty ?? 0} tone="success" hint="Produced & stocked" />
+        <Stat
+          label="Scrapped"
+          value={scrapQty ?? 0}
+          tone={(scrapQty ?? 0) > 0 ? 'danger' : 'default'}
+          hint="Consumed, no output"
+        />
         <Stat label="Awaiting used qty" value={pending} tone={pending > 0 ? 'warning' : 'success'} />
         <Stat label="To back-flush" value={totalReturned} tone="success" hint="Units returning to stock" />
       </div>
@@ -1154,7 +1491,8 @@ function CloseOutStep({
           <h2 className="text-sm font-medium text-text">Reconciliation</h2>
           <p className="mt-0.5 text-xs text-text-3">
             Enter Quantity Used from the traveler. Anything left over returns to inventory as an
-            explicit back-flush.
+            explicit back-flush. <span className="text-text-2">Needed</span> updates from what the
+            build yielded — (good + scrap) × per-unit BOM.
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -1163,6 +1501,7 @@ function CloseOutStep({
               <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                 <th className="px-3 py-2 font-medium">Item</th>
                 <th className="px-3 py-2 text-right font-medium">On floor</th>
+                <th className="px-3 py-2 text-right font-medium">Needed</th>
                 <th className="px-3 py-2 text-right font-medium">Used</th>
                 <th className="px-3 py-2 text-right font-medium">Returned</th>
                 <th className="px-3 py-2 font-medium">Return location</th>
@@ -1172,9 +1511,23 @@ function CloseOutStep({
               {kit.lines.map((line) => {
                 const over = overUse.some((l) => l.id === line.id);
                 const ret = returned(line);
+                // Live "needed" for this build's yield (good + scrap), rounded up
+                // to whole units to match the backend. Flags red when it exceeds
+                // what was issued (issue more) or when Used is below it (Task 5.1).
+                const issuedTotal = lineIssuedTotal(line);
+                const needed =
+                  attemptedTotal == null ? null : Math.ceil(Number(line.qty_per_unit) * attemptedTotal);
+                const needShort = needed != null && needed > issuedTotal;
+                const u = editable ? used[line.id] : line.used_qty;
+                const usedShort = needed != null && u != null && u < needed;
                 return (
                   <React.Fragment key={line.id}>
-                    <tr className={cn('border-b border-border/60', over && 'bg-danger-soft/30')}>
+                    <tr
+                      className={cn(
+                        'border-b border-border/60',
+                        (over || needShort || usedShort) && 'bg-danger-soft/30',
+                      )}
+                    >
                       <td className="max-w-[300px] px-3 py-2">
                         <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
                       </td>
@@ -1189,11 +1542,24 @@ function CloseOutStep({
                         />
                       </td>
                       <td className="px-3 py-2 text-right">
+                        <QtyCell
+                          value={needed}
+                          tone={
+                            needShort || usedShort ? 'danger' : needed == null ? 'muted' : undefined
+                          }
+                          title={
+                            attemptedTotal == null
+                              ? 'Enter good + scrap to compute'
+                              : `${Number(line.qty_per_unit)} per unit × ${attemptedTotal} made (good + scrap)`
+                          }
+                        />
+                      </td>
+                      <td className="px-3 py-2 text-right">
                         {editable ? (
                           <NumberInput
                             aria-label={`Used for ${line.item_number}`}
                             value={used[line.id] ?? null}
-                            invalid={over}
+                            invalid={over || usedShort}
                             onChange={(v) => onUsed(line.id, v)}
                           />
                         ) : (
@@ -1227,10 +1593,28 @@ function CloseOutStep({
                     </tr>
                     {over && (
                       <tr className="bg-danger-soft/30">
-                        <td colSpan={5} className="px-3 pb-2 text-xs text-danger">
+                        <td colSpan={6} className="px-3 pb-2 text-xs text-danger">
                           Used exceeds what is on the floor by{' '}
                           {(used[line.id] as number) - line.on_floor_qty}. Record an additional
                           issue to cover it.
+                        </td>
+                      </tr>
+                    )}
+                    {editable && needShort && !over && (
+                      <tr className="bg-danger-soft/30">
+                        <td colSpan={6} className="px-3 pb-2 text-xs text-danger">
+                          Needs {needed} ({attemptedTotal} made × {Number(line.qty_per_unit)} per
+                          unit) but only {issuedTotal} was issued. Record an additional issue before
+                          closing out.
+                        </td>
+                      </tr>
+                    )}
+                    {editable && usedShort && !over && !needShort && (
+                      <tr className="bg-danger-soft/30">
+                        <td colSpan={6} className="px-3 pb-2 text-xs text-danger">
+                          Used {u} is below the {needed} needed to make {attemptedTotal} unit
+                          {attemptedTotal === 1 ? '' : 's'} — that much material is required to
+                          produce the output.
                         </td>
                       </tr>
                     )}
@@ -1247,7 +1631,7 @@ function CloseOutStep({
                             destination is a box, so collapse the padding rather
                             than the row when it turns out to be bulk. */}
                         <td
-                          colSpan={5}
+                          colSpan={6}
                           className={cn(returnIsBox[line.id] ? 'px-3 pb-3 pt-0' : 'p-0')}
                         >
                           <div className="max-w-xl">
@@ -1469,24 +1853,31 @@ function ReturnExcessDialog({
   if (!line) return null;
 
   const onFloor = line.on_floor_qty;
-  const over = (qty ?? 0) > onFloor;
-  const cellsReady = !destGrid || cells.length === (qty ?? 0);
-  const ready = Boolean(qty && qty > 0 && !over && node && cellsReady);
+  // You may only return the SURPLUS above what's needed — the floor can never
+  // drop below the build requirement (client 2026-07-22, Task 6). "needed" is
+  // dynamic: (good+scrap)×BOM once production figures exist, else target×BOM.
+  const attempted = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
+  const effTarget = attempted > 0 ? attempted : kit.target_qty;
+  const needed = Math.ceil(Number(line.qty_per_unit) * effTarget);
+  const maxReturn = Math.max(0, onFloor - needed);
+  // For an LN2 box the quantity is a consequence of the cells picked (like
+  // issuing from a box), never typed. For a bulk shelf it's the typed number.
+  const effectiveQty = destGrid ? cells.length : (qty ?? 0);
+  const over = effectiveQty > maxReturn;
+  const ready = Boolean(node && effectiveQty > 0 && !over);
 
   const submit = async () => {
     if (!ready) return;
     setBusy(true);
     try {
       const k = await kitsApi.returnExcess(kit.id, line.id, {
-        qty: qty as number,
+        qty: effectiveQty,
         return_location_node_id: node,
-        return_cells: destGrid
-          ? cells.map(toCell)
-          : undefined,
+        return_cells: destGrid ? cells.map(toCell) : undefined,
         reason: reason.trim() || null,
       });
       toast.success('Returned to inventory', {
-        description: `${qty} × ${line.item_number} back in stock.`,
+        description: `${effectiveQty} × ${line.item_number} back in stock.`,
       });
       onDone(k);
     } catch (err) {
@@ -1512,15 +1903,7 @@ function ReturnExcessDialog({
           <div className="rounded-md border border-border bg-surface p-3">
             <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
           </div>
-          <dl className="grid grid-cols-3 gap-2 text-center">
-            <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Issued</dt>
-              <dd className="mt-0.5 font-mono text-sm text-text">{lineIssuedTotal(line)}</dd>
-            </div>
-            <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Returned</dt>
-              <dd className="mt-0.5 font-mono text-sm text-text">{line.early_returned_qty}</dd>
-            </div>
+          <dl className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
             <div className="rounded-md border border-border bg-bg-elev p-2">
               <dt className="text-[11px] uppercase tracking-wider text-text-3">On floor</dt>
               <dd
@@ -1529,18 +1912,50 @@ function ReturnExcessDialog({
                 {onFloor}
               </dd>
             </div>
+            <div className="rounded-md border border-border bg-bg-elev p-2">
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">Needed</dt>
+              <dd className="mt-0.5 font-mono text-sm text-text">{needed}</dd>
+            </div>
+            <div className="rounded-md border border-border bg-bg-elev p-2" title="Surplus above needed">
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">Returnable</dt>
+              <dd
+                className={cn(
+                  'mt-0.5 font-mono text-sm',
+                  maxReturn > 0 ? 'text-success' : 'text-text-3',
+                )}
+              >
+                {maxReturn}
+              </dd>
+            </div>
+            <div className="rounded-md border border-border bg-bg-elev p-2">
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">Returned</dt>
+              <dd className="mt-0.5 font-mono text-sm text-text">{line.early_returned_qty}</dd>
+            </div>
           </dl>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">Return quantity</label>
-            <NumberInput
-              aria-label="Return quantity"
-              value={qty}
-              min={1}
-              invalid={over}
-              onChange={setQty}
-            />
-            {over && (
-              <p className="mt-1 text-xs text-danger">Only {onFloor} on the production floor.</p>
+            {destGrid ? (
+              // LN2: quantity is set by the cells picked below — show it as a
+              // read-out, not a typed field (mirrors issuing from a box).
+              <div className="flex h-9 items-center justify-between rounded-md border border-border bg-bg-elev px-3">
+                <span className="font-mono text-sm text-text">{effectiveQty}</span>
+                <span className="text-[11px] uppercase tracking-wide text-text-3">
+                  from {effectiveQty === 1 ? 'cell' : 'cells'} selected
+                </span>
+              </div>
+            ) : (
+              <>
+                <NumberInput
+                  aria-label="Return quantity"
+                  value={qty}
+                  min={1}
+                  invalid={over}
+                  onChange={setQty}
+                />
+                {over && (
+                  <p className="mt-1 text-xs text-danger">You can return at most {maxReturn}.</p>
+                )}
+              </>
             )}
           </div>
           <div>
@@ -1554,7 +1969,15 @@ function ReturnExcessDialog({
               modal
               showPath
             />
-            <BoxCellPicker nodeId={node} qty={qty ?? 0} value={cells} onChange={setCells} />
+            {/* Box destination: the cap is the surplus (on-floor − needed), and
+                the quantity follows the selection (derive). */}
+            <BoxCellPicker
+              nodeId={node}
+              qty={maxReturn}
+              value={cells}
+              onChange={setCells}
+              derive
+            />
           </div>
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">
@@ -1573,7 +1996,7 @@ function ReturnExcessDialog({
             Cancel
           </Button>
           <Button variant="primary" onClick={() => void submit()} disabled={busy || !ready}>
-            Return {qty ?? 0}
+            Return {effectiveQty}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1725,7 +2148,98 @@ function CancelKitDialog({
   );
 }
 
-// ── Activity sheet ──────────────────────────────────────────────────────────
+// ── Activity timeline ───────────────────────────────────────────────────────
+
+/** Visual config per kitting operation — the timeline dot's icon + colour. */
+const OP_TIMELINE: Record<string, { label: string; Icon: LucideIcon; tone: string }> = {
+  create: { label: 'Kit created', Icon: PackagePlus, tone: 'accent' },
+  edit_line: { label: 'Draft edited', Icon: Pencil, tone: 'neutral' },
+  issue: { label: 'Issued to production', Icon: Send, tone: 'accent' },
+  additional_issue: { label: 'Additional issue', Icon: Plus, tone: 'warning' },
+  early_return: { label: 'Excess returned', Icon: Undo2, tone: 'success' },
+  production_draft: { label: 'Production recorded', Icon: FlaskConical, tone: 'neutral' },
+  close_out: { label: 'Closed out', Icon: CheckCircle2, tone: 'success' },
+  cancel: { label: 'Cancelled', Icon: XCircle, tone: 'danger' },
+};
+
+/** Fallback op for a movement with no matching audit event (legacy kits). */
+const MTYPE_OP: Record<string, string> = {
+  kit_issue: 'issue',
+  kit_additional_issue: 'additional_issue',
+  kit_return: 'early_return',
+  backflush: 'close_out',
+  production_output: 'close_out',
+  kit_cancel_return: 'cancel',
+};
+
+const TONE_DOT: Record<string, string> = {
+  accent: 'border-accent/40 bg-accent-soft text-accent',
+  success: 'border-success/40 bg-success-soft text-success',
+  warning: 'border-warning/45 bg-warning-soft text-warning',
+  danger: 'border-danger/40 bg-danger-soft text-danger',
+  neutral: 'border-border-strong bg-bg-elev text-text-2',
+};
+
+interface TimelineNode {
+  key: string;
+  time: string;
+  operation: string;
+  goodQty: number | null;
+  scrapQty: number | null;
+  outputLocation: string | null;
+  outputExpiry: string | null;
+  moves: ApiKitActivityRow[];
+}
+
+/** Fold the audit events + stock movements into one chronological timeline.
+ *  Every movement shares its transaction's timestamp with the event that caused
+ *  it (both use the DB's transaction clock), so we attach movements to events by
+ *  equal time; any orphan movements (legacy kits with no events) become their
+ *  own nodes. */
+function buildTimeline(events: ApiKitAuditEvent[], moves: ApiKitActivityRow[]): TimelineNode[] {
+  const byTime = new Map<number, ApiKitActivityRow[]>();
+  for (const m of moves) {
+    const t = new Date(m.performed_at).getTime();
+    const bucket = byTime.get(t);
+    if (bucket) bucket.push(m);
+    else byTime.set(t, [m]);
+  }
+
+  const nodes: TimelineNode[] = [];
+  const consumed = new Set<number>();
+  for (const ev of events) {
+    const t = new Date(ev.occurred_at).getTime();
+    consumed.add(t);
+    nodes.push({
+      key: ev.id,
+      time: ev.occurred_at,
+      operation: ev.operation,
+      goodQty: ev.good_qty,
+      scrapQty: ev.scrap_qty,
+      outputLocation: ev.output_location,
+      outputExpiry: ev.output_expiration_date,
+      moves: byTime.get(t) ?? [],
+    });
+  }
+  // Orphan movement groups (no event) — keep them visible rather than dropping.
+  for (const [t, group] of byTime) {
+    const first = group[0];
+    if (consumed.has(t) || !first) continue;
+    nodes.push({
+      key: `mv-${t}`,
+      time: first.performed_at,
+      operation: MTYPE_OP[first.movement_type] ?? 'issue',
+      goodQty: null,
+      scrapQty: null,
+      outputLocation: null,
+      outputExpiry: null,
+      moves: group,
+    });
+  }
+  // Oldest → newest: the kit's story reads top to bottom.
+  nodes.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+  return nodes;
+}
 
 function ActivitySheet({
   kitId,
@@ -1739,83 +2253,143 @@ function ActivitySheet({
   onOpenChange: (open: boolean) => void;
 }) {
   const [rows, setRows] = React.useState<ApiKitActivityRow[] | null>(null);
+  const [events, setEvents] = React.useState<ApiKitAuditEvent[]>([]);
 
   React.useEffect(() => {
     if (!open) return;
     const ctrl = new AbortController();
     setRows(null);
+    setEvents([]);
     void kitsApi
       .activity(kitId, { signal: ctrl.signal })
-      .then((r) => setRows(r.items))
+      .then((r) => {
+        setRows(r.items);
+        setEvents(r.events ?? []);
+      })
       .catch(() => setRows([]));
     return () => ctrl.abort();
   }, [open, kitId]);
 
+  const timeline = React.useMemo(
+    () => (rows ? buildTimeline(events, rows) : []),
+    [events, rows],
+  );
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="sm:w-[720px]">
+      <SheetContent side="right" className="sm:w-[640px]">
         <SheetHeader>
-          <SheetTitle>Activity log — {kitNumber}</SheetTitle>
+          <SheetTitle>Activity — {kitNumber}</SheetTitle>
           <p className="text-xs text-text-3">
-            Every quantity movement this kit caused. A return posts as an explicit{' '}
-            <span className="font-medium text-text-2">Backflushed</span> row, never a plain receipt.
+            The kit’s full story, oldest first. Each step shows what happened and the exact stock it
+            moved.
           </p>
         </SheetHeader>
         <SheetBody className="px-0 py-0">
           {rows === null ? (
             <p className="p-6 text-center text-xs text-text-3">Loading…</p>
-          ) : rows.length === 0 ? (
+          ) : timeline.length === 0 ? (
             <div className="p-6">
-              <EmptyState title="Nothing yet" hint="Issuing the kit writes the first rows." />
+              <EmptyState title="Nothing yet" hint="Issuing the kit writes the first step." />
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-bg-elev">
-                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
-                  <th className="px-4 py-2.5 font-medium">When</th>
-                  <th className="px-3 py-2.5 font-medium">Transaction</th>
-                  <th className="px-3 py-2.5 font-medium">Item</th>
-                  <th className="px-3 py-2.5 text-right font-medium">Qty</th>
-                  <th className="px-4 py-2.5 font-medium">Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((e) => (
-                  <tr key={e.id} className="border-b border-border/60 align-top last:border-0">
-                    <td className="whitespace-nowrap px-4 py-2.5 text-xs text-text-3">
-                      {formatDateTime(e.performed_at)}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <Badge
-                        tone={
-                          e.movement_type === 'backflush' ||
-                          e.movement_type === 'kit_return' ||
-                          e.movement_type === 'production_output'
-                            ? 'success'
-                            : e.movement_type === 'kit_additional_issue' ||
-                                e.movement_type === 'kit_cancel_return'
-                              ? 'warning'
-                              : 'neutral'
-                        }
-                      >
-                        {MOVEMENT_TYPE_LABEL[e.movement_type] ?? e.movement_type}
-                      </Badge>
-                    </td>
-                    <td className="px-3 py-2.5 font-mono text-xs">{e.item_number}</td>
-                    <td className="px-3 py-2.5 text-right">
-                      <QtyCell
-                        value={e.qty_delta > 0 ? `+${e.qty_delta}` : String(e.qty_delta)}
-                        tone={e.qty_delta > 0 ? 'success' : 'danger'}
-                      />
-                    </td>
-                    <td className="px-4 py-2.5 text-xs text-text-3">{e.notes}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <ol className="px-5 py-4">
+              {timeline.map((node, i) => (
+                <TimelineItem key={node.key} node={node} last={i === timeline.length - 1} />
+              ))}
+            </ol>
           )}
         </SheetBody>
       </SheetContent>
     </Sheet>
+  );
+}
+
+function TimelineItem({ node, last }: { node: TimelineNode; last: boolean }) {
+  const cfg = OP_TIMELINE[node.operation] ?? {
+    label: node.operation,
+    Icon: ScrollText,
+    tone: 'neutral',
+  };
+  const { Icon } = cfg;
+  const showYield =
+    (node.operation === 'close_out' || node.operation === 'production_draft') &&
+    (node.goodQty !== null || node.scrapQty !== null);
+
+  return (
+    <li className="relative flex gap-3.5 pb-5 last:pb-0">
+      {/* Rail: connecting line behind the dot, drawn except on the last node. */}
+      {!last && (
+        <span
+          aria-hidden
+          className="absolute left-[15px] top-8 bottom-0 w-px bg-border"
+        />
+      )}
+      <span
+        className={cn(
+          'relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border',
+          TONE_DOT[cfg.tone] ?? TONE_DOT.neutral,
+        )}
+      >
+        <Icon size={15} />
+      </span>
+
+      <div className="min-w-0 flex-1 pt-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+          <h3 className="text-sm font-medium text-text">{cfg.label}</h3>
+          <time className="whitespace-nowrap text-[11px] tabular-nums text-text-3">
+            {formatDateTime(node.time)}
+          </time>
+        </div>
+
+        {showYield && (
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            <Badge tone="success">{node.goodQty ?? 0} good</Badge>
+            {(node.scrapQty ?? 0) > 0 && <Badge tone="danger">{node.scrapQty} scrapped</Badge>}
+          </div>
+        )}
+
+        {(node.outputLocation || node.outputExpiry) && (
+          <dl className="mt-1.5 space-y-0.5 text-[11px]">
+            {node.outputLocation && (
+              <div className="flex gap-1.5">
+                <dt className="text-text-3">Stocked to</dt>
+                <dd className="font-medium text-text-2">{node.outputLocation}</dd>
+              </div>
+            )}
+            {node.outputExpiry && (
+              <div className="flex gap-1.5">
+                <dt className="text-text-3">Expires</dt>
+                <dd className="font-medium text-text-2">{node.outputExpiry}</dd>
+              </div>
+            )}
+          </dl>
+        )}
+
+        {node.moves.length > 0 && (
+          <ul className="mt-2 space-y-1.5">
+            {node.moves.map((m) => (
+              <li
+                key={m.id}
+                className="flex items-center gap-2 rounded-md border border-border/70 bg-bg-elev px-2.5 py-1.5"
+              >
+                <span
+                  className={cn(
+                    'w-11 shrink-0 text-right font-mono text-xs font-semibold tabular-nums',
+                    m.qty_delta > 0 ? 'text-success' : 'text-danger',
+                  )}
+                >
+                  {m.qty_delta > 0 ? `+${m.qty_delta}` : m.qty_delta}
+                </span>
+                <span className="shrink-0 font-mono text-xs text-text-2">{m.item_number}</span>
+                <span className="truncate text-[11px] text-text-3" title={m.notes ?? undefined}>
+                  {m.notes}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </li>
   );
 }
