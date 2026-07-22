@@ -362,12 +362,18 @@ export function BoxCellPicker({
   value,
   onChange,
   onResolved,
+  derive = false,
 }: {
   nodeId: string | null | undefined;
+  /** In exact mode: the number of cells that must be picked. In derive mode:
+   *  the CAP (e.g. what's on the floor) — the quantity follows the selection. */
   qty: number;
   value: string[];
   onChange: (next: string[]) => void;
   onResolved?: (isBox: boolean) => void;
+  /** LN2 return: don't type a quantity — the count follows the cells picked,
+   *  exactly like issuing from a box. `qty` becomes the upper cap. */
+  derive?: boolean;
 }) {
   const { grid, loading } = useBoxGrid(nodeId);
   const isBox = grid !== null;
@@ -394,11 +400,17 @@ export function BoxCellPicker({
         onChange={onChange}
         max={qty}
       />
-      {value.length !== qty && (
-        <p className="mt-1 text-xs text-danger">
-          Pick {qty} free cell{qty === 1 ? '' : 's'} — a cell holds one unit.
-        </p>
-      )}
+      {derive
+        ? value.length === 0 && (
+            <p className="mt-1 text-xs text-text-3">
+              Select the cells to fill — the return quantity follows your selection.
+            </p>
+          )
+        : value.length !== qty && (
+            <p className="mt-1 text-xs text-danger">
+              Pick {qty} free cell{qty === 1 ? '' : 's'} — a cell holds one unit.
+            </p>
+          )}
     </div>
   );
 }

@@ -132,6 +132,10 @@ class KitListItem(BaseModel):
     target_qty: int
     status: KitStatus
     production_location_node_id: str
+    # Human path of the production floor (e.g. "Manufacturing Floor").
+    production_location: str | None = None
+    # Human path of where the output was stocked — null until close-out.
+    output_location: str | None = None
     good_qty: int | None = None
     scrap_qty: int | None = None
     line_count: int = 0
@@ -168,8 +172,94 @@ class KitActivityRow(BaseModel):
     performed_by_user_id: str
 
 
+class KitAuditEventRow(BaseModel):
+    """One audit-trail entry for a kit (from ``audit.audit_events``).
+
+    Complements :class:`KitActivityRow`: the stock ledger only records quantity
+    *movements*, so scrap — which never moves stock — is invisible there. These
+    rows carry the full-snapshot events (client 2026-07-22), including good and
+    scrap counts, so the activity view misses nothing.
+    """
+
+    id: str
+    occurred_at: datetime
+    # The kitting operation (issue / additional_issue / early_return /
+    # production_draft / close_out / cancel / create / edit_line), from the
+    # event context; falls back to the coarse audit action.
+    operation: str
+    action: str
+    actor_user_id: str | None = None
+    good_qty: int | None = None
+    scrap_qty: int | None = None
+    # Where the produced output was stocked + its lot expiry (close-out only).
+    output_location: str | None = None
+    output_expiration_date: str | None = None
+    # Per-field {before, after} for what changed on this event.
+    diff: dict | None = None
+
+
+class FloorKitLine(BaseModel):
+    """One component a kit is holding on the production floor."""
+
+    item_id: str
+    item_number: str
+    description: str
+    on_floor_qty: int
+
+
+class FloorKit(BaseModel):
+    """An open kit building on a production floor, with its on-floor material —
+    so the Production view can attribute WIP to the kit it belongs to."""
+
+    id: str
+    kit_number: str
+    item_id: str
+    item_number: str
+    description: str
+    target_qty: int
+    status: KitStatus
+    on_floor_total: int
+    lines: list[FloorKitLine] = Field(default_factory=list)
+
+
+class FloorKitConsumedLine(BaseModel):
+    """A component a completed kit consumed on the floor."""
+
+    item_id: str
+    item_number: str
+    description: str
+    used_qty: int
+
+
+class FloorKitConsumed(BaseModel):
+    """A closed kit that built on this floor — what it consumed and yielded, so
+    the Production view can show completed builds alongside live WIP."""
+
+    id: str
+    kit_number: str
+    item_id: str
+    item_number: str
+    description: str
+    target_qty: int
+    good_qty: int | None = None
+    scrap_qty: int | None = None
+    closed_at: datetime | None = None
+    consumed_total: int
+    lines: list[FloorKitConsumedLine] = Field(default_factory=list)
+
+
+class FloorKitsResponse(BaseModel):
+    # Open kits with material still on the floor (WIP).
+    active: list[FloorKit] = Field(default_factory=list)
+    # Recently closed kits that built here — what they consumed.
+    completed: list[FloorKitConsumed] = Field(default_factory=list)
+
+
 class KitActivityResponse(BaseModel):
     items: list[KitActivityRow] = Field(default_factory=list)
+    # The audit-trail events for the kit (newest first) — carry good/scrap and
+    # per-line changes the stock ledger can't show.
+    events: list[KitAuditEventRow] = Field(default_factory=list)
 
 
 # ── Writes ──────────────────────────────────────────────────────────────
@@ -193,6 +283,20 @@ class KitCreateRequest(BaseModel):
         description="Advisory production floor (a real location node)"
     )
     notes: str | None = Field(default=None, max_length=2048)
+
+
+class KitUpdateRequest(BaseModel):
+    """Edit a kit's name and/or target quantity.
+
+    ``kit_number`` is editable while the kit is still open (not closed /
+    cancelled). ``target_qty`` may only change while the kit is a draft — after
+    issue it is locked because it drives every line's needed quantity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kit_number: str | None = Field(default=None, min_length=1, max_length=64)
+    target_qty: int | None = Field(default=None, gt=0)
 
 
 class KitLineUpdateRequest(BaseModel):

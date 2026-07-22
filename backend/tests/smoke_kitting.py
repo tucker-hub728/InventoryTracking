@@ -29,9 +29,16 @@ BASE = "http://localhost:8000/v1"
 EMAIL = os.environ.get("SMOKE_EMAIL", "admin@cellready.local")
 PASSWORD = os.environ.get("SMOKE_PASSWORD", "ChangeMe!Now123")
 
-BUILT_ITEM_ID = "7537b141-efac-45e3-b129-fc67b0e26a79"  # AY-001 (4-child BOM)
-PROD_NODE_ID = "358ad8b4-3d13-484b-ac8f-bcb7ce8f075c"  # PROD-CR1
-OUTPUT_SHELF_ID = "33068349-5206-45a1-a0a8-800772cf4e33"  # WH1-A
+# A well-stocked 2-child sub-assembly (qty_per_unit 1): both components have a
+# single node holding far more than a small build needs, so the 2026-07-22 hard
+# issue gate (issued ≥ need AND source holds ≥ need for EVERY line) is satisfied.
+BUILT_ITEM_ID = "94f6f76d-b1e1-4a7b-88d9-ce094ae8259c"  # AS-TEST-001 (2-child BOM)
+BOM_LINES = 2
+# An UNstocked built item (AY-001, qty_per_unit 21, no component stock anywhere)
+# — used to prove the hard gate blocks issuing a kit that can't be covered.
+UNSTOCKED_ITEM_ID = "7537b141-efac-45e3-b129-fc67b0e26a79"  # AY-001
+PROD_NODE_ID = "358ad8b4-3d13-484b-ac8f-bcb7ce8f075c"  # Clean Room 1 (production)
+OUTPUT_SHELF_ID = "33068349-5206-45a1-a0a8-800772cf4e33"  # Shelf A
 
 # [passed, failed] — a list so ``check`` mutates without a ``global`` statement.
 _TALLY = [0, 0]
@@ -101,28 +108,23 @@ def _create(token, qty=2, kit_number=None):
     )
 
 
-def _issue(token, kit):
-    """Issue a draft kit, pointing every line at a source that actually holds
-    the component. A new kit has NO source set — the operator picks one per
-    line — and issue rejects a line with none (``source_required``). The draft
-    (issued qty + source) is committed in this one call, see
-    kitting-wip-build.md."""
+def _issue(token, kit, extra=0):
+    """Issue a draft kit, pointing every line at a source that holds ENOUGH of
+    the component. Under the 2026-07-22 hard gate a kit can only be issued when
+    every line is fully covered — issued ≥ the BOM need AND the source holds ≥
+    the need. ``extra`` issues a surplus above the need so there is something to
+    return / reconcile (the return cap now forbids dropping below needed). The
+    draft (issued qty + source) is committed in this one call."""
     lines = []
     for line in kit["lines"]:
         options = sorted(line["source_options"], key=lambda o: -o["qty"])
-        if not options:
-            # No available stock anywhere (e.g. the component's only units are
-            # WIP on a production floor). Issue nothing for it — leaving it out
-            # of the payload would keep the creation-time default and fail.
-            lines.append({"line_id": line["id"], "issued_qty": 0})
-            continue
-        best = options[0]
+        best = options[0] if options else None
         entry = {
             "line_id": line["id"],
-            "issued_qty": min(int(line["issued_qty"]), int(best["qty"])),
-            "source_location_node_id": best["node_id"],
+            "issued_qty": int(line["issued_qty"]) + extra,
+            "source_location_node_id": best["node_id"] if best else None,
         }
-        if best.get("is_grid"):
+        if best and best.get("is_grid"):
             # An LN2 box is picked cell by cell, and the quantity follows the
             # selection rather than being typed (kitting04 / D2).
             cells = best["cells"][: entry["issued_qty"]]
@@ -144,7 +146,7 @@ def main() -> int:
     kit_id = kit["id"]
     check("status draft", kit["status"] == "draft", kit["status"])
     check("kit_number KIT-####", kit["kit_number"].startswith("KIT-"), kit["kit_number"])
-    check("4 lines exploded from BOM", len(kit["lines"]) == 4, len(kit["lines"]))
+    check(f"{BOM_LINES} lines exploded from BOM", len(kit["lines"]) == BOM_LINES, len(kit["lines"]))
     check(
         "each line has needed/issued",
         all(int(l["issued_qty"]) >= 1 for l in kit["lines"]),
@@ -185,8 +187,135 @@ def main() -> int:
     )
     _req("POST", f"/kits/{named['id']}/cancel", token=token, json_body={})
 
+    print("== hard gates (client 2026-07-22) ==")
+    # (a) issued < needed on any line blocks the whole issue.
+    s, gk = _create(token)
+    low = []
+    for i, line in enumerate(gk["lines"]):
+        opts = sorted(line["source_options"], key=lambda o: -o["qty"])
+        low.append(
+            {
+                "line_id": line["id"],
+                # Starve line 1 below its need; the rest get a valid quantity.
+                "issued_qty": 0 if i == 0 else int(line["issued_qty"]),
+                "source_location_node_id": opts[0]["node_id"] if opts else None,
+            }
+        )
+    s, b = _req("POST", f"/kits/{gk['id']}/issue", token=token, json_body={"lines": low})
+    check(
+        "issue below need -> 422 issued_below_need",
+        s == 422 and b.get("code") == "issued_below_need",
+        (s, b),
+    )
+    _req("POST", f"/kits/{gk['id']}/cancel", token=token, json_body={})
+
+    # (b) source can't cover the need -> blocked, even at issued == needed.
+    s, sug = _req("GET", "/kits/next-number", token=token)
+    s, ak = _req(
+        "POST",
+        "/kits",
+        token=token,
+        json_body={
+            "kit_number": f"SMOKE-SRC-{sug['kit_number']}",
+            "item_id": UNSTOCKED_ITEM_ID,
+            "target_qty": 1,
+            "production_location_node_id": PROD_NODE_ID,
+        },
+    )
+    check("create unstocked kit -> 201", s == 201, (s, ak))
+    sb = [
+        {
+            "line_id": line["id"],
+            "issued_qty": int(line["issued_qty"]),  # = ceil(need); passes the need check
+            "source_location_node_id": OUTPUT_SHELF_ID,  # holds none of this component
+        }
+        for line in ak["lines"]
+    ]
+    s, b = _req("POST", f"/kits/{ak['id']}/issue", token=token, json_body={"lines": sb})
+    check(
+        "issue from empty source -> 422 source_below_need",
+        s == 422 and b.get("code") == "source_below_need",
+        (s, b),
+    )
+    _req("POST", f"/kits/{ak['id']}/cancel", token=token, json_body={})
+
+    # (c) close-out claiming more output than the material issued could yield.
+    s, yk = _create(token)
+    s, yk = _issue(token, yk)
+    check("yield-gate kit issued", s == 200, (s, yk))
+    evy = _reauth(token, "kit.closeout")
+    s, b = _req(
+        "POST",
+        f"/kits/{yk['id']}/close-out",
+        token=token,
+        json_body={
+            "good_qty": 999,  # far more than issued/BOM could produce
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "lines": [{"line_id": line["id"], "used_qty": 0} for line in yk["lines"]],
+            "evidence_id": evy,
+        },
+    )
+    check(
+        "close-out beyond yield -> 422 issued_below_yield",
+        s == 422 and b.get("code") == "issued_below_yield",
+        (s, b),
+    )
+    _req("POST", f"/kits/{yk['id']}/cancel", token=token, json_body={"reason": "gate test"})
+
+    # (d) return can't drop the floor below the need (Task 6). Issue a surplus,
+    # then try to return more than the surplus.
+    s, rk = _create(token)
+    s, rk = _issue(token, rk, extra=2)  # need + 2 surplus per line
+    check("return-gate kit issued", s == 200, (s, rk))
+    rgl = rk["lines"][0]
+    needed = int(round(float(rgl["needed_qty"])))
+    s, b = _req(
+        "POST",
+        f"/kits/{rk['id']}/lines/{rgl['id']}/return",
+        token=token,
+        # on_floor = need + 2; returning need+2 would leave the floor at 0 < need.
+        json_body={"qty": rgl["on_floor_qty"], "return_location_node_id": OUTPUT_SHELF_ID},
+    )
+    check(
+        "return below need -> 422 return_below_need",
+        s == 422 and b.get("code") == "return_below_need",
+        (s, b),
+    )
+    # Returning exactly the surplus (2) is allowed — floor lands on the need.
+    s, b = _req(
+        "POST",
+        f"/kits/{rk['id']}/lines/{rgl['id']}/return",
+        token=token,
+        json_body={"qty": rgl["on_floor_qty"] - needed, "return_location_node_id": OUTPUT_SHELF_ID},
+    )
+    check("return surplus down to need -> 200", s == 200, (s, b))
+
+    # (e) close-out can't record used below the need (Task 5.1).
+    ev_ub = _reauth(token, "kit.closeout")
+    s, b = _req(
+        "POST",
+        f"/kits/{rk['id']}/close-out",
+        token=token,
+        json_body={
+            "good_qty": 1,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "lines": [{"line_id": line["id"], "used_qty": 0} for line in rk["lines"]],
+            "evidence_id": ev_ub,
+        },
+    )
+    check(
+        "used below need -> 422 used_below_need",
+        s == 422 and b.get("code") == "used_below_need",
+        (s, b),
+    )
+    _req("POST", f"/kits/{rk['id']}/cancel", token=token, json_body={"reason": "gate test"})
+
     print("== issue ==")
-    s, b = _issue(token, kit)
+    # Issue a surplus (need + 3) so there is something to return / reconcile —
+    # the return cap now forbids the floor dropping below the need.
+    s, b = _issue(token, kit, extra=3)
     check("issue -> 200", s == 200, (s, b))
     check("status in_production", b.get("status") == "in_production", b.get("status"))
     kit = b  # issue commits the draft, so re-read the committed lines
@@ -324,6 +453,22 @@ def main() -> int:
         ),
         types,
     )
+    # The audit-trail feed (full-snapshot events) must carry good/scrap — the
+    # stock ledger above never records scrap (client 2026-07-22).
+    events = act.get("events", [])
+    check("activity exposes audit events", len(events) >= 1, len(events))
+    close_ev = next((e for e in events if e.get("operation") == "close_out"), None)
+    check(
+        "close_out event carries good/scrap",
+        close_ev is not None and close_ev["good_qty"] == 2 and close_ev["scrap_qty"] == 0,
+        close_ev,
+    )
+    ops = {e.get("operation") for e in events}
+    check(
+        "activity logged create + issue + close_out",
+        {"create", "issue", "close_out"} <= ops,
+        ops,
+    )
 
     print("== over-use guard ==")
     s, k2 = _create(token)
@@ -358,7 +503,7 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [{"line_id": l["id"], "used_qty": 0} for l in k2["lines"]],
+            "lines": [{"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]],
             "evidence_id": ev,
         },
     )  # ev already consumed by the first close-out
@@ -376,7 +521,7 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [{"line_id": l["id"], "used_qty": 0} for l in k2["lines"]],
+            "lines": [{"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]],
             "evidence_id": ev_wrong,
         },
     )

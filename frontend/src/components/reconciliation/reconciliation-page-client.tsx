@@ -6,7 +6,6 @@ import { ChevronRight, FlaskConical, Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Pagination, usePagination } from '@/components/ui/pagination';
@@ -20,11 +19,11 @@ import {
 } from '@/components/ui/select';
 import { toast } from '@/components/ui/sonner';
 import { usePermission } from '@/hooks/use-permission';
+import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
 import {
   KIT_STATUS_LABEL,
   KIT_STATUSES,
-  kitYield,
   kitsApi,
   type ApiKitListItem,
   type KitStatus,
@@ -97,7 +96,7 @@ export function ReconciliationPageClient() {
   return (
     <>
       <PageHeader
-        title="Kitting & Reconciliation"
+        title="Kitting"
         subtitle="Gather material for a build, issue it to production, then reconcile what was actually used and back-flush the rest."
         actions={
           canCreate ? (
@@ -164,64 +163,55 @@ export function ReconciliationPageClient() {
                   <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                     <th className="px-3 py-2 font-medium">Kit</th>
                     <th className="px-3 py-2 font-medium">Building</th>
-                    <th className="px-3 py-2 text-right font-medium">Target</th>
                     <th className="px-3 py-2 font-medium">Status</th>
-                    <th className="px-3 py-2 text-right font-medium">Lines</th>
-                    <th className="px-3 py-2 text-right font-medium">Yield</th>
+                    <th className="px-3 py-2 font-medium">Built vs target</th>
+                    <th className="px-3 py-2 font-medium">Production location</th>
+                    <th className="px-3 py-2 font-medium">Stock the output to</th>
                     <th className="px-3 py-2 font-medium">Opened</th>
                     <th className="px-3 py-2" />
                   </tr>
                 </thead>
                 <tbody>
-                  {pager.pageItems.map((kit) => {
-                    const y = kitYield(kit.good_qty, kit.scrap_qty);
-                    return (
-                      <tr
-                        key={kit.id}
-                        className="border-b border-border/60 transition-colors hover:bg-surface"
-                      >
-                        <td className="px-3 py-2.5">
-                          <Link
-                            href={`/reconciliation/${kit.id}`}
-                            className="rounded-sm font-mono text-xs font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                          >
-                            {kit.kit_number}
+                  {pager.pageItems.map((kit) => (
+                    <tr
+                      key={kit.id}
+                      className="border-b border-border/60 transition-colors hover:bg-surface"
+                    >
+                      <td className="px-3 py-2.5">
+                        <Link
+                          href={`/reconciliation/${kit.id}`}
+                          className="rounded-sm font-mono text-xs font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                        >
+                          {kit.kit_number}
+                        </Link>
+                      </td>
+                      <td className="max-w-[280px] px-3 py-2.5">
+                        <ItemCell itemNumber={kit.item_number} description={kit.description} itemId={kit.item_id} />
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <KitStatusBadge status={kit.status} />
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <OutputCell target={kit.target_qty} good={kit.good_qty} />
+                      </td>
+                      <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
+                        {kit.production_location ?? <span className="text-text-3">—</span>}
+                      </td>
+                      <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
+                        {kit.output_location ?? <span className="text-text-3">—</span>}
+                      </td>
+                      <td className="px-3 py-2.5 text-xs text-text-3">
+                        {formatDate(kit.created_at)}
+                      </td>
+                      <td className="px-3 py-2.5 text-right">
+                        <Button variant="ghost" size="icon-sm" asChild>
+                          <Link href={`/reconciliation/${kit.id}`} aria-label={`Open ${kit.kit_number}`}>
+                            <ChevronRight size={14} />
                           </Link>
-                        </td>
-                        <td className="max-w-[280px] px-3 py-2.5">
-                          <ItemCell itemNumber={kit.item_number} description={kit.description} itemId={kit.item_id} />
-                        </td>
-                        <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
-                          {kit.target_qty}
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <KitStatusBadge status={kit.status} />
-                        </td>
-                        <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-text-3">
-                          {kit.line_count}
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          {y === null ? (
-                            <span className="text-xs text-text-3">—</span>
-                          ) : (
-                            <Badge tone={y >= 1 ? 'success' : y >= 0.8 ? 'warning' : 'danger'}>
-                              {Math.round(y * 100)}%
-                            </Badge>
-                          )}
-                        </td>
-                        <td className="px-3 py-2.5 text-xs text-text-3">
-                          {formatDate(kit.created_at)}
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <Button variant="ghost" size="icon-sm" asChild>
-                            <Link href={`/reconciliation/${kit.id}`} aria-label={`Open ${kit.kit_number}`}>
-                              <ChevronRight size={14} />
-                            </Link>
-                          </Button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -260,5 +250,53 @@ export function ReconciliationPageClient() {
         }}
       />
     </>
+  );
+}
+
+/**
+ * Built-vs-target at a glance: `built / target` with a mini bar (green fill =
+ * good units built, a tick at the target). Until a kit closes nothing is built,
+ * so it reads `— / target` — the plan stays visible. Scrap is intentionally not
+ * shown here (client 2026-07-22, Task 1).
+ */
+function OutputCell({ target, good }: { target: number; good: number | null }) {
+  const g = good ?? 0;
+  // The bar's full width is whichever is larger — target or what was actually
+  // built — so an overbuild pushes the target tick left of the end.
+  const track = Math.max(target, g, 1);
+  const gPct = (g / track) * 100;
+  const targetPct = Math.min(100, (target / track) * 100);
+  const met = good !== null && g >= target;
+
+  return (
+    <div className="w-32">
+      <div className="font-mono text-xs tabular-nums">
+        {good === null ? (
+          <span className="text-text-3">—</span>
+        ) : (
+          <span className={cn('font-semibold', met ? 'text-success' : 'text-warning')}>{g}</span>
+        )}
+        <span className="text-text-3"> / {target}</span>
+        {good !== null && g < target && (
+          <span className="ml-1 text-[10px] font-medium text-warning">{g - target}</span>
+        )}
+      </div>
+      <div
+        className="relative mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface"
+        title={`${g} built · ${target} target`}
+      >
+        {g > 0 && (
+          <div
+            className={cn('absolute inset-y-0 left-0', met ? 'bg-success' : 'bg-accent')}
+            style={{ width: `${gPct}%` }}
+          />
+        )}
+        <div
+          className="absolute inset-y-0 w-px bg-text-2/70"
+          style={{ left: `calc(${targetPct}% - 0.5px)` }}
+          aria-hidden
+        />
+      </div>
+    </div>
   );
 }

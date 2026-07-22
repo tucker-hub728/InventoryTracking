@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, status
@@ -44,9 +45,15 @@ from .schemas import (
     CancelRequest,
     CellOption,
     CloseOutRequest,
+    FloorKit,
+    FloorKitConsumed,
+    FloorKitConsumedLine,
+    FloorKitLine,
+    FloorKitsResponse,
     IssueRequest,
     KitActivityResponse,
     KitActivityRow,
+    KitAuditEventRow,
     KitCreateRequest,
     KitLineRead,
     KitLineSourceOption,
@@ -55,6 +62,7 @@ from .schemas import (
     KitListResponse,
     KitNumberSuggestion,
     KitRead,
+    KitUpdateRequest,
     ProductionDraftRequest,
     ReturnExcessRequest,
 )
@@ -86,6 +94,77 @@ def _on_floor(line: KitLine) -> int:
     """What is still physically on the production floor for this line —
     ``issued + additional − early_returned`` (§3.3 of the build plan)."""
     return line.issued_qty + line.additional_issued_qty - line.early_returned_qty
+
+
+def _needed(line: KitLine, target_qty: int) -> Decimal:
+    """The BOM requirement for the whole build — ``qty_per_unit × target_qty``
+    (``Transaction_Spec`` §2, "quantity needed is derived from the BOM"). Not
+    stored; recomputed wherever it gates a step."""
+    return line.qty_per_unit * target_qty
+
+
+def _effective_target(kit: Kit) -> int:
+    """The unit count the kit is committed to build **right now**: the actual
+    attempted output (good + scrap) once production figures exist, otherwise the
+    planned target.
+
+    Client-directed (2026-07-22), BEYOND ``Transaction_Spec`` — the spec keeps
+    "needed" fixed at ``BOM × target`` and reconciles on actual Qty Used. Here
+    "needed" is dynamic: producing more units than planned raises it, so more
+    material must be issued and less can be returned. Isolated in this one helper
+    so the deviation is easy to trace / revert."""
+    attempted = (kit.good_qty or 0) + (kit.scrap_qty or 0)
+    return attempted if attempted > 0 else kit.target_qty
+
+
+def _needed_units(line: KitLine, kit: Kit) -> int:
+    """The dynamic need for a line, rounded up to whole units — the floor the
+    on-floor quantity (and Qty Used) may not drop below."""
+    return kit_repo.default_issued_qty(line.qty_per_unit, _effective_target(kit))
+
+
+def _kit_snapshot(kit: Kit) -> dict:
+    """A full audit snapshot of a kit and *every* line.
+
+    Recorded on **every** kitting activity event (client 2026-07-22 — "capture
+    everything, don't miss anything"), so the audit trail never loses a field:
+    good/scrap, per-line needed/issued/additional/used/returned, and the source
+    and return locations. All values are JSON-native (UUIDs and the Decimal
+    ``qty_per_unit`` / ``needed`` are stringified) so they store cleanly in the
+    ``audit.audit_events`` JSONB columns.
+    """
+    return {
+        "status": kit.status,
+        "kit_number": kit.kit_number,
+        "item_id": str(kit.item_id),
+        "target_qty": kit.target_qty,
+        "good_qty": kit.good_qty,
+        "scrap_qty": kit.scrap_qty,
+        "production_location_node_id": str(kit.production_location_node_id),
+        "output_location_node_id": (
+            str(kit.output_location_node_id) if kit.output_location_node_id else None
+        ),
+        "lines": [
+            {
+                "line_no": ln.line_no,
+                "item_id": str(ln.item_id),
+                "qty_per_unit": str(ln.qty_per_unit),
+                "needed_qty": str(_needed(ln, kit.target_qty)),
+                "issued_qty": ln.issued_qty,
+                "additional_issued_qty": ln.additional_issued_qty,
+                "used_qty": ln.used_qty,
+                "early_returned_qty": ln.early_returned_qty,
+                "on_floor_qty": _on_floor(ln),
+                "source_location_node_id": (
+                    str(ln.source_location_node_id) if ln.source_location_node_id else None
+                ),
+                "return_location_node_id": (
+                    str(ln.return_location_node_id) if ln.return_location_node_id else None
+                ),
+            }
+            for ln in sorted(kit.lines, key=lambda x: x.line_no)
+        ],
+    }
 
 
 def _line_returned(line: KitLine) -> int | None:
@@ -297,7 +376,9 @@ async def _move_to_production(
     # transaction. Distinct lots still get their own rows: the ledger groups by
     # lot, and merging them would misstate which lot moved.
     for lot_id, moved in taken.items():
-        await loc_repo.create_allocation(
+        # Merge into the lot's existing WIP row on the production floor rather
+        # than opening a second row for the same lot (bulk placement).
+        await loc_repo.create_or_merge_allocation(
             db,
             lot_id=lot_id,
             location_node_id=prod_node,
@@ -417,7 +498,9 @@ async def _return_to_inventory(
     # the box (D4). Returning three vials of one lot is one back-flush row.
     for lot_id, moved in returned.items():
         if not is_grid_target:
-            await loc_repo.create_allocation(
+            # Back-flush to a shelf: add to the lot's existing row there instead
+            # of opening a second row for the same (item, lot).
+            await loc_repo.create_or_merge_allocation(
                 db,
                 lot_id=lot_id,
                 location_node_id=to_node,
@@ -533,7 +616,7 @@ async def _place(
         created_by_user_id=current.id,
         expiration_date=expiration_date,
     )
-    await loc_repo.create_allocation(
+    await loc_repo.create_or_merge_allocation(
         db,
         lot_id=lot.id,
         location_node_id=node_id,
@@ -576,6 +659,14 @@ async def list_kits(
 ) -> KitListResponse:
     rows, total = await kit_repo.list_kits(db, status=status_filter, limit=limit, offset=offset)
     items = await kit_repo.load_item_map(db, {k.item_id for k in rows})
+    node_labels = await loc_repo.node_label_map(db) if rows else {}
+
+    def _label(node_id: uuid.UUID | None) -> str | None:
+        if node_id is None:
+            return None
+        lbl = node_labels.get(node_id)
+        return (lbl[1] or lbl[0]) if lbl else None
+
     return KitListResponse(
         items=[
             KitListItem(
@@ -587,6 +678,8 @@ async def list_kits(
                 target_qty=k.target_qty,
                 status=k.status,  # type: ignore[arg-type]
                 production_location_node_id=str(k.production_location_node_id),
+                production_location=_label(k.production_location_node_id),
+                output_location=_label(k.output_location_node_id),
                 good_qty=k.good_qty,
                 scrap_qty=k.scrap_qty,
                 line_count=len(k.lines),
@@ -612,6 +705,85 @@ async def next_kit_number(db: DBSession) -> KitNumberSuggestion:
 
 
 @kits_router.get(
+    "/floor/{node_id}",
+    response_model=FloorKitsResponse,
+    summary="Open kits building on a production floor, with their on-floor material",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> FloorKitsResponse:
+    """Powers the Production view — attributes the WIP on a floor to the kit it
+    belongs to (a floor holds material from every kit issued to it)."""
+    active_kits = await kit_repo.kits_on_floor(db, node_id)
+    done_kits = await kit_repo.kits_completed_on_floor(db, node_id)
+    item_ids = {k.item_id for k in (*active_kits, *done_kits)} | {
+        ln.item_id for k in (*active_kits, *done_kits) for ln in k.lines
+    }
+    items = await kit_repo.load_item_map(db, item_ids)
+
+    def _num(iid: uuid.UUID) -> tuple[str, str]:
+        it = items.get(iid)
+        return (it.item_number, it.description) if it else ("", "")
+
+    active: list[FloorKit] = []
+    for k in active_kits:
+        lines = [
+            FloorKitLine(
+                item_id=str(ln.item_id),
+                item_number=_num(ln.item_id)[0],
+                description=_num(ln.item_id)[1],
+                on_floor_qty=_on_floor(ln),
+            )
+            for ln in sorted(k.lines, key=lambda x: x.line_no)
+            if _on_floor(ln) > 0
+        ]
+        if not lines:
+            continue  # nothing physically on this floor for the kit
+        active.append(
+            FloorKit(
+                id=str(k.id),
+                kit_number=k.kit_number,
+                item_id=str(k.item_id),
+                item_number=_num(k.item_id)[0],
+                description=_num(k.item_id)[1],
+                target_qty=k.target_qty,
+                status=k.status,  # type: ignore[arg-type]
+                on_floor_total=sum(ln.on_floor_qty for ln in lines),
+                lines=lines,
+            )
+        )
+
+    completed: list[FloorKitConsumed] = []
+    for k in done_kits:
+        c_lines = [
+            FloorKitConsumedLine(
+                item_id=str(ln.item_id),
+                item_number=_num(ln.item_id)[0],
+                description=_num(ln.item_id)[1],
+                used_qty=ln.used_qty or 0,
+            )
+            for ln in sorted(k.lines, key=lambda x: x.line_no)
+            if (ln.used_qty or 0) > 0
+        ]
+        completed.append(
+            FloorKitConsumed(
+                id=str(k.id),
+                kit_number=k.kit_number,
+                item_id=str(k.item_id),
+                item_number=_num(k.item_id)[0],
+                description=_num(k.item_id)[1],
+                target_qty=k.target_qty,
+                good_qty=k.good_qty,
+                scrap_qty=k.scrap_qty,
+                closed_at=k.closed_at,
+                consumed_total=sum(ln.used_qty for ln in c_lines),
+                lines=c_lines,
+            )
+        )
+
+    return FloorKitsResponse(active=active, completed=completed)
+
+
+@kits_router.get(
     "/{kit_id}",
     response_model=KitRead,
     summary="Get one kit with its lines",
@@ -632,7 +804,46 @@ async def kit_activity(db: DBSession, kit_id: Annotated[uuid.UUID, Path()]) -> K
     await _require_kit(db, kit_id)
     movements = await kit_repo.kit_movements(db, kit_id)
     items = await kit_repo.load_item_map(db, {m.item_id for m in movements})
-    return KitActivityResponse(items=[_activity_row(m, items) for m in movements])
+    events = await kit_repo.kit_audit_events(db, kit_id)
+    # Resolve the output-location node id carried on close-out events to a
+    # human path (Warehouse One › Shelf Y) for the activity timeline.
+    node_labels = await loc_repo.node_label_map(db) if events else {}
+    return KitActivityResponse(
+        items=[_activity_row(m, items) for m in movements],
+        events=[_audit_event_row(e, node_labels) for e in events],
+    )
+
+
+def _audit_event_row(e, node_labels: dict | None = None) -> KitAuditEventRow:
+    ctx = e.context or {}
+    after = e.after_state or {}
+    good = ctx.get("good_qty")
+    good = after.get("good_qty") if good is None else good
+    scrap = ctx.get("scrap_qty")
+    scrap = after.get("scrap_qty") if scrap is None else scrap
+    out_node = ctx.get("output_location_node_id") or after.get("output_location_node_id")
+    out_label: str | None = None
+    if out_node and node_labels:
+        try:
+            key = uuid.UUID(str(out_node))
+        except (ValueError, TypeError):
+            key = None
+        label = node_labels.get(key) if key is not None else None
+        if label:
+            # node_label_map yields (name, path); prefer the fuller path.
+            out_label = label[1] or label[0]
+    return KitAuditEventRow(
+        id=str(e.id),
+        occurred_at=e.occurred_at,
+        operation=str(ctx.get("operation") or e.action),
+        action=e.action,
+        actor_user_id=str(e.actor_user_id) if e.actor_user_id else None,
+        good_qty=good,
+        scrap_qty=scrap,
+        output_location=out_label,
+        output_expiration_date=ctx.get("output_expiration_date"),
+        diff=e.diff,
+    )
 
 
 def _activity_row(m: StockMovement, items: dict[uuid.UUID, Item]) -> KitActivityRow:
@@ -736,6 +947,7 @@ async def create_kit(
             source_location_node_id=None,
         )
 
+    refreshed = await _require_kit(db, kit.id)
     await record_entity_change(
         db,
         actor_user_id=current.id,
@@ -744,7 +956,74 @@ async def create_kit(
         subject_id=kit.id,
         subject_label=kit.kit_number,
         before=None,
-        after={"item_id": str(item_id), "target_qty": kit.target_qty},
+        after=_kit_snapshot(refreshed),
+        context={"operation": "create"},
+    )
+    response = await _kit_read(db, refreshed)
+    await db.commit()
+    return response
+
+
+# ── Edit kit (name / target) ─────────────────────────────────────────────
+
+
+@kits_router.patch(
+    "/{kit_id}",
+    response_model=KitRead,
+    summary="Edit a kit's name and/or target (name while open, target while draft)",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def update_kit(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    kit_id: Annotated[uuid.UUID, Path()],
+    payload: KitUpdateRequest,
+) -> KitRead:
+    kit = await _require_kit(db, kit_id)
+    before = _kit_snapshot(kit)
+
+    if payload.kit_number is not None:
+        # The name doubles as the produced lot number, so it may change while the
+        # kit is still open but not once it is closed / cancelled (the record and
+        # its lot are then final).
+        if kit.status in ("closed", "cancelled"):
+            raise ValidationError(
+                "A closed or cancelled kit cannot be renamed", code="kit_locked"
+            )
+        new_name = payload.kit_number.strip()
+        if not new_name:
+            raise ValidationError("Kit name is required", code="kit_number_required")
+        if new_name != kit.kit_number and await kit_repo.kit_number_taken(db, new_name):
+            raise ConflictError(
+                f'The kit name "{new_name}" is already in use.', code="kit_number_conflict"
+            )
+        kit.kit_number = new_name
+
+    if payload.target_qty is not None and payload.target_qty != kit.target_qty:
+        # Target drives every line's needed quantity, so it is only editable
+        # before anything is issued (draft). Re-default each line's issued qty to
+        # the new need so the Issue step stays pre-filled sensibly.
+        if kit.status != "draft":
+            raise ValidationError(
+                "Target can only be changed while the kit is a draft (before issue)",
+                code="target_locked",
+            )
+        kit.target_qty = payload.target_qty
+        for line in kit.lines:
+            line.issued_qty = kit_repo.default_issued_qty(line.qty_per_unit, payload.target_qty)
+
+    kit.updated_by_user_id = current.id
+    await db.flush()
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kits",
+        subject_id=kit.id,
+        subject_label=kit.kit_number,
+        before=before,
+        after=_kit_snapshot(kit),
+        context={"operation": "edit_kit"},
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -763,6 +1042,7 @@ async def create_kit(
 )
 async def update_line(
     db: DBSession,
+    current: CurrentDbUserDep,
     kit_id: Annotated[uuid.UUID, Path()],
     line_id: Annotated[uuid.UUID, Path()],
     payload: KitLineUpdateRequest,
@@ -777,6 +1057,7 @@ async def update_line(
     if line is None:
         raise NotFoundError(f"Line {line_id} not on kit {kit_id}", code="line_not_found")
 
+    before = _kit_snapshot(kit)
     if payload.issued_qty is not None:
         line.issued_qty = payload.issued_qty
     if payload.source_location_node_id is not None:
@@ -787,6 +1068,17 @@ async def update_line(
         # Return defaults to the source it was pulled from (editable at close-out).
         line.return_location_node_id = src
     await db.flush()
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kits",
+        subject_id=kit.id,
+        subject_label=kit.kit_number,
+        before=before,
+        after=_kit_snapshot(kit),
+        context={"operation": "edit_line", "line_no": line.line_no},
+    )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
     await db.commit()
@@ -811,6 +1103,8 @@ async def issue_kit(
     kit = await _require_kit(db, kit_id)
     if kit.status != "draft":
         raise ValidationError("Only a draft kit can be issued", code="kit_not_draft")
+
+    before = _kit_snapshot(kit)
 
     # The draft edits (issued qty + source per line) are committed here, so the
     # Issue button is the only write — nothing is persisted while the user types.
@@ -844,6 +1138,39 @@ async def issue_kit(
     if all(ln.issued_qty <= 0 for ln in kit.lines):
         raise ValidationError("Nothing to issue — every line is zero", code="nothing_to_issue")
 
+    # Hard issue gate (client 2026-07-22). A kit may only be issued when EVERY
+    # line is fully covered: issued ≥ the BOM need, and the source physically
+    # holds at least the need. This is stricter than ``Transaction_Spec`` §2
+    # (which leaves "quantity issued" a free manual entry) but consistent with
+    # it — §2 defines "needed" as the build requirement and every worked example
+    # issues ≥ needed. No partial / short issue: one short component blocks the
+    # whole kit. Runs as a pre-flight over all lines BEFORE any material moves,
+    # so nothing is issued when the kit can't be fully covered.
+    for line in kit.lines:
+        needed = _needed(line, kit.target_qty)
+        if line.issued_qty < needed:
+            raise ValidationError(
+                f"Line {line.line_no}: issued {line.issued_qty} is below the {needed} "
+                f"needed to build {kit.target_qty}. Issue at least the needed quantity "
+                f"— a short kit can't be issued.",
+                code="issued_below_need",
+            )
+        node_id = line.source_location_node_id
+        if node_id is None:
+            raise ValidationError(
+                f"Line {line.line_no} needs a source location before issue",
+                code="source_required",
+            )
+        allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, node_id)
+        available = sum(int(a.qty) for a in allocs)
+        if available < needed:
+            raise ValidationError(
+                f"Line {line.line_no}: the source location holds only {available}, but "
+                f"{needed} are needed to build {kit.target_qty}. Restock before issuing "
+                f"— you cannot move forward with a short kit.",
+                code="source_below_need",
+            )
+
     for line in kit.lines:
         if line.issued_qty <= 0:
             continue
@@ -872,8 +1199,9 @@ async def issue_kit(
         subject_table="app.kits",
         subject_id=kit.id,
         subject_label=kit.kit_number,
-        before={"status": "draft"},
-        after={"status": kit.status},
+        before=before,
+        after=_kit_snapshot(kit),
+        context={"operation": "issue"},
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -904,6 +1232,7 @@ async def additional_issue(
     if line is None:
         raise NotFoundError(f"Line {line_id} not on kit {kit_id}", code="line_not_found")
 
+    before = _kit_snapshot(kit)
     await _move_to_production(
         db,
         kit=kit,
@@ -917,6 +1246,17 @@ async def additional_issue(
     line.additional_issued_qty += payload.qty
     kit.updated_by_user_id = current.id
     await db.flush()
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kits",
+        subject_id=kit.id,
+        subject_label=kit.kit_number,
+        before=before,
+        after=_kit_snapshot(kit),
+        context={"operation": "additional_issue", "line_no": line.line_no, "qty": payload.qty},
+    )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
     await db.commit()
@@ -956,10 +1296,24 @@ async def return_excess(
             f"(tried to return {payload.qty}).",
             code="return_exceeds_on_floor",
         )
+    # Client-directed cap (2026-07-22): you may only hand back the SURPLUS above
+    # what's needed — the floor can never drop below the build requirement, or
+    # there wouldn't be enough left to make the units. Returning down to zero was
+    # the bug. "needed" is dynamic via _effective_target.
+    needed_units = _needed_units(line, kit)
+    max_return = on_floor - needed_units
+    if payload.qty > max_return:
+        raise ValidationError(
+            f"Line {line.line_no}: at most {max(max_return, 0)} can be returned — {needed_units} "
+            f"must stay on the floor to build {_effective_target(kit)}. Return the surplus above "
+            f"what's needed, not below it.",
+            code="return_below_need",
+        )
     to_node = _parse_uuid_or_422(payload.return_location_node_id, field="return_location_node_id")
     node = await _require_placeable(db, to_node, "Return location")
     await _validate_return_cells(db, node, payload.qty, payload.return_cells, "Return location")
 
+    before = _kit_snapshot(kit)
     note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
     if payload.reason:
         note = f"{note} — {payload.reason}"
@@ -979,6 +1333,22 @@ async def return_excess(
     line.return_location_node_id = to_node
     kit.updated_by_user_id = current.id
     await db.flush()
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kits",
+        subject_id=kit.id,
+        subject_label=kit.kit_number,
+        before=before,
+        after=_kit_snapshot(kit),
+        context={
+            "operation": "early_return",
+            "line_no": line.line_no,
+            "qty": payload.qty,
+            "reason": payload.reason,
+        },
+    )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
     await db.commit()
@@ -1006,6 +1376,7 @@ async def save_production(
             "Production figures can only be saved while the kit is in production",
             code="kit_not_in_production",
         )
+    before = _kit_snapshot(kit)
     if payload.good_qty is not None:
         kit.good_qty = payload.good_qty
     if payload.scrap_qty is not None:
@@ -1018,6 +1389,17 @@ async def save_production(
         kit.output_location_node_id = out_node
     kit.updated_by_user_id = current.id
     await db.flush()
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kits",
+        subject_id=kit.id,
+        subject_label=kit.kit_number,
+        before=before,
+        after=_kit_snapshot(kit),
+        context={"operation": "production_draft"},
+    )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
     await db.commit()
@@ -1044,11 +1426,42 @@ async def close_out_kit(
         raise ValidationError(
             "Only a kit in production can be closed out", code="kit_not_closeable"
         )
-    if payload.good_qty + payload.scrap_qty == 0:
+    before = _kit_snapshot(kit)
+    # Good units can never be zero — a kit must yield at least one good unit to
+    # close out (client 2026-07-22, Task 3). Scrap alone is not a valid close.
+    if payload.good_qty < 1:
         raise ValidationError(
-            "Record what production yielded — made and scrapped can't both be zero",
-            code="no_output",
+            "A kit must produce at least 1 good unit to close out",
+            code="good_required",
         )
+    # A produced lot can't already be expired (client 2026-07-22) — expiry, when
+    # given, must be today or later.
+    if payload.output_expiration_date and payload.output_expiration_date < _now().date():
+        raise ValidationError(
+            "The produced lot's expiry can't be in the past",
+            code="expiry_in_past",
+        )
+
+    # ── Client-directed yield gate (2026-07-22) ─────────────────────────────
+    # BEYOND ``Transaction_Spec``: the spec reconciles close-out on the actual
+    # *Qty Used* per line (§3 / Table 3) and never recomputes "needed". The
+    # client asked to ALSO refuse close-out unless the material issued could
+    # physically have produced the claimed output — i.e. issued+additional ≥
+    # (good+scrap) × qty_per_unit for every line. Isolated here with its own
+    # error code so it can be relaxed if the client reverts to the pure
+    # Qty-Used model. The existing ``used ≤ on_floor`` guard below is unchanged.
+    attempted = payload.good_qty + payload.scrap_qty
+    for line in kit.lines:
+        yield_need = line.qty_per_unit * attempted
+        total_issued = line.issued_qty + line.additional_issued_qty
+        if total_issued < yield_need:
+            raise ValidationError(
+                f"Line {line.line_no}: {total_issued} issued, but producing "
+                f"{payload.good_qty} good + {payload.scrap_qty} scrap needs {yield_need} "
+                f"per the BOM. Record an additional issue before closing out.",
+                code="issued_below_yield",
+            )
+
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
     output_node = _parse_uuid_or_422(
         payload.output_location_node_id, field="output_location_node_id"
@@ -1081,6 +1494,19 @@ async def close_out_kit(
                 f"Line {line.line_no}: used {line_in.used_qty} exceeds the {on_floor} "
                 f"still on the production floor. Record an additional issue to cover it.",
                 code="used_exceeds_issued",
+            )
+        # Client-directed lower bound (2026-07-22, Task 5.1): you can't have
+        # consumed LESS than the BOM requires for the output you claim — that
+        # much material is what makes the good+scrap units. Uses the close-out
+        # payload's attempted total (good+scrap), not the possibly-stale kit row.
+        # BEYOND Transaction_Spec, which reconciles on Qty Used without a floor.
+        need = kit_repo.default_issued_qty(line.qty_per_unit, attempted)
+        if line_in.used_qty < need:
+            raise ValidationError(
+                f"Line {line.line_no}: used {line_in.used_qty} is below the {need} needed to "
+                f"produce {payload.good_qty} good + {payload.scrap_qty} scrap. That much material "
+                f"is required to make the output.",
+                code="used_below_need",
             )
         line.used_qty = line_in.used_qty
         if line_in.return_location_node_id is not None:
@@ -1157,11 +1583,18 @@ async def close_out_kit(
         subject_table="app.kits",
         subject_id=kit.id,
         subject_label=kit.kit_number,
-        before={"status": "in_production"},
-        after={
-            "status": "closed",
+        before=before,
+        after=_kit_snapshot(kit),
+        context={
+            "operation": "close_out",
             "good_qty": payload.good_qty,
             "scrap_qty": payload.scrap_qty,
+            "output_location_node_id": str(output_node),
+            "output_expiration_date": (
+                payload.output_expiration_date.isoformat()
+                if payload.output_expiration_date
+                else None
+            ),
         },
         signature_id=evidence_uuid,
     )
@@ -1201,6 +1634,7 @@ async def cancel_kit(
             "Only an open kit can be cancelled",
             code="cancel_not_open",
         )
+    before = _kit_snapshot(kit)
     # Post-issue cancel (resolves the deferred §99.8): hand every unit still on
     # the floor back to inventory. Safe by construction — nothing was bound to a
     # production lot at kitting (TRX-002), so nothing can be stranded, and the
@@ -1267,8 +1701,9 @@ async def cancel_kit(
         subject_table="app.kits",
         subject_id=kit.id,
         subject_label=kit.kit_number,
-        before={"status": "draft"},
-        after={"status": "cancelled"},
+        before=before,
+        after=_kit_snapshot(kit),
+        context={"operation": "cancel", "reason": payload.reason if payload else None},
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
