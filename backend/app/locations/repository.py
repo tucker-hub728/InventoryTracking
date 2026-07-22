@@ -27,9 +27,7 @@ from app.models.products import Customer
 
 async def get_node(session: AsyncSession, node_id: uuid.UUID) -> LocationNode | None:
     return (
-        await session.execute(
-            select(LocationNode).where(LocationNode.id == node_id)
-        )
+        await session.execute(select(LocationNode).where(LocationNode.id == node_id))
     ).scalar_one_or_none()
 
 
@@ -141,9 +139,7 @@ async def list_nodes_by_types(
 async def count_children(session: AsyncSession, node_id: uuid.UUID) -> int:
     n = (
         await session.execute(
-            select(func.count())
-            .select_from(LocationNode)
-            .where(LocationNode.parent_id == node_id)
+            select(func.count()).select_from(LocationNode).where(LocationNode.parent_id == node_id)
         )
     ).scalar_one()
     return int(n)
@@ -256,9 +252,7 @@ def node_to_audit_snapshot(node: LocationNode) -> dict[str, object | None]:
     }
 
 
-async def update_node_name(
-    session: AsyncSession, *, node: LocationNode, name: str
-) -> LocationNode:
+async def update_node_name(session: AsyncSession, *, node: LocationNode, name: str) -> LocationNode:
     """Rename a node (the user-facing label; ``code`` identity is unchanged).
     Caller commits."""
     node.name = name
@@ -312,9 +306,7 @@ async def resolve_inherited_dedication(
     return None, None
 
 
-async def max_occupied_cell(
-    session: AsyncSession, node_id: uuid.UUID
-) -> tuple[int, int]:
+async def max_occupied_cell(session: AsyncSession, node_id: uuid.UUID) -> tuple[int, int]:
     """Highest occupied (row, col) among a Box's active allocations.
 
     Returns ``(0, 0)`` when the Box is empty. Used to reject a resize that
@@ -342,13 +334,9 @@ async def max_occupied_cell(
 # ── Allocations ─────────────────────────────────────────────────────────
 
 
-async def get_allocation(
-    session: AsyncSession, allocation_id: uuid.UUID
-) -> LotAllocation | None:
+async def get_allocation(session: AsyncSession, allocation_id: uuid.UUID) -> LotAllocation | None:
     return (
-        await session.execute(
-            select(LotAllocation).where(LotAllocation.id == allocation_id)
-        )
+        await session.execute(select(LotAllocation).where(LotAllocation.id == allocation_id))
     ).scalar_one_or_none()
 
 
@@ -374,9 +362,7 @@ async def node_has_any_allocations(session: AsyncSession, node_id: uuid.UUID) ->
     return (await session.execute(stmt)).first() is not None
 
 
-async def node_has_movement_history(
-    session: AsyncSession, node_id: uuid.UUID
-) -> bool:
+async def node_has_movement_history(session: AsyncSession, node_id: uuid.UUID) -> bool:
     """True iff the GxP ledger has a movement referencing this node.
 
     Movement history now lives in ``app.stock_movements`` (the location
@@ -413,9 +399,7 @@ async def get_active_cell_occupant(
     return (await session.execute(stmt)).scalars().first()
 
 
-async def sum_active_alloc_qty_for_lot(
-    session: AsyncSession, lot_id: uuid.UUID
-) -> Decimal:
+async def sum_active_alloc_qty_for_lot(session: AsyncSession, lot_id: uuid.UUID) -> Decimal:
     """Total currently-placed quantity of a lot across all nodes (capacity)."""
     total = (
         await session.execute(
@@ -428,9 +412,7 @@ async def sum_active_alloc_qty_for_lot(
     return Decimal(total)
 
 
-async def sum_received_qty_for_lot(
-    session: AsyncSession, lot_id: uuid.UUID
-) -> Decimal:
+async def sum_received_qty_for_lot(session: AsyncSession, lot_id: uuid.UUID) -> Decimal:
     """Total quantity ever placed (unit-IN) for a lot — the lifetime cap base.
 
     Sums the append-only ``receipt`` movements (the only source of unit-IN;
@@ -471,9 +453,7 @@ async def product_exists(session: AsyncSession, product_id: uuid.UUID) -> bool:
     """A location can be dedicated to a finished-good (built) item now."""
     return (
         await session.execute(
-            select(Item.id).where(
-                Item.id == product_id, Item.deleted_at.is_(None)
-            )
+            select(Item.id).where(Item.id == product_id, Item.deleted_at.is_(None))
         )
     ).first() is not None
 
@@ -720,7 +700,5 @@ async def list_node_ledger(
                 StockMovement.to_location_node_id == node_id,
             )
         )
-    stmt = (
-        stmt.order_by(StockMovement.performed_at.desc()).limit(limit).offset(offset)
-    )
+    stmt = stmt.order_by(StockMovement.performed_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().unique().all())

@@ -114,9 +114,11 @@ export function NewKitDialog({
       toast.success(`${kit.kit_number} opened`, {
         description: `Draft to build ${targetQty} × ${kit.item_number}.`,
       });
+      // Go straight to the new kit — start the navigation first so the detail
+      // page's loading state shows immediately, then let the dialog unmount.
+      router.push(`/reconciliation/${kit.id}`);
       onOpenChange(false);
       onCreated?.();
-      router.push(`/reconciliation/${kit.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not open the kit.');
     } finally {

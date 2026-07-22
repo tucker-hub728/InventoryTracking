@@ -70,6 +70,7 @@ export const navSections: readonly NavSection[] = [
         href: '/reconciliation',
         icon: Scale,
         resource: 'inventory',
+        comingSoon: true,
       },
       {
         id: 'customers',
@@ -102,7 +103,14 @@ export const navSections: readonly NavSection[] = [
       { id: 'warehouse', label: 'Warehouse', href: '/warehouse', icon: Warehouse, resource: 'inventory' },
       // View-only: the 5 seeded production floors and the WIP currently on them
       // (client 2026-07-22). Material moves only through a kit's issue/close-out.
-      { id: 'production', label: 'Production', href: '/production', icon: Factory, resource: 'inventory' },
+      {
+        id: 'production',
+        label: 'Production',
+        href: '/production',
+        icon: Factory,
+        resource: 'inventory',
+        comingSoon: true,
+      },
     ],
   },
   {
