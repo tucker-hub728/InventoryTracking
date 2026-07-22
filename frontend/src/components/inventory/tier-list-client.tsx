@@ -315,7 +315,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
                       <TableCell className="font-mono">
                         <Link
                           href={`/inventory/${row.uuid}/${config.detailSegment}`}
-                          className="rounded-sm text-text hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                          className="rounded-sm text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                         >
                           {row.id}
                         </Link>

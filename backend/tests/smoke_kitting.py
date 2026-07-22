@@ -88,6 +88,17 @@ def _reauth(token, action):
     return b["evidence_id"]
 
 
+def _cancel(token, kit_id, lines=None, reason=None):
+    """Cancel is e-signed (client 2026-07-22) — reauth for a kit.cancel evidence
+    and post it with the request."""
+    body = {"evidence_id": _reauth(token, "kit.cancel")}
+    if reason is not None:
+        body["reason"] = reason
+    if lines is not None:
+        body["lines"] = lines
+    return _req("POST", f"/kits/{kit_id}/cancel", token=token, json_body=body)
+
+
 def _create(token, qty=2, kit_number=None):
     # The kit name is operator-supplied now (it also names the produced lot),
     # so ask the API for a free suggestion unless the caller pins one.
@@ -185,7 +196,7 @@ def main() -> int:
         s == 201 and named["kit_number"] == batch_name,
         (s, named.get("kit_number")),
     )
-    _req("POST", f"/kits/{named['id']}/cancel", token=token, json_body={})
+    _cancel(token, named['id'])
 
     print("== hard gates (client 2026-07-22) ==")
     # (a) issued < needed on any line blocks the whole issue.
@@ -207,7 +218,7 @@ def main() -> int:
         s == 422 and b.get("code") == "issued_below_need",
         (s, b),
     )
-    _req("POST", f"/kits/{gk['id']}/cancel", token=token, json_body={})
+    _cancel(token, gk['id'])
 
     # (b) source can't cover the need -> blocked, even at issued == needed.
     s, sug = _req("GET", "/kits/next-number", token=token)
@@ -237,7 +248,7 @@ def main() -> int:
         s == 422 and b.get("code") == "source_below_need",
         (s, b),
     )
-    _req("POST", f"/kits/{ak['id']}/cancel", token=token, json_body={})
+    _cancel(token, ak['id'])
 
     # (c) close-out claiming more output than the material issued could yield.
     s, yk = _create(token)
@@ -261,7 +272,7 @@ def main() -> int:
         s == 422 and b.get("code") == "issued_below_yield",
         (s, b),
     )
-    _req("POST", f"/kits/{yk['id']}/cancel", token=token, json_body={"reason": "gate test"})
+    _cancel(token, yk['id'], reason="gate test")
 
     # (d) return can't drop the floor below the need (Task 6). Issue a surplus,
     # then try to return more than the surplus.
@@ -310,7 +321,7 @@ def main() -> int:
         s == 422 and b.get("code") == "used_below_need",
         (s, b),
     )
-    _req("POST", f"/kits/{rk['id']}/cancel", token=token, json_body={"reason": "gate test"})
+    _cancel(token, rk['id'], reason="gate test")
 
     print("== issue ==")
     # Issue a surplus (need + 3) so there is something to return / reconcile —
@@ -537,7 +548,7 @@ def main() -> int:
 
     print("== cancel (draft + post-issue) ==")
     s, k3 = _create(token)
-    s, b = _req("POST", f"/kits/{k3['id']}/cancel", token=token, json_body={})
+    s, b = _cancel(token, k3['id'])
     check("cancel draft -> 200 cancelled", s == 200 and b.get("status") == "cancelled", (s, b))
     s, act3 = _req("GET", f"/kits/{k3['id']}/activity", token=token)
     check("draft cancel writes no movements", len(act3["items"]) == 0, len(act3["items"]))
@@ -545,7 +556,7 @@ def main() -> int:
     # kitting03 resolves the deferred §99.8: cancelling an in-production kit is
     # now allowed and hands every unit on the floor back (TRX-008), so nothing
     # is stranded. k2 is in_production.
-    s, b = _req("POST", f"/kits/{k2['id']}/cancel", token=token, json_body={"reason": "abandoned"})
+    s, b = _cancel(token, k2['id'], reason="abandoned")
     check(
         "cancel in-production -> 200 cancelled",
         s == 200 and b.get("status") == "cancelled",

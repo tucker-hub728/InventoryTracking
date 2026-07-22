@@ -12,6 +12,7 @@ import {
   PackageSearch,
   Pencil,
   Plus,
+  Save,
   ScrollText,
   Send,
   Undo2,
@@ -25,7 +26,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { useConfirm } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
   DialogBody,
@@ -47,6 +47,7 @@ import {
   type ApiKitActivityRow,
   type ApiKitAuditEvent,
   type ApiKitLine,
+  type CancelLineInput,
   type KitStatus,
   type KitUpdateInput,
   type ReturnCellInput,
@@ -134,7 +135,6 @@ const todayStr = (): string => {
 export function KitDetailClient({ kitId }: { kitId: string }) {
   const canSign = usePermission('inventory', 'sign');
   const canWrite = usePermission('inventory', 'create');
-  const { confirm, confirmDialog } = useConfirm();
 
   const [kit, setKit] = React.useState<ApiKit | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -149,6 +149,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const [addingTo, setAddingTo] = React.useState<ApiKitLine | null>(null);
   const [returningFrom, setReturningFrom] = React.useState<ApiKitLine | null>(null);
   const [cancelOpen, setCancelOpen] = React.useState(false);
+  // Cancel is e-signed: the reauth dialog is the final confirmation. For a
+  // post-issue kit the return locations are collected first (pendingCancelLines).
+  const [cancelReauthOpen, setCancelReauthOpen] = React.useState(false);
+  const [pendingCancelLines, setPendingCancelLines] = React.useState<CancelLineInput[]>([]);
 
   const [output, setOutput] = React.useState<OutputDraft>({
     good_qty: null,
@@ -354,14 +358,21 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // need: the operator must issue more first (Task 2). A closed/cancelled kit is
   // read-only, so navigation stays open.
   const productionEditable = kit.status === 'issued' || kit.status === 'in_production';
-  const prodAttempted = (output.good_qty ?? 0) + (output.scrap_qty ?? 0);
-  const prodEffTarget = prodAttempted > 0 ? prodAttempted : kit.target_qty;
+  // Material on the floor + the Next gate use the SAVED production figures. The
+  // operator must click Save (which logs ONE "Production recorded") for their
+  // good/scrap to take effect — typing alone changes nothing, and issuing more
+  // no longer records production (client 2026-07-22).
+  const savedAttempted = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
+  const savedEffTarget = savedAttempted > 0 ? savedAttempted : kit.target_qty;
   const materialShort = kit.lines.some(
-    (l) => l.on_floor_qty < Math.ceil(Number(l.qty_per_unit) * prodEffTarget),
+    (l) => l.on_floor_qty < Math.ceil(Number(l.qty_per_unit) * savedEffTarget),
   );
+  const productionDirty =
+    output.good_qty !== kit.good_qty ||
+    output.scrap_qty !== kit.scrap_qty ||
+    (output.output_location_node_id || null) !== (kit.output_location_node_id || null);
   const productionReady =
-    !productionEditable ||
-    (Boolean(output.output_location_node_id) && goodValid && expiryValid && !materialShort);
+    !productionEditable || (outputReady && !productionDirty && !materialShort);
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
   // Whether each line's chosen return destination turned out to be a box —
   // reported by BoxCellPicker, which resolves it from the Location System.
@@ -438,24 +449,37 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       1,
     );
 
-  // Production step: persist good/scrap/output when advancing to close-out, so
-  // the figures survive a reload (the signed commit is still close-out).
-  const onProductionNext = () => {
+  // Advancing to close-out no longer saves — the figures are already persisted
+  // by the "Save production" button. Entering the step, pre-fill each line's
+  // Used with its needed quantity (the material required to make the output) and
+  // default the back-flush location to where it was pulled from, so the operator
+  // only edits the exceptions (client 2026-07-22).
+  const enterCloseOut = () => {
     if (kit.status === 'issued' || kit.status === 'in_production') {
-      void run(
-        () =>
-          kitsApi.saveProduction(kit.id, {
-            good_qty: output.good_qty,
-            scrap_qty: output.scrap_qty,
-            output_location_node_id: output.output_location_node_id || null,
-          }),
-        'Production saved',
-        2,
-      );
-    } else {
-      setActiveStep(2);
+      const attempted = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
+      const eff = attempted > 0 ? attempted : kit.target_qty;
+      setUsed((prev) => {
+        const next = { ...prev };
+        for (const l of kit.lines) {
+          if (next[l.id] == null) {
+            next[l.id] = Math.min(Math.ceil(Number(l.qty_per_unit) * eff), l.on_floor_qty);
+          }
+        }
+        return next;
+      });
+      setReturnLoc((prev) => {
+        const next = { ...prev };
+        for (const l of kit.lines) {
+          if (!next[l.id]) {
+            next[l.id] = l.source_location_node_id ?? l.return_location_node_id ?? '';
+          }
+        }
+        return next;
+      });
     }
+    setActiveStep(2);
   };
+  const onProductionNext = enterCloseOut;
 
   const onCloseConfirmed = async (evidence: ReauthResponse) => {
     try {
@@ -485,22 +509,33 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     }
   };
 
-  const onCancel = async () => {
-    // A draft has moved nothing, so a plain confirm is honest. Post-issue,
-    // material has to go somewhere specific — that needs a real dialog (D1).
-    if (!editableDraft) {
+  const onCancel = () => {
+    // Cancelling is e-signed. A draft has moved nothing, so the signature IS the
+    // confirmation. Post-issue, material must go somewhere specific — collect the
+    // per-line return locations first (D1), then sign.
+    if (editableDraft) {
+      setPendingCancelLines([]);
+      setCancelReauthOpen(true);
+    } else {
       setCancelOpen(true);
-      return;
     }
-    const ok = await confirm({
-      title: `Cancel ${kit.kit_number}?`,
-      destructive: true,
-      confirmLabel: 'Cancel kit',
-      cancelLabel: 'Keep kit',
-      description: 'This kit is a draft, so no material has moved.',
-    });
-    if (!ok) return;
-    void run(() => kitsApi.cancel(kit.id), `${kit.kit_number} cancelled`);
+  };
+
+  const onCancelConfirmed = async (evidence: ReauthResponse) => {
+    try {
+      const k = await kitsApi.cancel(kit.id, {
+        evidence_id: evidence.evidence_id,
+        reason: evidence.comment || undefined,
+        lines: pendingCancelLines,
+      });
+      setKit(k);
+      setActiveStep(stepModel(k.status).def);
+      toast.success(`${k.kit_number} cancelled`);
+    } catch (err) {
+      toast.error('Could not cancel', {
+        description: err instanceof ApiError ? err.message : undefined,
+      });
+    }
   };
 
   return (
@@ -546,16 +581,26 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
                 const isCurrent = i === activeStep;
                 const isDone = i < model.completed;
                 const isReachable = i <= model.reachable;
+                // Same gate as the "Next: Close-Out" button — you can't jump
+                // FORWARD to Close-Out until production is saved and every line
+                // holds its need. Going back to Issue / Production stays open.
+                const gateBlocked = i === 2 && i > activeStep && !productionReady;
+                const clickable = isReachable && !gateBlocked;
                 return (
                   <li key={step.key} className="flex flex-1 items-center last:flex-none">
                     <button
                       type="button"
-                      disabled={!isReachable}
-                      onClick={() => setActiveStep(i)}
+                      disabled={!clickable}
+                      onClick={() => clickable && (i === 2 ? enterCloseOut() : setActiveStep(i))}
                       aria-current={isCurrent ? 'step' : undefined}
+                      title={
+                        gateBlocked
+                          ? 'Save the production figures and make sure no line is short first'
+                          : undefined
+                      }
                       className={cn(
                         'group flex items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent sm:px-3',
-                        isReachable ? 'hover:bg-surface' : 'cursor-not-allowed opacity-50',
+                        clickable ? 'hover:bg-surface' : 'cursor-not-allowed opacity-50',
                       )}
                     >
                       <span
@@ -631,12 +676,15 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             onChange={setOutput}
             allowedIds={placeableIds}
             canWrite={canWrite}
-            onIssueMore={async (l) => {
-              if (await persistProduction()) setAddingTo(l);
+            busy={busy}
+            dirty={productionDirty}
+            onSave={async () => {
+              setBusy(true);
+              if (await persistProduction()) toast.success('Production figures saved');
+              setBusy(false);
             }}
-            onReturn={async (l) => {
-              if (await persistProduction()) setReturningFrom(l);
-            }}
+            onIssueMore={(l) => setAddingTo(l)}
+            onReturn={(l) => setReturningFrom(l)}
           />
         )}
         {activeStep === 2 && (
@@ -703,10 +751,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         open={cancelOpen}
         allowedIds={returnableIds}
         onOpenChange={setCancelOpen}
-        onDone={(k) => {
+        onSubmit={(cancelLines) => {
           setCancelOpen(false);
-          setKit(k);
-          setActiveStep(stepModel(k.status).def);
+          setPendingCancelLines(cancelLines);
+          setCancelReauthOpen(true);
         }}
       />
 
@@ -733,9 +781,23 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         onConfirmed={onCloseConfirmed}
       />
 
+      <PasswordReauthDialog
+        open={cancelReauthOpen}
+        onOpenChange={setCancelReauthOpen}
+        action="kit.cancel"
+        meaning={
+          editableDraft
+            ? `I am cancelling draft kit ${kit.kit_number}. No material has moved.`
+            : `I am cancelling kit ${kit.kit_number} and returning all material still on the floor to inventory.`
+        }
+        title="Sign this cancellation"
+        submitLabel="Cancel kit"
+        commentPlaceholder="e.g. Batch aborted — contamination"
+        onConfirmed={onCancelConfirmed}
+      />
+
       <ActivitySheet kitId={kit.id} kitNumber={kit.kit_number} open={activityOpen} onOpenChange={setActivityOpen} />
       <EditKitDialog kit={kit} open={editOpen} onOpenChange={setEditOpen} onDone={(k) => setKit(k)} />
-      {confirmDialog}
     </>
   );
 }
@@ -885,7 +947,7 @@ function footerPrimary(
         title={
           ctx.productionReady
             ? undefined
-            : 'Issue more so no line is short, enter at least 1 good unit, and choose the output location'
+            : 'Save the production figures, make sure no line is short, and choose the output location'
         }
       >
         Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
@@ -1202,6 +1264,9 @@ function ProductionStep({
   onChange,
   allowedIds,
   canWrite,
+  busy,
+  dirty,
+  onSave,
   onIssueMore,
   onReturn,
 }: {
@@ -1210,6 +1275,10 @@ function ProductionStep({
   onChange: (o: OutputDraft) => void;
   allowedIds: Set<string>;
   canWrite: boolean;
+  busy: boolean;
+  /** Whether the entered figures differ from what's saved on the kit. */
+  dirty: boolean;
+  onSave: () => void;
   onIssueMore: (line: ApiKitLine) => void;
   onReturn: (line: ApiKitLine) => void;
 }) {
@@ -1219,11 +1288,16 @@ function ProductionStep({
   const scrap = closed ? kit.scrap_qty : output.scrap_qty;
   const total = (made ?? 0) + (scrap ?? 0);
   const yieldPct = total > 0 ? (made ?? 0) / total : null;
-  // Dynamic need: producing more than planned raises it, so more material must
-  // be on the floor before close-out (client 2026-07-22, Task 4). Uses the live
-  // good+scrap once entered, else the planned target.
-  const effTarget = total > 0 ? total : kit.target_qty;
+  // "Material on the floor" reflects the SAVED figures, not what's being typed —
+  // the operator commits with Save (which records production). Until then it
+  // shows the last saved good+scrap, else the planned target (client 2026-07-22).
+  const savedTotal = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
+  const effTarget = savedTotal > 0 ? savedTotal : kit.target_qty;
   const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * effTarget);
+  // The Save button is enabled only when there are valid, unsaved changes.
+  const expiryOk = !output.output_expiration_date || output.output_expiration_date >= todayStr();
+  const canSaveNow =
+    dirty && (output.good_qty ?? 0) >= 1 && Boolean(output.output_location_node_id) && expiryOk;
 
   return (
     <div className="space-y-4">
@@ -1315,6 +1389,17 @@ function ProductionStep({
             )}
           </div>
         </div>
+
+        {!closed && (
+          <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-3">
+            <span className={cn('text-xs', dirty ? 'text-warning' : 'text-success')}>
+              {dirty ? 'Unsaved — save to record production and update the floor.' : 'Saved.'}
+            </span>
+            <Button variant="primary" size="sm" disabled={busy || !canSaveNow} onClick={onSave}>
+              <Save size={13} /> Save production
+            </Button>
+          </div>
+        )}
       </Card>
 
       {editable && (
@@ -1322,9 +1407,12 @@ function ProductionStep({
           <div className="mb-3">
             <h2 className="text-sm font-medium text-text">Material on the floor</h2>
             <p className="mt-0.5 text-xs text-text-3">
-              Needed updates from what you’re producing — {total > 0 ? total : kit.target_qty} unit
-              {(total > 0 ? total : kit.target_qty) === 1 ? '' : 's'} × per-unit BOM. Each line must
-              hold at least its need before close-out; issue more if short, return the surplus.
+              Needed reflects the <span className="text-text-2">saved</span> output — {effTarget} unit
+              {effTarget === 1 ? '' : 's'} × per-unit BOM. Each line must hold at least its need
+              before close-out; issue more if short, return the surplus.
+              {dirty && (
+                <span className="font-medium text-warning"> Save your changes to update these.</span>
+              )}
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -1503,8 +1591,8 @@ function CloseOutStep({
                 <th className="px-3 py-2 text-right font-medium">On floor</th>
                 <th className="px-3 py-2 text-right font-medium">Needed</th>
                 <th className="px-3 py-2 text-right font-medium">Used</th>
-                <th className="px-3 py-2 text-right font-medium">Returned</th>
-                <th className="px-3 py-2 font-medium">Return location</th>
+                <th className="px-3 py-2 text-right font-medium">Back-flushed</th>
+                <th className="px-3 py-2 font-medium">Back-flush location</th>
               </tr>
             </thead>
             <tbody>
@@ -2011,19 +2099,19 @@ function CancelKitDialog({
   open,
   allowedIds,
   onOpenChange,
-  onDone,
+  onSubmit,
 }: {
   kit: ApiKit;
   open: boolean;
   allowedIds: Set<string>;
   onOpenChange: (open: boolean) => void;
-  onDone: (kit: ApiKit) => void;
+  /** Hand the chosen return locations back — the parent then collects the
+   *  signature and posts the cancel. */
+  onSubmit: (lines: CancelLineInput[]) => void;
 }) {
   const lines = React.useMemo(() => kit.lines.filter((l) => l.on_floor_qty > 0), [kit.lines]);
   const [loc, setLoc] = React.useState<Record<string, string>>({});
   const [cells, setCells] = React.useState<Record<string, string[]>>({});
-  const [reason, setReason] = React.useState('');
-  const [busy, setBusy] = React.useState(false);
 
   // Default each line to where it was pulled from (D1).
   React.useEffect(() => {
@@ -2034,7 +2122,6 @@ function CancelKitDialog({
       ),
     );
     setCells({});
-    setReason('');
   }, [open, lines]);
 
   // Resolved per line by BoxCellPicker (from the Location System), because the
@@ -2047,32 +2134,15 @@ function CancelKitDialog({
   });
   const totalUnits = lines.reduce((a, l) => a + l.on_floor_qty, 0);
 
-  const submit = async () => {
+  const submit = () => {
     if (!ready) return;
-    setBusy(true);
-    try {
-      const k = await kitsApi.cancel(kit.id, {
-        reason: reason.trim() || null,
-        lines: lines.map((l) => {
-          const node = loc[l.id] ?? '';
-          return {
-            line_id: l.id,
-            return_location_node_id: node,
-            return_cells: isBoxMap[l.id] ? (cells[l.id] ?? []).map(toCell) : undefined,
-          };
-        }),
-      });
-      toast.success(`${k.kit_number} cancelled`, {
-        description: `${totalUnits} unit${totalUnits === 1 ? '' : 's'} returned to inventory.`,
-      });
-      onDone(k);
-    } catch (err) {
-      toast.error('Could not cancel', {
-        description: err instanceof ApiError ? err.message : undefined,
-      });
-    } finally {
-      setBusy(false);
-    }
+    onSubmit(
+      lines.map((l) => ({
+        line_id: l.id,
+        return_location_node_id: loc[l.id] ?? '',
+        return_cells: isBoxMap[l.id] ? (cells[l.id] ?? []).map(toCell) : undefined,
+      })),
+    );
   };
 
   return (
@@ -2083,7 +2153,7 @@ function CancelKitDialog({
           <DialogDescription>
             {totalUnits} unit{totalUnits === 1 ? '' : 's'} still on the production floor will be
             returned to inventory as a back-flush. Choose where each component goes — each is
-            pre-set to where it was pulled from. This cannot be undone.
+            pre-set to where it was pulled from. You’ll sign to confirm on the next step.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="max-h-[55vh] space-y-3 overflow-y-auto">
@@ -2123,24 +2193,13 @@ function CancelKitDialog({
               </div>
             );
           })}
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">
-              Reason <span className="text-text-3">(optional)</span>
-            </label>
-            <Input
-              aria-label="Cancellation reason"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Batch aborted — contamination"
-            />
-          </div>
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Keep kit
           </Button>
-          <Button variant="danger" onClick={() => void submit()} disabled={busy || !ready}>
-            Cancel kit &amp; return {totalUnits}
+          <Button variant="danger" onClick={submit} disabled={!ready}>
+            Continue — return {totalUnits} &amp; sign
           </Button>
         </DialogFooter>
       </DialogContent>
