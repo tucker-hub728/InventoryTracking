@@ -75,6 +75,7 @@ _PLACEABLE_NODE_TYPES = ("shelf", "sub_location")
 
 # The reauth action verb minted by the frontend before close-out.
 CLOSEOUT_ACTION = "kit.closeout"
+CANCEL_ACTION = "kit.cancel"
 _BUILT_TIERS = ("sub_assembly", "finished_good")
 
 # Smallest BOM a kit can be opened against. Transaction_Spec §1.1 composes
@@ -1617,14 +1618,14 @@ async def close_out_kit(
 @kits_router.post(
     "/{kit_id}/cancel",
     response_model=KitRead,
-    summary="Cancel an open kit — draft (no movements) or in-production (returns everything)",
+    summary="Cancel an open kit — draft (no movements) or in-production (returns everything). E-signed.",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def cancel_kit(
     db: DBSession,
     current: CurrentDbUserDep,
     kit_id: Annotated[uuid.UUID, Path()],
-    payload: CancelRequest | None = None,
+    payload: CancelRequest,
 ) -> KitRead:
     kit = await _require_kit(db, kit_id)
     if kit.status not in ("draft", "issued", "in_production"):
@@ -1632,6 +1633,7 @@ async def cancel_kit(
             "Only an open kit can be cancelled",
             code="cancel_not_open",
         )
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
     before = _kit_snapshot(kit)
     # Post-issue cancel (resolves the deferred §99.8): hand every unit still on
     # the floor back to inventory. Safe by construction — nothing was bound to a
@@ -1642,8 +1644,7 @@ async def cancel_kit(
         # Per-line destinations (D1). When supplied they must cover every line
         # still holding material, so the dialog can't silently drop a component.
         by_line = {
-            _parse_uuid_or_422(li.line_id, field="line_id"): li
-            for li in (payload.lines if payload else [])
+            _parse_uuid_or_422(li.line_id, field="line_id"): li for li in payload.lines
         }
         if by_line:
             missing = [ln.line_no for ln in kit.lines if _on_floor(ln) > 0 and ln.id not in by_line]
@@ -1701,7 +1702,17 @@ async def cancel_kit(
         subject_label=kit.kit_number,
         before=before,
         after=_kit_snapshot(kit),
-        context={"operation": "cancel", "reason": payload.reason if payload else None},
+        context={"operation": "cancel", "reason": payload.reason or None},
+        signature_id=evidence_uuid,
+    )
+    # Consume the evidence last so a replay rolls back the whole cancel.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action=CANCEL_ACTION,
+        target_table="app.kits",
+        target_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)

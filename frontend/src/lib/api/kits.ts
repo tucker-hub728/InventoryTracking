@@ -317,7 +317,9 @@ export interface CancelLineInput {
 }
 
 export interface CancelInput {
-  reason?: string | null;
+  /** Signed write — cancelling is electronically signed. */
+  evidence_id: string;
+  reason?: string;
   /** Per-line return destinations. Must cover every line still on the floor. */
   lines?: CancelLineInput[];
 }
@@ -390,7 +392,7 @@ export const kitsApi = {
   closeOut: (id: string, input: CloseOutInput) =>
     api.post<ApiKit>(`/kits/${id}/close-out`, { json: input }),
 
-  cancel: (id: string, input: CancelInput = {}) =>
+  cancel: (id: string, input: CancelInput) =>
     api.post<ApiKit>(`/kits/${id}/cancel`, { json: input }),
 };
 

@@ -413,12 +413,14 @@ class CancelLineInput(BaseModel):
     return_cells: list[ReturnCellInput] = Field(default_factory=list)
 
 
-class CancelRequest(BaseModel):
+class CancelRequest(_ESignFields):
+    """Cancelling a kit is electronically signed (client 2026-07-22) — it abandons
+    the batch and, post-issue, returns material to inventory. Carries the e-sign
+    ``evidence_id`` + optional ``reason`` from ``_ESignFields``."""
+
     model_config = ConfigDict(extra="forbid")
 
-    reason: str | None = Field(default=None, max_length=512)
     # Per-line return destinations (D1). Omitted → each line falls back to its
-    # return/source location, preserving the pre-kitting04 behaviour for
-    # scripted callers. When supplied it must cover every line still holding
-    # material, so the UI can never silently drop a component.
+    # return/source location. When supplied it must cover every line still
+    # holding material, so the UI can never silently drop a component.
     lines: list[CancelLineInput] = Field(default_factory=list)

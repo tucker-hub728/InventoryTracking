@@ -18,6 +18,7 @@ import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber, isUuid } from '@/lib/utils';
 import { movementsApi, type ApiMovement } from '@/lib/api/movements';
 import { isBuiltTier } from '@/lib/api/tiers';
+import { FINISHED_GOOD_TIER, RAW_MATERIAL_TIER, SUB_ASSEMBLY_TIER } from '@/config/tiers';
 import { apiMovementsToLedgerEntries } from '@/lib/api/movements-adapter';
 // bomApi / forecastApi are used only by the hidden forecast-demand fetch:
 // import { bomApi } from '@/lib/api/bom';
@@ -26,6 +27,15 @@ import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
+
+const TIER_CFGS = [RAW_MATERIAL_TIER, SUB_ASSEMBLY_TIER, FINISHED_GOOD_TIER];
+
+/** Breadcrumb for an item's tier — e.g. `Raw Materials` linking to
+ *  `/inventory/cr`. Null when the tier is unknown (the crumb is then omitted). */
+function tierCrumb(tierType: string | null | undefined) {
+  const cfg = TIER_CFGS.find((c) => c.type === tierType);
+  return cfg ? { label: cfg.title, href: `/inventory/${cfg.prefix.toLowerCase()}` } : null;
+}
 
 interface DetailTab {
   seg: string;
@@ -281,7 +291,11 @@ export function InventoryDetailShell({
     <>
       <PageHeader
         title={item.desc}
-        crumbs={[{ label: 'Inventory', href: '/inventory' }, { label: item.id }]}
+        crumbs={[
+          { label: 'Inventory', href: '/inventory' },
+          ...(tierCrumb(item.tierType) ? [tierCrumb(item.tierType)!] : []),
+          { label: item.id },
+        ]}
         subtitle={
           <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-accent">{item.id}</span>
