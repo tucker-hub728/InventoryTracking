@@ -138,7 +138,8 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
               <TableCell className="font-mono text-xs">
                 <Link
                   href={detailHref}
-                  className="text-accent transition-opacity hover:opacity-80"
+                  title={`Open ${item.id}`}
+                  className="text-accent underline-offset-2 transition-opacity hover:underline hover:opacity-80"
                 >
                   {item.id}
                 </Link>

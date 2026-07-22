@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Pagination, usePagination } from '@/components/ui/pagination';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Select,
   SelectContent,
@@ -17,7 +18,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { toast } from '@/components/ui/sonner';
 import { usePermission } from '@/hooks/use-permission';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
@@ -139,6 +139,39 @@ export function ReconciliationPageClient() {
               hint={loadError}
               action={<Button onClick={() => void load()}>Retry</Button>}
             />
+          ) : loading && kits.length === 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
+                    <th className="px-3 py-2 font-medium">Kit</th>
+                    <th className="px-3 py-2 font-medium">Building</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Built vs target</th>
+                    <th className="px-3 py-2 text-right font-medium">Scrapped</th>
+                    <th className="px-3 py-2 font-medium">Production location</th>
+                    <th className="px-3 py-2 font-medium">Stock the output to</th>
+                    <th className="px-3 py-2 font-medium">Opened</th>
+                    <th className="px-3 py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from({ length: 8 }).map((_, i) => (
+                    <tr key={i} className="border-b border-border/60">
+                      <td className="px-3 py-3"><Skeleton className="h-3.5 w-16" /></td>
+                      <td className="px-3 py-3"><Skeleton className="h-3.5 w-28" /></td>
+                      <td className="px-3 py-3"><Skeleton className="h-5 w-24 rounded-full" /></td>
+                      <td className="px-3 py-3"><Skeleton className="h-3.5 w-20" /></td>
+                      <td className="px-3 py-3"><Skeleton className="ml-auto h-3.5 w-8" /></td>
+                      <td className="px-3 py-3"><Skeleton className="h-3.5 w-32" /></td>
+                      <td className="px-3 py-3"><Skeleton className="h-3.5 w-32" /></td>
+                      <td className="px-3 py-3"><Skeleton className="h-3.5 w-16" /></td>
+                      <td className="px-3 py-3"><Skeleton className="ml-auto h-4 w-4" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : !loading && visible.length === 0 ? (
             <EmptyState
               icon={FlaskConical}
@@ -165,6 +198,7 @@ export function ReconciliationPageClient() {
                     <th className="px-3 py-2 font-medium">Building</th>
                     <th className="px-3 py-2 font-medium">Status</th>
                     <th className="px-3 py-2 font-medium">Built vs target</th>
+                    <th className="px-3 py-2 text-right font-medium">Scrapped</th>
                     <th className="px-3 py-2 font-medium">Production location</th>
                     <th className="px-3 py-2 font-medium">Stock the output to</th>
                     <th className="px-3 py-2 font-medium">Opened</th>
@@ -193,6 +227,15 @@ export function ReconciliationPageClient() {
                       </td>
                       <td className="px-3 py-2.5">
                         <OutputCell target={kit.target_qty} good={kit.good_qty} />
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
+                        {kit.scrap_qty == null ? (
+                          <span className="text-text-3">—</span>
+                        ) : kit.scrap_qty > 0 ? (
+                          <span className="font-medium text-danger">{kit.scrap_qty}</span>
+                        ) : (
+                          <span className="text-text-3">0</span>
+                        )}
                       </td>
                       <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
                         {kit.production_location ?? <span className="text-text-3">—</span>}
@@ -244,10 +287,9 @@ export function ReconciliationPageClient() {
       <NewKitDialog
         open={creating}
         onOpenChange={setCreating}
-        onCreated={() => {
-          void load();
-          toast.success('Kit opened');
-        }}
+        // Refresh the list for when the operator navigates back; the dialog
+        // handles the success toast and routes straight to the new kit.
+        onCreated={() => void load()}
       />
     </>
   );

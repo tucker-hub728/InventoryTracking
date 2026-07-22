@@ -7,6 +7,7 @@ import { ArrowRight, Boxes, CheckCircle2, Factory, Search, Wrench } from 'lucide
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
 import { KitStatusBadge } from '@/components/reconciliation/recon-bits';
+import { ItemLink } from '@/components/inventory/item-link';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -255,9 +256,11 @@ function ProductionFloorSheet({
                             key={line.item_id}
                             className="flex items-center justify-between gap-2 px-3 py-1.5"
                           >
-                            <span className="truncate font-mono text-xs text-text-2">
-                              {line.item_number}
-                            </span>
+                            <ItemLink
+                              itemNumber={line.item_number}
+                              itemId={line.item_id}
+                              className="truncate font-mono text-xs"
+                            />
                             <span className="shrink-0 font-mono text-xs tabular-nums text-text">
                               {line.on_floor_qty}
                             </span>
@@ -307,9 +310,11 @@ function ProductionFloorSheet({
                             key={line.item_id}
                             className="flex items-center justify-between gap-2 px-3 py-1.5"
                           >
-                            <span className="truncate font-mono text-xs text-text-2">
-                              {line.item_number}
-                            </span>
+                            <ItemLink
+                              itemNumber={line.item_number}
+                              itemId={line.item_id}
+                              className="truncate font-mono text-xs"
+                            />
                             <span className="shrink-0 font-mono text-xs tabular-nums text-text-3">
                               −{line.used_qty}
                             </span>

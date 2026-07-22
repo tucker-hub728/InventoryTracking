@@ -987,9 +987,7 @@ async def update_kit(
         # kit is still open but not once it is closed / cancelled (the record and
         # its lot are then final).
         if kit.status in ("closed", "cancelled"):
-            raise ValidationError(
-                "A closed or cancelled kit cannot be renamed", code="kit_locked"
-            )
+            raise ValidationError("A closed or cancelled kit cannot be renamed", code="kit_locked")
         new_name = payload.kit_number.strip()
         if not new_name:
             raise ValidationError("Kit name is required", code="kit_number_required")

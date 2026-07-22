@@ -503,7 +503,9 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [{"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]],
+            "lines": [
+                {"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]
+            ],
             "evidence_id": ev,
         },
     )  # ev already consumed by the first close-out
@@ -521,7 +523,9 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [{"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]],
+            "lines": [
+                {"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]
+            ],
             "evidence_id": ev_wrong,
         },
     )
