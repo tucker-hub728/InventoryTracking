@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { ArrowRight, Boxes, CheckCircle2, Factory, Search, Wrench } from 'lucide-react';
+import { ArrowRight, Boxes, CheckCircle2, Factory, Pencil, Plus, Search, Wrench } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
@@ -10,10 +10,19 @@ import { KitStatusBadge } from '@/components/reconciliation/recon-bits';
 import { ItemLink } from '@/components/inventory/item-link';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+import { useAuthStore, selectIsSuperAdmin } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
 import { kitsApi, type ApiFloorKitsResponse } from '@/lib/api/kits';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
@@ -29,11 +38,16 @@ import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
  * 2026-07-22, Task 2): WIP moves only through the kit's own issue / close-out.
  */
 export function ProductionClient() {
+  // Adding / renaming production areas is super-admin-only (client 2026-07-23):
+  // new areas are added by an admin on request, not by every operator.
+  const canManage = useAuthStore(selectIsSuperAdmin);
   const [floors, setFloors] = React.useState<LocationNode[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState('');
   const [selected, setSelected] = React.useState<LocationNode | null>(null);
+  const [adding, setAdding] = React.useState(false);
+  const [renaming, setRenaming] = React.useState<LocationNode | null>(null);
 
   const reload = React.useCallback(async (signal?: AbortSignal) => {
     try {
@@ -69,7 +83,17 @@ export function ProductionClient() {
 
   return (
     <>
-      <PageHeader title="Production" subtitle="Manufacturing & lab floors · work-in-progress on the floor" />
+      <PageHeader
+        title="Production"
+        subtitle="Manufacturing & lab areas · work-in-progress on the floor"
+        actions={
+          canManage ? (
+            <Button variant="primary" onClick={() => setAdding(true)}>
+              <Plus size={15} /> Add area
+            </Button>
+          ) : undefined
+        }
+      />
 
       <div className="px-6 py-5 sm:px-8">
         {loadError ? (
@@ -130,30 +154,46 @@ export function ProductionClient() {
                 {filtered.map((floor) => {
                   const busy = floor.active_allocation_count > 0;
                   return (
-                    <button
-                      key={floor.id}
-                      type="button"
-                      onClick={() => setSelected(floor)}
-                      className={cn(
-                        'flex flex-col gap-3 rounded-lg border border-border bg-bg-elev p-4 text-left transition-colors',
-                        'hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                        !busy && 'opacity-90',
-                      )}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="grid size-10 place-items-center rounded-md bg-surface-2 text-accent">
-                          <Factory size={18} />
-                        </div>
-                        {busy ? (
-                          <Badge tone="warning">{floor.active_allocation_count} WIP</Badge>
-                        ) : (
-                          <span className="text-[11px] font-medium uppercase tracking-wide text-text-3">
-                            Idle
-                          </span>
+                    <div key={floor.id} className="group relative">
+                      <button
+                        type="button"
+                        onClick={() => setSelected(floor)}
+                        className={cn(
+                          'flex w-full flex-col gap-3 rounded-lg border border-border bg-bg-elev p-4 text-left transition-colors',
+                          'hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+                          !busy && 'opacity-90',
                         )}
-                      </div>
-                      <div className="text-sm font-medium text-text">{floor.name}</div>
-                    </button>
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="grid size-10 place-items-center rounded-md bg-surface-2 text-accent">
+                            <Factory size={18} />
+                          </div>
+                          {busy ? (
+                            <Badge tone="warning">{floor.active_allocation_count} WIP</Badge>
+                          ) : (
+                            <span className="text-[11px] font-medium uppercase tracking-wide text-text-3">
+                              Idle
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-sm font-medium text-text">{floor.name}</div>
+                      </button>
+                      {canManage && (
+                        <button
+                          type="button"
+                          onClick={() => setRenaming(floor)}
+                          aria-label={`Rename ${floor.name}`}
+                          title="Rename area"
+                          className={cn(
+                            'absolute bottom-2 right-2 grid size-7 place-items-center rounded-md text-text-3 transition',
+                            'opacity-0 hover:bg-surface-2 hover:text-text focus:outline-none',
+                            'focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100',
+                          )}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -163,7 +203,190 @@ export function ProductionClient() {
       </div>
 
       <ProductionFloorSheet floor={selected} onOpenChange={(o) => !o && setSelected(null)} />
+
+      <AddAreaDialog
+        open={adding}
+        onOpenChange={setAdding}
+        existingNames={floors.map((f) => f.name)}
+        onCreated={() => void reload()}
+      />
+      <RenameAreaDialog
+        area={renaming}
+        onOpenChange={(o) => !o && setRenaming(null)}
+        existingNames={floors.map((f) => f.name)}
+        onRenamed={() => void reload()}
+      />
     </>
+  );
+}
+
+/** Add a new production area (admin). The server generates the code from the
+ *  name; here we only collect the name and guard against an obvious duplicate. */
+function AddAreaDialog({
+  open,
+  onOpenChange,
+  existingNames,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  existingNames: string[];
+  onCreated: () => void;
+}) {
+  const [name, setName] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (open) {
+      setName('');
+      setError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  const trimmed = name.trim();
+  const dupe = existingNames.some((n) => n.toLowerCase() === trimmed.toLowerCase());
+  const canSubmit = trimmed.length > 0 && !dupe && !busy;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await locationNodesApi.createProductionArea(trimmed);
+      onCreated();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to add the area.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add production area</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-3">
+          <p className="text-xs text-text-3">
+            A new manufacturing or lab area under Production. You can rename it later.
+          </p>
+          <div className="space-y-1.5">
+            <label htmlFor="new-area-name" className="text-xs font-medium text-text-2">
+              Area name
+            </label>
+            <Input
+              id="new-area-name"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void submit()}
+              placeholder="e.g. Clean Room Three"
+              maxLength={128}
+              aria-label="Area name"
+            />
+            {dupe && (
+              <p className="text-xs text-danger">An area with that name already exists.</p>
+            )}
+          </div>
+          {error && <p className="text-xs text-danger">{error}</p>}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit}>
+            {busy ? 'Adding…' : 'Add area'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Rename a production area to the client's real area name. */
+function RenameAreaDialog({
+  area,
+  onOpenChange,
+  existingNames,
+  onRenamed,
+}: {
+  area: LocationNode | null;
+  onOpenChange: (open: boolean) => void;
+  existingNames: string[];
+  onRenamed: () => void;
+}) {
+  const [name, setName] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (area) {
+      setName(area.name);
+      setError(null);
+      setBusy(false);
+    }
+  }, [area]);
+
+  const trimmed = name.trim();
+  const unchanged = trimmed === area?.name;
+  const dupe =
+    !unchanged &&
+    existingNames.some((n) => n.toLowerCase() === trimmed.toLowerCase());
+  const canSubmit = trimmed.length > 0 && !unchanged && !dupe && !busy;
+
+  const submit = async () => {
+    if (!canSubmit || !area) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await locationNodesApi.rename(area.id, trimmed);
+      onRenamed();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to rename the area.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={Boolean(area)} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Rename area</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-3">
+          <div className="space-y-1.5">
+            <label htmlFor="rename-area-name" className="text-xs font-medium text-text-2">
+              Area name
+            </label>
+            <Input
+              id="rename-area-name"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void submit()}
+              maxLength={128}
+              aria-label="Area name"
+            />
+            {dupe && (
+              <p className="text-xs text-danger">An area with that name already exists.</p>
+            )}
+          </div>
+          {error && <p className="text-xs text-danger">{error}</p>}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit}>
+            {busy ? 'Saving…' : 'Save'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

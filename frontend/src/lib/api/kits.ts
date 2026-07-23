@@ -56,6 +56,23 @@ export interface KitLineSourceOption {
   cells: CellOption[];
 }
 
+/** One lot of a component available at one location — a pickable issue source
+ *  (KIT-002/003). Listed FIFO-ordered so the picker can split a need across
+ *  lots. For a box, `cells` are the exact vials of this lot. */
+export interface KitLineSourceLot {
+  lot_id: string;
+  lot_number: string | null;
+  expiration_date: string | null;
+  node_id: string;
+  node_name: string;
+  path: string;
+  qty: number;
+  is_grid: boolean;
+  grid_rows: number | null;
+  grid_cols: number | null;
+  cells: CellOption[];
+}
+
 /** A free cell to place a returned unit into. */
 export interface ReturnCellInput {
   grid_row: number;
@@ -85,10 +102,21 @@ export interface ApiKitLine {
   return_location_node_id: string | null;
   /** Total available for this component across all locations. */
   on_hand: number;
-  /** Locations holding the component, with per-node qty. */
+  /** Locations holding the component, with per-node qty (legacy picker). */
   source_options: KitLineSourceOption[];
+  /** Per-lot sources for the multi-source picker (KIT-002/003), FIFO-ordered. */
+  source_lots: KitLineSourceLot[];
+  /** The (lot, location) this line was ISSUED from — the post-issue snapshot. */
+  issued_from: KitLineIssuedFrom[];
   /** Available at the currently-chosen source node (the issue cap). */
   source_available: number;
+}
+
+/** One (lot, source location) a line was issued from, with the quantity. */
+export interface KitLineIssuedFrom {
+  lot_number: string | null;
+  location: string;
+  qty: number;
 }
 
 export interface ApiKit {
@@ -166,7 +194,18 @@ export interface ApiKitAuditEvent {
   /** Close-out only: where the produced output was stocked + its lot expiry. */
   output_location: string | null;
   output_expiration_date: string | null;
+  /** Material this batch consumed, per component (produce & close). Consuming
+   *  writes no stock movement, so this is the only record of a produce batch's
+   *  consumption. Empty for non-producing events. */
+  consumed: KitConsumedLine[];
   diff: Record<string, { before: unknown; after: unknown }> | null;
+}
+
+/** One component consumed by a produce / close batch. */
+export interface KitConsumedLine {
+  item_id: string;
+  item_number: string;
+  qty: number;
 }
 
 export interface ApiKitActivityResponse {
@@ -231,6 +270,7 @@ export const KIT_OPERATION_LABEL: Record<string, string> = {
   additional_issue: 'Additional issue',
   early_return: 'Excess returned',
   production_draft: 'Production figures saved',
+  produce: 'Produced a batch',
   close_out: 'Closed out',
   cancel: 'Cancelled',
 };
@@ -258,11 +298,23 @@ export interface KitLineUpdateInput {
   source_location_node_id?: string;
 }
 
+/** One lot pick within a line's issue — draw `qty` of the component from a
+ *  specific (location, lot). For a box lot, `cell_allocation_ids` names the
+ *  exact vials and `qty` follows their count (KIT-003). */
+export interface IssueSourceInput {
+  node_id: string;
+  lot_id?: string | null;
+  qty: number;
+  cell_allocation_ids?: string[];
+}
+
 export interface IssueLineInput {
   line_id: string;
-  issued_qty: number;
+  /** Multi-source (preferred): draw the need across one or more lot picks. */
+  sources?: IssueSourceInput[];
+  /** Legacy single-source (used only when `sources` is empty). */
+  issued_qty?: number;
   source_location_node_id?: string | null;
-  /** LN2 only: the exact cells to pull. Length must equal issued_qty. */
   cell_allocation_ids?: string[];
 }
 
@@ -277,8 +329,10 @@ export interface ProductionDraftInput {
 }
 
 export interface AdditionalIssueInput {
-  qty: number;
-  /** LN2 only: the exact cells to pull. Length must equal qty. */
+  /** Multi-source (preferred, KIT-004): pull the extra from any lots/shelves. */
+  sources?: IssueSourceInput[];
+  /** Legacy single-source (used only when `sources` is empty). */
+  qty?: number;
   cell_allocation_ids?: string[];
 }
 
@@ -291,6 +345,7 @@ export interface ReturnExcessInput {
   reason?: string | null;
 }
 
+/** Per-component close-out: material used + where the leftover back-flushes. */
 export interface CloseOutLineInput {
   line_id: string;
   used_qty: number;
@@ -298,10 +353,41 @@ export interface CloseOutLineInput {
   return_cells?: ReturnCellInput[];
 }
 
+/** One component's material consumed by a produce batch (operator-entered). */
+export interface ProduceLineInput {
+  line_id: string;
+  used_qty: number;
+}
+
+/** One place a produced batch is stocked. Split a batch across several when a
+ *  single box can't hold every unit (client 2026-07-23) — the units stay ONE lot
+ *  placed across the destinations, and the `qty`s must sum to `good_qty`. A box
+ *  destination lists one `cells` entry per unit; a shelf/freezer takes `qty`. */
+export interface OutputDestinationInput {
+  location_node_id: string;
+  qty: number;
+  cells?: ReturnCellInput[];
+}
+
+/** Produce a batch and KEEP the kit open (KIT-007 incremental production).
+ *  The operator enters `used` per component (≥ recipe need, ≤ on-floor). */
+export interface ProduceInput {
+  good_qty: number;
+  scrap_qty: number;
+  /** Multi-destination output (split across locations). */
+  outputs: OutputDestinationInput[];
+  output_expiration_date?: string | null;
+  lines: ProduceLineInput[];
+  /** Signed write (action kit.produce). */
+  evidence_id: string;
+  reason: string;
+}
+
 export interface CloseOutInput {
   good_qty: number;
   scrap_qty: number;
-  output_location_node_id: string;
+  /** Multi-destination output (split across locations). Empty when good_qty is 0. */
+  outputs: OutputDestinationInput[];
   /** Expiry of the produced lot (REQ-2026-07-01-INV-008). ISO yyyy-mm-dd. */
   output_expiration_date?: string | null;
   lines: CloseOutLineInput[];
@@ -382,6 +468,10 @@ export const kitsApi = {
 
   saveProduction: (id: string, input: ProductionDraftInput) =>
     api.patch<ApiKit>(`/kits/${id}/production`, { json: input }),
+
+  /** Produce a batch and keep the kit open (e-signed). */
+  produce: (id: string, input: ProduceInput) =>
+    api.post<ApiKit>(`/kits/${id}/produce`, { json: input }),
 
   additionalIssue: (id: string, lineId: string, input: AdditionalIssueInput) =>
     api.post<ApiKit>(`/kits/${id}/lines/${lineId}/additional-issue`, { json: input }),

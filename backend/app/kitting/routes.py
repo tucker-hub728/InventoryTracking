@@ -51,11 +51,15 @@ from .schemas import (
     FloorKitLine,
     FloorKitsResponse,
     IssueRequest,
+    IssueSourceInput,
     KitActivityResponse,
     KitActivityRow,
     KitAuditEventRow,
+    KitConsumedLine,
     KitCreateRequest,
+    KitLineIssuedFrom,
     KitLineRead,
+    KitLineSourceLot,
     KitLineSourceOption,
     KitLineUpdateRequest,
     KitListItem,
@@ -63,6 +67,7 @@ from .schemas import (
     KitNumberSuggestion,
     KitRead,
     KitUpdateRequest,
+    ProduceRequest,
     ProductionDraftRequest,
     ReturnExcessRequest,
 )
@@ -75,6 +80,7 @@ _PLACEABLE_NODE_TYPES = ("shelf", "sub_location")
 
 # The reauth action verb minted by the frontend before close-out.
 CLOSEOUT_ACTION = "kit.closeout"
+PRODUCE_ACTION = "kit.produce"
 CANCEL_ACTION = "kit.cancel"
 _BUILT_TIERS = ("sub_assembly", "finished_good")
 
@@ -93,8 +99,20 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
 
 def _on_floor(line: KitLine) -> int:
     """What is still physically on the production floor for this line —
-    ``issued + additional − early_returned`` (§3.3 of the build plan)."""
-    return line.issued_qty + line.additional_issued_qty - line.early_returned_qty
+    ``issued + additional − early_returned − used``.
+
+    ``used_qty`` is cumulative across produce batches (KIT-007 incremental /
+    serialized production): each ``produce`` consumes material, so the floor
+    shrinks and the next batch (or close-out back-flush) sees only what remains.
+    For a one-shot close (``used_qty`` starts null → 0) this is the classic
+    ``issued + additional − early_returned``, so existing behaviour is unchanged.
+    """
+    return (
+        line.issued_qty
+        + line.additional_issued_qty
+        - line.early_returned_qty
+        - (line.used_qty or 0)
+    )
 
 
 def _needed(line: KitLine, target_qty: int) -> Decimal:
@@ -102,26 +120,6 @@ def _needed(line: KitLine, target_qty: int) -> Decimal:
     (``Transaction_Spec`` §2, "quantity needed is derived from the BOM"). Not
     stored; recomputed wherever it gates a step."""
     return line.qty_per_unit * target_qty
-
-
-def _effective_target(kit: Kit) -> int:
-    """The unit count the kit is committed to build **right now**: the actual
-    attempted output (good + scrap) once production figures exist, otherwise the
-    planned target.
-
-    Client-directed (2026-07-22), BEYOND ``Transaction_Spec`` — the spec keeps
-    "needed" fixed at ``BOM × target`` and reconciles on actual Qty Used. Here
-    "needed" is dynamic: producing more units than planned raises it, so more
-    material must be issued and less can be returned. Isolated in this one helper
-    so the deviation is easy to trace / revert."""
-    attempted = (kit.good_qty or 0) + (kit.scrap_qty or 0)
-    return attempted if attempted > 0 else kit.target_qty
-
-
-def _needed_units(line: KitLine, kit: Kit) -> int:
-    """The dynamic need for a line, rounded up to whole units — the floor the
-    on-floor quantity (and Qty Used) may not drop below."""
-    return kit_repo.default_issued_qty(line.qty_per_unit, _effective_target(kit))
 
 
 def _kit_snapshot(kit: Kit) -> dict:
@@ -169,10 +167,13 @@ def _kit_snapshot(kit: Kit) -> dict:
 
 
 def _line_returned(line: KitLine) -> int | None:
-    """The close-out back-flush amount (null until used is entered)."""
+    """The close-out back-flush amount — whatever is still on the floor once the
+    consumed material is accounted for (null until any production is recorded).
+    ``_on_floor`` already subtracts cumulative ``used_qty``, so this is simply the
+    remaining floor."""
     if line.used_qty is None:
         return None
-    return _on_floor(line) - line.used_qty
+    return _on_floor(line)
 
 
 def _line_read(
@@ -183,11 +184,61 @@ def _line_read(
     node_labels: dict[uuid.UUID, tuple[str, str]],
     cells_by_node: dict[uuid.UUID, dict[uuid.UUID, list]] | None = None,
     grid_meta: dict[uuid.UUID, tuple[int, int]] | None = None,
+    lots_by_item: dict[uuid.UUID, list] | None = None,
+    issued_breakdown: dict[uuid.UUID, list] | None = None,
 ) -> KitLineRead:
     item = items.get(line.item_id)
     per_node = stock_by_node.get(line.item_id, {})
     line_cells = (cells_by_node or {}).get(line.item_id, {})
     grid_meta = grid_meta or {}
+
+    def _node_path(node_id: uuid.UUID | None) -> str:
+        if node_id is None:
+            return ""
+        name, path = node_labels.get(node_id, ("", ""))
+        return path or name
+
+    issued_from = [
+        KitLineIssuedFrom(lot_number=lot_number, location=_node_path(node_id), qty=qty)
+        for lot_number, node_id, qty in (issued_breakdown or {}).get(line.id, [])
+    ]
+
+    def _lot_cells(node_id: uuid.UUID, lot_id: uuid.UUID) -> list[CellOption]:
+        """The occupied cells of one lot in one box — so the picker can offer the
+        exact vials of that lot (D2)."""
+        return [
+            CellOption(
+                allocation_id=str(a.id),
+                grid_row=int(a.grid_row),
+                grid_col=int(a.grid_col),
+                lot_id=str(a.lot_id),
+                lot_number=getattr(getattr(a, "lot", None), "lot_number", None),
+                expiration_date=getattr(getattr(a, "lot", None), "expiration_date", None),
+            )
+            for a in line_cells.get(node_id, [])
+            if a.lot_id == lot_id
+        ]
+
+    source_lots: list[KitLineSourceLot] = []
+    for lot_id, lot_number, exp, node_id, qty in (lots_by_item or {}).get(line.item_id, []):
+        name, path = node_labels.get(node_id, ("", ""))
+        rows_cols = grid_meta.get(node_id)
+        is_grid = rows_cols is not None
+        source_lots.append(
+            KitLineSourceLot(
+                lot_id=str(lot_id),
+                lot_number=lot_number,
+                expiration_date=exp,
+                node_id=str(node_id),
+                node_name=name,
+                path=path,
+                qty=qty,
+                is_grid=is_grid,
+                grid_rows=rows_cols[0] if rows_cols else None,
+                grid_cols=rows_cols[1] if rows_cols else None,
+                cells=_lot_cells(node_id, lot_id) if is_grid else [],
+            )
+        )
 
     def _option(node_id: uuid.UUID, qty: int) -> KitLineSourceOption:
         cells = line_cells.get(node_id, [])
@@ -239,6 +290,8 @@ def _line_read(
         ),
         on_hand=sum(per_node.values()),
         source_options=options,
+        source_lots=source_lots,
+        issued_from=issued_from,
         source_available=(
             per_node.get(line.source_location_node_id, 0) if line.source_location_node_id else 0
         ),
@@ -252,7 +305,13 @@ async def _kit_read(db, kit: Kit) -> KitRead:
     # source picker + on-hand preview).
     line_item_ids = {ln.item_id for ln in kit.lines}
     stock_by_node = await kit_repo.item_stock_by_node(db, line_item_ids)
-    node_labels = await loc_repo.node_label_map(db) if stock_by_node else {}
+    # Per-lot rows for the multi-source Issue picker (KIT-002/003).
+    lots_by_item = await kit_repo.item_stock_by_node_lot(db, line_item_ids)
+    # What each line was ISSUED from (lot × source), for the post-issue snapshot.
+    issued_breakdown = await kit_repo.line_issue_breakdown(db, kit.id)
+    # Labels are needed for both the source picker and the issued-from snapshot,
+    # so load them whenever the kit has lines.
+    node_labels = await loc_repo.node_label_map(db) if kit.lines else {}
     # LN2 boxes additionally carry their occupied cells, so the Issue step can
     # draw the grid and the operator picks exact vials (D2).
     cells_by_node = await kit_repo.item_cells_by_node(db, line_item_ids)
@@ -285,7 +344,15 @@ async def _kit_read(db, kit: Kit) -> KitRead:
         updated_at=kit.updated_at,
         lines=[
             _line_read(
-                ln, kit.target_qty, items, stock_by_node, node_labels, cells_by_node, grid_meta
+                ln,
+                kit.target_qty,
+                items,
+                stock_by_node,
+                node_labels,
+                cells_by_node,
+                grid_meta,
+                lots_by_item,
+                issued_breakdown,
             )
             for ln in kit.lines
         ],
@@ -308,10 +375,18 @@ async def _move_to_production(
     movement_type: str,
     note: str,
     current,
+    node_id: uuid.UUID | None = None,
+    lot_id: uuid.UUID | None = None,
     cell_allocation_ids: list[str] | None = None,
 ) -> None:
-    """Move ``qty`` of a line's component from its source node **to the kit's
+    """Move ``qty`` of a line's component from a source node **to the kit's
     production node** — the relocation ``Transaction_Spec`` §2 requires.
+
+    ``node_id`` selects the source location (defaults to the line's recorded
+    source for the legacy single-source path). ``lot_id``, when given, restricts
+    the draw to that one lot — the multi-source picker issues one pick per
+    (location, lot) so it can split a need across lots FIFO (KIT-003). Without a
+    ``lot_id`` the whole node is drained FIFO across its lots (legacy behavior).
 
     Reduces the source allocation FIFO (by expiry, then age) and re-allocates
     the **same lot** at the production node. Retaining the source lot is not a
@@ -322,7 +397,8 @@ async def _move_to_production(
     (TRX-001) while remaining physically placed as WIP. Blocks (422) when the
     source doesn't hold enough.
     """
-    node_id = line.source_location_node_id
+    if node_id is None:
+        node_id = line.source_location_node_id
     if node_id is None:
         raise ValidationError(
             f"Line {line.line_no} needs a source location", code="source_required"
@@ -353,10 +429,14 @@ async def _move_to_production(
             )
     else:
         allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, node_id)
+        if lot_id is not None:
+            # Multi-source: this pick draws one specific lot at the node.
+            allocs = [a for a in allocs if a.lot_id == lot_id]
         available = sum(int(a.qty) for a in allocs)
         if qty > available:
+            where = "that lot at the source location" if lot_id is not None else "the source location"
             raise ValidationError(
-                f"Line {line.line_no}: only {available} available at the source location "
+                f"Line {line.line_no}: only {available} available at {where} "
                 f"(tried to issue {qty}).",
                 code="insufficient_source_stock",
             )
@@ -376,12 +456,12 @@ async def _move_to_production(
     # the same lot would otherwise post three rows of −1 for what is a single
     # transaction. Distinct lots still get their own rows: the ledger groups by
     # lot, and merging them would misstate which lot moved.
-    for lot_id, moved in taken.items():
+    for src_lot_id, moved in taken.items():
         # Merge into the lot's existing WIP row on the production floor rather
         # than opening a second row for the same lot (bulk placement).
         await loc_repo.create_or_merge_allocation(
             db,
-            lot_id=lot_id,
+            lot_id=src_lot_id,
             location_node_id=prod_node,
             qty=moved,
             created_by_user_id=current.id,
@@ -398,8 +478,35 @@ async def _move_to_production(
             performed_by_user_id=current.id,
             reauth_evidence_id=None,
             notes=note,
-            lot_id=lot_id,
+            lot_id=src_lot_id,
         )
+
+
+async def _parse_source_picks(
+    db, *, line: KitLine, sources: list[IssueSourceInput]
+) -> tuple[list[tuple[uuid.UUID, uuid.UUID | None, int, list[str]]], int, uuid.UUID | None]:
+    """Validate a line's multi-source picks and normalize them to moves.
+
+    Returns ``(moves, total_qty, primary_node)`` where each move is
+    ``(node_id, lot_id, qty, cells)``. ``qty`` is the cell count for a box pick,
+    otherwise the entered quantity. ``primary_node`` (the largest pick) seeds the
+    line's source / return default. Per-lot availability is NOT checked here — it
+    is enforced as each pick actually moves (``insufficient_source_stock``)."""
+    moves: list[tuple[uuid.UUID, uuid.UUID | None, int, list[str]]] = []
+    total = 0
+    for s in sources:
+        node_id = _parse_uuid_or_422(s.node_id, field="node_id")
+        if not await kit_repo.storage_node_exists(db, node_id):
+            raise NotFoundError("Source location not found", code="source_not_found")
+        cells = list(s.cell_allocation_ids)
+        lot_id = _parse_uuid_or_422(s.lot_id, field="lot_id") if s.lot_id else None
+        eff = len(cells) if cells else s.qty
+        if eff <= 0:
+            continue
+        moves.append((node_id, lot_id, eff, cells))
+        total += eff
+    primary = max(moves, key=lambda m: m[2])[0] if moves else None
+    return moves, total, primary
 
 
 async def _drain_production(db, *, kit: Kit, line: KitLine, qty: int) -> None:
@@ -583,11 +690,54 @@ async def _validate_return_cells(db, node, qty: int, cells: list, field: str) ->
         )
 
 
-async def _place(
+async def _resolve_output_destinations(
+    db, payload, good: int
+) -> list[tuple[uuid.UUID, int, list]]:
+    """Normalise + validate the produce / close output into placeable
+    ``(node, qty, cells)`` destinations.
+
+    Supports SPLITTING a batch across several locations (client 2026-07-23) when
+    one box can't hold every unit — the leftover good units go to another box, a
+    freezer, or a shelf. ``payload.outputs`` (the multi-destination list) wins;
+    otherwise the single ``output_location_node_id`` (+ ``output_cells``) is used
+    as one destination for the whole ``good``. Every destination is checked
+    placeable, its cells validated, and the quantities must sum to ``good``.
+    Returns ``[]`` when nothing is produced (``good == 0`` at close-out)."""
+    if good <= 0:
+        return []
+    if payload.outputs:
+        raw = [(o.location_node_id, o.qty, o.cells) for o in payload.outputs]
+    elif payload.output_location_node_id is not None:
+        raw = [(payload.output_location_node_id, good, payload.output_cells)]
+    else:
+        raise ValidationError("An output location is required", code="output_required")
+    total = sum(qty for _, qty, _ in raw)
+    if total != good:
+        raise ValidationError(
+            f"Output placement must total {good} unit(s) — got {total}.",
+            code="output_qty_mismatch",
+        )
+    seen: set[uuid.UUID] = set()
+    dests: list[tuple[uuid.UUID, int, list]] = []
+    for node_str, qty, cells in raw:
+        node_uuid = _parse_uuid_or_422(node_str, field="output_location_node_id")
+        if node_uuid in seen:
+            raise ValidationError(
+                "Each output location can be used once — combine the quantities.",
+                code="output_duplicate_node",
+            )
+        seen.add(node_uuid)
+        node_obj = await _require_placeable(db, node_uuid, "Output location")
+        await _validate_return_cells(db, node_obj, qty, cells, "Output location")
+        dests.append((node_uuid, qty, cells))
+    return dests
+
+
+async def _place_units(
     db,
     *,
     kit: Kit,
-    item_id: uuid.UUID,
+    lot,
     node_id: uuid.UUID,
     qty: int,
     movement_type: str,
@@ -595,40 +745,43 @@ async def _place(
     evidence: uuid.UUID,
     note: str,
     current,
-    expiration_date: date | None = None,
+    cells: list | None = None,
 ) -> None:
-    """Place ``qty`` of an item into a node — create a lot + allocation and write
-    the unit-IN movement. Used for the production output at close-out: the AY/FG
-    was genuinely just manufactured, so a new lot is correct here (unlike a
-    return, which moves the material's own lot back).
+    """Allocate ``qty`` of an EXISTING ``lot`` into a node and write the unit-IN
+    movement. The lot is created by the caller so a single batch can be split
+    across several destinations (client 2026-07-23) while staying ONE lot.
 
-    ``expiration_date`` carries the produced item's shelf life
-    (REQ-2026-07-01-INV-008); without it the lot lands with a NULL expiry and
-    never fires expiry alerting.
+    ``cells`` places the units into specific vial positions of an LN2 box (KIT-005
+    "LN2 tank position") — one allocation per cell, qty 1, so single-occupancy
+    holds; ``qty`` must equal ``len(cells)``. Without cells the units land as one
+    bulk allocation on a shelf / freezer. Either way the ledger records ONE
+    ``production_output`` row per destination (the cell is a placement detail, D4).
     """
-    lot = await inv_repo.create_lot(
-        db,
-        item_id=item_id,
-        # The produced lot IS the kit/batch — the operator names it once, when
-        # opening the kit, and that name carries the traveler's batch number
-        # through to inventory. Lot numbers are unique per item and kit names
-        # are globally unique, so this can never collide.
-        lot_number=kit.kit_number,
-        created_by_user_id=current.id,
-        expiration_date=expiration_date,
-    )
-    await loc_repo.create_or_merge_allocation(
-        db,
-        lot_id=lot.id,
-        location_node_id=node_id,
-        qty=qty,
-        created_by_user_id=current.id,
-    )
+    if cells:
+        # LN2 box: one allocation per chosen cell (cells are single-occupancy).
+        for c in cells:
+            await loc_repo.create_allocation(
+                db,
+                lot_id=lot.id,
+                location_node_id=node_id,
+                qty=1,
+                grid_row=c.grid_row,
+                grid_col=c.grid_col,
+                created_by_user_id=current.id,
+            )
+    else:
+        await loc_repo.create_or_merge_allocation(
+            db,
+            lot_id=lot.id,
+            location_node_id=node_id,
+            qty=qty,
+            created_by_user_id=current.id,
+        )
     await kit_repo.create_kit_movement(
         db,
         kit_id=kit.id,
         kit_line_id=kit_line_id,
-        item_id=item_id,
+        item_id=lot.item_id,
         movement_type=movement_type,
         qty_delta=qty,
         from_location_node_id=None,
@@ -638,6 +791,124 @@ async def _place(
         notes=note,
         lot_id=lot.id,
     )
+
+
+async def _produce_batch(
+    db,
+    *,
+    kit: Kit,
+    good: int,
+    scrap: int,
+    destinations: list[tuple[uuid.UUID, int, list]],
+    expiration_date: date | None,
+    used_by_line: dict[uuid.UUID, int],
+    evidence: uuid.UUID,
+    note: str,
+    current,
+) -> None:
+    """Consume material and place ONE produced batch of the AY/FG — shared by the
+    ``produce`` endpoint (keep open) and ``close-out`` (finalise), for KIT-007
+    incremental / serialized production.
+
+    The operator ENTERS the material used per component (``used_by_line``). Each
+    is validated (client 2026-07-23): at least the recipe need
+    ``ceil(qty_per_unit × (good + scrap))`` — you can't make N units with less
+    than N units' worth (``used_below_need``) — and no more than what's on the
+    floor (``used_exceeds_issued``). A component missing a value is
+    ``used_qty_missing``. The used amount is drained and added to the cumulative
+    ``used_qty``; ``good`` units are placed into the output as a NEW per-batch lot
+    (``KIT-0289-1``, ``-2``, … — its own expiry, client 2026-07-23) and
+    ``good_qty`` / ``scrap_qty`` accumulate. The batch's units may be SPLIT across
+    several ``destinations`` (``(node, qty, cells)``; qtys sum to ``good``) when a
+    single box can't hold them all — one lot, several places. It does NOT
+    back-flush or change status — the caller decides whether to stay open or
+    finalise."""
+    attempted = good + scrap
+    # Pre-flight EVERY line before anything moves, so a short batch produces nothing.
+    consume: dict[uuid.UUID, int] = {}
+    for line in kit.lines:
+        if line.id not in used_by_line:
+            raise ValidationError(
+                f"Enter the material used for line {line.line_no}", code="used_qty_missing"
+            )
+        used = used_by_line[line.id]
+        need = kit_repo.default_issued_qty(line.qty_per_unit, attempted)
+        if used < need:
+            raise ValidationError(
+                f"Line {line.line_no}: used {used} is below the {need} needed to make "
+                f"{attempted} unit(s) — you can't make {attempted} with less than "
+                f"{attempted} unit(s)' worth of material.",
+                code="used_below_need",
+            )
+        on_floor = _on_floor(line)
+        if used > on_floor:
+            raise ValidationError(
+                f"Line {line.line_no}: used {used} exceeds the {on_floor} on the floor. "
+                f"Issue more before producing.",
+                code="used_exceeds_issued",
+            )
+        consume[line.id] = used
+    for line in kit.lines:
+        used = consume[line.id]
+        if used <= 0:
+            continue
+        await _drain_production(db, kit=kit, line=line, qty=used)
+        line.used_qty = (line.used_qty or 0) + used
+    if good > 0 and destinations:
+        # Number this batch's lot: KIT-0289-<n>, n = prior batch lots + 1. ONE lot
+        # for the whole batch, even split across destinations (client 2026-07-23).
+        batch_no = (
+            await inv_repo.count_lots_by_number_prefix(
+                db, item_id=kit.item_id, prefix=f"{kit.kit_number}-"
+            )
+            + 1
+        )
+        lot = await inv_repo.create_lot(
+            db,
+            item_id=kit.item_id,
+            lot_number=f"{kit.kit_number}-{batch_no}",
+            created_by_user_id=current.id,
+            expiration_date=expiration_date,
+        )
+        for node_id, qty, cells in destinations:
+            await _place_units(
+                db,
+                kit=kit,
+                lot=lot,
+                node_id=node_id,
+                qty=qty,
+                movement_type="production_output",
+                kit_line_id=None,
+                evidence=evidence,
+                note=note,
+                current=current,
+                cells=cells or None,
+            )
+        # Primary destination (informational — the ledger has every split).
+        kit.output_location_node_id = destinations[0][0]
+    kit.good_qty = (kit.good_qty or 0) + good
+    kit.scrap_qty = (kit.scrap_qty or 0) + scrap
+
+
+async def _consumed_context(
+    db, kit: Kit, used_by_line: dict[uuid.UUID, int]
+) -> list[dict]:
+    """The per-component material a batch consumed, resolved to item numbers, for
+    the audit event. Consuming material writes NO stock movement (it left stock at
+    issue), so without this the partial-produce consumption is invisible in the
+    activity timeline — the client wants each batch's consumption shown, not only
+    the close-out total (2026-07-23)."""
+    consumed_ids = {ln.item_id for ln in kit.lines if used_by_line.get(ln.id, 0) > 0}
+    items = await kit_repo.load_item_map(db, consumed_ids) if consumed_ids else {}
+    return [
+        {
+            "item_id": str(ln.item_id),
+            "item_number": items[ln.item_id].item_number if ln.item_id in items else "",
+            "qty": used_by_line[ln.id],
+        }
+        for ln in kit.lines
+        if used_by_line.get(ln.id, 0) > 0
+    ]
 
 
 # ── List / get ──────────────────────────────────────────────────────────
@@ -833,6 +1104,15 @@ def _audit_event_row(e, node_labels: dict | None = None) -> KitAuditEventRow:
         if label:
             # node_label_map yields (name, path); prefer the fuller path.
             out_label = label[1] or label[0]
+    consumed = [
+        KitConsumedLine(
+            item_id=str(c.get("item_id")),
+            item_number=str(c.get("item_number") or ""),
+            qty=int(c.get("qty") or 0),
+        )
+        for c in (ctx.get("consumed") or [])
+        if int(c.get("qty") or 0) > 0
+    ]
     return KitAuditEventRow(
         id=str(e.id),
         occurred_at=e.occurred_at,
@@ -843,6 +1123,7 @@ def _audit_event_row(e, node_labels: dict | None = None) -> KitAuditEventRow:
         scrap_qty=scrap,
         output_location=out_label,
         output_expiration_date=ctx.get("output_expiration_date"),
+        consumed=consumed,
         diff=e.diff,
     )
 
@@ -1105,72 +1386,69 @@ async def issue_kit(
 
     before = _kit_snapshot(kit)
 
-    # The draft edits (issued qty + source per line) are committed here, so the
-    # Issue button is the only write — nothing is persisted while the user types.
-    cells_by_line: dict[uuid.UUID, list[str]] = {}
+    # The draft edits are committed here, so the Issue button is the only write —
+    # nothing is persisted while the user types. Two shapes are accepted per line:
+    # the multi-source ``sources`` list (KIT-002/003, preferred), or the legacy
+    # single source + issued_qty [+ cells].
+    lines_by_id = {ln.id: ln for ln in kit.lines}
+    multi_moves: dict[uuid.UUID, list[tuple[uuid.UUID, uuid.UUID | None, int, list[str]]]] = {}
+    legacy_cells: dict[uuid.UUID, list[str]] = {}
     if payload and payload.lines:
-        lines_by_id = {ln.id: ln for ln in kit.lines}
-        for line_in in payload.lines:
-            cells_by_line[_parse_uuid_or_422(line_in.line_id, field="line_id")] = (
-                line_in.cell_allocation_ids
-            )
         for line_in in payload.lines:
             lid = _parse_uuid_or_422(line_in.line_id, field="line_id")
             line = lines_by_id.get(lid)
             if line is None:
                 raise ValidationError(f"Line {lid} is not on this kit", code="line_not_in_kit")
-            line.issued_qty = line_in.issued_qty
-            if line_in.source_location_node_id is not None:
-                src = _parse_uuid_or_422(
-                    line_in.source_location_node_id, field="source_location_node_id"
+            if line_in.sources:
+                moves, total, primary = await _parse_source_picks(
+                    db, line=line, sources=line_in.sources
                 )
-                if not await kit_repo.storage_node_exists(db, src):
-                    raise NotFoundError("Source location not found", code="source_not_found")
-                line.source_location_node_id = src
+                line.issued_qty = total
+                if primary is not None:
+                    line.source_location_node_id = primary
+                multi_moves[lid] = moves
+            else:
+                line.issued_qty = line_in.issued_qty or 0
+                legacy_cells[lid] = line_in.cell_allocation_ids
+                if line_in.source_location_node_id is not None:
+                    src = _parse_uuid_or_422(
+                        line_in.source_location_node_id, field="source_location_node_id"
+                    )
+                    if not await kit_repo.storage_node_exists(db, src):
+                        raise NotFoundError("Source location not found", code="source_not_found")
+                    line.source_location_node_id = src
         await db.flush()
 
     # Leftover back-flushes to where it was pulled from, so the return location
-    # defaults to the line's actual source (still editable at close-out).
+    # defaults to the line's source (the primary/largest pick for a multi line).
     for line in kit.lines:
         line.return_location_node_id = line.source_location_node_id
 
-    if all(ln.issued_qty <= 0 for ln in kit.lines):
-        raise ValidationError("Nothing to issue — every line is zero", code="nothing_to_issue")
-
-    # Hard issue gate (client 2026-07-22). A kit may only be issued when EVERY
-    # line is fully covered: issued ≥ the BOM need, and the source physically
-    # holds at least the need. This is stricter than ``Transaction_Spec`` §2
-    # (which leaves "quantity issued" a free manual entry) but consistent with
-    # it — §2 defines "needed" as the build requirement and every worked example
-    # issues ≥ needed. No partial / short issue: one short component blocks the
-    # whole kit. Runs as a pre-flight over all lines BEFORE any material moves,
-    # so nothing is issued when the kit can't be fully covered.
+    # No recipe gating at issue (REQ-2026-07-22-KIT-007). A kit records what
+    # physically happened, so a short or even empty issue is allowed — the
+    # operator may issue for a whole campaign up front OR assign at point of use
+    # and top up later with "issue more". The earlier hard gates
+    # (``issued_below_need`` / ``source_below_need`` / ``nothing_to_issue``, all
+    # client-added 2026-07-22) are removed. Physical reality still holds: a pick
+    # can't pull more of a lot than exists (``insufficient_source_stock``) and a
+    # line issuing > 0 still needs a source (``source_required``) — both enforced
+    # inside ``_move_to_production`` as each pick moves.
     for line in kit.lines:
-        needed = _needed(line, kit.target_qty)
-        if line.issued_qty < needed:
-            raise ValidationError(
-                f"Line {line.line_no}: issued {line.issued_qty} is below the {needed} "
-                f"needed to build {kit.target_qty}. Issue at least the needed quantity "
-                f"— a short kit can't be issued.",
-                code="issued_below_need",
-            )
-        node_id = line.source_location_node_id
-        if node_id is None:
-            raise ValidationError(
-                f"Line {line.line_no} needs a source location before issue",
-                code="source_required",
-            )
-        allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, node_id)
-        available = sum(int(a.qty) for a in allocs)
-        if available < needed:
-            raise ValidationError(
-                f"Line {line.line_no}: the source location holds only {available}, but "
-                f"{needed} are needed to build {kit.target_qty}. Restock before issuing "
-                f"— you cannot move forward with a short kit.",
-                code="source_below_need",
-            )
-
-    for line in kit.lines:
+        if line.id in multi_moves:
+            for node_id, lot_id, qty, cells in multi_moves[line.id]:
+                await _move_to_production(
+                    db,
+                    kit=kit,
+                    line=line,
+                    qty=qty,
+                    movement_type="kit_issue",
+                    note=f"Issued {qty} to production for {kit.kit_number}",
+                    current=current,
+                    node_id=node_id,
+                    lot_id=lot_id,
+                    cell_allocation_ids=cells or None,
+                )
+            continue
         if line.issued_qty <= 0:
             continue
         await _move_to_production(
@@ -1181,7 +1459,7 @@ async def issue_kit(
             movement_type="kit_issue",
             note=f"Issued {line.issued_qty} to production for {kit.kit_number}",
             current=current,
-            cell_allocation_ids=cells_by_line.get(line.id),
+            cell_allocation_ids=legacy_cells.get(line.id) or None,
         )
 
     # Issuing lands the kit on the production floor — move straight into
@@ -1232,17 +1510,41 @@ async def additional_issue(
         raise NotFoundError(f"Line {line_id} not on kit {kit_id}", code="line_not_found")
 
     before = _kit_snapshot(kit)
-    await _move_to_production(
-        db,
-        kit=kit,
-        line=line,
-        qty=payload.qty,
-        movement_type="kit_additional_issue",
-        note=f"Additional {payload.qty} issued for {kit.kit_number}",
-        current=current,
-        cell_allocation_ids=payload.cell_allocation_ids,
-    )
-    line.additional_issued_qty += payload.qty
+    # Multi-source (KIT-004): the extra material may be drawn from any lots/
+    # shelves, not just the line's original source. Legacy: a single qty [+ cells]
+    # from the line's recorded source.
+    if payload.sources:
+        moves, added, _primary = await _parse_source_picks(db, line=line, sources=payload.sources)
+        if added <= 0:
+            raise ValidationError("Nothing to issue — every source is zero", code="nothing_to_issue")
+        for node_id, lot_id, qty, cells in moves:
+            await _move_to_production(
+                db,
+                kit=kit,
+                line=line,
+                qty=qty,
+                movement_type="kit_additional_issue",
+                note=f"Additional {qty} issued for {kit.kit_number}",
+                current=current,
+                node_id=node_id,
+                lot_id=lot_id,
+                cell_allocation_ids=cells or None,
+            )
+    else:
+        if not payload.qty:
+            raise ValidationError("A quantity or sources are required", code="qty_required")
+        added = payload.qty
+        await _move_to_production(
+            db,
+            kit=kit,
+            line=line,
+            qty=payload.qty,
+            movement_type="kit_additional_issue",
+            note=f"Additional {payload.qty} issued for {kit.kit_number}",
+            current=current,
+            cell_allocation_ids=payload.cell_allocation_ids or None,
+        )
+    line.additional_issued_qty += added
     kit.updated_by_user_id = current.id
     await db.flush()
     await record_entity_change(
@@ -1254,7 +1556,7 @@ async def additional_issue(
         subject_label=kit.kit_number,
         before=before,
         after=_kit_snapshot(kit),
-        context={"operation": "additional_issue", "line_no": line.line_no, "qty": payload.qty},
+        context={"operation": "additional_issue", "line_no": line.line_no, "qty": added},
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -1295,19 +1597,11 @@ async def return_excess(
             f"(tried to return {payload.qty}).",
             code="return_exceeds_on_floor",
         )
-    # Client-directed cap (2026-07-22): you may only hand back the SURPLUS above
-    # what's needed — the floor can never drop below the build requirement, or
-    # there wouldn't be enough left to make the units. Returning down to zero was
-    # the bug. "needed" is dynamic via _effective_target.
-    needed_units = _needed_units(line, kit)
-    max_return = on_floor - needed_units
-    if payload.qty > max_return:
-        raise ValidationError(
-            f"Line {line.line_no}: at most {max(max_return, 0)} can be returned — {needed_units} "
-            f"must stay on the floor to build {_effective_target(kit)}. Return the surplus above "
-            f"what's needed, not below it.",
-            code="return_below_need",
-        )
+    # No recipe cap on returns (REQ-2026-07-22-KIT-007): the operator may hand
+    # back whatever wasn't used, even below the BOM requirement — the system
+    # records reality, it doesn't force enough to stay on the floor. The old
+    # ``return_below_need`` cap (client 2026-07-22) is removed. The only limit is
+    # physical: you can't return more than is on the floor (checked above).
     to_node = _parse_uuid_or_422(payload.return_location_node_id, field="return_location_node_id")
     node = await _require_placeable(db, to_node, "Return location")
     await _validate_return_cells(db, node, payload.qty, payload.return_cells, "Return location")
@@ -1405,6 +1699,101 @@ async def save_production(
     return response
 
 
+# ── Produce a batch (e-signed; keeps the kit OPEN) ──────────────────────
+
+
+@kits_router.post(
+    "/{kit_id}/produce",
+    response_model=KitRead,
+    summary="Produce a batch of the AY/FG and keep the kit open. E-signed.",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def produce_kit(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    kit_id: Annotated[uuid.UUID, Path()],
+    payload: ProduceRequest,
+) -> KitRead:
+    """Make a batch now, keep the kit open for more (KIT-007 incremental /
+    serialized production). Produces ``good_qty`` units from the material used,
+    accumulating on the kit; the leftover stays on the floor for the next batch
+    or the final close-out. E-signed (action ``kit.produce``)."""
+    kit = await _require_kit(db, kit_id)
+    if kit.status not in ("issued", "in_production"):
+        raise ValidationError(
+            "Only a kit in production can produce a batch",
+            code="kit_not_in_production",
+        )
+    before = _kit_snapshot(kit)
+    if payload.output_expiration_date and payload.output_expiration_date < _now().date():
+        raise ValidationError(
+            "The produced lot's expiry can't be in the past", code="expiry_in_past"
+        )
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    destinations = await _resolve_output_destinations(db, payload, payload.good_qty)
+    lines_by_id = {ln.id: ln for ln in kit.lines}
+    used_by_line: dict[uuid.UUID, int] = {}
+    for line_in in payload.lines:
+        lid = _parse_uuid_or_422(line_in.line_id, field="line_id")
+        if lid not in lines_by_id:
+            raise ValidationError(f"Line {lid} is not on this kit", code="line_not_in_kit")
+        used_by_line[lid] = line_in.used_qty
+
+    await _produce_batch(
+        db,
+        kit=kit,
+        good=payload.good_qty,
+        scrap=payload.scrap_qty,
+        destinations=destinations,
+        expiration_date=payload.output_expiration_date,
+        used_by_line=used_by_line,
+        evidence=evidence_uuid,
+        note=f"Produced batch of {payload.good_qty} for {kit.kit_number}",
+        current=current,
+    )
+    kit.status = "in_production"  # stays OPEN — produce more, or close later
+    kit.updated_by_user_id = current.id
+    await db.flush()
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kits",
+        subject_id=kit.id,
+        subject_label=kit.kit_number,
+        before=before,
+        after=_kit_snapshot(kit),
+        context={
+            "operation": "produce",
+            "good_qty": payload.good_qty,
+            "scrap_qty": payload.scrap_qty,
+            "output_location_node_id": (
+                str(destinations[0][0]) if destinations else None
+            ),
+            "output_destination_count": len(destinations),
+            "output_expiration_date": (
+                payload.output_expiration_date.isoformat()
+                if payload.output_expiration_date
+                else None
+            ),
+            "consumed": await _consumed_context(db, kit, used_by_line),
+        },
+        signature_id=evidence_uuid,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action=PRODUCE_ACTION,
+        target_table="app.kits",
+        target_id=kit.id,
+    )
+    refreshed = await _require_kit(db, kit.id)
+    response = await _kit_read(db, refreshed)
+    await db.commit()
+    return response
+
+
 # ── Close-out (e-signed, atomic) ────────────────────────────────────────
 
 
@@ -1426,9 +1815,13 @@ async def close_out_kit(
             "Only a kit in production can be closed out", code="kit_not_closeable"
         )
     before = _kit_snapshot(kit)
-    # Good units can never be zero — a kit must yield at least one good unit to
-    # close out (client 2026-07-22, Task 3). Scrap alone is not a valid close.
-    if payload.good_qty < 1:
+    # A kit must yield at least one good unit over its lifetime — but with
+    # incremental production (KIT-007) the good units may have been made in
+    # earlier ``produce`` batches, so the check is on the CUMULATIVE total
+    # (already-produced + this final batch). A close with good_qty 0 is valid
+    # when prior batches already produced something — it just back-flushes the
+    # remainder and locks the kit.
+    if (kit.good_qty or 0) + payload.good_qty < 1:
         raise ValidationError(
             "A kit must produce at least 1 good unit to close out",
             code="good_required",
@@ -1441,106 +1834,55 @@ async def close_out_kit(
             code="expiry_in_past",
         )
 
-    # ── Client-directed yield gate (2026-07-22) ─────────────────────────────
-    # BEYOND ``Transaction_Spec``: the spec reconciles close-out on the actual
-    # *Qty Used* per line (§3 / Table 3) and never recomputes "needed". The
-    # client asked to ALSO refuse close-out unless the material issued could
-    # physically have produced the claimed output — i.e. issued+additional ≥
-    # (good+scrap) × qty_per_unit for every line. Isolated here with its own
-    # error code so it can be relaxed if the client reverts to the pure
-    # Qty-Used model. The existing ``used ≤ on_floor`` guard below is unchanged.
-    attempted = payload.good_qty + payload.scrap_qty
-    for line in kit.lines:
-        yield_need = line.qty_per_unit * attempted
-        total_issued = line.issued_qty + line.additional_issued_qty
-        if total_issued < yield_need:
-            raise ValidationError(
-                f"Line {line.line_no}: {total_issued} issued, but producing "
-                f"{payload.good_qty} good + {payload.scrap_qty} scrap needs {yield_need} "
-                f"per the BOM. Record an additional issue before closing out.",
-                code="issued_below_yield",
-            )
-
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
-    output_node = _parse_uuid_or_422(
-        payload.output_location_node_id, field="output_location_node_id"
-    )
-    await _require_placeable(db, output_node, "Output location")
+    # The output may target an LN2 box (KIT-005) and may be SPLIT across several
+    # boxes / freezers / shelves (client 2026-07-23) when one box can't hold every
+    # unit — each destination is checked placeable and its cells validated up
+    # front so a bad selection blocks before anything is written. Empty (no output)
+    # when this final batch makes 0 good units.
+    destinations = await _resolve_output_destinations(db, payload, payload.good_qty)
 
+    # Per-line consumption (used, validated in _produce_batch) + back-flush
+    # destinations for the leftover. Omitted lines default to the source.
     lines_by_id = {ln.id: ln for ln in kit.lines}
-    used_by_id: dict[uuid.UUID, int] = {}
+    used_by_line: dict[uuid.UUID, int] = {}
+    return_cells_by_line: dict[uuid.UUID, list] = {}
     for line_in in payload.lines:
         lid = _parse_uuid_or_422(line_in.line_id, field="line_id")
         if lid not in lines_by_id:
             raise ValidationError(f"Line {lid} is not on this kit", code="line_not_in_kit")
-        used_by_id[lid] = line_in.used_qty
-    missing = [ln.line_no for ln in kit.lines if ln.id not in used_by_id]
-    if missing:
-        raise ValidationError(
-            f"Enter a used quantity for every line (missing: {missing})",
-            code="used_qty_missing",
-        )
-
-    # Apply used + validate the over-use guard (also enforced by DB CHECK).
-    # The cap is what is still ON THE FLOOR — net of anything already returned
-    # under TRX-008 — not the raw issued total.
-    for line_in in payload.lines:
-        lid = _parse_uuid_or_422(line_in.line_id, field="line_id")
-        line = lines_by_id[lid]
-        on_floor = _on_floor(line)
-        if line_in.used_qty > on_floor:
-            raise ValidationError(
-                f"Line {line.line_no}: used {line_in.used_qty} exceeds the {on_floor} "
-                f"still on the production floor. Record an additional issue to cover it.",
-                code="used_exceeds_issued",
-            )
-        # Client-directed lower bound (2026-07-22, Task 5.1): you can't have
-        # consumed LESS than the BOM requires for the output you claim — that
-        # much material is what makes the good+scrap units. Uses the close-out
-        # payload's attempted total (good+scrap), not the possibly-stale kit row.
-        # BEYOND Transaction_Spec, which reconciles on Qty Used without a floor.
-        need = kit_repo.default_issued_qty(line.qty_per_unit, attempted)
-        if line_in.used_qty < need:
-            raise ValidationError(
-                f"Line {line.line_no}: used {line_in.used_qty} is below the {need} needed to "
-                f"produce {payload.good_qty} good + {payload.scrap_qty} scrap. That much material "
-                f"is required to make the output.",
-                code="used_below_need",
-            )
-        line.used_qty = line_in.used_qty
+        used_by_line[lid] = line_in.used_qty
+        return_cells_by_line[lid] = line_in.return_cells
         if line_in.return_location_node_id is not None:
             ret = _parse_uuid_or_422(
                 line_in.return_location_node_id, field="return_location_node_id"
             )
             await _require_placeable(db, ret, "Return location")
-            line.return_location_node_id = ret
+            lines_by_id[lid].return_location_node_id = ret
 
-    # 1. Production output → place the finished AY/FG into stock (§3.1).
-    if payload.good_qty > 0:
-        await _place(
-            db,
-            kit=kit,
-            item_id=kit.item_id,
-            node_id=output_node,
-            qty=payload.good_qty,
-            movement_type="production_output",
-            kit_line_id=None,
-            evidence=evidence_uuid,
-            note=f"{payload.good_qty} produced and stocked for {kit.kit_number}",
-            current=current,
-            expiration_date=payload.output_expiration_date,
-        )
+    # 1. Produce the FINAL batch — consumes the entered used (≥ need, ≤ floor),
+    #    places good, accumulates on the kit (same helper as ``produce``). good
+    #    may be 0 when everything was produced in earlier batches; close then
+    #    just back-flushes the remainder and locks.
+    await _produce_batch(
+        db,
+        kit=kit,
+        good=payload.good_qty,
+        scrap=payload.scrap_qty,
+        destinations=destinations,
+        expiration_date=payload.output_expiration_date,
+        used_by_line=used_by_line,
+        evidence=evidence_uuid,
+        note=f"{payload.good_qty} produced and stocked for {kit.kit_number}",
+        current=current,
+    )
 
-    # 2. Drain the production floor. `used` is consumed with no movement (it
-    #    already left v_item_stock at issue, §5); the leftover back-flushes to
-    #    the return node (REQ-2026-07-09-TRX-003) on a fresh unassigned lot.
-    #    used + leftover == on_floor, so the kit's WIP always reaches zero.
-    cells_by_line = {
-        _parse_uuid_or_422(li.line_id, field="line_id"): li.return_cells for li in payload.lines
-    }
+    # 2. Back-flush whatever is still on the floor — the remainder after every
+    #    produce batch (``_on_floor`` already nets out cumulative used) — to each
+    #    line's return location (REQ-2026-07-09-TRX-003), so the kit's WIP
+    #    reaches zero.
     for line in kit.lines:
-        await _drain_production(db, kit=kit, line=line, qty=line.used_qty or 0)
-        returned = _line_returned(line) or 0
+        returned = _on_floor(line)
         if returned <= 0:
             continue
         ret_node = line.return_location_node_id or line.source_location_node_id
@@ -1549,7 +1891,7 @@ async def close_out_kit(
                 f"Line {line.line_no} has nowhere to back-flush to", code="return_required"
             )
         node = await _require_placeable(db, ret_node, "Return location")
-        ret_cells = cells_by_line.get(line.id, [])
+        ret_cells = return_cells_by_line.get(line.id, [])
         await _validate_return_cells(db, node, returned, ret_cells, "Return location")
         await _return_to_inventory(
             db,
@@ -1558,7 +1900,6 @@ async def close_out_kit(
             qty=returned,
             to_node=ret_node,
             evidence=evidence_uuid,
-            return_cells=ret_cells,
             note=(
                 f"Issued {line.issued_qty + line.additional_issued_qty}, "
                 f"used {line.used_qty}, backflushed {returned}"
@@ -1567,9 +1908,6 @@ async def close_out_kit(
         )
 
     kit.status = "closed"
-    kit.good_qty = payload.good_qty
-    kit.scrap_qty = payload.scrap_qty
-    kit.output_location_node_id = output_node
     kit.closed_at = _now()
     kit.closed_by_user_id = current.id
     kit.updated_by_user_id = current.id
@@ -1588,12 +1926,16 @@ async def close_out_kit(
             "operation": "close_out",
             "good_qty": payload.good_qty,
             "scrap_qty": payload.scrap_qty,
-            "output_location_node_id": str(output_node),
+            "output_location_node_id": (
+                str(destinations[0][0]) if destinations else None
+            ),
+            "output_destination_count": len(destinations),
             "output_expiration_date": (
                 payload.output_expiration_date.isoformat()
                 if payload.output_expiration_date
                 else None
             ),
+            "consumed": await _consumed_context(db, kit, used_by_line),
         },
         signature_id=evidence_uuid,
     )

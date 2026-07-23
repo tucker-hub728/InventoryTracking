@@ -39,6 +39,7 @@ BOM_LINES = 2
 UNSTOCKED_ITEM_ID = "7537b141-efac-45e3-b129-fc67b0e26a79"  # AY-001
 PROD_NODE_ID = "358ad8b4-3d13-484b-ac8f-bcb7ce8f075c"  # Clean Room 1 (production)
 OUTPUT_SHELF_ID = "33068349-5206-45a1-a0a8-800772cf4e33"  # Shelf A
+OUTPUT_SHELF_B_ID = "30c3c9ab-318c-4126-b6e8-2f6699626693"  # Shelf B (split output)
 
 # [passed, failed] — a list so ``check`` mutates without a ``global`` statement.
 _TALLY = [0, 0]
@@ -120,28 +121,72 @@ def _create(token, qty=2, kit_number=None):
 
 
 def _issue(token, kit, extra=0):
-    """Issue a draft kit, pointing every line at a source that holds ENOUGH of
-    the component. Under the 2026-07-22 hard gate a kit can only be issued when
-    every line is fully covered — issued ≥ the BOM need AND the source holds ≥
-    the need. ``extra`` issues a surplus above the need so there is something to
-    return / reconcile (the return cap now forbids dropping below needed). The
-    draft (issued qty + source) is committed in this one call."""
+    """Issue a draft kit covering ``needed + extra`` per line, filling across the
+    component's lots FIFO (multi-source). Robust to fragmented dev stock — it
+    gathers from as many lots as it takes, rather than one node."""
     lines = []
     for line in kit["lines"]:
-        options = sorted(line["source_options"], key=lambda o: -o["qty"])
-        best = options[0] if options else None
-        entry = {
-            "line_id": line["id"],
-            "issued_qty": int(line["issued_qty"]) + extra,
-            "source_location_node_id": best["node_id"] if best else None,
-        }
-        if best and best.get("is_grid"):
-            # An LN2 box is picked cell by cell, and the quantity follows the
-            # selection rather than being typed (kitting04 / D2).
-            cells = best["cells"][: entry["issued_qty"]]
-            entry["cell_allocation_ids"] = [c["allocation_id"] for c in cells]
-            entry["issued_qty"] = len(cells)
-        lines.append(entry)
+        want = int(line["issued_qty"]) + extra
+        picks, rem = [], want
+        for lot in line["source_lots"]:
+            if rem <= 0:
+                break
+            if lot.get("is_grid"):
+                cell_ids = [c["allocation_id"] for c in lot["cells"][:rem]]
+                if not cell_ids:
+                    continue
+                picks.append(
+                    {
+                        "node_id": lot["node_id"],
+                        "lot_id": lot["lot_id"],
+                        "qty": len(cell_ids),
+                        "cell_allocation_ids": cell_ids,
+                    }
+                )
+                rem -= len(cell_ids)
+            else:
+                take = min(rem, int(lot["qty"]))
+                if take <= 0:
+                    continue
+                picks.append({"node_id": lot["node_id"], "lot_id": lot["lot_id"], "qty": take})
+                rem -= take
+        lines.append({"line_id": line["id"], "sources": picks})
+    return _req("POST", f"/kits/{kit['id']}/issue", token=token, json_body={"lines": lines})
+
+
+def _issue_multi(token, kit, extra=0):
+    """Issue with the multi-source ``sources[]`` shape (KIT-003): for each line,
+    cover the need FIFO across its ``source_lots``, splitting when one lot can't
+    fully satisfy it. Exercises the per-lot pick path shared by issue and
+    additional-issue."""
+    lines = []
+    for line in kit["lines"]:
+        need = int(round(float(line["needed_qty"]))) + extra
+        picks = []
+        remaining = need
+        for lot in line["source_lots"]:  # backend returns these FIFO-ordered
+            if remaining <= 0:
+                break
+            if lot.get("is_grid"):
+                cell_ids = [c["allocation_id"] for c in lot["cells"][:remaining]]
+                if not cell_ids:
+                    continue
+                picks.append(
+                    {
+                        "node_id": lot["node_id"],
+                        "lot_id": lot["lot_id"],
+                        "qty": len(cell_ids),
+                        "cell_allocation_ids": cell_ids,
+                    }
+                )
+                remaining -= len(cell_ids)
+            else:
+                take = min(remaining, int(lot["qty"]))
+                if take <= 0:
+                    continue
+                picks.append({"node_id": lot["node_id"], "lot_id": lot["lot_id"], "qty": take})
+                remaining -= take
+        lines.append({"line_id": line["id"], "sources": picks})
     return _req("POST", f"/kits/{kit['id']}/issue", token=token, json_body={"lines": lines})
 
 
@@ -198,29 +243,28 @@ def main() -> int:
     )
     _cancel(token, named['id'])
 
-    print("== hard gates (client 2026-07-22) ==")
-    # (a) issued < needed on any line blocks the whole issue.
-    s, gk = _create(token)
-    low = []
-    for i, line in enumerate(gk["lines"]):
+    print("== KIT-007: recipe gates removed, physical guards stay ==")
+    # (a) A SHORT issue is now ALLOWED (no issued_below_need). Starve line 1 to 1.
+    s, sk = _create(token)
+    short = []
+    for i, line in enumerate(sk["lines"]):
         opts = sorted(line["source_options"], key=lambda o: -o["qty"])
-        low.append(
+        short.append(
             {
                 "line_id": line["id"],
-                # Starve line 1 below its need; the rest get a valid quantity.
-                "issued_qty": 0 if i == 0 else int(line["issued_qty"]),
+                "issued_qty": 1 if i == 0 else int(line["issued_qty"]),
                 "source_location_node_id": opts[0]["node_id"] if opts else None,
             }
         )
-    s, b = _req("POST", f"/kits/{gk['id']}/issue", token=token, json_body={"lines": low})
+    s, b = _req("POST", f"/kits/{sk['id']}/issue", token=token, json_body={"lines": short})
     check(
-        "issue below need -> 422 issued_below_need",
-        s == 422 and b.get("code") == "issued_below_need",
+        "short issue now allowed -> 200 in_production",
+        s == 200 and b.get("status") == "in_production",
         (s, b),
     )
-    _cancel(token, gk['id'])
+    _cancel(token, sk["id"], reason="kit007")
 
-    # (b) source can't cover the need -> blocked, even at issued == needed.
+    # (b) PHYSICAL guard STAYS: you still can't pull from a source that holds none.
     s, sug = _req("GET", "/kits/next-number", token=token)
     s, ak = _req(
         "POST",
@@ -237,83 +281,34 @@ def main() -> int:
     sb = [
         {
             "line_id": line["id"],
-            "issued_qty": int(line["issued_qty"]),  # = ceil(need); passes the need check
+            "issued_qty": int(line["issued_qty"]),
             "source_location_node_id": OUTPUT_SHELF_ID,  # holds none of this component
         }
         for line in ak["lines"]
     ]
     s, b = _req("POST", f"/kits/{ak['id']}/issue", token=token, json_body={"lines": sb})
     check(
-        "issue from empty source -> 422 source_below_need",
-        s == 422 and b.get("code") == "source_below_need",
+        "issue beyond available stock -> 422 insufficient_source_stock",
+        s == 422 and b.get("code") == "insufficient_source_stock",
         (s, b),
     )
-    _cancel(token, ak['id'])
+    _cancel(token, ak["id"])
 
-    # (c) close-out claiming more output than the material issued could yield.
+    # (c) Used must be ≥ recipe need (client 2026-07-23): to make N you need N
+    # units' worth. yk has need=2 on the floor (qty_per_unit 1, target 2).
     s, yk = _create(token)
     s, yk = _issue(token, yk)
-    check("yield-gate kit issued", s == 200, (s, yk))
-    evy = _reauth(token, "kit.closeout")
+    check("used-bound test kit issued", s == 200, (s, yk))
     s, b = _req(
         "POST",
         f"/kits/{yk['id']}/close-out",
         token=token,
         json_body={
-            "good_qty": 999,  # far more than issued/BOM could produce
+            "good_qty": 5,  # needs 5 per line, but we only enter 2 used
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [{"line_id": line["id"], "used_qty": 0} for line in yk["lines"]],
-            "evidence_id": evy,
-        },
-    )
-    check(
-        "close-out beyond yield -> 422 issued_below_yield",
-        s == 422 and b.get("code") == "issued_below_yield",
-        (s, b),
-    )
-    _cancel(token, yk['id'], reason="gate test")
-
-    # (d) return can't drop the floor below the need (Task 6). Issue a surplus,
-    # then try to return more than the surplus.
-    s, rk = _create(token)
-    s, rk = _issue(token, rk, extra=2)  # need + 2 surplus per line
-    check("return-gate kit issued", s == 200, (s, rk))
-    rgl = rk["lines"][0]
-    needed = int(round(float(rgl["needed_qty"])))
-    s, b = _req(
-        "POST",
-        f"/kits/{rk['id']}/lines/{rgl['id']}/return",
-        token=token,
-        # on_floor = need + 2; returning need+2 would leave the floor at 0 < need.
-        json_body={"qty": rgl["on_floor_qty"], "return_location_node_id": OUTPUT_SHELF_ID},
-    )
-    check(
-        "return below need -> 422 return_below_need",
-        s == 422 and b.get("code") == "return_below_need",
-        (s, b),
-    )
-    # Returning exactly the surplus (2) is allowed — floor lands on the need.
-    s, b = _req(
-        "POST",
-        f"/kits/{rk['id']}/lines/{rgl['id']}/return",
-        token=token,
-        json_body={"qty": rgl["on_floor_qty"] - needed, "return_location_node_id": OUTPUT_SHELF_ID},
-    )
-    check("return surplus down to need -> 200", s == 200, (s, b))
-
-    # (e) close-out can't record used below the need (Task 5.1).
-    ev_ub = _reauth(token, "kit.closeout")
-    s, b = _req(
-        "POST",
-        f"/kits/{rk['id']}/close-out",
-        token=token,
-        json_body={
-            "good_qty": 1,
-            "scrap_qty": 0,
-            "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [{"line_id": line["id"], "used_qty": 0} for line in rk["lines"]],
-            "evidence_id": ev_ub,
+            "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in yk["lines"]],
+            "evidence_id": _reauth(token, "kit.closeout"),
         },
     )
     check(
@@ -321,11 +316,54 @@ def main() -> int:
         s == 422 and b.get("code") == "used_below_need",
         (s, b),
     )
-    _cancel(token, rk['id'], reason="gate test")
+    # Fits when used matches good's need (good=2 -> need 2, used 2 ≤ floor 2).
+    s, b = _req(
+        "POST",
+        f"/kits/{yk['id']}/close-out",
+        token=token,
+        json_body={
+            "good_qty": 2,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in yk["lines"]],
+            "evidence_id": _reauth(token, "kit.closeout"),
+        },
+    )
+    check("close good=2 used=2 -> 200 closed", s == 200 and b.get("status") == "closed", (s, b))
+
+    # (d) Manual return (TRX-008) stays uncapped: hand back EVERYTHING on the floor.
+    s, rk = _create(token)
+    s, rk = _issue(token, rk, extra=2)
+    check("return-test kit issued", s == 200, (s, rk))
+    rgl = rk["lines"][0]
+    s, b = _req(
+        "POST",
+        f"/kits/{rk['id']}/lines/{rgl['id']}/return",
+        token=token,
+        json_body={"qty": rgl["on_floor_qty"], "return_location_node_id": OUTPUT_SHELF_ID},
+    )
+    check("return all on-floor now allowed -> 200", s == 200, (s, b))
+    rl = next(x for x in b["lines"] if x["id"] == rgl["id"])
+    check("floor dropped to 0 after full return", rl["on_floor_qty"] == 0, rl["on_floor_qty"])
+
+    # PHYSICAL guard STAYS: can't return more than is on the floor.
+    s, b = _req(
+        "POST",
+        f"/kits/{rk['id']}/lines/{rgl['id']}/return",
+        token=token,
+        json_body={"qty": 999999, "return_location_node_id": OUTPUT_SHELF_ID},
+    )
+    check(
+        "over-return -> 422 return_exceeds_on_floor",
+        s == 422 and b.get("code") == "return_exceeds_on_floor",
+        (s, b),
+    )
+    _cancel(token, rk["id"], reason="return test")
 
     print("== issue ==")
-    # Issue a surplus (need + 3) so there is something to return / reconcile —
-    # the return cap now forbids the floor dropping below the need.
+    # Re-fetch so source_lots are current (other kits moved stock since create),
+    # then issue a surplus (need + 3) so there is leftover to back-flush.
+    s, kit = _req("GET", f"/kits/{kit_id}", token=token)
     s, b = _issue(token, kit, extra=3)
     check("issue -> 200", s == 200, (s, b))
     check("status in_production", b.get("status") == "in_production", b.get("status"))
@@ -403,9 +441,11 @@ def main() -> int:
 
     print("== close-out (happy path, leftover backflush) ==")
     lines = kit["lines"]
-    # Reconcile against what is still ON THE FLOOR (net of the return above).
+    pre_floor = {l["id"]: int(l["on_floor_qty"]) for l in lines}
+    # good=2, qty_per_unit=1 -> need 2 per line; enter used=2, the rest back-flushes.
     body_lines = [
-        {"line_id": l["id"], "used_qty": max(0, int(l["on_floor_qty"]) - 1)} for l in lines
+        {"line_id": l["id"], "used_qty": 2, "return_location_node_id": OUTPUT_SHELF_ID}
+        for l in lines
     ]
     ev = _reauth(token, "kit.closeout")
     s, b = _req(
@@ -423,11 +463,11 @@ def main() -> int:
     check("close-out -> 200", s == 200, (s, b))
     check("status closed", b.get("status") == "closed", b.get("status"))
     check("good_qty 2", b.get("good_qty") == 2, b.get("good_qty"))
-    # used = on_floor − 1, so every line that had material back-flushes exactly 1.
+    # BOM-computed: 2 consumed per line, so each back-flushes (on_floor − 2).
     check(
-        "returned_qty = 1 per issued line",
-        all(l["returned_qty"] == 1 for l in b["lines"] if l["issued_qty"] > 0),
-        [(l["issued_qty"], l["returned_qty"]) for l in b["lines"]],
+        "returned_qty = on_floor − 2 per line",
+        all(l["returned_qty"] == pre_floor[l["id"]] - 2 for l in b["lines"]),
+        [(pre_floor[l["id"]], l["returned_qty"]) for l in b["lines"]],
     )
     s, act = _req("GET", f"/kits/{kit_id}/activity", token=token)
     types = [r["movement_type"] for r in act["items"]]
@@ -481,31 +521,30 @@ def main() -> int:
         ops,
     )
 
-    print("== over-use guard ==")
+    print("== capacity guard ==")
     s, k2 = _create(token)
     s, k2 = _issue(token, k2)
     check("second kit issued", s == 200, (s, k2))
-    over = [{"line_id": l["id"], "used_qty": int(l["on_floor_qty"]) + 5} for l in k2["lines"]]
+    floor2 = int(k2["lines"][0]["on_floor_qty"])
     ev2 = _reauth(token, "kit.closeout")
     s, b = _req(
         "POST",
         f"/kits/{k2['id']}/close-out",
         token=token,
         json_body={
-            "good_qty": 1,
+            "good_qty": floor2 + 5,  # needs floor+5 per line
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": over,
+            "lines": [{"line_id": ln["id"], "used_qty": floor2} for ln in k2["lines"]],
             "evidence_id": ev2,
         },
     )
     check(
-        "used > issued -> 422 used_exceeds_issued",
-        s == 422 and b.get("code") == "used_exceeds_issued",
+        "close good beyond floor's worth -> 422 used_below_need",
+        s == 422 and b.get("code") == "used_below_need",
         (s, b),
     )
-
-    print("== e-sign guards ==")
+    ev3 = _reauth(token, "kit.closeout")
     s, b = _req(
         "POST",
         f"/kits/{k2['id']}/close-out",
@@ -514,12 +553,32 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [
-                {"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]
-            ],
+            "lines": [{"line_id": ln["id"], "used_qty": floor2 + 5} for ln in k2["lines"]],
+            "evidence_id": ev3,
+        },
+    )
+    check(
+        "used beyond floor -> 422 used_exceeds_issued",
+        s == 422 and b.get("code") == "used_exceeds_issued",
+        (s, b),
+    )
+
+    print("== e-sign guards ==")
+    # good=1 used=1 fits, so validation passes and the evidence check runs. `ev`
+    # was already consumed by the happy-path close.
+    valid_lines = [{"line_id": ln["id"], "used_qty": 1} for ln in k2["lines"]]
+    s, b = _req(
+        "POST",
+        f"/kits/{k2['id']}/close-out",
+        token=token,
+        json_body={
+            "good_qty": 1,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "lines": valid_lines,
             "evidence_id": ev,
         },
-    )  # ev already consumed by the first close-out
+    )
     check(
         "replayed evidence -> 401 replayed",
         s == 401 and b.get("code") == "reauth_evidence_replayed",
@@ -534,9 +593,7 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
-            "lines": [
-                {"line_id": l["id"], "used_qty": int(l["on_floor_qty"])} for l in k2["lines"]
-            ],
+            "lines": valid_lines,
             "evidence_id": ev_wrong,
         },
     )
@@ -576,6 +633,219 @@ def main() -> int:
         and not any(r["movement_type"] == "backflush" for r in act2["items"]),
         [r["movement_type"] for r in act2["items"]],
     )
+
+    print("== multi-source issue (KIT-003) ==")
+    s, mk = _create(token)
+    check("multi-source: source_lots present on lines", all(l.get("source_lots") for l in mk["lines"]), mk["lines"])
+    s, mk = _issue_multi(token, mk)
+    check("multi-source issue -> 200", s == 200, (s, mk))
+    check("multi-source status in_production", mk.get("status") == "in_production", mk.get("status"))
+    check(
+        "multi-source issued >= needed per line",
+        all(int(l["issued_qty"]) >= int(round(float(l["needed_qty"]))) for l in mk["lines"]),
+        [(l["issued_qty"], l["needed_qty"]) for l in mk["lines"]],
+    )
+    check(
+        "multi-source on_floor == issued + additional",
+        all(l["on_floor_qty"] == l["issued_qty"] + l["additional_issued_qty"] for l in mk["lines"]),
+        [(l["on_floor_qty"], l["issued_qty"]) for l in mk["lines"]],
+    )
+    s, act_m = _req("GET", f"/kits/{mk['id']}/activity", token=token)
+    check(
+        "multi-source posts kit_issue rows",
+        sum(1 for r in act_m["items"] if r["movement_type"] == "kit_issue") >= 1,
+        [r["movement_type"] for r in act_m["items"]],
+    )
+    # The post-issue snapshot (issued_from) must name the lot(s) each line pulled.
+    check(
+        "issued_from populated per issued line",
+        all(len(l.get("issued_from") or []) >= 1 for l in mk["lines"] if l["issued_qty"] > 0),
+        [(l["item_number"], l.get("issued_from")) for l in mk["lines"]],
+    )
+    # Additional issue via the same multi-source shape (KIT-004): pull 1 more of
+    # line 1 from whatever lot currently holds it.
+    ml = mk["lines"][0]
+    src_lot = next((lot for lot in ml["source_lots"] if not lot.get("is_grid") and lot["qty"] > 0), None)
+    if src_lot is not None:
+        s, mk2 = _req(
+            "POST",
+            f"/kits/{mk['id']}/lines/{ml['id']}/additional-issue",
+            token=token,
+            json_body={
+                "sources": [{"node_id": src_lot["node_id"], "lot_id": src_lot["lot_id"], "qty": 1}]
+            },
+        )
+        check("multi-source additional issue -> 200", s == 200, (s, mk2))
+        ml2 = next(x for x in mk2["lines"] if x["id"] == ml["id"])
+        check(
+            "additional issue incremented additional_issued_qty",
+            ml2["additional_issued_qty"] == ml["additional_issued_qty"] + 1,
+            (ml["additional_issued_qty"], ml2["additional_issued_qty"]),
+        )
+    _cancel(token, mk["id"], reason="multi-source smoke")
+
+    print("== incremental produce (KIT-007) ==")
+    s, pk = _create(token, qty=3)
+    s, pk = _issue(token, pk)  # issue needed (3) per line
+    check("produce-test kit issued", s == 200, (s, pk))
+    evp = _reauth(token, "kit.produce")
+    # Produce a batch of 2 — operator enters used=2 per line (need for 2). This
+    # batch carries its OWN expiry; the close batch below gets a different one, to
+    # prove per-batch lots keep independent shelf lives (client 2026-07-23).
+    produce_exp = "2098-11-30"
+    s, b = _req(
+        "POST",
+        f"/kits/{pk['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 2,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_expiration_date": produce_exp,
+            "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in pk["lines"]],
+            "evidence_id": evp,
+        },
+    )
+    check("produce batch -> 200 still open", s == 200 and b.get("status") == "in_production", (s, b))
+    check("good accumulated = 2", b.get("good_qty") == 2, b.get("good_qty"))
+    check(
+        "on_floor reduced to 1 (issued 3 − used 2)",
+        all(l["on_floor_qty"] == 1 for l in b["lines"]),
+        [l["on_floor_qty"] for l in b["lines"]],
+    )
+    # Used-bound guard: to make 2 you need used ≥ 2, but only 1 is left.
+    evp2 = _reauth(token, "kit.produce")
+    s, bad = _req(
+        "POST",
+        f"/kits/{pk['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 2,  # need 2 per line; enter used 1 (all that's left)
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "lines": [{"line_id": ln["id"], "used_qty": 1} for ln in b["lines"]],
+            "evidence_id": evp2,
+        },
+    )
+    check(
+        "produce beyond floor's worth -> 422 used_below_need",
+        s == 422 and bad.get("code") == "used_below_need",
+        (s, bad),
+    )
+    # Close with a final batch of 1 (used 1 per line) → cumulative 3. A DIFFERENT
+    # expiry than the produce batch above — each batch is its own lot with its own
+    # shelf life (client 2026-07-23; REQ-2026-07-01-INV-008).
+    close_exp = "2099-12-31"
+    evc = _reauth(token, "kit.closeout")
+    s, b = _req(
+        "POST",
+        f"/kits/{pk['id']}/close-out",
+        token=token,
+        json_body={
+            "good_qty": 1,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_expiration_date": close_exp,
+            "lines": [{"line_id": ln["id"], "used_qty": 1} for ln in b["lines"]],
+            "evidence_id": evc,
+        },
+    )
+    check("close after produce -> 200 closed", s == 200 and b.get("status") == "closed", (s, b))
+    check("cumulative good = 3 (2 batch + 1 close)", b.get("good_qty") == 3, b.get("good_qty"))
+    # Two per-batch lots — KIT-xxxx-1 (produce) and KIT-xxxx-2 (close) — each
+    # carrying its OWN expiry, NOT a single shared/last-wins value.
+    s, lots = _req("GET", f"/lots?item_id={BUILT_ITEM_ID}&limit=500", token=token)
+    b1 = next((lt for lt in lots if lt.get("lot_number") == f"{pk['kit_number']}-1"), None)
+    b2 = next((lt for lt in lots if lt.get("lot_number") == f"{pk['kit_number']}-2"), None)
+    check("produce batch minted its own lot (KIT-…-1)", b1 is not None, [lt.get("lot_number") for lt in lots])
+    check("close batch minted its own lot (KIT-…-2)", b2 is not None, [lt.get("lot_number") for lt in lots])
+    check(
+        "per-batch lots keep independent expiries",
+        b1 is not None
+        and b2 is not None
+        and b1.get("expiration_date") == produce_exp
+        and b2.get("expiration_date") == close_exp,
+        [(b1 or {}).get("expiration_date"), (b2 or {}).get("expiration_date")],
+    )
+    s, act_p = _req("GET", f"/kits/{pk['id']}/activity", token=token)
+    ev_ops = {e.get("operation") for e in act_p.get("events", [])}
+    check("activity logged produce + close_out", {"produce", "close_out"} <= ev_ops, ev_ops)
+    # Each produce batch records what it CONSUMED (no stock movement backs it), so
+    # the timeline can show partial-produce consumption, not just the close total.
+    prod_ev = next((e for e in act_p.get("events", []) if e.get("operation") == "produce"), {})
+    consumed = prod_ev.get("consumed") or []
+    check(
+        "produce event carries per-component consumed",
+        len(consumed) == BOM_LINES and all(c.get("qty", 0) > 0 and c.get("item_number") for c in consumed),
+        consumed,
+    )
+
+    print("== split output across locations (LN2/freezer/shelf overflow) ==")
+    s, sk = _create(token, qty=3)
+    s, sk = _issue(token, sk)  # issue 3 per line
+    check("split-test kit issued", s == 200, (s, sk))
+    # good=3 split across TWO shelves: 2 on Shelf A + 1 on Shelf B, one batch/lot.
+    ev = _reauth(token, "kit.produce")
+    s, b = _req(
+        "POST",
+        f"/kits/{sk['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 3,
+            "scrap_qty": 0,
+            "outputs": [
+                {"location_node_id": OUTPUT_SHELF_ID, "qty": 2},
+                {"location_node_id": OUTPUT_SHELF_B_ID, "qty": 1},
+            ],
+            "lines": [{"line_id": ln["id"], "used_qty": 3} for ln in sk["lines"]],
+            "evidence_id": ev,
+        },
+    )
+    check("split produce -> 200", s == 200 and b.get("good_qty") == 3, (s, b))
+    # The one batch lot must have allocations on BOTH shelves (2 + 1).
+    s, lots = _req("GET", f"/lots?item_id={BUILT_ITEM_ID}&limit=500", token=token)
+    blot = next((lt for lt in lots if lt.get("lot_number") == f"{sk['kit_number']}-1"), None)
+    check("split batch minted one lot", blot is not None, [lt.get("lot_number") for lt in lots])
+    s, allocA = _req("GET", f"/location-nodes/{OUTPUT_SHELF_ID}/allocations", token=token)
+    s, allocB = _req("GET", f"/location-nodes/{OUTPUT_SHELF_B_ID}/allocations", token=token)
+    onA = sum(a["qty"] for a in allocA if blot and a.get("lot_id") == blot["id"])
+    onB = sum(a["qty"] for a in allocB if blot and a.get("lot_id") == blot["id"])
+    check("split placed 2 on Shelf A", onA == 2, onA)
+    check("split placed 1 on Shelf B", onB == 1, onB)
+    # Quantities must sum to good — a short split is rejected.
+    ev2 = _reauth(token, "kit.produce")
+    s, bad = _req(
+        "POST",
+        f"/kits/{sk['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 3,
+            "scrap_qty": 0,
+            "outputs": [{"location_node_id": OUTPUT_SHELF_ID, "qty": 2}],
+            "lines": [{"line_id": ln["id"], "used_qty": 3} for ln in b["lines"]],
+            "evidence_id": ev2,
+        },
+    )
+    check("split qty mismatch -> 422", s == 422 and bad.get("code") == "output_qty_mismatch", (s, bad))
+    # The same location twice is rejected (combine the quantities instead).
+    ev3 = _reauth(token, "kit.produce")
+    s, dup = _req(
+        "POST",
+        f"/kits/{sk['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 2,
+            "scrap_qty": 0,
+            "outputs": [
+                {"location_node_id": OUTPUT_SHELF_ID, "qty": 1},
+                {"location_node_id": OUTPUT_SHELF_ID, "qty": 1},
+            ],
+            "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in b["lines"]],
+            "evidence_id": ev3,
+        },
+    )
+    check("split duplicate node -> 422", s == 422 and dup.get("code") == "output_duplicate_node", (s, dup))
+    _cancel(token, sk["id"], reason="split-output smoke")
 
     print("== list + filter ==")
     s, b = _req("GET", "/kits?status=closed", token=token)
