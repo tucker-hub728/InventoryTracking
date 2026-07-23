@@ -806,12 +806,12 @@ def main() -> int:
     s, lots = _req("GET", f"/lots?item_id={BUILT_ITEM_ID}&limit=500", token=token)
     blot = next((lt for lt in lots if lt.get("lot_number") == f"{sk['kit_number']}-1"), None)
     check("split batch minted one lot", blot is not None, [lt.get("lot_number") for lt in lots])
-    s, allocA = _req("GET", f"/location-nodes/{OUTPUT_SHELF_ID}/allocations", token=token)
-    s, allocB = _req("GET", f"/location-nodes/{OUTPUT_SHELF_B_ID}/allocations", token=token)
-    onA = sum(a["qty"] for a in allocA if blot and a.get("lot_id") == blot["id"])
-    onB = sum(a["qty"] for a in allocB if blot and a.get("lot_id") == blot["id"])
-    check("split placed 2 on Shelf A", onA == 2, onA)
-    check("split placed 1 on Shelf B", onB == 1, onB)
+    s, alloc_a = _req("GET", f"/location-nodes/{OUTPUT_SHELF_ID}/allocations", token=token)
+    s, alloc_b = _req("GET", f"/location-nodes/{OUTPUT_SHELF_B_ID}/allocations", token=token)
+    on_a = sum(a["qty"] for a in alloc_a if blot and a.get("lot_id") == blot["id"])
+    on_b = sum(a["qty"] for a in alloc_b if blot and a.get("lot_id") == blot["id"])
+    check("split placed 2 on Shelf A", on_a == 2, on_a)
+    check("split placed 1 on Shelf B", on_b == 1, on_b)
     # Quantities must sum to good — a short split is rejected.
     ev2 = _reauth(token, "kit.produce")
     s, bad = _req(
