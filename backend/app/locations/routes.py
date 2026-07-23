@@ -22,7 +22,12 @@ from fastapi import APIRouter, Depends, Path, Query, status
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    AuthorizationError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from app.inventory import repository as inv_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import (
@@ -39,6 +44,7 @@ from app.locations.schemas import (
     NodeUpdateRequest,
     PlaceBatchRequest,
     PlaceRequest,
+    ProductionAreaCreate,
     TransferBatchRequest,
     TransferRequest,
 )
@@ -509,6 +515,10 @@ async def update_node(
     node = await loc_repo.get_node(db, node_id)
     if node is None:
         raise NotFoundError(f"Location node {node_id} not found")
+    # Renaming a PRODUCTION area is super-admin-only (client 2026-07-23); other
+    # nodes (LN2 boxes, freezers, shelves) keep the inventory:create gate above.
+    if node.node_type == "flat" and node.flat_category == "production":
+        _require_super_admin(current)
     before = loc_repo.node_to_audit_snapshot(node)
     updated = await loc_repo.update_node_name(db, node=node, name=payload.name)
     await record_entity_change(
@@ -525,6 +535,55 @@ async def update_node(
     # accessing them lazily inside the sync serializer raises MissingGreenlet.
     await db.refresh(updated)
     response = _node_to_read(updated)
+    await db.commit()
+    return response
+
+
+def _require_super_admin(user) -> None:
+    """Managing production areas (add / rename) is super-admin-only (client
+    2026-07-23): new areas are added by an admin on request, not by every
+    operator. ``super_admin`` is told apart from ``admin`` by the DB role, since
+    both share the ``admin`` permission bucket."""
+    if getattr(user, "role", None) != "super_admin":
+        raise AuthorizationError(
+            "Only a super admin can manage production areas",
+            code="permission_denied",
+            details={"required_role": "super_admin"},
+        )
+
+
+@nodes_router.post(
+    "/production-areas",
+    response_model=NodeRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a Production area (a production-floor sub-location) — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_production_area(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: ProductionAreaCreate,
+) -> NodeRead:
+    """Add one production area on top of the seeded set. Production is seeded to
+    cover existing spaces; new areas are added by a SUPER ADMIN on request (SRS
+    2026-07-22) — there is no open, per-user "add a floor". The area is a ``flat``
+    node in the ``production`` category; its ``code`` is generated from the name.
+    Rename it later via ``PATCH /location-nodes/{id}``."""
+    _require_super_admin(current)
+    node = await loc_repo.create_production_area(
+        db, name=payload.name, created_by_user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="meta.location_nodes",
+        subject_id=node.id,
+        subject_label=f"{node.node_type}:{node.code}",
+        before=None,
+        after=loc_repo.node_to_audit_snapshot(node),
+    )
+    response = _node_to_read(node)
     await db.commit()
     return response
 

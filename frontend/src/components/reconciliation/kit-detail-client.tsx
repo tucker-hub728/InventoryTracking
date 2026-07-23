@@ -12,10 +12,10 @@ import {
   PackageSearch,
   Pencil,
   Plus,
-  Save,
   ScrollText,
   Send,
   Undo2,
+  X,
   XCircle,
   type LucideIcon,
 } from 'lucide-react';
@@ -55,8 +55,16 @@ import {
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { cn } from '@/lib/utils';
 
-import { BoxCellPicker, CellGridPicker, useBoxGrid } from './cell-grid-picker';
+import { BoxCellPicker, useBoxGrid } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
+import {
+  LotSourcePicker,
+  autoFillFifo,
+  picksToSources,
+  picksTotal,
+  picksValid,
+  type LotPick,
+} from './lot-source-picker';
 import {
   ItemCell,
   KitStatusBadge,
@@ -70,20 +78,24 @@ import {
 
 const STEPS = [
   { key: 'issue', label: 'Issue', hint: 'Pull material to production' },
-  { key: 'production', label: 'Production', hint: 'Record what was built' },
-  { key: 'closeout', label: 'Close-Out', hint: 'Reconcile & back-flush' },
+  { key: 'production', label: 'Production', hint: 'Adjust material on the floor' },
+  { key: 'closeout', label: 'Close-Out', hint: 'Record output & reconcile' },
+  { key: 'review', label: 'Review', hint: 'Confirm the batch, then produce or close' },
 ] as const;
 
+// Four steps (client 2026-07-22): Issue → Production (adjust only) → Close-Out
+// (record output + reconcile) → Review & Close (summary + e-signed close). The
+// signature lives on the final Review step; Production no longer gates advance.
 function stepModel(status: KitStatus): { completed: number; reachable: number; def: number } {
   switch (status) {
     case 'draft':
       return { completed: 0, reachable: 0, def: 0 };
     case 'issued':
-      return { completed: 1, reachable: 1, def: 1 };
+      return { completed: 1, reachable: 3, def: 1 };
     case 'in_production':
-      return { completed: 1, reachable: 2, def: 1 };
+      return { completed: 1, reachable: 3, def: 1 };
     case 'closed':
-      return { completed: 3, reachable: 2, def: 2 };
+      return { completed: 4, reachable: 3, def: 3 };
     case 'cancelled':
       return { completed: 0, reachable: 0, def: 0 };
     default:
@@ -101,24 +113,31 @@ interface OutputDraft {
   output_expiration_date: string;
 }
 
-/** Draft edits for the Issue step — held locally and committed only when the
- *  Issue button is pressed (nothing is saved while the user types). */
-interface LineDraft {
-  issued_qty: number;
-  source: string;
-  /** LN2 only: allocation ids of the chosen cells. Drives issued_qty. */
+/** One place a produced batch is stocked. A batch may be split across several
+ *  (client 2026-07-23) when one LN2 box can't hold every unit — the rest go to
+ *  another box, a freezer, or a shelf. A box row's quantity IS its picked
+ *  ``cells``; a bulk row (shelf / freezer) carries a typed ``qty``. */
+interface OutputDest {
+  key: string;
+  location_node_id: string;
+  isBox: boolean;
   cells: string[];
+  qty: number | null;
 }
 
-const sourceOption = (line: ApiKitLine, source: string) =>
-  line.source_options.find((o) => o.node_id === source);
+let _outputDestSeq = 0;
+const emptyDest = (): OutputDest => ({
+  key: `dest-${_outputDestSeq++}`,
+  location_node_id: '',
+  isBox: false,
+  cells: [],
+  qty: null,
+});
+/** Units this destination will place — cells for a box, the typed qty for bulk. */
+const destPlaced = (d: OutputDest): number => (d.isBox ? d.cells.length : d.qty ?? 0);
 
-const sourceQty = (line: ApiKitLine, source: string): number =>
-  sourceOption(line, source)?.qty ?? 0;
-
-/** A grid (LN2 box) source hands quantity control to the cell selection. */
-const isGridSource = (line: ApiKitLine, source: string): boolean =>
-  Boolean(sourceOption(line, source)?.is_grid);
+/** The BOM need for a line, rounded up to whole units (matches the backend). */
+const lineNeededQty = (l: ApiKitLine) => Math.ceil(Number(l.needed_qty));
 
 /** `"3:2"` → `{ grid_row: 3, grid_col: 2 }` — CellGridPicker's destination key. */
 const toCell = (key: string): ReturnCellInput => {
@@ -146,6 +165,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const [activityOpen, setActivityOpen] = React.useState(false);
   const [editOpen, setEditOpen] = React.useState(false);
   const [reauthOpen, setReauthOpen] = React.useState(false);
+  const [produceReauthOpen, setProduceReauthOpen] = React.useState(false);
   const [addingTo, setAddingTo] = React.useState<ApiKitLine | null>(null);
   const [returningFrom, setReturningFrom] = React.useState<ApiKitLine | null>(null);
   const [cancelOpen, setCancelOpen] = React.useState(false);
@@ -160,13 +180,19 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     output_location_node_id: '',
     output_expiration_date: '',
   });
+  /** Operator-entered material used per component this batch (≥ recipe need). */
   const [used, setUsed] = React.useState<Record<string, number | null>>({});
   const [returnLoc, setReturnLoc] = React.useState<Record<string, string>>({});
+  /** Where the produced OUTPUT is stocked — one or more destinations. A batch is
+   *  split across several when one box can't hold every unit (client 2026-07-23);
+   *  the common case is a single row. */
+  const [outputDests, setOutputDests] = React.useState<OutputDest[]>([emptyDest()]);
   /** Close-out back-flush cells per line, when the return target is a box. */
   const [returnCells, setReturnCells] = React.useState<Record<string, string[]>>({});
   /** Whether each line's return destination resolved to a box (grid) node. */
   const [returnIsBox, setReturnIsBox] = React.useState<Record<string, boolean>>({});
-  const [lineDraft, setLineDraft] = React.useState<Record<string, LineDraft>>({});
+  /** Per-line multi-lot issue picks — held locally, committed only on Issue. */
+  const [linePicks, setLinePicks] = React.useState<Record<string, LotPick[]>>({});
 
   const load = React.useCallback(
     async (signal?: AbortSignal) => {
@@ -183,7 +209,6 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             k.output_location_node_id ?? prev.output_location_node_id ?? '',
           output_expiration_date: prev.output_expiration_date ?? '',
         }));
-        setUsed(Object.fromEntries(k.lines.map((l) => [l.id, l.used_qty])));
         setReturnLoc(
           Object.fromEntries(
             k.lines.map((l) => [
@@ -193,12 +218,11 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             ]),
           ),
         );
-        setLineDraft(
+        // Pre-fill each line's issue with a FIFO split covering the need
+        // (KIT-002 "default the issue quantity to the needed amount").
+        setLinePicks(
           Object.fromEntries(
-            k.lines.map((l) => [
-              l.id,
-              { issued_qty: l.issued_qty, source: l.source_location_node_id ?? '', cells: [] },
-            ]),
+            k.lines.map((l) => [l.id, autoFillFifo(l.source_lots, lineNeededQty(l))]),
           ),
         );
       } catch (err) {
@@ -225,19 +249,8 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     () => nodes.map((n) => ({ value: n.id, label: n.path ?? n.name })),
     [nodes],
   );
-  // Output / back-flush place stock, so only free storage leaves (no box cells).
-  const placeableOptions: SelectOption[] = React.useMemo(
-    () =>
-      nodes
-        .filter((n) => n.node_type === 'shelf' || n.node_type === 'sub_location')
-        .map((n) => ({ value: n.id, label: n.path ?? n.name })),
-    [nodes],
-  );
-  const placeableIds = React.useMemo(
-    () => new Set(placeableOptions.map((o) => o.value)),
-    [placeableOptions],
-  );
-  // Returns may also land in an LN2 box, provided free cells are chosen (D3).
+  // Output + back-flush may land on a shelf, freezer sub-location, or an LN2 box
+  // (KIT-005) — a box only alongside an explicit free-cell selection.
   const returnableIds = React.useMemo(
     () =>
       new Set(
@@ -263,32 +276,11 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     return () => ctrl.abort();
   }, [kit?.production_location_node_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Persist the current production figures (good/scrap/output) so the dynamic
-  // "needed" is the same on the server as on screen before an issue-more/return
-  // from the Production step. Returns whether it saved.
-  const persistProduction = async (): Promise<boolean> => {
-    try {
-      const k = await kitsApi.saveProduction(kit!.id, {
-        good_qty: output.good_qty,
-        scrap_qty: output.scrap_qty,
-        output_location_node_id: output.output_location_node_id || null,
-      });
-      setKit(k);
-      return true;
-    } catch (err) {
-      toast.error('Could not save production figures', {
-        description: err instanceof ApiError ? err.message : undefined,
-      });
-      return false;
-    }
-  };
-
   const run = async (fn: () => Promise<ApiKit>, ok: string, next?: number) => {
     setBusy(true);
     try {
       const k = await fn();
       setKit(k);
-      setUsed(Object.fromEntries(k.lines.map((l) => [l.id, l.used_qty])));
       if (next !== undefined) setActiveStep(next);
       else setActiveStep(stepModel(k.status).def);
       toast.success(ok);
@@ -344,125 +336,93 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const editableDraft = kit.status === 'draft';
   const inProd = kit.status === 'issued' || kit.status === 'in_production';
 
-  // Good units can never be zero — you must have produced something (Task 3).
-  const goodValid = (output.good_qty ?? 0) >= 1;
-  // The produced lot's expiry, when given, can't be in the past.
+  // ── Produce / Close readiness (KIT-007 incremental production) ───────────
+  // The Close-Out form (good/scrap/output/used) feeds BOTH a "Produce" batch
+  // (make units, keep the kit open) and the final "Close". Good accumulates on
+  // the kit across produce batches, so a Close with good 0 is valid once earlier
+  // batches produced something (it just back-flushes the remainder and locks).
+  const producingNow = (output.good_qty ?? 0) >= 1;
+  const priorGood = kit.good_qty ?? 0;
   const expiryValid = !output.output_expiration_date || output.output_expiration_date >= todayStr();
-  const outputReady =
-    goodValid &&
-    output.scrap_qty !== null &&
-    Boolean(output.output_location_node_id) &&
-    expiryValid;
-  // The output location is required — close-out places the produced quantity
-  // there. Production also can't advance while any line is SHORT of its dynamic
-  // need: the operator must issue more first (Task 2). A closed/cancelled kit is
-  // read-only, so navigation stays open.
-  const productionEditable = kit.status === 'issued' || kit.status === 'in_production';
-  // Material on the floor + the Next gate use the SAVED production figures. The
-  // operator must click Save (which logs ONE "Production recorded") for their
-  // good/scrap to take effect — typing alone changes nothing, and issuing more
-  // no longer records production (client 2026-07-22).
-  const savedAttempted = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
-  const savedEffTarget = savedAttempted > 0 ? savedAttempted : kit.target_qty;
-  const materialShort = kit.lines.some(
-    (l) => l.on_floor_qty < Math.ceil(Number(l.qty_per_unit) * savedEffTarget),
+  // The good units must be fully placed — across ONE or MORE destinations
+  // (client 2026-07-23) when a box can't hold them all. Every row needs a
+  // location and a positive quantity (a box row's qty is its picked cells), and
+  // the quantities must sum to the good count.
+  const outputPlaced = outputDests.reduce((s, d) => s + destPlaced(d), 0);
+  const outputRowsFilled = outputDests.every(
+    (d) => Boolean(d.location_node_id) && destPlaced(d) > 0,
   );
-  const productionDirty =
-    output.good_qty !== kit.good_qty ||
-    output.scrap_qty !== kit.scrap_qty ||
-    (output.output_location_node_id || null) !== (kit.output_location_node_id || null);
-  const productionReady =
-    !productionEditable || (outputReady && !productionDirty && !materialShort);
+  const outputComplete = (output.good_qty ?? 0) >= 1 && outputRowsFilled && outputPlaced === (output.good_qty ?? 0);
+  // The operator ENTERS the material used per component (client 2026-07-23). It
+  // must be at least the recipe need — ceil(qty_per_unit × (good+scrap)); you
+  // can't make N units with less than N units' worth — and no more than what's
+  // on the floor. Leftover (= floor − used) back-flushes at close.
+  const batchAttempt = (output.good_qty ?? 0) + (output.scrap_qty ?? 0);
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * batchAttempt);
+  const lineLeft = (l: ApiKitLine) => l.on_floor_qty - (used[l.id] ?? 0);
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
-  // Whether each line's chosen return destination turned out to be a box —
-  // reported by BoxCellPicker, which resolves it from the Location System.
-  // (The kit's source_options can't answer this: the operator may pick a box
-  // this kit never pulled from, and it wouldn't be listed there.)
-  const isBox = (lineId: string) => returnIsBox[lineId] === true;
-  // A back-flush into a box needs one free cell per returned unit.
-  const cellsIncomplete = kit.lines.some((l) => {
-    const u = used[l.id];
-    if (u == null) return false;
-    const ret = l.on_floor_qty - u;
-    if (ret <= 0) return false;
-    return isBox(l.id) ? (returnCells[l.id]?.length ?? 0) !== ret : false;
-  });
-  // The cap is what is still on the floor — net of anything already returned.
-  const overUse = kit.lines.filter(
+  const usedBelowNeed = kit.lines.some(
+    (l) => used[l.id] != null && (used[l.id] as number) < lineNeed(l),
+  );
+  const usedOverFloor = kit.lines.some(
     (l) => used[l.id] != null && (used[l.id] as number) > l.on_floor_qty,
   );
-  // The close-out "needed" is driven by what the build actually yielded — good +
-  // scrap — not the original target, so it updates live as those are entered.
-  // (Backend yield gate: issued+additional must cover it, else issued_below_yield.)
-  const attemptedTotal = (() => {
-    const g = kit.status === 'closed' ? kit.good_qty : output.good_qty;
-    const s = kit.status === 'closed' ? kit.scrap_qty : output.scrap_qty;
-    return g == null && s == null ? null : (g ?? 0) + (s ?? 0);
-  })();
-  const lineNeeded = (l: ApiKitLine) =>
-    attemptedTotal == null ? 0 : Math.ceil(Number(l.qty_per_unit) * attemptedTotal);
-  // Task 5.1: used can never be below needed — that much material is required to
-  // make the claimed output (backend code used_below_need). Blocks close-out.
-  const underUse = kit.lines.filter(
-    (l) => used[l.id] != null && (used[l.id] as number) < lineNeeded(l),
-  );
+  // Whether each line's back-flush destination resolved to a box (grid) node.
+  const isBox = (lineId: string) => returnIsBox[lineId] === true;
+  // A back-flush into a box needs one free cell per leftover unit (close only).
+  const cellsIncomplete = kit.lines.some((l) => {
+    const left = lineLeft(l);
+    if (left <= 0) return false;
+    return isBox(l.id) ? (returnCells[l.id]?.length ?? 0) !== left : false;
+  });
+  const usedValid = usedComplete && !usedBelowNeed && !usedOverFloor;
+  // Produce a batch NOW (keep open): make ≥ 1, with output + valid used. No
+  // back-flush, so no return-cell check.
+  const produceReady =
+    producingNow &&
+    output.scrap_qty !== null &&
+    expiryValid &&
+    outputComplete &&
+    usedValid;
+  // Close (finalize): cumulative good (prior + this batch) ≥ 1. Output required
+  // only if producing a final batch; a good-0 close just back-flushes the rest.
   const closeReady =
-    outputReady && usedComplete && overUse.length === 0 && underUse.length === 0 && !cellsIncomplete;
-  // The hard issue gate (client 2026-07-22): every line must issue AT LEAST its
-  // BOM need, from a source that physically holds the need — a short kit can't
-  // be issued at all. Checked against the local draft (nothing is saved until
-  // Issue is pressed) so the button disables before the server 422s.
+    priorGood + (output.good_qty ?? 0) >= 1 &&
+    output.scrap_qty !== null &&
+    expiryValid &&
+    (producingNow ? outputComplete : true) &&
+    usedValid &&
+    !cellsIncomplete;
+  // No recipe gating at issue (KIT-007): a short or even empty issue is allowed
+  // — issue for a campaign up front, or assign at point of use and top up later.
+  // The ONLY block is physical: a pick can't pull more of a lot than exists.
   const issueBlocked =
     editableDraft &&
-    kit.lines.some((l) => {
-      const d = lineDraft[l.id];
-      if (!d) return true;
-      const needed = Number(l.needed_qty);
-      if (!d.source) return true; // every line needs a source
-      if (isGridSource(l, d.source)) {
-        // For a box the quantity IS the cell count: must pick at least `needed`.
-        return d.cells.length < needed;
-      }
-      // Bulk: issue ≥ need, and the source must hold ≥ need (and ≥ what's typed).
-      if (d.issued_qty < needed) return true;
-      if (sourceQty(l, d.source) < needed) return true;
-      return d.issued_qty > sourceQty(l, d.source);
-    });
+    kit.lines.some((l) => !picksValid(l.source_lots, linePicks[l.id] ?? []));
 
   const onIssue = () =>
     void run(
       () =>
         kitsApi.issue(kit.id, {
-          lines: kit.lines.map((l) => {
-            const d = lineDraft[l.id];
-            const grid = d?.source ? isGridSource(l, d.source) : false;
-            return {
-              line_id: l.id,
-              // A box's quantity is the number of cells picked (D2).
-              issued_qty: grid ? (d?.cells.length ?? 0) : (d?.issued_qty ?? l.issued_qty),
-              source_location_node_id: (d?.source ?? l.source_location_node_id) || null,
-              cell_allocation_ids: grid ? d?.cells : undefined,
-            };
-          }),
+          lines: kit.lines.map((l) => ({
+            line_id: l.id,
+            sources: picksToSources(linePicks[l.id] ?? []),
+          })),
         }),
       'Material issued',
       1,
     );
 
-  // Advancing to close-out no longer saves — the figures are already persisted
-  // by the "Save production" button. Entering the step, pre-fill each line's
-  // Used with its needed quantity (the material required to make the output) and
-  // default the back-flush location to where it was pulled from, so the operator
-  // only edits the exceptions (client 2026-07-22).
+  // Entering close-out: pre-fill each line's Used with the recipe need (the
+  // minimum) and default the back-flush location to the source. Both editable.
   const enterCloseOut = () => {
     if (kit.status === 'issued' || kit.status === 'in_production') {
-      const attempted = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
-      const eff = attempted > 0 ? attempted : kit.target_qty;
+      const attempted = (output.good_qty ?? kit.target_qty) + (output.scrap_qty ?? 0);
       setUsed((prev) => {
         const next = { ...prev };
         for (const l of kit.lines) {
           if (next[l.id] == null) {
-            next[l.id] = Math.min(Math.ceil(Number(l.qty_per_unit) * eff), l.on_floor_qty);
+            next[l.id] = Math.ceil(Number(l.qty_per_unit) * attempted);
           }
         }
         return next;
@@ -481,16 +441,27 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   };
   const onProductionNext = enterCloseOut;
 
+  // The produced units, mapped to the API's multi-destination `outputs` (one
+  // entry per filled row; a box row sends its cells, a bulk row its qty).
+  const buildOutputs = () =>
+    outputDests
+      .filter((d) => d.location_node_id && destPlaced(d) > 0)
+      .map((d) => ({
+        location_node_id: d.location_node_id,
+        qty: destPlaced(d),
+        cells: d.isBox ? d.cells.map(toCell) : [],
+      }));
+
   const onCloseConfirmed = async (evidence: ReauthResponse) => {
     try {
       const k = await kitsApi.closeOut(kit.id, {
-        good_qty: output.good_qty!,
-        scrap_qty: output.scrap_qty!,
-        output_location_node_id: output.output_location_node_id,
+        good_qty: output.good_qty ?? 0,
+        scrap_qty: output.scrap_qty ?? 0,
+        outputs: (output.good_qty ?? 0) >= 1 ? buildOutputs() : [],
         output_expiration_date: output.output_expiration_date || null,
         lines: kit.lines.map((l) => ({
           line_id: l.id,
-          used_qty: used[l.id] as number,
+          used_qty: used[l.id] ?? 0,
           return_location_node_id: returnLoc[l.id] || null,
           return_cells: isBox(l.id) ? (returnCells[l.id] ?? []).map(toCell) : undefined,
         })),
@@ -498,12 +469,48 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         reason: evidence.comment ?? '',
       });
       setKit(k);
-      setActiveStep(2);
+      setActiveStep(3);
       toast.success(`${k.kit_number} closed`, {
         description: `${k.good_qty} × ${k.item_number} stocked; leftovers back-flushed.`,
       });
     } catch (err) {
       toast.error('Close-out failed', {
+        description: err instanceof ApiError ? err.message : undefined,
+      });
+    }
+  };
+
+  // Produce a batch and KEEP the kit open (KIT-007). The operator's Used per
+  // component is validated server-side (≥ need, ≤ floor). Does NOT back-flush or
+  // lock. Afterwards the form resets for the next batch and we land on Review.
+  const onProduceConfirmed = async (evidence: ReauthResponse) => {
+    try {
+      const k = await kitsApi.produce(kit.id, {
+        good_qty: output.good_qty!,
+        scrap_qty: output.scrap_qty ?? 0,
+        outputs: buildOutputs(),
+        output_expiration_date: output.output_expiration_date || null,
+        lines: kit.lines.map((l) => ({ line_id: l.id, used_qty: used[l.id] as number })),
+        evidence_id: evidence.evidence_id,
+        reason: evidence.comment ?? '',
+      });
+      const made = output.good_qty ?? 0;
+      setKit(k);
+      // Reset the batch form for the next batch.
+      setOutput((p) => ({
+        good_qty: null,
+        scrap_qty: 0,
+        output_location_node_id: p.output_location_node_id,
+        output_expiration_date: '',
+      }));
+      setOutputDests([emptyDest()]);
+      setUsed(Object.fromEntries(k.lines.map((l) => [l.id, null])));
+      setActiveStep(3);
+      toast.success(`Produced ${made} × ${k.item_number}`, {
+        description: `${k.good_qty} made so far — the kit is still open.`,
+      });
+    } catch (err) {
+      toast.error('Could not produce', {
         description: err instanceof ApiError ? err.message : undefined,
       });
     }
@@ -581,10 +588,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
                 const isCurrent = i === activeStep;
                 const isDone = i < model.completed;
                 const isReachable = i <= model.reachable;
-                // Same gate as the "Next: Close-Out" button — you can't jump
-                // FORWARD to Close-Out until production is saved and every line
-                // holds its need. Going back to Issue / Production stays open.
-                const gateBlocked = i === 2 && i > activeStep && !productionReady;
+                // Production no longer gates advance (client 2026-07-22, KIT-007).
+                // The only forward gate is Review: you can't jump to the signed
+                // close until the output + reconciliation are complete.
+                const gateBlocked = i === 3 && i > activeStep && !closeReady;
                 const clickable = isReachable && !gateBlocked;
                 return (
                   <li key={step.key} className="flex flex-1 items-center last:flex-none">
@@ -595,7 +602,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
                       aria-current={isCurrent ? 'step' : undefined}
                       title={
                         gateBlocked
-                          ? 'Save the production figures and make sure no line is short first'
+                          ? 'Enter the output and used quantities on Close-Out first'
                           : undefined
                       }
                       className={cn(
@@ -646,43 +653,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             kit={kit}
             nodeOptions={nodeOptions}
             editableDraft={editableDraft}
-            inProd={inProd}
             busy={busy}
-            draft={lineDraft}
-            onDraftChange={(lineId, patch) =>
-              setLineDraft((prev) => {
-                const cur = prev[lineId];
-                // Changing the source invalidates any cell picks from the old one.
-                const sourceChanged = patch.source !== undefined && patch.source !== cur?.source;
-                const cells = patch.cells ?? (sourceChanged ? [] : (cur?.cells ?? []));
-                return {
-                  ...prev,
-                  [lineId]: {
-                    issued_qty: patch.issued_qty ?? cur?.issued_qty ?? 0,
-                    source: patch.source ?? cur?.source ?? '',
-                    cells,
-                  },
-                };
-              })
+            picks={linePicks}
+            onPicksChange={(lineId, picks) =>
+              setLinePicks((prev) => ({ ...prev, [lineId]: picks }))
             }
-            onIssueMore={(line) => setAddingTo(line)}
-            onReturn={(line) => setReturningFrom(line)}
           />
         )}
         {activeStep === 1 && (
           <ProductionStep
             kit={kit}
-            output={output}
-            onChange={setOutput}
-            allowedIds={placeableIds}
             canWrite={canWrite}
             busy={busy}
-            dirty={productionDirty}
-            onSave={async () => {
-              setBusy(true);
-              if (await persistProduction()) toast.success('Production figures saved');
-              setBusy(false);
-            }}
             onIssueMore={(l) => setAddingTo(l)}
             onReturn={(l) => setReturningFrom(l)}
           />
@@ -690,6 +672,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         {activeStep === 2 && (
           <CloseOutStep
             kit={kit}
+            output={output}
+            onOutputChange={setOutput}
+            outputAllowedIds={returnableIds}
+            outputDests={outputDests}
+            onOutputDests={(next) => {
+              setOutputDests(next);
+              // Keep the draft's primary location in sync for the Review summary.
+              setOutput((o) => ({
+                ...o,
+                output_location_node_id: next[0]?.location_node_id ?? '',
+              }));
+            }}
             used={used}
             onUsed={(id, v) => setUsed((u) => ({ ...u, [id]: v }))}
             returnLoc={returnLoc}
@@ -705,10 +699,16 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
               setReturnIsBox((m) => (m[id] === v ? m : { ...m, [id]: v }))
             }
             allowedIds={returnableIds}
-            overUse={overUse}
-            attemptedTotal={attemptedTotal}
-            goodQty={kit.status === 'closed' ? kit.good_qty : output.good_qty}
-            scrapQty={kit.status === 'closed' ? kit.scrap_qty : output.scrap_qty}
+          />
+        )}
+        {activeStep === 3 && (
+          <ReviewStep
+            kit={kit}
+            output={output}
+            used={used}
+            returnLoc={returnLoc}
+            nodeOptions={nodeOptions}
+            prodName={prodName}
           />
         )}
 
@@ -726,11 +726,15 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             canSign,
             busy,
             closeReady,
+            produceReady,
+            producingNow,
             issueBlocked,
-            productionReady,
             onIssue,
             onNext: () => setActiveStep((s) => Math.min(model.reachable, s + 1)),
             onProductionNext,
+            onCloseOutNext: () => setActiveStep(3),
+            onProduce: () => setProduceReauthOpen(true),
+            onProduceAnother: enterCloseOut,
             onClose: () => setReauthOpen(true),
           })}
         </div>
@@ -765,7 +769,6 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         onOpenChange={(o) => !o && setReturningFrom(null)}
         onDone={(k) => {
           setKit(k);
-          setUsed(Object.fromEntries(k.lines.map((l) => [l.id, l.used_qty])));
           setReturningFrom(null);
         }}
       />
@@ -774,11 +777,22 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         open={reauthOpen}
         onOpenChange={setReauthOpen}
         action="kit.closeout"
-        meaning={`I am closing kit ${kit.kit_number}: ${output.good_qty} good, ${output.scrap_qty} scrapped, and back-flushing the leftover.`}
+        meaning={`I am closing kit ${kit.kit_number}: ${output.good_qty ?? 0} good this batch, and back-flushing the leftover.`}
         title="Sign this close-out"
         submitLabel="Close kit"
         commentPlaceholder="e.g. Batch record 2026-07-20"
         onConfirmed={onCloseConfirmed}
+      />
+
+      <PasswordReauthDialog
+        open={produceReauthOpen}
+        onOpenChange={setProduceReauthOpen}
+        action="kit.produce"
+        meaning={`I am producing ${output.good_qty ?? 0} × ${kit.item_number} for kit ${kit.kit_number}. The kit stays open to produce more.`}
+        title="Sign this batch"
+        submitLabel="Produce batch"
+        commentPlaceholder="e.g. Batch record 2026-07-23"
+        onConfirmed={onProduceConfirmed}
       />
 
       <PasswordReauthDialog
@@ -909,19 +923,25 @@ function footerPrimary(
     canSign: boolean;
     busy: boolean;
     closeReady: boolean;
+    produceReady: boolean;
+    producingNow: boolean;
     issueBlocked: boolean;
-    productionReady: boolean;
     onIssue: () => void;
     onNext: () => void;
     onProductionNext: () => void;
+    onCloseOutNext: () => void;
+    onProduce: () => void;
+    onProduceAnother: () => void;
     onClose: () => void;
   },
 ) {
-  const next = (
-    <Button variant="primary" onClick={ctx.onNext} disabled={ctx.busy}>
+  const open = kit.status === 'issued' || kit.status === 'in_production';
+  const nextBtn = (onClick: () => void, disabled = false, title?: string) => (
+    <Button variant="primary" onClick={onClick} disabled={ctx.busy || disabled} title={title}>
       Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
     </Button>
   );
+  // Step 0 — Issue.
   if (activeStep === 0) {
     if (kit.status === 'draft')
       return ctx.canWrite ? (
@@ -929,44 +949,73 @@ function footerPrimary(
           variant="primary"
           onClick={ctx.onIssue}
           disabled={ctx.busy || ctx.issueBlocked}
-          title={ctx.issueBlocked ? 'A line issues more than its source location holds' : undefined}
+          title={ctx.issueBlocked ? 'A component pulls more than that lot holds' : undefined}
         >
           Issue material <ArrowRight size={14} />
         </Button>
       ) : (
         <span />
       );
-    return model.reachable > 0 ? next : <span />;
+    return model.reachable > 0 ? nextBtn(ctx.onNext) : <span />;
   }
-  if (activeStep === 1)
-    return model.reachable > 1 ? (
+  // Step 1 — Production (adjust only, no gate).
+  if (activeStep === 1) return model.reachable > 1 ? nextBtn(ctx.onProductionNext) : <span />;
+  // Step 2 — Close-Out: go to Review to confirm the batch, then produce/close
+  // there. The button reads "Produce" when a batch is entered (it leads to the
+  // Review-and-produce screen), or "Review & close" for a pure finalize.
+  if (activeStep === 2 && open) {
+    const finalize = !ctx.producingNow;
+    const canAdvance = finalize ? ctx.closeReady : ctx.produceReady;
+    return (
       <Button
         variant="primary"
-        onClick={ctx.onProductionNext}
-        disabled={ctx.busy || !ctx.productionReady}
-        title={
-          ctx.productionReady
-            ? undefined
-            : 'Save the production figures, make sure no line is short, and choose the output location'
-        }
+        onClick={ctx.onCloseOutNext}
+        disabled={ctx.busy || !canAdvance}
+        title={canAdvance ? undefined : 'Enter the output and used quantities first'}
       >
-        Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
+        {finalize ? (
+          <>
+            Review &amp; close <ArrowRight size={14} />
+          </>
+        ) : (
+          <>
+            <FlaskConical size={14} /> Produce <ArrowRight size={14} />
+          </>
+        )}
       </Button>
-    ) : (
-      <span />
     );
-  if (activeStep === 2 && (kit.status === 'issued' || kit.status === 'in_production'))
-    return ctx.canSign ? (
-      <Button
-        variant="primary"
-        onClick={ctx.onClose}
-        disabled={!ctx.closeReady || ctx.busy}
-        title={ctx.closeReady ? undefined : 'Enter output and used quantities first'}
-      >
-        Post output &amp; close kit <ArrowRight size={14} />
-      </Button>
-    ) : (
-      <span />
+  }
+  // Step 3 — Review: produce THIS batch (keep open) or the signed terminal close.
+  if (activeStep === 3 && open)
+    return (
+      <div className="flex items-center gap-2">
+        {ctx.producingNow ? (
+          ctx.canSign && (
+            <Button
+              variant="primary"
+              onClick={ctx.onProduce}
+              disabled={ctx.busy || !ctx.produceReady}
+              title={ctx.produceReady ? 'Make this batch and keep the kit open' : 'Fix the batch on Close-Out first'}
+            >
+              <FlaskConical size={14} /> Produce this batch
+            </Button>
+          )
+        ) : (
+          <Button variant="ghost" onClick={ctx.onProduceAnother} disabled={ctx.busy}>
+            Produce another batch
+          </Button>
+        )}
+        {ctx.canSign && (
+          <Button
+            variant={ctx.producingNow ? 'secondary' : 'primary'}
+            onClick={ctx.onClose}
+            disabled={!ctx.closeReady || ctx.busy}
+            title={ctx.closeReady ? undefined : 'Enter the used quantities (and output, if producing a final batch) first'}
+          >
+            Sign &amp; close kit <ArrowRight size={14} />
+          </Button>
+        )}
+      </div>
     );
   return <span />;
 }
@@ -977,22 +1026,16 @@ function IssueStep({
   kit,
   nodeOptions,
   editableDraft,
-  inProd,
   busy,
-  draft,
-  onDraftChange,
-  onIssueMore,
-  onReturn,
+  picks,
+  onPicksChange,
 }: {
   kit: ApiKit;
   nodeOptions: SelectOption[];
   editableDraft: boolean;
-  inProd: boolean;
   busy: boolean;
-  draft: Record<string, LineDraft>;
-  onDraftChange: (lineId: string, patch: Partial<LineDraft>) => void;
-  onIssueMore: (line: ApiKitLine) => void;
-  onReturn: (line: ApiKitLine) => void;
+  picks: Record<string, LotPick[]>;
+  onPicksChange: (lineId: string, picks: LotPick[]) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -1006,413 +1049,53 @@ function IssueStep({
         <Stat label="Status" value={editableDraft ? 'Draft' : 'Issued'} hint={editableDraft ? 'Nothing moved yet' : 'Stock decremented'} />
       </div>
 
-      <Card className="p-4">
-        <div className="mb-3">
-          <h2 className="text-sm font-medium text-text">Kit structure</h2>
-          <p className="mt-0.5 text-xs text-text-3">
-            {editableDraft
-              ? 'Quantity Needed comes from the BOM. Quantity Issued is what you pull — it must be at least the Needed amount, and the source location must hold that much, or the kit can’t be issued. Edit, then press Issue material to commit.'
-              : 'Issued and locked. Extra material during production goes through an additional issue.'}
+      {editableDraft ? (
+        <div className="space-y-3">
+          <p className="text-xs text-text-3">
+            Pull each component up to its Needed amount. You can draw from several lots/shelves at
+            once — <span className="text-text-2">Auto-fill FIFO</span> takes the earliest-expiry lots
+            first, or set the quantities by hand. For an LN2 box, tap the exact vials. Then press{' '}
+            <span className="text-text-2">Issue material</span> to commit.
           </p>
+          {kit.lines.map((line) => {
+            const needed = lineNeededQty(line);
+            const linePickList = picks[line.id] ?? [];
+            return (
+              <Card key={line.id} className="p-4">
+                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                  <ItemCell
+                    itemNumber={line.item_number}
+                    description={line.description}
+                    itemId={line.item_id}
+                  />
+                  <div className="flex items-center gap-4 text-xs">
+                    <span className="text-text-3">
+                      Needed <span className="font-mono text-text">{needed}</span>
+                    </span>
+                    <span className={cn('text-text-3', line.on_hand <= 0 && 'text-danger')}>
+                      On hand <span className="font-mono text-text">{line.on_hand}</span>
+                    </span>
+                  </div>
+                </div>
+                <LotSourcePicker
+                  itemNumber={line.item_number}
+                  lots={line.source_lots}
+                  needed={needed}
+                  picks={linePickList}
+                  onChange={(p) => onPicksChange(line.id, p)}
+                  disabled={busy}
+                />
+              </Card>
+            );
+          })}
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
-                <th className="px-3 py-2 font-medium">Item</th>
-                <th className="px-3 py-2 text-right font-medium">Needed</th>
-                <th className="px-3 py-2 text-right font-medium">On hand</th>
-                <th className="px-3 py-2 text-right font-medium">Issued</th>
-                {!editableDraft && <th className="px-3 py-2 text-right font-medium">Additional</th>}
-                {!editableDraft && <th className="px-3 py-2 text-right font-medium">Returned</th>}
-                {!editableDraft && <th className="px-3 py-2 text-right font-medium">On floor</th>}
-                <th className="px-3 py-2 font-medium">Source location</th>
-                <th className="px-3 py-2" />
-              </tr>
-            </thead>
-            <tbody>
-              {kit.lines.map((line) => {
-                const d = draft[line.id] ?? {
-                  issued_qty: line.issued_qty,
-                  source: line.source_location_node_id ?? '',
-                  cells: [],
-                };
-                const opt = line.source_options.find((o) => o.node_id === d.source);
-                const grid = Boolean(opt?.is_grid);
-                // Available at the chosen source: from the draft in edit mode,
-                // from the server-derived value once issued.
-                const hereQty = editableDraft
-                  ? d.source
-                    ? sourceQty(line, d.source)
-                    : null
-                  : line.source_available;
-                const noSource = editableDraft && !d.source;
-                const needed = Number(line.needed_qty);
-                // A box can't be over-issued — quantity is the cell count — but
-                // it can be under-picked (fewer cells than needed).
-                const over =
-                  editableDraft && Boolean(d.source) && !grid && d.issued_qty > sourceQty(line, d.source);
-                const noCells = editableDraft && grid && d.cells.length === 0;
-                // Hard gate (2026-07-22): issued ≥ need, and the source holds ≥ need.
-                const belowNeed = editableDraft && !grid && d.issued_qty < needed;
-                const gridBelowNeed = editableDraft && grid && d.cells.length < needed;
-                const sourceShort =
-                  editableDraft && Boolean(d.source) && !grid && sourceQty(line, d.source) < needed;
-                const invalid =
-                  over || noSource || noCells || belowNeed || gridBelowNeed || sourceShort;
-                return (
-                  <React.Fragment key={line.id}>
-                  <tr className={cn('border-b border-border/60', invalid && 'bg-danger-soft/30')}>
-                    <td className="max-w-[300px] px-3 py-2">
-                      <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <QtyCell value={Number(line.needed_qty)} title={`×${line.qty_per_unit} per unit`} />
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <div className="flex flex-col items-end leading-tight">
-                        <QtyCell
-                          value={line.on_hand}
-                          tone={line.on_hand <= 0 ? 'danger' : undefined}
-                          title={`${line.on_hand} in stock across ${line.source_options.length} location${line.source_options.length === 1 ? '' : 's'}`}
-                        />
-                        {hereQty !== null && (
-                          <span
-                            className={cn(
-                              'mt-0.5 text-[11px] tabular-nums',
-                              over || sourceShort ? 'text-danger' : 'text-text-3',
-                            )}
-                          >
-                            {hereQty} at source{sourceShort && ` · need ${needed}`}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {editableDraft ? (
-                        grid ? (
-                          // LN2: the quantity is however many cells were picked,
-                          // so the input becomes a derived read-out (D2). Flags
-                          // red when fewer cells than the BOM need are selected.
-                          <div className="flex flex-col items-end leading-tight">
-                            <QtyCell
-                              value={d.cells.length}
-                              tone={gridBelowNeed ? 'danger' : undefined}
-                            />
-                            {gridBelowNeed ? (
-                              <span className="mt-0.5 text-[10px] text-danger">
-                                pick {needed} cell{needed === 1 ? '' : 's'}
-                              </span>
-                            ) : (
-                              <span className="mt-0.5 text-[10px] uppercase tracking-wide text-text-3">
-                                from cells
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="flex flex-col items-end leading-tight">
-                            <NumberInput
-                              aria-label={`Issued for ${line.item_number}`}
-                              value={d.issued_qty}
-                              invalid={invalid}
-                              onChange={(v) => onDraftChange(line.id, { issued_qty: v ?? 0 })}
-                            />
-                            {belowNeed && (
-                              <span className="mt-0.5 text-[10px] text-danger">min {needed}</span>
-                            )}
-                          </div>
-                        )
-                      ) : (
-                        <QtyCell value={line.issued_qty} />
-                      )}
-                    </td>
-                    {!editableDraft && (
-                      <td className="px-3 py-2 text-right">
-                        <QtyCell
-                          value={line.additional_issued_qty || null}
-                          tone={line.additional_issued_qty ? 'success' : 'muted'}
-                        />
-                      </td>
-                    )}
-                    {!editableDraft && (
-                      <td className="px-3 py-2 text-right">
-                        <QtyCell
-                          value={line.early_returned_qty || null}
-                          tone={line.early_returned_qty ? 'success' : 'muted'}
-                          title="Already handed back to inventory"
-                        />
-                      </td>
-                    )}
-                    {!editableDraft && (
-                      <td className="px-3 py-2 text-right">
-                        <QtyCell
-                          value={line.on_floor_qty}
-                          tone={line.on_floor_qty > 0 ? undefined : 'muted'}
-                          title="Still at the production location"
-                        />
-                      </td>
-                    )}
-                    <td className="px-3 py-2">
-                      {editableDraft ? (
-                        <div className="w-56">
-                          <LocationTreePicker
-                            aria-label={`Source for ${line.item_number}`}
-                            value={d.source}
-                            onChange={(v) => onDraftChange(line.id, { source: v })}
-                            allowedNodeIds={new Set(line.source_options.map((o) => o.node_id))}
-                            nodeQty={Object.fromEntries(
-                              line.source_options.map((o) => [o.node_id, o.qty]),
-                            )}
-                            showPath
-                            placeholder={line.source_options.length ? 'Choose a location' : 'None in stock'}
-                            emptyText="This item isn't in stock anywhere."
-                          />
-                          {noSource && (
-                            <p className="mt-1 text-xs text-danger">Choose a source location.</p>
-                          )}
-                          {over && (
-                            <p className="mt-1 text-xs text-danger">
-                              Only {sourceQty(line, d.source)} at the chosen location.
-                            </p>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-text-2">
-                          {nodeOptions.find((o) => o.value === line.source_location_node_id)?.label ?? '—'}
-                        </span>
-                      )}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right">
-                      {inProd && (
-                        <>
-                          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onIssueMore(line)}>
-                            <Plus size={12} /> Issue more
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={busy || line.on_floor_qty <= 0}
-                            title={
-                              line.on_floor_qty > 0
-                                ? 'Return excess to inventory'
-                                : 'Nothing on the floor to return'
-                            }
-                            onClick={() => onReturn(line)}
-                          >
-                            <Undo2 size={12} /> Return
-                          </Button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                  {/* The cryobox grid gets its own full-width row. Nested in the
-                      224px Source cell it overflowed and forced a scrollbar —
-                      a 10×10 box needs ~320px.
-                      Draft only: once issued the source is locked, and the
-                      table also gains the Returned / On-floor columns, so the
-                      colSpan below would be wrong too. */}
-                  {editableDraft && grid && opt && (
-                    <tr className="border-b border-border/60 bg-surface/40">
-                      <td colSpan={7} className="px-3 pb-3 pt-1">
-                        <div className="max-w-xl">
-                          <p className="mb-2 text-xs text-text-2">
-                            <span className="font-mono text-text">{line.item_number}</span> in{' '}
-                            <span className="text-text">{opt.name}</span>
-                          </p>
-                          <CellGridPicker
-                            mode="source"
-                            rows={opt.grid_rows ?? 1}
-                            cols={opt.grid_cols ?? 1}
-                            cells={opt.cells}
-                            value={d.cells}
-                            onChange={(next) =>
-                              onDraftChange(line.id, { cells: next, issued_qty: next.length })
-                            }
-                          />
-                          {noCells && (
-                            <p className="mt-1 text-xs text-danger">
-                              Pick at least one vial, or set this line to another location.
-                            </p>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <RuleNote>
-        Issuing removes the quantity from the source location immediately — kitted material stops
-        counting as on hand. Leftovers come back at close-out as a back-flush.
-      </RuleNote>
-    </div>
-  );
-}
-
-// ── Production step ─────────────────────────────────────────────────────────
-
-const OUTPUT_HINT = 'What the build yielded. This posts to stock when you close the kit out.';
-
-function ProductionStep({
-  kit,
-  output,
-  onChange,
-  allowedIds,
-  canWrite,
-  busy,
-  dirty,
-  onSave,
-  onIssueMore,
-  onReturn,
-}: {
-  kit: ApiKit;
-  output: OutputDraft;
-  onChange: (o: OutputDraft) => void;
-  allowedIds: Set<string>;
-  canWrite: boolean;
-  busy: boolean;
-  /** Whether the entered figures differ from what's saved on the kit. */
-  dirty: boolean;
-  onSave: () => void;
-  onIssueMore: (line: ApiKitLine) => void;
-  onReturn: (line: ApiKitLine) => void;
-}) {
-  const closed = kit.status === 'closed' || kit.status === 'cancelled';
-  const editable = kit.status === 'issued' || kit.status === 'in_production';
-  const made = closed ? kit.good_qty : output.good_qty;
-  const scrap = closed ? kit.scrap_qty : output.scrap_qty;
-  const total = (made ?? 0) + (scrap ?? 0);
-  const yieldPct = total > 0 ? (made ?? 0) / total : null;
-  // "Material on the floor" reflects the SAVED figures, not what's being typed —
-  // the operator commits with Save (which records production). Until then it
-  // shows the last saved good+scrap, else the planned target (client 2026-07-22).
-  const savedTotal = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
-  const effTarget = savedTotal > 0 ? savedTotal : kit.target_qty;
-  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * effTarget);
-  // The Save button is enabled only when there are valid, unsaved changes.
-  const expiryOk = !output.output_expiration_date || output.output_expiration_date >= todayStr();
-  const canSaveNow =
-    dirty && (output.good_qty ?? 0) >= 1 && Boolean(output.output_location_node_id) && expiryOk;
-
-  return (
-    <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-4">
-        <Stat label="Build target" value={kit.target_qty} hint={kit.item_number} />
-        <Stat label="Good units" value={made ?? '—'} tone="success" hint="Added to stock" />
-        <Stat label="Scrapped" value={scrap ?? '—'} tone={(scrap ?? 0) > 0 ? 'danger' : 'default'} hint="Not stocked" />
-        <Stat
-          label="Yield"
-          value={yieldPct === null ? '—' : `${Math.round(yieldPct * 100)}%`}
-          tone={yieldPct === null ? 'default' : yieldPct >= 1 ? 'success' : yieldPct >= 0.8 ? 'warning' : 'danger'}
-          hint={total > 0 ? `${made} good of ${total}` : 'Enter output'}
-        />
-      </div>
-
-      <Card className="p-4">
-        <div className="mb-3">
-          <h2 className="text-sm font-medium text-text">Production output</h2>
-          <p className="mt-0.5 text-xs text-text-3">{closed ? 'Posted at close-out.' : OUTPUT_HINT}</p>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity made (good)</label>
-            <NumberInput
-              aria-label="Quantity made"
-              value={made}
-              min={1}
-              disabled={closed}
-              invalid={!closed && (made ?? 0) < 1}
-              onChange={(v) => onChange({ ...output, good_qty: v })}
-              className="h-8 w-full text-sm"
-            />
-            {!closed && (made ?? 0) < 1 && (
-              <p className="mt-1 text-xs text-danger">
-                Must be at least 1 — a kit has to yield some good units.
-              </p>
-            )}
-          </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity scrapped</label>
-            <NumberInput
-              aria-label="Quantity scrapped"
-              value={scrap}
-              disabled={closed}
-              onChange={(v) => onChange({ ...output, scrap_qty: v })}
-              className="h-8 w-full text-sm"
-            />
-          </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">
-              Expiry of the produced {kit.item_number}
-            </label>
-            <Input
-              type="date"
-              aria-label="Output expiry date"
-              value={closed ? '' : output.output_expiration_date}
-              min={todayStr()}
-              disabled={closed}
-              onChange={(e) => onChange({ ...output, output_expiration_date: e.target.value })}
-            />
-            {!closed && output.output_expiration_date && output.output_expiration_date < todayStr() ? (
-              <p className="mt-1 text-xs text-danger">
-                Expiry must be today or later — a produced lot can’t already be expired.
-              </p>
-            ) : (
-              <p className="mt-1 text-xs text-text-3">
-                Carried onto the produced lot so it appears in expiry reporting.
-              </p>
-            )}
-          </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">
-              Stock the output to <span className="text-danger">*</span>
-            </label>
-            <LocationTreePicker
-              aria-label="Output location"
-              value={(closed ? kit.output_location_node_id : output.output_location_node_id) ?? ''}
-              onChange={(v) => onChange({ ...output, output_location_node_id: v })}
-              areas={['cold', 'warehouse']}
-              allowedNodeIds={allowedIds}
-              disabled={closed}
-              showPath
-              placeholder="Choose a location"
-            />
-            {!closed && !output.output_location_node_id && (
-              <p className="mt-1 text-xs text-danger">
-                Required — the finished quantity is stocked here at close-out.
-              </p>
-            )}
-          </div>
-        </div>
-
-        {!closed && (
-          <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-3">
-            <span className={cn('text-xs', dirty ? 'text-warning' : 'text-success')}>
-              {dirty ? 'Unsaved — save to record production and update the floor.' : 'Saved.'}
-            </span>
-            <Button variant="primary" size="sm" disabled={busy || !canSaveNow} onClick={onSave}>
-              <Save size={13} /> Save production
-            </Button>
-          </div>
-        )}
-      </Card>
-
-      {editable && (
+      ) : (
         <Card className="p-4">
           <div className="mb-3">
-            <h2 className="text-sm font-medium text-text">Material on the floor</h2>
+            <h2 className="text-sm font-medium text-text">Issued to production</h2>
             <p className="mt-0.5 text-xs text-text-3">
-              Needed reflects the <span className="text-text-2">saved</span> output — {effTarget} unit
-              {effTarget === 1 ? '' : 's'} × per-unit BOM. Each line must hold at least its need
-              before close-out; issue more if short, return the surplus.
-              {dirty && (
-                <span className="font-medium text-warning"> Save your changes to update these.</span>
-              )}
+              A snapshot of what was pulled at issue. Adjustments (issue more / return) and the
+              produced output are handled on the next steps.
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -1421,6 +1104,116 @@ function ProductionStep({
                 <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                   <th className="px-3 py-2 font-medium">Item</th>
                   <th className="px-3 py-2 text-right font-medium">Needed</th>
+                  <th className="px-3 py-2 text-right font-medium">Issued</th>
+                  <th className="px-3 py-2 font-medium">Pulled from</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kit.lines.map((line) => (
+                  <tr key={line.id} className="border-b border-border/60 align-top">
+                    <td className="max-w-[280px] px-3 py-2.5">
+                      <ItemCell
+                        itemNumber={line.item_number}
+                        description={line.description}
+                        itemId={line.item_id}
+                      />
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <QtyCell value={Number(line.needed_qty)} title={`×${line.qty_per_unit} per unit`} />
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <QtyCell value={line.issued_qty} />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {line.issued_from.length ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {line.issued_from.map((f, idx) => (
+                            <span
+                              key={idx}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface/60 px-2 py-0.5 text-[11px]"
+                              title={f.location}
+                            >
+                              <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
+                              <span className="text-text-3">·</span>
+                              <span className="max-w-[160px] truncate text-text-3">{f.location}</span>
+                              <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-text-3">
+                          {nodeOptions.find((o) => o.value === line.source_location_node_id)?.label ??
+                            '—'}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <RuleNote>
+        Issuing removes the quantity from the source lots immediately — kitted material stops
+        counting as on hand. Adjust it on the Production step; reconcile and back-flush at close-out.
+      </RuleNote>
+    </div>
+  );
+}
+
+// ── Production step ─────────────────────────────────────────────────────────
+
+function ProductionStep({
+  kit,
+  canWrite,
+  busy,
+  onIssueMore,
+  onReturn,
+}: {
+  kit: ApiKit;
+  canWrite: boolean;
+  busy: boolean;
+  onIssueMore: (line: ApiKitLine) => void;
+  onReturn: (line: ApiKitLine) => void;
+}) {
+  const editable = kit.status === 'issued' || kit.status === 'in_production';
+  // Need is based on the planned target here — good/scrap are entered at
+  // close-out now, so there's no dynamic need on this step (client 2026-07-22).
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * kit.target_qty);
+  const onFloorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Stat label="Build target" value={kit.target_qty} hint={kit.item_number} />
+        <Stat label="Components" value={kit.lines.length} hint="Staged on the floor" />
+        <Stat label="On floor" value={onFloorTotal} hint="Total units in production" />
+      </div>
+
+      <Card className="p-4">
+        <div className="mb-3">
+          <h2 className="text-sm font-medium text-text">Material on the floor</h2>
+          <p className="mt-0.5 text-xs text-text-3">
+            Adjust what&apos;s staged in production — <span className="text-text-2">issue more</span>{' '}
+            if a component runs short, or <span className="text-text-2">return</span> the surplus.
+            Needed is for the planned {kit.target_qty} unit{kit.target_qty === 1 ? '' : 's'}; the
+            produced output and final reconciliation happen at close-out.
+          </p>
+        </div>
+        {!editable ? (
+          <RuleNote>This kit is {kit.status} — there is nothing on the floor to adjust.</RuleNote>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
+                  <th className="px-3 py-2 font-medium">Item</th>
+                  <th className="px-3 py-2 text-right font-medium">Needed</th>
+                  <th className="px-3 py-2 text-right font-medium">Issued</th>
+                  <th className="px-3 py-2 text-right font-medium">Additional</th>
+                  <th className="px-3 py-2 text-right font-medium">Returned</th>
                   <th className="px-3 py-2 text-right font-medium">On floor</th>
                   <th className="px-3 py-2 font-medium">Status</th>
                   <th className="px-3 py-2 text-right font-medium">Adjust</th>
@@ -1433,24 +1226,35 @@ function ProductionStep({
                   const short = floor < need;
                   const surplus = floor - need;
                   return (
-                    <tr
-                      key={line.id}
-                      className={cn('border-b border-border/60', short && 'bg-danger-soft/30')}
-                    >
-                      <td className="max-w-[280px] px-3 py-2">
+                    <tr key={line.id} className="border-b border-border/60">
+                      <td className="max-w-[240px] px-3 py-2">
                         <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <QtyCell value={need} tone={short ? 'danger' : undefined} />
+                        <QtyCell value={need} />
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell value={line.issued_qty} />
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell
+                          value={line.additional_issued_qty || null}
+                          tone={line.additional_issued_qty ? 'success' : 'muted'}
+                        />
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <QtyCell
+                          value={line.early_returned_qty || null}
+                          tone={line.early_returned_qty ? 'success' : 'muted'}
+                          title="Already handed back to inventory"
+                        />
                       </td>
                       <td className="px-3 py-2 text-right">
                         <QtyCell value={floor} />
                       </td>
                       <td className="px-3 py-2">
                         {short ? (
-                          <span className="text-xs font-medium text-danger">
-                            Short {need - floor} — issue more
-                          </span>
+                          <span className="text-xs text-warning">Short {need - floor}</span>
                         ) : surplus > 0 ? (
                           <span className="text-xs text-text-3">Surplus {surplus}</span>
                         ) : (
@@ -1461,7 +1265,7 @@ function ProductionStep({
                         <Button
                           variant="ghost"
                           size="sm"
-                          disabled={!canWrite}
+                          disabled={!canWrite || busy}
                           onClick={() => onIssueMore(line)}
                         >
                           <Plus size={12} /> Issue more
@@ -1469,11 +1273,11 @@ function ProductionStep({
                         <Button
                           variant="ghost"
                           size="sm"
-                          disabled={!canWrite || surplus <= 0}
+                          disabled={!canWrite || busy || floor <= 0}
                           title={
-                            surplus > 0
-                              ? 'Return the surplus to inventory'
-                              : 'No surplus above the need to return'
+                            floor > 0
+                              ? 'Return material to inventory'
+                              : 'Nothing on the floor to return'
                           }
                           onClick={() => onReturn(line)}
                         >
@@ -1486,14 +1290,159 @@ function ProductionStep({
               </tbody>
             </table>
           </div>
-        </Card>
+        )}
+      </Card>
+
+      <RuleNote>
+        Nothing here is final — adjust freely. The produced output is recorded and the leftover
+        back-flushed at close-out, in one signed step.
+      </RuleNote>
+    </div>
+  );
+}
+
+// ── Output placement (single, or split across locations) ────────────────────
+
+/**
+ * Where a produced batch is stocked. The common case is ONE location; when a
+ * chosen LN2 box can't hold every unit, "Add another location" lets the rest of
+ * the good units go to another box, a freezer, or a shelf (client 2026-07-23).
+ * All rows are ONE lot; the quantities must sum to ``good``.
+ *
+ * A box row picks cells (quantity follows the selection, capped at what's left);
+ * a bulk row (shelf / freezer) takes a typed quantity. ``BoxCellPicker`` reports
+ * whether a location is a box, so we swap the cell grid for a quantity input.
+ */
+function OutputPlacement({
+  good,
+  dests,
+  onChange,
+  allowedIds,
+  required,
+  reservedFor,
+}: {
+  good: number;
+  dests: OutputDest[];
+  onChange: (next: OutputDest[]) => void;
+  allowedIds: Set<string>;
+  required: boolean;
+  /** Cells claimed by other box pickers in the form (back-flush lines / other
+   *  split rows), keyed off this row's node — blocked so no two claim one cell. */
+  reservedFor: (nodeId: string | undefined, own: string[]) => Set<string>;
+}) {
+  const placed = dests.reduce((s, d) => s + destPlaced(d), 0);
+  const remaining = good - placed;
+  const update = (key: string, patch: Partial<OutputDest>) =>
+    onChange(dests.map((d) => (d.key === key ? { ...d, ...patch } : d)));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <label className="text-xs font-medium text-text-2">
+          Stock the output to {required && <span className="text-danger">*</span>}
+        </label>
+        {good > 0 && (
+          <span
+            className={cn(
+              'font-mono text-xs tabular-nums',
+              placed === good ? 'text-success' : 'text-text-3',
+            )}
+          >
+            {placed} / {good} placed{remaining > 0 ? ` · ${remaining} to go` : ''}
+          </span>
+        )}
+      </div>
+
+      {dests.map((d, i) => {
+        // This row's cap = the good count minus everything the OTHER rows hold.
+        const cap = Math.max(0, good - (placed - destPlaced(d)));
+        // A location already used by ANOTHER row is off the menu here — to put
+        // more units in the same box you pick more cells in that box's own row,
+        // not a second row (which the backend rejects as a duplicate anyway).
+        const usedElsewhere = new Set(
+          dests.filter((x) => x.key !== d.key).map((x) => x.location_node_id).filter(Boolean),
+        );
+        const rowAllowed = new Set([...allowedIds].filter((id) => !usedElsewhere.has(id)));
+        return (
+          <div key={d.key} className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <LocationTreePicker
+                  aria-label={`Output location ${i + 1}`}
+                  value={d.location_node_id}
+                  onChange={(v) =>
+                    update(d.key, { location_node_id: v, isBox: false, cells: [], qty: null })
+                  }
+                  areas={['ln2', 'cold', 'warehouse']}
+                  allowedNodeIds={rowAllowed}
+                  showPath
+                  placeholder="Warehouse, freezer, or LN2 box"
+                />
+              </div>
+              {dests.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => onChange(dests.filter((x) => x.key !== d.key))}
+                  aria-label="Remove this location"
+                  className="mt-1 grid size-8 shrink-0 place-items-center rounded-md text-text-3 transition-colors hover:bg-surface-2 hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            {d.location_node_id && (
+              <div className="mt-2">
+                {/* Box → pick cells (quantity follows, capped at what's left).
+                    Renders nothing for a shelf / freezer and reports back so we
+                    show a quantity input instead. */}
+                <BoxCellPicker
+                  nodeId={d.location_node_id}
+                  qty={cap}
+                  derive
+                  value={d.cells}
+                  onChange={(cells) => update(d.key, { cells })}
+                  onResolved={(isBox) => {
+                    if (isBox !== d.isBox) update(d.key, { isBox, cells: [], qty: null });
+                  }}
+                  reserved={reservedFor(d.location_node_id, d.cells)}
+                />
+                {!d.isBox && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-text-3">Quantity here</span>
+                    <NumberInput
+                      aria-label={`Quantity at location ${i + 1}`}
+                      value={d.qty}
+                      min={1}
+                      onChange={(v) => update(d.key, { qty: v == null ? null : Math.min(v, cap) })}
+                      className="h-8 w-20"
+                    />
+                    <span className="text-[11px] text-text-3">of {cap} left</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {required && good > 0 && placed !== good && (
+        <p className="text-xs text-danger">
+          {placed < good
+            ? `Place all ${good} unit${good === 1 ? '' : 's'} — ${remaining} still to place.`
+            : `Too many placed — remove ${placed - good}.`}
+        </p>
       )}
 
-      {!closed && (
-        <RuleNote>
-          Output and reconciliation commit together at close-out — the finished quantity is stocked
-          and the leftover back-flushed in one signed step.
-        </RuleNote>
+      {remaining > 0 && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => onChange([...dests, emptyDest()])}
+        >
+          <Plus size={14} /> Add another location
+        </Button>
       )}
     </div>
   );
@@ -1503,6 +1452,11 @@ function ProductionStep({
 
 function CloseOutStep({
   kit,
+  output,
+  onOutputChange,
+  outputAllowedIds,
+  outputDests,
+  onOutputDests,
   used,
   onUsed,
   returnLoc,
@@ -1512,12 +1466,13 @@ function CloseOutStep({
   returnIsBox,
   onReturnIsBox,
   allowedIds,
-  overUse,
-  attemptedTotal,
-  goodQty,
-  scrapQty,
 }: {
   kit: ApiKit;
+  output: OutputDraft;
+  onOutputChange: (o: OutputDraft) => void;
+  outputAllowedIds: Set<string>;
+  outputDests: OutputDest[];
+  onOutputDests: (next: OutputDest[]) => void;
   used: Record<string, number | null>;
   onUsed: (id: string, v: number | null) => void;
   returnLoc: Record<string, string>;
@@ -1527,15 +1482,20 @@ function CloseOutStep({
   returnIsBox: Record<string, boolean>;
   onReturnIsBox: (id: string, isBox: boolean) => void;
   allowedIds: Set<string>;
-  overUse: ApiKitLine[];
-  /** good + scrap (null until entered) — drives the live close-out "needed". */
-  attemptedTotal: number | null;
-  goodQty: number | null;
-  scrapQty: number | null;
 }) {
   const closed = kit.status === 'closed';
   const cancelled = kit.status === 'cancelled';
   const editable = kit.status === 'issued' || kit.status === 'in_production';
+  // The produced output is entered HERE (KIT-005), then posted with either
+  // "Produce" (keep open) or the signed close on the Review step.
+  const goodQty = closed ? kit.good_qty : output.good_qty;
+  const scrapQty = closed ? kit.scrap_qty : output.scrap_qty;
+  const expiryBad = Boolean(output.output_expiration_date) && output.output_expiration_date < todayStr();
+  // Good/scrap accumulate across produce batches (KIT-007). A good of 0 is only
+  // valid at CLOSE once earlier batches already produced something.
+  const priorGood = kit.good_qty ?? 0;
+  const goodRequired = priorGood < 1; // must make ≥ 1 this batch if nothing made yet
+  const producingNow = (goodQty ?? 0) >= 1;
 
   if (kit.status === 'draft') {
     return (
@@ -1552,195 +1512,321 @@ function CloseOutStep({
     );
   }
 
-  const returned = (l: ApiKitLine) => {
-    const u = closed ? l.used_qty : used[l.id];
-    if (u == null) return null;
-    return l.on_floor_qty - u;
+  // The operator ENTERS Used per component (client 2026-07-23); Needed is the
+  // recipe minimum ceil(qty_per_unit × (good+scrap)). Used must be ≥ Needed and
+  // ≤ on-floor; the leftover (floor − used) back-flushes at close.
+  const attempted = (goodQty ?? 0) + (scrapQty ?? 0);
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * attempted);
+  // Changing good/scrap re-syncs each line's Used to the recipe need, so the
+  // Used column tracks the target (client 2026-07-23). The operator can still
+  // override a line afterwards.
+  const setBatch = (next: OutputDraft) => {
+    onOutputChange(next);
+    const att = (next.good_qty ?? 0) + (next.scrap_qty ?? 0);
+    for (const l of kit.lines) {
+      onUsed(l.id, Math.ceil(Number(l.qty_per_unit) * att));
+    }
   };
-  const totalReturned = kit.lines.reduce((a, l) => a + (returned(l) ?? 0), 0);
-  const pending = kit.lines.filter((l) => (closed ? l.used_qty : used[l.id]) == null).length;
+  const usedOf = (l: ApiKitLine) => (editable ? used[l.id] : l.used_qty);
+  const anyProblem =
+    editable &&
+    kit.lines.some((l) => {
+      const u = used[l.id];
+      return u == null || u < lineNeed(l) || u > l.on_floor_qty;
+    });
+  const consumeTotal = kit.lines.reduce((a, l) => a + (usedOf(l) ?? 0), 0);
+  const leftTotal = kit.lines.reduce(
+    (a, l) => a + Math.max(0, l.on_floor_qty - (usedOf(l) ?? 0)),
+    0,
+  );
+  const yieldPct = attempted > 0 ? (goodQty ?? 0) / attempted : null;
+
+  // Cells claimed by EVERY box picker in this form (the split-output rows AND
+  // the back-flush lines), keyed by node. A cell taken by one picker is blocked
+  // in the others so the produced output and a back-flush can share a box but
+  // never the same physical position. Recomputed each render → reserves live.
+  const claimedByNode = new Map<string, Set<string>>();
+  const claimCells = (nodeId: string | undefined, keys: string[]) => {
+    if (!nodeId || keys.length === 0) return;
+    const set = claimedByNode.get(nodeId) ?? new Set<string>();
+    keys.forEach((k) => set.add(k));
+    claimedByNode.set(nodeId, set);
+  };
+  outputDests.forEach((d) => {
+    if (d.isBox) claimCells(d.location_node_id, d.cells);
+  });
+  kit.lines.forEach((l) => {
+    if (returnIsBox[l.id]) claimCells(returnLoc[l.id], returnCells[l.id] ?? []);
+  });
+  const reservedFor = (nodeId: string | undefined, own: string[]): Set<string> => {
+    const all = nodeId ? claimedByNode.get(nodeId) : undefined;
+    if (!all) return new Set();
+    const ownSet = new Set(own);
+    return new Set([...all].filter((k) => !ownSet.has(k)));
+  };
 
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-4">
-        <Stat label="Good units" value={goodQty ?? 0} tone="success" hint="Produced & stocked" />
+        <Stat label="Making (good)" value={goodQty ?? 0} tone="success" hint="This batch" />
         <Stat
           label="Scrapped"
           value={scrapQty ?? 0}
           tone={(scrapQty ?? 0) > 0 ? 'danger' : 'default'}
           hint="Consumed, no output"
         />
-        <Stat label="Awaiting used qty" value={pending} tone={pending > 0 ? 'warning' : 'success'} />
-        <Stat label="To back-flush" value={totalReturned} tone="success" hint="Units returning to stock" />
+        <Stat
+          label={editable ? 'Consumes' : 'Consumed'}
+          value={consumeTotal}
+          tone={anyProblem ? 'danger' : 'default'}
+          hint={editable ? 'Material from the floor' : 'Total across batches'}
+        />
+        <Stat
+          label="Left on floor"
+          value={leftTotal}
+          tone="success"
+          hint={editable ? 'Back-flushes at close' : 'Back-flushed'}
+        />
       </div>
 
+      {/* Production output — entered here, posted by Produce (keep open) or Close. */}
       <Card className="p-4">
-        <div className="mb-3">
-          <h2 className="text-sm font-medium text-text">Reconciliation</h2>
-          <p className="mt-0.5 text-xs text-text-3">
-            Enter Quantity Used from the traveler. Anything left over returns to inventory as an
-            explicit back-flush. <span className="text-text-2">Needed</span> updates from what the
-            build yielded — (good + scrap) × per-unit BOM.
-          </p>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium text-text">This batch</h2>
+            <p className="mt-0.5 text-xs text-text-3">
+              {closed
+                ? 'Posted at close-out.'
+                : priorGood > 0
+                  ? `${priorGood} already produced. Enter the next batch, then Produce (keep open) or Sign & close.`
+                  : 'What this batch yielded — post it with Produce (keep open) or Sign & close.'}
+            </p>
+          </div>
+          {yieldPct !== null && (
+            <span
+              className={cn(
+                'shrink-0 rounded-full px-2.5 py-1 text-xs font-medium',
+                yieldPct >= 1
+                  ? 'bg-success-soft text-success'
+                  : yieldPct >= 0.8
+                    ? 'bg-warning-soft text-warning'
+                    : 'bg-danger-soft text-danger',
+              )}
+            >
+              {Math.round(yieldPct * 100)}% yield
+            </span>
+          )}
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
-                <th className="px-3 py-2 font-medium">Item</th>
-                <th className="px-3 py-2 text-right font-medium">On floor</th>
-                <th className="px-3 py-2 text-right font-medium">Needed</th>
-                <th className="px-3 py-2 text-right font-medium">Used</th>
-                <th className="px-3 py-2 text-right font-medium">Back-flushed</th>
-                <th className="px-3 py-2 font-medium">Back-flush location</th>
-              </tr>
-            </thead>
-            <tbody>
-              {kit.lines.map((line) => {
-                const over = overUse.some((l) => l.id === line.id);
-                const ret = returned(line);
-                // Live "needed" for this build's yield (good + scrap), rounded up
-                // to whole units to match the backend. Flags red when it exceeds
-                // what was issued (issue more) or when Used is below it (Task 5.1).
-                const issuedTotal = lineIssuedTotal(line);
-                const needed =
-                  attemptedTotal == null ? null : Math.ceil(Number(line.qty_per_unit) * attemptedTotal);
-                const needShort = needed != null && needed > issuedTotal;
-                const u = editable ? used[line.id] : line.used_qty;
-                const usedShort = needed != null && u != null && u < needed;
-                return (
-                  <React.Fragment key={line.id}>
-                    <tr
-                      className={cn(
-                        'border-b border-border/60',
-                        (over || needShort || usedShort) && 'bg-danger-soft/30',
-                      )}
-                    >
-                      <td className="max-w-[300px] px-3 py-2">
-                        <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <QtyCell
-                          value={line.on_floor_qty}
-                          title={
-                            line.early_returned_qty
-                              ? `${lineIssuedTotal(line)} issued − ${line.early_returned_qty} already returned`
-                              : undefined
-                          }
-                        />
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <QtyCell
-                          value={needed}
-                          tone={
-                            needShort || usedShort ? 'danger' : needed == null ? 'muted' : undefined
-                          }
-                          title={
-                            attemptedTotal == null
-                              ? 'Enter good + scrap to compute'
-                              : `${Number(line.qty_per_unit)} per unit × ${attemptedTotal} made (good + scrap)`
-                          }
-                        />
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {editable ? (
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity made (good)</label>
+            <NumberInput
+              aria-label="Quantity made"
+              value={goodQty}
+              min={0}
+              disabled={closed}
+              invalid={!closed && goodRequired && (goodQty ?? 0) < 1}
+              onChange={(v) => setBatch({ ...output, good_qty: v })}
+              className="h-8 w-full"
+            />
+            {!closed && goodRequired && (goodQty ?? 0) < 1 ? (
+              <p className="mt-1 text-xs text-danger">Must be at least 1 good unit.</p>
+            ) : (
+              !closed &&
+              !goodRequired &&
+              (goodQty ?? 0) < 1 && (
+                <p className="mt-1 text-[11px] text-text-3">0 is fine — closing just back-flushes.</p>
+              )
+            )}
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity scrapped</label>
+            <NumberInput
+              aria-label="Quantity scrapped"
+              value={scrapQty}
+              disabled={closed}
+              onChange={(v) => setBatch({ ...output, scrap_qty: v })}
+              className="h-8 w-full"
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">
+              Expiry of the {kit.item_number}
+            </label>
+            <Input
+              type="date"
+              aria-label="Output expiry date"
+              value={closed ? '' : output.output_expiration_date}
+              min={todayStr()}
+              disabled={closed}
+              onChange={(e) => onOutputChange({ ...output, output_expiration_date: e.target.value })}
+            />
+            {!closed && expiryBad ? (
+              <p className="mt-1 text-xs text-danger">Expiry can’t be in the past.</p>
+            ) : (
+              <p className="mt-1 text-[11px] text-text-3">Optional — carried onto the produced lot.</p>
+            )}
+          </div>
+        </div>
+
+        {/* Where the produced units go — one location, or SPLIT across several
+            (client 2026-07-23) when one LN2 box can't hold every unit. */}
+        {!closed ? (
+          <div className="mt-4 border-t border-border pt-4">
+            <OutputPlacement
+              good={goodQty ?? 0}
+              dests={outputDests}
+              onChange={onOutputDests}
+              allowedIds={outputAllowedIds}
+              required={producingNow}
+              reservedFor={reservedFor}
+            />
+          </div>
+        ) : (
+          kit.output_location_node_id && (
+            <div className="mt-4 border-t border-border pt-4">
+              <label className="mb-1.5 block text-xs font-medium text-text-2">Stocked the output to</label>
+              <LocationTreePicker
+                aria-label="Output location"
+                value={kit.output_location_node_id}
+                onChange={() => {}}
+                areas={['ln2', 'cold', 'warehouse']}
+                disabled
+                showPath
+              />
+            </div>
+          )
+        )}
+      </Card>
+
+      {editable ? (
+        <Card className="p-4">
+          <div className="mb-3">
+            <h2 className="text-sm font-medium text-text">Material this batch consumes</h2>
+            <p className="mt-0.5 text-xs text-text-3">
+              Enter how much of each component you used. It must be at least the recipe{' '}
+              <span className="text-text-2">Needs</span> — making {attempted} unit
+              {attempted === 1 ? '' : 's'} takes at least that much — and no more than what&apos;s on
+              the floor. The leftover back-flushes when you <span className="text-text-2">close</span>.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
+                  <th className="px-3 py-2 font-medium">Component</th>
+                  <th className="px-3 py-2 text-right font-medium">Per unit</th>
+                  <th className="px-3 py-2 text-right font-medium">Needs</th>
+                  <th className="px-3 py-2 text-right font-medium">On floor</th>
+                  <th className="px-3 py-2 text-right font-medium">Used</th>
+                  <th className="px-3 py-2 text-right font-medium">Left</th>
+                  <th className="px-3 py-2 font-medium">Back-flush to (at close)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kit.lines.map((line) => {
+                  const need = lineNeed(line);
+                  const floor = line.on_floor_qty;
+                  const u = used[line.id];
+                  const left = floor - (u ?? 0);
+                  const cantMake = need > floor; // even the minimum doesn't fit
+                  const belowNeed = u != null && u < need;
+                  const overFloor = u != null && u > floor;
+                  const rowBad = cantMake || belowNeed || overFloor;
+                  return (
+                    <React.Fragment key={line.id}>
+                      <tr className={cn('border-b border-border/60', rowBad && 'bg-danger-soft/30')}>
+                        <td className="max-w-[240px] px-3 py-2">
+                          <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono text-xs tabular-nums text-text-2">
+                          {Number(line.qty_per_unit)}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <QtyCell value={need} tone={cantMake ? 'danger' : undefined} />
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <QtyCell value={floor} tone={cantMake ? 'danger' : undefined} />
+                        </td>
+                        <td className="px-3 py-2 text-right">
                           <NumberInput
                             aria-label={`Used for ${line.item_number}`}
-                            value={used[line.id] ?? null}
-                            invalid={over || usedShort}
+                            value={u ?? null}
+                            min={0}
+                            invalid={belowNeed || overFloor || cantMake}
                             onChange={(v) => onUsed(line.id, v)}
+                            className="w-16"
                           />
-                        ) : (
-                          <QtyCell value={line.used_qty} />
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <QtyCell value={ret} tone={ret && ret > 0 ? 'success' : 'muted'} />
-                      </td>
-                      <td className="px-3 py-2">
-                        {ret && ret > 0 ? (
-                          <div className="w-56">
-                            <LocationTreePicker
-                              aria-label={`Return location for ${line.item_number}`}
-                              value={
-                                (editable ? returnLoc[line.id] : line.return_location_node_id) ?? ''
-                              }
-                              onChange={(v) => onReturnLoc(line.id, v)}
-                              areas={['ln2', 'cold', 'warehouse']}
-                              allowedNodeIds={allowedIds}
-                              disabled={!editable}
-                              showPath
-                            />
-                          </div>
-                        ) : (
-                          <span className="text-xs text-text-3">
-                            {(closed ? line.used_qty : used[line.id]) == null ? '—' : 'Nothing to return'}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                    {over && (
-                      <tr className="bg-danger-soft/30">
-                        <td colSpan={6} className="px-3 pb-2 text-xs text-danger">
-                          Used exceeds what is on the floor by{' '}
-                          {(used[line.id] as number) - line.on_floor_qty}. Record an additional
-                          issue to cover it.
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {u == null ? (
+                            <span className="text-xs text-text-3">—</span>
+                          ) : (
+                            <QtyCell value={left} tone={left > 0 ? 'success' : 'muted'} />
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          {left > 0 ? (
+                            <div className="w-52">
+                              <LocationTreePicker
+                                aria-label={`Back-flush location for ${line.item_number}`}
+                                value={returnLoc[line.id] ?? ''}
+                                onChange={(v) => onReturnLoc(line.id, v)}
+                                areas={['ln2', 'cold', 'warehouse']}
+                                allowedNodeIds={allowedIds}
+                                showPath
+                              />
+                            </div>
+                          ) : (
+                            <span className="text-xs text-text-3">Nothing left</span>
+                          )}
                         </td>
                       </tr>
-                    )}
-                    {editable && needShort && !over && (
-                      <tr className="bg-danger-soft/30">
-                        <td colSpan={6} className="px-3 pb-2 text-xs text-danger">
-                          Needs {needed} ({attemptedTotal} made × {Number(line.qty_per_unit)} per
-                          unit) but only {issuedTotal} was issued. Record an additional issue before
-                          closing out.
-                        </td>
-                      </tr>
-                    )}
-                    {editable && usedShort && !over && !needShort && (
-                      <tr className="bg-danger-soft/30">
-                        <td colSpan={6} className="px-3 pb-2 text-xs text-danger">
-                          Used {u} is below the {needed} needed to make {attemptedTotal} unit
-                          {attemptedTotal === 1 ? '' : 's'} — that much material is required to
-                          produce the output.
-                        </td>
-                      </tr>
-                    )}
-                    {/* Full-width row for the cryobox grid — it doesn't fit the
-                        224px Return-location cell without a scrollbar. */}
-                    {editable && ret !== null && ret > 0 && (
-                      <tr
-                        className={cn(
-                          'border-b border-border/60',
-                          returnIsBox[line.id] && 'bg-surface/40',
-                        )}
-                      >
-                        {/* The picker must stay mounted to resolve whether the
-                            destination is a box, so collapse the padding rather
-                            than the row when it turns out to be bulk. */}
-                        <td
-                          colSpan={6}
-                          className={cn(returnIsBox[line.id] ? 'px-3 pb-3 pt-0' : 'p-0')}
+                      {(cantMake || belowNeed || overFloor) && (
+                        <tr className="bg-danger-soft/30">
+                          <td colSpan={7} className="px-3 pb-2 text-xs text-danger">
+                            {cantMake
+                              ? `Not enough on the floor — ${need} needed to make ${attempted}, only ${floor} here. Issue more first.`
+                              : belowNeed
+                                ? `Use at least ${need} to make ${attempted} unit${attempted === 1 ? '' : 's'}.`
+                                : `Only ${floor} on the floor.`}
+                          </td>
+                        </tr>
+                      )}
+                      {/* Cryobox grid gets its own full-width row for the leftover. */}
+                      {left > 0 && (
+                        <tr
+                          className={cn(
+                            'border-b border-border/60',
+                            returnIsBox[line.id] && 'bg-surface/40',
+                          )}
                         >
-                          <div className="max-w-xl">
-                            <BoxCellPicker
-                              nodeId={returnLoc[line.id]}
-                              qty={ret}
-                              value={returnCells[line.id] ?? []}
-                              onChange={(v) => onReturnCells(line.id, v)}
-                              onResolved={(isBox) => onReturnIsBox(line.id, isBox)}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+                          <td colSpan={7} className={cn(returnIsBox[line.id] ? 'px-3 pb-3 pt-0' : 'p-0')}>
+                            <div className="max-w-xl">
+                              <BoxCellPicker
+                                nodeId={returnLoc[line.id]}
+                                qty={left}
+                                value={returnCells[line.id] ?? []}
+                                onChange={(v) => onReturnCells(line.id, v)}
+                                onResolved={(isBox) => onReturnIsBox(line.id, isBox)}
+                                reserved={reservedFor(returnLoc[line.id], returnCells[line.id] ?? [])}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      ) : (
+        <Card className="p-4">
+          <RuleNote>Posted — see the Review step for the full component summary.</RuleNote>
+        </Card>
+      )}
 
       {closed && (
         <Card className="flex items-start gap-3 border-success/30 bg-success-soft/40 p-4">
@@ -1749,11 +1835,265 @@ function CloseOutStep({
             <div className="font-medium text-text">Kit closed</div>
             <p className="mt-1 text-xs text-text-2">
               {kit.good_qty} × {kit.item_number} stocked
-              {(kit.scrap_qty ?? 0) > 0 && ` (${kit.scrap_qty} scrapped)`}, and {totalReturned} unit
-              {totalReturned === 1 ? '' : 's'} back-flushed to inventory.
+              {(kit.scrap_qty ?? 0) > 0 && ` (${kit.scrap_qty} scrapped)`}, and {leftTotal} unit
+              {leftTotal === 1 ? '' : 's'} back-flushed to inventory.
             </p>
           </div>
         </Card>
+      )}
+    </div>
+  );
+}
+
+// ── Review & Close step ──────────────────────────────────────────────────────
+
+function ReviewStep({
+  kit,
+  output,
+  used,
+  returnLoc,
+  nodeOptions,
+  prodName,
+}: {
+  kit: ApiKit;
+  output: OutputDraft;
+  used: Record<string, number | null>;
+  returnLoc: Record<string, string>;
+  nodeOptions: SelectOption[];
+  /** Resolved production-floor name (production nodes aren't in nodeOptions). */
+  prodName: string;
+}) {
+  const closed = kit.status === 'closed';
+  // Good/scrap accumulate on the kit across produce batches (KIT-007).
+  const producedSoFar = kit.good_qty ?? 0;
+  const scrapSoFar = kit.scrap_qty ?? 0;
+  const pendingGood = closed ? 0 : output.good_qty ?? 0; // a batch entered but not yet made
+  const pendingScrap = closed ? 0 : output.scrap_qty ?? 0;
+  const producingNow = pendingGood >= 1;
+  const totalMade = producedSoFar + scrapSoFar;
+  const yieldPct = totalMade > 0 ? producedSoFar / totalMade : null;
+  const label = (id: string | null | undefined) =>
+    id ? (nodeOptions.find((o) => o.value === id)?.label ?? '—') : '—';
+  const outLoc = closed ? kit.output_location_node_id : output.output_location_node_id;
+  // ``on_floor_qty`` already nets out cumulative used, so it is the material
+  // still physically on the floor — which is exactly what back-flushes at close.
+  const floorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
+  const usedTotal = kit.lines.reduce((a, l) => a + (l.used_qty ?? 0), 0);
+
+  return (
+    <div className="space-y-4">
+      {/* Producing NOW — detail of the batch about to be made (the "Produce"
+          button posts exactly this and keeps the kit open). */}
+      {producingNow && (
+        <Card className="border-accent/40 bg-accent-soft/15 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-accent">Producing now</div>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-3xl font-semibold text-text">{pendingGood}</span>
+                <span className="text-text-3">×</span>
+                <span className="font-mono text-lg text-text">{kit.item_number}</span>
+                {pendingScrap > 0 && (
+                  <span className="text-sm text-text-3">+ {pendingScrap} scrap</span>
+                )}
+              </div>
+              <div className="mt-0.5 text-sm text-text-2">
+                Stocking to <span className="text-text">{label(outLoc)}</span>
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 overflow-x-auto rounded-md border border-border bg-bg-elev/50">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-3">
+                  <th className="px-3 py-1.5 font-medium">Component</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Uses</th>
+                  <th className="px-3 py-1.5 text-right font-medium">Left after</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kit.lines.map((line) => {
+                  const u = used[line.id] ?? 0;
+                  return (
+                    <tr key={line.id} className="border-b border-border/60 last:border-0">
+                      <td className="px-3 py-1.5">
+                        <span className="font-mono text-xs text-text">{line.item_number}</span>
+                        <span className="ml-2 text-text-3">{line.description}</span>
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-mono tabular-nums text-text">{u}</td>
+                      <td className="px-3 py-1.5 text-right font-mono tabular-nums text-text-2">
+                        {line.on_floor_qty - u}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-xs text-text-3">
+            Press <span className="text-text-2">Produce this batch</span> to make these and keep the
+            kit open, or <span className="text-text-2">Sign &amp; close</span> to make them and
+            finish (the remainder back-flushes).
+          </p>
+        </Card>
+      )}
+
+      {/* Headline: cumulative production. */}
+      <Card className="p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wider text-text-3">
+                {closed ? 'Produced' : 'Produced so far'}
+              </span>
+              {!closed && (
+                <Badge tone="warning" className="text-[10px]">
+                  Kit open
+                </Badge>
+              )}
+            </div>
+            <div className="mt-1 flex items-baseline gap-2">
+              <span className="text-3xl font-semibold text-text">{producedSoFar}</span>
+              {!closed && <span className="text-sm text-text-3">of {kit.target_qty} target</span>}
+              <span className="text-text-3">·</span>
+              <span className="font-mono text-lg text-text">{kit.item_number}</span>
+            </div>
+            <div className="mt-0.5 text-sm text-text-2">{kit.description}</div>
+            {!closed && pendingGood > 0 && (
+              <p className="mt-1 text-xs text-accent">
+                Sign &amp; close will make {pendingGood} more, then finish the kit.
+              </p>
+            )}
+          </div>
+          {yieldPct !== null && (
+            <div className="text-right">
+              <div className="text-[11px] uppercase tracking-wider text-text-3">Yield</div>
+              <div
+                className={cn(
+                  'text-3xl font-semibold',
+                  yieldPct >= 1 ? 'text-success' : yieldPct >= 0.8 ? 'text-warning' : 'text-danger',
+                )}
+              >
+                {Math.round(yieldPct * 100)}%
+              </div>
+              <div className="text-[11px] text-text-3">
+                {producedSoFar} good · {scrapSoFar} scrap
+              </div>
+            </div>
+          )}
+        </div>
+        <dl className="mt-4 grid gap-3 border-t border-border pt-4 text-sm sm:grid-cols-3">
+          <div>
+            <dt className="text-[11px] uppercase tracking-wider text-text-3">Built at</dt>
+            <dd className="mt-0.5 text-text-2">{prodName || 'Production floor'}</dd>
+          </div>
+          <div>
+            <dt className="text-[11px] uppercase tracking-wider text-text-3">Output stored to</dt>
+            <dd className="mt-0.5 text-text-2">{label(outLoc)}</dd>
+          </div>
+          <div>
+            <dt className="text-[11px] uppercase tracking-wider text-text-3">
+              {closed ? 'Consumed / returned' : 'Consumed / on floor'}
+            </dt>
+            <dd className="mt-0.5 text-text-2">
+              <span className="font-mono">{usedTotal}</span> used ·{' '}
+              <span className="font-mono">{floorTotal}</span>{' '}
+              {closed ? 'back to stock' : 'still on floor'}
+            </dd>
+          </div>
+        </dl>
+      </Card>
+
+      {/* Per-component summary. */}
+      <Card className="p-4">
+        <div className="mb-3">
+          <h2 className="text-sm font-medium text-text">Component summary</h2>
+          <p className="mt-0.5 text-xs text-text-3">
+            {closed
+              ? 'What the kit consumed and what returned to inventory.'
+              : 'Consumed so far and what is still staged on the floor. Produce another batch, or sign & close to finish (the remainder back-flushes).'}
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
+                <th className="px-3 py-2 font-medium">Component</th>
+                <th className="px-3 py-2 font-medium">Issued from</th>
+                <th className="px-3 py-2 text-right font-medium">Used</th>
+                <th className="px-3 py-2 text-right font-medium">
+                  {closed ? 'Back-flushed' : 'On floor'}
+                </th>
+                <th className="px-3 py-2 font-medium">
+                  {closed ? 'Returned to' : 'Back-flushes to'}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {kit.lines.map((line) => (
+                <tr key={line.id} className="border-b border-border/60 align-top">
+                  <td className="max-w-[220px] px-3 py-2.5">
+                    <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
+                  </td>
+                  <td className="px-3 py-2.5">
+                    {line.issued_from.length ? (
+                      <div className="flex flex-wrap gap-1">
+                        {line.issued_from.map((f, idx) => (
+                          <span
+                            key={idx}
+                            className="inline-flex items-center gap-1 rounded border border-border bg-surface/60 px-1.5 py-0.5 text-[11px]"
+                            title={f.location}
+                          >
+                            <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
+                            <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-text-3">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <QtyCell value={line.used_qty ?? null} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <QtyCell
+                      value={line.on_floor_qty || null}
+                      tone={line.on_floor_qty ? 'success' : 'muted'}
+                    />
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <span className="text-xs text-text-2">
+                      {line.on_floor_qty > 0
+                        ? label(closed ? line.return_location_node_id : returnLoc[line.id])
+                        : '—'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {closed ? (
+        <Card className="flex items-start gap-3 border-success/30 bg-success-soft/40 p-4">
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-success" />
+          <div className="text-sm">
+            <div className="font-medium text-text">Kit closed</div>
+            <p className="mt-1 text-xs text-text-2">
+              {producedSoFar} × {kit.item_number} stocked
+              {scrapSoFar > 0 && ` (${scrapSoFar} scrapped)`}; {floorTotal} unit
+              {floorTotal === 1 ? '' : 's'} back-flushed to inventory.
+            </p>
+          </div>
+        </Card>
+      ) : (
+        <RuleNote>
+          <span className="text-text-2">Produce another batch</span> to make more (the kit stays
+          open), or <span className="text-text-2">Sign &amp; close</span> to finish — the{' '}
+          {floorTotal} unit{floorTotal === 1 ? '' : 's'} still on the floor back-flush to inventory.
+        </RuleNote>
       )}
     </div>
   );
@@ -1772,38 +2112,31 @@ function AdditionalIssueDialog({
   onOpenChange: (open: boolean) => void;
   onDone: (kit: ApiKit) => void;
 }) {
-  const [qty, setQty] = React.useState<number | null>(1);
-  const [cells, setCells] = React.useState<string[]>([]);
+  const [picks, setPicks] = React.useState<LotPick[]>([]);
   const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
     if (!line) return;
-    setQty(1);
-    setCells([]);
+    // Start with one blank row — the operator adds lots/quantities directly.
+    setPicks(line.source_lots.length ? autoFillFifo(line.source_lots, 0) : []);
   }, [line?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!line) return null;
 
   const issuedSoFar = lineIssuedTotal(line);
-  const srcOption = line.source_options.find((o) => o.node_id === line.source_location_node_id);
-  const available = line.source_available;
-  // Same rule as the initial issue (D2): pulling from a box means picking
-  // vials, and the quantity is however many you picked.
-  const grid = Boolean(srcOption?.is_grid);
-  const effectiveQty = grid ? cells.length : (qty ?? 0);
-  const over = effectiveQty > available;
-  const ready = effectiveQty > 0 && !over;
+  const totalAvail = line.source_lots.reduce((a, l) => a + l.qty, 0);
+  const adding = picksTotal(picks);
+  const ready = adding > 0 && picksValid(line.source_lots, picks);
 
   const submit = async () => {
     if (!ready) return;
     setBusy(true);
     try {
       const k = await kitsApi.additionalIssue(kit.id, line.id, {
-        qty: effectiveQty,
-        cell_allocation_ids: grid ? cells : undefined,
+        sources: picksToSources(picks),
       });
       toast.success('Additional material issued', {
-        description: `${qty} × ${line.item_number}.`,
+        description: `${adding} × ${line.item_number}.`,
       });
       onDone(k);
     } catch (err) {
@@ -1817,83 +2150,52 @@ function AdditionalIssueDialog({
 
   return (
     <Dialog open={line !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Issue more to {kit.kit_number}</DialogTitle>
           <DialogDescription>
-            Production needed extra {line.item_number}. This posts as a separate additional issue,
-            pulled from the line&apos;s source location.
+            Production needed extra material. Draw it from any lots or shelves — this posts as a
+            separate additional issue and adds to what&apos;s on the floor.
           </DialogDescription>
         </DialogHeader>
-        <DialogBody className="space-y-3">
-          <div className="rounded-md border border-border bg-surface p-3">
+        <DialogBody className="space-y-4">
+          {/* Component + at-a-glance numbers. */}
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-surface/50 p-3">
             <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
+            <div className="flex items-center gap-5 text-center">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-3">Issued</div>
+                <div className="font-mono text-sm text-text">{issuedSoFar}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-3">In stock</div>
+                <div className={cn('font-mono text-sm', totalAvail <= 0 ? 'text-danger' : 'text-text')}>
+                  {totalAvail}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-text-3">Adding</div>
+                <div className="font-mono text-sm font-semibold text-accent">{adding}</div>
+              </div>
+            </div>
           </div>
-          <dl className="grid grid-cols-3 gap-2 text-center">
-            <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Needed</dt>
-              <dd className="mt-0.5 font-mono text-sm text-text">{Number(line.needed_qty)}</dd>
-            </div>
-            <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Issued</dt>
-              <dd className="mt-0.5 font-mono text-sm text-text">{issuedSoFar}</dd>
-            </div>
-            <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">At source</dt>
-              <dd
-                className={cn(
-                  'mt-0.5 font-mono text-sm',
-                  available <= 0 ? 'text-danger' : 'text-text',
-                )}
-              >
-                {available}
-              </dd>
-            </div>
-          </dl>
-          <p className="text-xs text-text-3">
-            Source: <span className="text-text-2">{srcOption?.path ?? srcOption?.name ?? '—'}</span>
-          </p>
-          {grid && srcOption ? (
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-text-2">
-                Pick the vials to pull
-              </label>
-              <CellGridPicker
-                mode="source"
-                rows={srcOption.grid_rows ?? 1}
-                cols={srcOption.grid_cols ?? 1}
-                cells={srcOption.cells}
-                value={cells}
-                onChange={setCells}
-              />
-              {cells.length === 0 && (
-                <p className="mt-1 text-xs text-danger">Pick at least one vial.</p>
-              )}
-            </div>
-          ) : (
-            <div>
-              <label className="mb-1.5 block text-xs font-medium text-text-2">Issue now</label>
-              <NumberInput
-                aria-label="Additional quantity"
-                value={qty}
-                min={1}
-                invalid={over}
-                onChange={setQty}
-              />
-              {over && (
-                <p className="mt-1 text-xs text-danger">
-                  Only {available} available at the source location.
-                </p>
-              )}
-            </div>
-          )}
+
+          <LotSourcePicker
+            itemNumber={line.item_number}
+            lots={line.source_lots}
+            needed={0}
+            picks={picks}
+            onChange={setPicks}
+            disabled={busy}
+            modal
+          />
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button variant="primary" onClick={() => void submit()} disabled={busy || !ready}>
-            Issue {effectiveQty}
+            <PackagePlus size={14} /> Issue {adding}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1941,13 +2243,9 @@ function ReturnExcessDialog({
   if (!line) return null;
 
   const onFloor = line.on_floor_qty;
-  // You may only return the SURPLUS above what's needed — the floor can never
-  // drop below the build requirement (client 2026-07-22, Task 6). "needed" is
-  // dynamic: (good+scrap)×BOM once production figures exist, else target×BOM.
-  const attempted = (kit.good_qty ?? 0) + (kit.scrap_qty ?? 0);
-  const effTarget = attempted > 0 ? attempted : kit.target_qty;
-  const needed = Math.ceil(Number(line.qty_per_unit) * effTarget);
-  const maxReturn = Math.max(0, onFloor - needed);
+  // No recipe cap (KIT-007): you may hand back anything up to what's physically
+  // on the floor, even below the BOM requirement. The only limit is arithmetic.
+  const maxReturn = onFloor;
   // For an LN2 box the quantity is a consequence of the cells picked (like
   // issuing from a box), never typed. For a bulk shelf it's the typed number.
   const effectiveQty = destGrid ? cells.length : (qty ?? 0);
@@ -1991,8 +2289,8 @@ function ReturnExcessDialog({
           <div className="rounded-md border border-border bg-surface p-3">
             <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
           </div>
-          <dl className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
-            <div className="rounded-md border border-border bg-bg-elev p-2">
+          <dl className="grid grid-cols-2 gap-2 text-center">
+            <div className="rounded-md border border-border bg-bg-elev p-2" title="Everything here can be returned">
               <dt className="text-[11px] uppercase tracking-wider text-text-3">On floor</dt>
               <dd
                 className={cn('mt-0.5 font-mono text-sm', onFloor <= 0 ? 'text-danger' : 'text-text')}
@@ -2001,22 +2299,7 @@ function ReturnExcessDialog({
               </dd>
             </div>
             <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Needed</dt>
-              <dd className="mt-0.5 font-mono text-sm text-text">{needed}</dd>
-            </div>
-            <div className="rounded-md border border-border bg-bg-elev p-2" title="Surplus above needed">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Returnable</dt>
-              <dd
-                className={cn(
-                  'mt-0.5 font-mono text-sm',
-                  maxReturn > 0 ? 'text-success' : 'text-text-3',
-                )}
-              >
-                {maxReturn}
-              </dd>
-            </div>
-            <div className="rounded-md border border-border bg-bg-elev p-2">
-              <dt className="text-[11px] uppercase tracking-wider text-text-3">Returned</dt>
+              <dt className="text-[11px] uppercase tracking-wider text-text-3">Already returned</dt>
               <dd className="mt-0.5 font-mono text-sm text-text">{line.early_returned_qty}</dd>
             </div>
           </dl>
@@ -2247,6 +2530,8 @@ interface TimelineNode {
   scrapQty: number | null;
   outputLocation: string | null;
   outputExpiry: string | null;
+  /** Material this batch consumed (produce / close) — no stock movement backs it. */
+  consumed: ApiKitAuditEvent['consumed'];
   moves: ApiKitActivityRow[];
 }
 
@@ -2277,6 +2562,7 @@ function buildTimeline(events: ApiKitAuditEvent[], moves: ApiKitActivityRow[]): 
       scrapQty: ev.scrap_qty,
       outputLocation: ev.output_location,
       outputExpiry: ev.output_expiration_date,
+      consumed: ev.consumed ?? [],
       moves: byTime.get(t) ?? [],
     });
   }
@@ -2292,6 +2578,7 @@ function buildTimeline(events: ApiKitAuditEvent[], moves: ApiKitActivityRow[]): 
       scrapQty: null,
       outputLocation: null,
       outputExpiry: null,
+      consumed: [],
       moves: group,
     });
   }
@@ -2423,6 +2710,28 @@ function TimelineItem({ node, last }: { node: TimelineNode; last: boolean }) {
               </div>
             )}
           </dl>
+        )}
+
+        {node.consumed.length > 0 && (
+          <div className="mt-2">
+            <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-text-3">
+              Consumed this batch
+            </p>
+            <ul className="space-y-1.5">
+              {node.consumed.map((c) => (
+                <li
+                  key={c.item_id}
+                  className="flex items-center gap-2 rounded-md border border-border/70 bg-bg-elev px-2.5 py-1.5"
+                >
+                  <span className="w-11 shrink-0 text-right font-mono text-xs font-semibold tabular-nums text-danger">
+                    −{c.qty}
+                  </span>
+                  <span className="shrink-0 font-mono text-xs text-text-2">{c.item_number}</span>
+                  <span className="truncate text-[11px] text-text-3">used to build</span>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         {node.moves.length > 0 && (

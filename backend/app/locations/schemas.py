@@ -90,6 +90,19 @@ class NodeUpdateRequest(BaseModel):
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
 
 
+class ProductionAreaCreate(BaseModel):
+    """Create one production area (a ``flat`` node, ``flat_category='production'``).
+
+    Production is seeded to cover the client's existing spaces; a new area is
+    added by an admin on request (SRS 2026-07-22). Only the ``name`` is given —
+    the ``code`` is generated server-side from it, and the type/category/root
+    placement are fixed. Renaming afterwards uses ``NodeUpdateRequest``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+
+
 class GridUpdateRequest(BaseModel):
     """Resize a Box's grid. Rejected if it would orphan a placed cell."""
 

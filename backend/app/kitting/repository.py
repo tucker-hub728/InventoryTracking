@@ -104,6 +104,54 @@ async def item_stock_by_node(
     return out
 
 
+async def item_stock_by_node_lot(
+    session: AsyncSession, item_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[uuid.UUID, str | None, object, uuid.UUID, int]]]:
+    """Per-item available stock grouped by **(location node, lot)** — the
+    lot-level source rows for the kit Issue picker (KIT-002/003: "show available
+    quantities per lot/shelf" and "FIFO across multiple lots").
+
+    Returns ``{item_id: [(lot_id, lot_number, expiration_date, node_id, qty)]}``
+    ordered FIFO (earliest expiry, then oldest lot) so the picker can auto-fill
+    across lots in the right order. Production nodes are excluded for the same
+    reason as :func:`item_stock_by_node` — WIP is not available stock.
+    """
+    if not item_ids:
+        return {}
+    stmt = (
+        select(
+            Lot.item_id,
+            LotAllocation.location_node_id,
+            Lot.id,
+            Lot.lot_number,
+            Lot.expiration_date,
+            func.coalesce(func.sum(LotAllocation.qty), 0),
+        )
+        .select_from(LotAllocation)
+        .join(Lot, Lot.id == LotAllocation.lot_id)
+        .join(LocationNode, LocationNode.id == LotAllocation.location_node_id)
+        .where(
+            Lot.item_id.in_(item_ids),
+            LotAllocation.is_active.is_(True),
+            LotAllocation.qty > 0,
+            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
+        )
+        .group_by(
+            Lot.item_id,
+            LotAllocation.location_node_id,
+            Lot.id,
+            Lot.lot_number,
+            Lot.expiration_date,
+        )
+        # FIFO: earliest expiry first (nulls last), then oldest lot.
+        .order_by(Lot.expiration_date.asc().nullslast(), Lot.created_at.asc())
+    )
+    out: dict[uuid.UUID, list[tuple[uuid.UUID, str | None, object, uuid.UUID, int]]] = {}
+    for item_id, node_id, lot_id, lot_number, exp, qty in (await session.execute(stmt)).all():
+        out.setdefault(item_id, []).append((lot_id, lot_number, exp, node_id, int(qty)))
+    return out
+
+
 async def item_cells_by_node(
     session: AsyncSession, item_ids: set[uuid.UUID]
 ) -> dict[uuid.UUID, dict[uuid.UUID, list[LotAllocation]]]:
@@ -254,6 +302,36 @@ async def list_kits(
         .all()
     )
     return list(rows), total
+
+
+async def line_issue_breakdown(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int]]]:
+    """Per kit line, the INITIAL issue split by (lot, source node) — powers the
+    "lots pulled" snapshot on the Issue step (client 2026-07-22). Only
+    ``kit_issue`` rows (not additional issues or returns), summed per lot at each
+    source. Returns ``{kit_line_id: [(lot_number, from_node_id, qty)]}``."""
+    stmt = (
+        select(
+            StockMovement.kit_line_id,
+            Lot.lot_number,
+            StockMovement.from_location_node_id,
+            func.coalesce(func.sum(StockMovement.qty_abs), 0),
+        )
+        .select_from(StockMovement)
+        .join(Lot, Lot.id == StockMovement.lot_id, isouter=True)
+        .where(
+            StockMovement.kit_id == kit_id,
+            StockMovement.movement_type == "kit_issue",
+        )
+        .group_by(StockMovement.kit_line_id, Lot.lot_number, StockMovement.from_location_node_id)
+    )
+    out: dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int]]] = {}
+    for line_id, lot_number, from_node, qty in (await session.execute(stmt)).all():
+        if line_id is None:
+            continue
+        out.setdefault(line_id, []).append((lot_number, from_node, int(qty)))
+    return out
 
 
 async def kit_movements(session: AsyncSession, kit_id: uuid.UUID) -> list[StockMovement]:

@@ -662,6 +662,23 @@ async def get_lot_by_item_and_number(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def count_lots_by_number_prefix(
+    session: AsyncSession, *, item_id: uuid.UUID, prefix: str
+) -> int:
+    """How many (live) lots of an item have a lot number starting with ``prefix``.
+
+    Used to number the per-batch produced lots in kitting (``KIT-0289-1``,
+    ``-2`, …): the next batch is ``count + 1``. ``prefix`` is a literal string,
+    so LIKE metacharacters in it are escaped."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    stmt = select(func.count()).where(
+        Lot.item_id == item_id,
+        Lot.lot_number.like(f"{escaped}%", escape="\\"),
+        Lot.deleted_at.is_(None),
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
 async def create_lot(
     session: AsyncSession,
     *,

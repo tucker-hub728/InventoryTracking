@@ -83,13 +83,13 @@ export const navSections: readonly NavSection[] = [
       },
       {
         id: 'forecast',
-        label: 'Forecast',
+        label: 'Planning',
         href: '/forecast',
         icon: LineChart,
         resource: 'inventory',
         disabled: true,
         disabledReason:
-          'Forecasting is a work in progress — demand projections and reorder signals are not yet wired to the backend.',
+          'Planning is a work in progress — demand projections and reorder signals are not yet wired to the backend.',
       },
     ],
   },

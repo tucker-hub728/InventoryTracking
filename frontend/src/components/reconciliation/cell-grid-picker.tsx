@@ -28,6 +28,9 @@ export function cellKey(mode: CellMode, cell: { allocation_id?: string; grid_row
 
 export type CellMode = 'source' | 'destination';
 
+/** Shared empty set so an omitted `reserved` prop keeps a stable reference. */
+const EMPTY_KEYS: Set<string> = new Set();
+
 /**
  * Human position label, following the cryobox / microplate convention the lab
  * already uses: row letter + column number, `A1` … `J10`.
@@ -54,6 +57,7 @@ export function CellGridPicker({
   value,
   onChange,
   max,
+  reserved,
   disabled = false,
   nearExpiryDays = 30,
   className,
@@ -67,6 +71,10 @@ export function CellGridPicker({
   onChange: (next: string[]) => void;
   /** Cap on how many may be selected — the quantity being moved. */
   max?: number;
+  /** `"row:col"` cells claimed by ANOTHER picker on the same box in this form
+   *  (a split-output row, a back-flush line). Blocked in `destination` mode so
+   *  two placements can't fight over one physical cell. */
+  reserved?: Set<string>;
   disabled?: boolean;
   /** Window for the amber "near expiry" tint on source cells. */
   nearExpiryDays?: number;
@@ -79,6 +87,7 @@ export function CellGridPicker({
   }, [cells]);
 
   const selected = React.useMemo(() => new Set(value), [value]);
+  const reservedSet = reserved ?? EMPTY_KEYS;
   const atLimit = max !== undefined && value.length >= max;
   const complete = max !== undefined && value.length === max;
   // A single-column box is a cassette: a vertical stack, so it has no column axis.
@@ -114,7 +123,8 @@ export function CellGridPicker({
     [value, cells, mode, cols],
   );
 
-  const freeCount = rows * cols - occupied.size;
+  const freeCount =
+    rows * cols - occupied.size - (mode === 'destination' ? reservedSet.size : 0);
 
   return (
     <div className={cn('space-y-2.5', className)}>
@@ -180,8 +190,12 @@ export function CellGridPicker({
                   const cell = occupied.get(pos);
                   const key = mode === 'source' ? (cell?.allocation_id ?? pos) : pos;
                   const isSelected = selected.has(key);
+                  // A cell claimed by another picker on this same box (a split
+                  // output row / a back-flush line) is taken, even though the API
+                  // occupancy — committed allocations only — doesn't show it yet.
+                  const isReserved = mode === 'destination' && reservedSet.has(pos);
                   // Source takes an occupied position; destination fills a free one.
-                  const pickable = mode === 'source' ? Boolean(cell) : !cell;
+                  const pickable = mode === 'source' ? Boolean(cell) : !cell && !isReserved;
                   const blocked = disabled || !pickable || (!isSelected && atLimit);
                   const label = positionLabel(r, c, cols);
                   // FIFO cue: tint occupied source cells by expiry urgency so the
@@ -198,7 +212,9 @@ export function CellGridPicker({
                       ]
                         .filter(Boolean)
                         .join(' · ')
-                    : `${label} · empty`;
+                    : isReserved
+                      ? `${label} · taken by another placement`
+                      : `${label} · empty`;
 
                   return (
                     <button
@@ -227,7 +243,8 @@ export function CellGridPicker({
                           risk !== 'danger' &&
                           risk !== 'warning' &&
                           'border-border-strong bg-bg-elev text-text-2',
-                        !isSelected && !cell && 'border-dashed border-border bg-transparent',
+                        !isSelected && !cell && isReserved && 'border-border-strong bg-surface-2 text-text-3',
+                        !isSelected && !cell && !isReserved && 'border-dashed border-border bg-transparent',
                         blocked && !isSelected && 'cursor-not-allowed opacity-40',
                         !blocked &&
                           !isSelected &&
@@ -236,7 +253,7 @@ export function CellGridPicker({
                     >
                       {isSelected ? (
                         <Check size={11} strokeWidth={3} aria-hidden />
-                      ) : cell ? (
+                      ) : cell || isReserved ? (
                         <span aria-hidden className="size-1.5 rounded-full bg-current opacity-70" />
                       ) : null}
                     </button>
@@ -362,6 +379,7 @@ export function BoxCellPicker({
   value,
   onChange,
   onResolved,
+  reserved,
   derive = false,
 }: {
   nodeId: string | null | undefined;
@@ -371,6 +389,9 @@ export function BoxCellPicker({
   value: string[];
   onChange: (next: string[]) => void;
   onResolved?: (isBox: boolean) => void;
+  /** `"row:col"` cells claimed by another picker on the SAME box in this form,
+   *  blocked here so two placements can't fight over one cell. */
+  reserved?: Set<string>;
   /** LN2 return: don't type a quantity — the count follows the cells picked,
    *  exactly like issuing from a box. `qty` becomes the upper cap. */
   derive?: boolean;
@@ -399,6 +420,7 @@ export function BoxCellPicker({
         value={value}
         onChange={onChange}
         max={qty}
+        reserved={reserved}
       />
       {derive
         ? value.length === 0 && (

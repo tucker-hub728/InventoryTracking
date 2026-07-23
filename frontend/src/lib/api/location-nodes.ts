@@ -337,6 +337,11 @@ export const locationNodesApi = {
 
   create: (input: NodeCreateInput) => api.post<LocationNode>('/location-nodes', { json: input }),
 
+  /** Add a Production area (admin) — a production-floor sub-location. The code is
+   *  generated server-side from the name; rename later via {@link rename}. */
+  createProductionArea: (name: string) =>
+    api.post<LocationNode>('/location-nodes/production-areas', { json: { name } }),
+
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 
   rename: (id: string, name: string) =>

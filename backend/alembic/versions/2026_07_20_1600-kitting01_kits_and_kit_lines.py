@@ -367,7 +367,10 @@ def upgrade() -> None:
     op.drop_constraint("ck_movements_locations", "stock_movements", schema="app", type_="check")
     op.create_check_constraint("ck_movements_locations", "stock_movements", _LOC_RULE, schema="app")
 
-    # ── meta.location_nodes: allow + seed the production floors ───────────
+    # ── meta.location_nodes: allow the 'production' flat category ─────────
+    # Schema only — the production areas themselves are seeded by a SCRIPT
+    # (scripts/seed_production.py), not here, so they aren't tied to the
+    # migration and can be re-seeded / extended independently.
     op.drop_constraint(
         "ck_location_nodes_flat_category",
         "location_nodes",
@@ -379,23 +382,6 @@ def upgrade() -> None:
         "location_nodes",
         _FLAT_RULE,
         schema="meta",
-    )
-    op.execute(
-        """
-        INSERT INTO meta.location_nodes
-            (node_type, flat_category, code, name, created_by_user_id)
-        SELECT 'flat', 'production', v.code, v.name, u.id
-        FROM (VALUES
-            ('PROD-CR1', 'Clean Room 1'),
-            ('PROD-CR2', 'Clean Room 2'),
-            ('PROD-MFG', 'Manufacturing Floor'),
-            ('PROD-PD1', 'PD Lab One'),
-            ('PROD-PD2', 'PD Lab Two')
-        ) AS v(code, name)
-        CROSS JOIN (
-            SELECT id FROM app.users ORDER BY created_at LIMIT 1
-        ) u
-        """
     )
 
 
@@ -433,8 +419,9 @@ def downgrade() -> None:
     op.drop_table("kits", schema="app")
     op.execute("DROP SEQUENCE IF EXISTS app.kit_number_seq")
 
-    # location_nodes: remove seeded production floors (no more kit FK refs),
-    # then restore the flat_category CHECK.
+    # location_nodes: clear any production areas (script-seeded or admin-added;
+    # no more kit FK refs by now) so the prior flat_category CHECK — which lacks
+    # 'production' — can be restored without violating existing rows.
     op.execute(
         "DELETE FROM meta.location_nodes "
         "WHERE node_type = 'flat' AND flat_category = 'production'"

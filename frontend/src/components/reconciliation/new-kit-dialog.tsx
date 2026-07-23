@@ -169,11 +169,11 @@ export function NewKitDialog({
             <>
               <div>
                 <label htmlFor="kit-name" className="mb-1.5 block text-xs font-medium text-text-2">
-                  Kit / batch name
+                  Kit identifier
                 </label>
                 <Input
                   id="kit-name"
-                  aria-label="Kit / batch name"
+                  aria-label="Kit identifier"
                   value={kitNumber}
                   onChange={(e) => setKitNumber(e.target.value)}
                   placeholder="e.g. BR-2026-014"
@@ -185,11 +185,11 @@ export function NewKitDialog({
               </div>
               <div>
                 <label htmlFor="kit-item" className="mb-1.5 block text-xs font-medium text-text-2">
-                  Item
+                  Target item
                 </label>
                 <SearchableSelect
                   id="kit-item"
-                  aria-label="Item"
+                  aria-label="Target item"
                   modal
                   options={itemOptions}
                   value={itemId}
@@ -221,10 +221,10 @@ export function NewKitDialog({
                 </div>
                 <div>
                   <label htmlFor="kit-loc" className="mb-1.5 block text-xs font-medium text-text-2">
-                    Production location
+                    Expected destination
                   </label>
                   <LocationTreePicker
-                    aria-label="Production location"
+                    aria-label="Expected destination"
                     value={prodNodeId}
                     onChange={setProdNodeId}
                     // Transaction_Spec §2: material is moved to a production or

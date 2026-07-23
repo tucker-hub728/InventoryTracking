@@ -65,6 +65,37 @@ class KitLineSourceOption(BaseModel):
     cells: list[CellOption] = Field(default_factory=list)
 
 
+class KitLineSourceLot(BaseModel):
+    """One **lot** of a component available at one location — a pickable issue
+    source (KIT-002/003). The Issue picker lists these FIFO-ordered so the
+    operator can draw the need across several lots/shelves at once, and see how
+    much comes from each. For an LN2 box, ``cells`` holds the exact vials of
+    this lot so the operator picks them by position (D2)."""
+
+    lot_id: str
+    lot_number: str | None = None
+    expiration_date: date | None = None
+    node_id: str
+    node_name: str
+    path: str
+    qty: int
+    # Grid-bearing (LN2 box) source: the quantity follows the cells picked.
+    is_grid: bool = False
+    grid_rows: int | None = None
+    grid_cols: int | None = None
+    cells: list[CellOption] = Field(default_factory=list)
+
+
+class KitLineIssuedFrom(BaseModel):
+    """One (lot, source location) the line was ISSUED from — the snapshot the
+    Issue step shows once material has moved (client 2026-07-22). Derived from
+    the ``kit_issue`` ledger rows, so it reflects the real multi-lot split."""
+
+    lot_number: str | None = None
+    location: str
+    qty: int
+
+
 class KitLineRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -91,7 +122,12 @@ class KitLineRead(BaseModel):
     return_location_node_id: str | None = None
     # Location-System stock for this component (from lot_allocations).
     on_hand: int = 0
+    # Per-location totals (legacy single-source picker).
     source_options: list[KitLineSourceOption] = Field(default_factory=list)
+    # Per-LOT sources (multi-source picker, KIT-002/003), FIFO-ordered.
+    source_lots: list[KitLineSourceLot] = Field(default_factory=list)
+    # The (lot, location) the line was ISSUED from — the post-issue snapshot.
+    issued_from: list[KitLineIssuedFrom] = Field(default_factory=list)
     # Available at the currently-chosen source node (the issue cap).
     source_available: int = 0
 
@@ -172,6 +208,17 @@ class KitActivityRow(BaseModel):
     performed_by_user_id: str
 
 
+class KitConsumedLine(BaseModel):
+    """One component consumed by a produce / close batch — recorded on the event
+    so the activity timeline can show what each batch used, not just the output.
+    Consumption writes no stock movement (the material left stock at issue), so
+    without this the partial-produce consumption would be invisible."""
+
+    item_id: str
+    item_number: str
+    qty: int
+
+
 class KitAuditEventRow(BaseModel):
     """One audit-trail entry for a kit (from ``audit.audit_events``).
 
@@ -194,6 +241,9 @@ class KitAuditEventRow(BaseModel):
     # Where the produced output was stocked + its lot expiry (close-out only).
     output_location: str | None = None
     output_expiration_date: str | None = None
+    # Material this batch consumed (produce / close), per component. Empty for
+    # non-producing events.
+    consumed: list[KitConsumedLine] = Field(default_factory=list)
     # Per-field {before, after} for what changed on this event.
     diff: dict | None = None
 
@@ -308,18 +358,42 @@ class KitLineUpdateRequest(BaseModel):
     source_location_node_id: str | None = None
 
 
+class IssueSourceInput(BaseModel):
+    """One lot pick within a line's issue — draw ``qty`` of the component from a
+    specific (location, lot). The Issue picker builds one of these per lot the
+    operator selects (KIT-003, "FIFO across multiple lots"). For a box lot the
+    exact vials are named by ``cell_allocation_ids`` and ``qty`` follows their
+    count."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    lot_id: str | None = None
+    qty: int = Field(ge=0)
+    # Box lot only: the exact cells to pull. When present, ``qty`` must equal
+    # its length (a cell holds one unit, D2).
+    cell_allocation_ids: list[str] = Field(default_factory=list)
+
+
 class IssueLineInput(BaseModel):
-    """A line's final issued qty + source, committed with the Issue action."""
+    """A line's final issue, committed with the Issue action.
+
+    Two shapes are accepted. The multi-source ``sources`` list (KIT-002/003) is
+    preferred and takes precedence when present. The legacy single-source fields
+    (``issued_qty`` + ``source_location_node_id`` [+ ``cell_allocation_ids``])
+    remain for back-compat.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
-    issued_qty: int = Field(ge=0)
+    # Multi-source: draw the need across one or more (location, lot) picks.
+    sources: list[IssueSourceInput] = Field(default_factory=list)
+    # ── Legacy single-source (used only when ``sources`` is empty) ──
+    issued_qty: int | None = Field(default=None, ge=0)
     source_location_node_id: str | None = None
     # LN2 only: the exact cells to pull. Empty = bulk source, drain FIFO by
-    # expiry (unchanged for shelves). When present, ``issued_qty`` must equal
-    # its length — for a grid source the quantity is a consequence of the
-    # selection, never typed (D2).
+    # expiry. When present, ``issued_qty`` must equal its length (D2).
     cell_allocation_ids: list[str] = Field(default_factory=list)
 
 
@@ -353,11 +427,18 @@ class ProductionDraftRequest(BaseModel):
 
 
 class AdditionalIssueRequest(BaseModel):
+    """Issue extra material to a line mid-production. Prefers the multi-source
+    ``sources`` list (any location/lot, KIT-004); the legacy ``qty`` [+ cells]
+    pulls from the line's original source and is used only when ``sources`` is
+    empty."""
+
     model_config = ConfigDict(extra="forbid")
 
-    qty: int = Field(gt=0, description="Extra quantity to issue mid-production")
-    # LN2 only: the exact cells to pull, same rule as the initial issue —
-    # ``qty`` must equal its length. Empty = bulk source, drain FIFO.
+    # Multi-source: one or more (location, lot) picks, like the initial issue.
+    sources: list[IssueSourceInput] = Field(default_factory=list)
+    # ── Legacy single-source (used only when ``sources`` is empty) ──
+    qty: int | None = Field(default=None, gt=0, description="Extra quantity to issue")
+    # LN2 only: the exact cells to pull; ``qty`` must equal its length.
     cell_allocation_ids: list[str] = Field(default_factory=list)
 
 
@@ -375,10 +456,13 @@ class ReturnExcessRequest(BaseModel):
 
 
 class CloseOutLineInput(BaseModel):
+    """Per-component close-out: the material used (≥ recipe need, ≤ on-floor) and
+    where the leftover back-flushes."""
+
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
-    used_qty: int = Field(ge=0, description="Actual quantity consumed (from the traveler)")
+    used_qty: int = Field(ge=0, description="Material consumed by the final batch")
     return_location_node_id: str | None = Field(
         default=None, description="Where leftover returns; defaults to the source"
     )
@@ -386,21 +470,92 @@ class CloseOutLineInput(BaseModel):
     return_cells: list[ReturnCellInput] = Field(default_factory=list)
 
 
+class ProduceLineInput(BaseModel):
+    """One component's material consumed by a produce batch (operator-entered)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: str
+    used_qty: int = Field(ge=0, description="Material consumed for THIS batch")
+
+
+class OutputDestinationInput(BaseModel):
+    """One place a produced batch is stocked. Split a batch across several when a
+    single box can't hold every unit (client 2026-07-23): the rest of the good
+    units go to another box, a freezer, or a shelf. The units stay ONE lot (same
+    batch, same expiry) allocated across the destinations.
+
+    A box destination lists one free ``cells`` entry per unit (``len == qty``); a
+    shelf / freezer takes ``qty`` only (no cells)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    location_node_id: str
+    qty: int = Field(ge=1, description="Units placed at this location")
+    cells: list[ReturnCellInput] = Field(default_factory=list)
+
+
+class ProduceRequest(_ESignFields):
+    """Produce a batch of the AY/FG **without closing the kit** (KIT-007
+    incremental / serialized production): make ``good_qty`` units, leaving the
+    kit open to produce more later. E-signed (action ``kit.produce``). No
+    back-flush — the leftover stays on the floor for the next batch or the final
+    close-out.
+
+    The operator ENTERS the material used per component; each must be **≥ the
+    recipe need** ``ceil(qty_per_unit × (good+scrap))`` (client 2026-07-23 — you
+    can't make N units with less than N units' worth) and **≤ what's on the
+    floor**."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    good_qty: int = Field(ge=1, description="Good units produced in THIS batch")
+    scrap_qty: int = Field(ge=0, description="Units scrapped in this batch")
+    # Single-destination (legacy) output: where the whole batch is stocked, with
+    # one free cell per good unit for a box. Optional when ``outputs`` is used.
+    output_location_node_id: str | None = Field(
+        default=None, description="Where this batch is stocked (single destination)"
+    )
+    output_cells: list[ReturnCellInput] = Field(default_factory=list)
+    # Multi-destination output: split the good units across several locations when
+    # one box can't hold them all. Overrides the single ``output_*`` fields; the
+    # quantities must sum to ``good_qty``.
+    outputs: list[OutputDestinationInput] = Field(default_factory=list)
+    output_expiration_date: date | None = Field(
+        default=None, description="Expiry of the produced AY/FG lot"
+    )
+    lines: list[ProduceLineInput] = Field(
+        min_length=1, description="Material consumed per component this batch"
+    )
+
+
 class CloseOutRequest(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
-    good_qty: int = Field(ge=0, description="Good finished units produced")
-    scrap_qty: int = Field(ge=0, description="Units scrapped in production")
-    output_location_node_id: str = Field(description="Where the finished quantity is stocked")
+    good_qty: int = Field(ge=0, description="Good finished units produced in this final batch")
+    scrap_qty: int = Field(ge=0, description="Units scrapped in this final batch")
+    # Single-destination (legacy) output. Optional when ``outputs`` is used, and
+    # not required at all when the final batch makes 0 good units.
+    output_location_node_id: str | None = Field(
+        default=None, description="Where the finished quantity is stocked (single destination)"
+    )
+    # Required when the output target is an LN2 box (KIT-005 "LN2 tank
+    # position"): one free cell per produced good unit, so ``len`` must equal
+    # ``good_qty``. Empty for a shelf / freezer (bulk placement).
+    output_cells: list[ReturnCellInput] = Field(default_factory=list)
+    # Multi-destination output: split the good units across several locations when
+    # one box can't hold them all (client 2026-07-23). Overrides the single
+    # ``output_*`` fields; the quantities must sum to ``good_qty``.
+    outputs: list[OutputDestinationInput] = Field(default_factory=list)
     # REQ-2026-07-01-INV-008 — the produced AY/FG must carry an expiration
     # date. Optional on the wire so an item with no shelf life can close out,
     # but the UI prompts for it.
     output_expiration_date: date | None = Field(
         default=None, description="Expiry of the produced AY/FG lot"
     )
-    lines: list[CloseOutLineInput] = Field(
-        min_length=1, description="Actual used quantity per component line"
-    )
+    # Optional per-line back-flush destinations for the leftover; omitted lines
+    # default to the source they were pulled from.
+    lines: list[CloseOutLineInput] = Field(default_factory=list)
 
 
 class CancelLineInput(BaseModel):

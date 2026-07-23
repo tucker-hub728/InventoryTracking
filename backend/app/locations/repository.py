@@ -9,6 +9,7 @@ using :func:`get_node` + :data:`PARENT_OF`.
 
 from __future__ import annotations
 
+import re
 import uuid
 from decimal import Decimal
 
@@ -107,6 +108,43 @@ async def create_node(
     refreshed = await get_node(session, node.id)
     assert refreshed is not None
     return refreshed
+
+
+def _slugify_area_code(name: str) -> str:
+    """A ``PROD-`` code derived from an area name — uppercased, non-alphanumerics
+    collapsed to dashes (e.g. "Suite A" → ``PROD-SUITE-A``). Capped at 64 chars
+    to fit ``location_nodes.code``."""
+    slug = re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-") or "AREA"
+    return f"PROD-{slug}"[:64]
+
+
+async def create_production_area(
+    session: AsyncSession, *, name: str, created_by_user_id: uuid.UUID
+) -> LocationNode:
+    """Create one Production area: a ``flat`` node tagged ``flat_category='production'``,
+    a parent-less root (the production areas ARE the sub-locations of the Production
+    group; the group itself is the ``production`` category, not a tree node).
+
+    The ``code`` is derived from ``name`` and de-duplicated against existing roots
+    (``-2``, ``-3`` … on collision). Bypasses the strict ``PARENT_OF`` engine on
+    purpose — ``flat`` is retired for general creation, but a production area is a
+    deliberate, admin-only exception (SRS 2026-07-22). Caller commits."""
+    base = _slugify_area_code(name)
+    code = base
+    n = 2
+    while await get_sibling_by_code(session, parent_id=None, code=code) is not None:
+        suffix = f"-{n}"
+        code = f"{base[: 64 - len(suffix)]}{suffix}"
+        n += 1
+    return await create_node(
+        session,
+        node_type="flat",
+        code=code,
+        name=name,
+        created_by_user_id=created_by_user_id,
+        parent_id=None,
+        flat_category="production",
+    )
 
 
 async def list_roots(
