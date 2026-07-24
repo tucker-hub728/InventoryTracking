@@ -46,17 +46,21 @@ from .schemas import (
     CellOption,
     CloseOutRequest,
     FloorKit,
+    FloorKitBatch,
     FloorKitConsumed,
     FloorKitConsumedLine,
     FloorKitLine,
     FloorKitsResponse,
     IssueRequest,
     IssueSourceInput,
+    ItemKitAuditEventRow,
+    ItemKitAuditResponse,
     KitActivityResponse,
     KitActivityRow,
     KitAuditEventRow,
     KitConsumedLine,
     KitCreateRequest,
+    KitLineFloorLot,
     KitLineIssuedFrom,
     KitLineRead,
     KitLineSourceLot,
@@ -186,6 +190,7 @@ def _line_read(
     grid_meta: dict[uuid.UUID, tuple[int, int]] | None = None,
     lots_by_item: dict[uuid.UUID, list] | None = None,
     issued_breakdown: dict[uuid.UUID, list] | None = None,
+    floor_lots: dict[uuid.UUID, list] | None = None,
 ) -> KitLineRead:
     item = items.get(line.item_id)
     per_node = stock_by_node.get(line.item_id, {})
@@ -292,6 +297,10 @@ def _line_read(
         source_options=options,
         source_lots=source_lots,
         issued_from=issued_from,
+        on_floor_lots=[
+            KitLineFloorLot(lot_id=str(lot_id), lot_number=lot_number, qty=qty)
+            for lot_id, lot_number, qty in (floor_lots or {}).get(line.item_id, [])
+        ],
         source_available=(
             per_node.get(line.source_location_node_id, 0) if line.source_location_node_id else 0
         ),
@@ -309,6 +318,11 @@ async def _kit_read(db, kit: Kit) -> KitRead:
     lots_by_item = await kit_repo.item_stock_by_node_lot(db, line_item_ids)
     # What each line was ISSUED from (lot × source), for the post-issue snapshot.
     issued_breakdown = await kit_repo.line_issue_breakdown(db, kit.id)
+    # Per-lot WIP on this kit's production floor — the pickable RETURN sources
+    # (client 2026-07-24); the operator picks which floor lot's units to hand back.
+    floor_lots = await kit_repo.floor_lots_by_item_at_node(
+        db, kit.production_location_node_id, line_item_ids
+    )
     # Labels are needed for both the source picker and the issued-from snapshot,
     # so load them whenever the kit has lines.
     node_labels = await loc_repo.node_label_map(db) if kit.lines else {}
@@ -353,6 +367,7 @@ async def _kit_read(db, kit: Kit) -> KitRead:
                 grid_meta,
                 lots_by_item,
                 issued_breakdown,
+                floor_lots,
             )
             for ln in kit.lines
         ],
@@ -545,6 +560,7 @@ async def _return_to_inventory(
     current,
     return_cells: list | None = None,
     movement_type: str = "backflush",
+    only_lot_id: uuid.UUID | None = None,
 ) -> None:
     """Hand ``qty`` back from the production floor to a storage node as an
     explicit return movement (TRX-003 — never a plain receipt).
@@ -568,6 +584,11 @@ async def _return_to_inventory(
     """
     prod_node = kit.production_location_node_id
     allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, prod_node)
+    # When the operator picked a specific floor lot to return (client 2026-07-24),
+    # drain only that lot's WIP; otherwise drain FIFO across every lot on the floor
+    # (close-out back-flush / cancel, unchanged).
+    if only_lot_id is not None:
+        allocs = [a for a in allocs if a.lot_id == only_lot_id]
     on_floor = sum(int(a.qty) for a in allocs)
     if qty > on_floor:
         raise ValidationError(
@@ -733,6 +754,29 @@ async def _resolve_output_destinations(
     return dests
 
 
+async def _resolve_output_lot_number(db, payload) -> str | None:
+    """Validate the operator-entered produced-batch lot number (client 2026-07-24).
+
+    Required + globally unique when the batch makes output (``good_qty >= 1``);
+    ``None`` when nothing is produced (a ``good_qty == 0`` close-out mints no lot,
+    so no number is needed). Uniqueness is application-level (the DB index is only
+    partial-unique per item)."""
+    if payload.good_qty < 1:
+        return None
+    lot_no = (payload.output_lot_number or "").strip()
+    if not lot_no:
+        raise ValidationError(
+            "Enter a lot number for the produced batch.",
+            code="output_lot_number_required",
+        )
+    if await inv_repo.lot_number_exists(db, lot_number=lot_no):
+        raise ValidationError(
+            f"Lot number {lot_no} is already in use.",
+            code="output_lot_number_taken",
+        )
+    return lot_no
+
+
 async def _place_units(
     db,
     *,
@@ -801,6 +845,7 @@ async def _produce_batch(
     scrap: int,
     destinations: list[tuple[uuid.UUID, int, list]],
     expiration_date: date | None,
+    lot_number: str | None,
     used_by_line: dict[uuid.UUID, int],
     evidence: uuid.UUID,
     note: str,
@@ -855,18 +900,15 @@ async def _produce_batch(
         await _drain_production(db, kit=kit, line=line, qty=used)
         line.used_qty = (line.used_qty or 0) + used
     if good > 0 and destinations:
-        # Number this batch's lot: KIT-0289-<n>, n = prior batch lots + 1. ONE lot
-        # for the whole batch, even split across destinations (client 2026-07-23).
-        batch_no = (
-            await inv_repo.count_lots_by_number_prefix(
-                db, item_id=kit.item_id, prefix=f"{kit.kit_number}-"
-            )
-            + 1
-        )
+        # The operator entered this batch's lot number (client 2026-07-24 — replaces
+        # the old auto KIT-0289-<n> suffix). ONE lot for the whole batch, even split
+        # across destinations. Required-when-producing + global uniqueness are
+        # enforced by the caller before we get here.
+        assert lot_number, "lot_number is required when producing a batch"
         lot = await inv_repo.create_lot(
             db,
             item_id=kit.item_id,
-            lot_number=f"{kit.kit_number}-{batch_no}",
+            lot_number=lot_number,
             created_by_user_id=current.id,
             expiration_date=expiration_date,
         )
@@ -926,10 +968,16 @@ async def list_kits(
         Literal["draft", "issued", "in_production", "closed", "cancelled"] | None,
         Query(alias="status", description="Filter by kit status"),
     ] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Search kit number, built item number, or description"),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> KitListResponse:
-    rows, total = await kit_repo.list_kits(db, status=status_filter, limit=limit, offset=offset)
+    rows, total = await kit_repo.list_kits(
+        db, status=status_filter, q=q, limit=limit, offset=offset
+    )
     items = await kit_repo.load_item_map(db, {k.item_id for k in rows})
     node_labels = await loc_repo.node_label_map(db) if rows else {}
 
@@ -996,6 +1044,10 @@ async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> Fl
         it = items.get(iid)
         return (it.item_number, it.description) if it else ("", "")
 
+    # Batches each open kit has already produced (incremental production, KIT-007)
+    # — one lot per batch — so the floor can show work already done, not just WIP.
+    batch_map = await kit_repo.produced_batches_for_kits(db, [k.id for k in active_kits])
+
     active: list[FloorKit] = []
     for k in active_kits:
         lines = [
@@ -1008,8 +1060,26 @@ async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> Fl
             for ln in sorted(k.lines, key=lambda x: x.line_no)
             if _on_floor(ln) > 0
         ]
-        if not lines:
-            continue  # nothing physically on this floor for the kit
+        # What produced batches have already consumed from the floor (cumulative
+        # per component), shown as a "Consumed so far" breakdown.
+        consumed_lines = [
+            FloorKitConsumedLine(
+                item_id=str(ln.item_id),
+                item_number=_num(ln.item_id)[0],
+                description=_num(ln.item_id)[1],
+                used_qty=ln.used_qty or 0,
+            )
+            for ln in sorted(k.lines, key=lambda x: x.line_no)
+            if (ln.used_qty or 0) > 0
+        ]
+        batches = [
+            FloorKitBatch(lot_number=lot_number, qty=qty, produced_at=produced_at)
+            for (lot_number, qty, produced_at) in batch_map.get(k.id, [])
+        ]
+        # Show the kit if it has material on the floor OR has already produced
+        # something here (so a kit mid-production doesn't vanish once its WIP is 0).
+        if not lines and not batches:
+            continue
         active.append(
             FloorKit(
                 id=str(k.id),
@@ -1020,7 +1090,12 @@ async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> Fl
                 target_qty=k.target_qty,
                 status=k.status,  # type: ignore[arg-type]
                 on_floor_total=sum(ln.on_floor_qty for ln in lines),
+                good_qty=k.good_qty or 0,
+                scrap_qty=k.scrap_qty or 0,
+                consumed_total=sum(cl.used_qty for cl in consumed_lines),
                 lines=lines,
+                batches=batches,
+                consumed=consumed_lines,
             )
         )
 
@@ -1089,11 +1164,22 @@ async def kit_activity(db: DBSession, kit_id: Annotated[uuid.UUID, Path()]) -> K
 def _audit_event_row(e, node_labels: dict | None = None) -> KitAuditEventRow:
     ctx = e.context or {}
     after = e.after_state or {}
-    good = ctx.get("good_qty")
-    good = after.get("good_qty") if good is None else good
-    scrap = ctx.get("scrap_qty")
-    scrap = after.get("scrap_qty") if scrap is None else scrap
-    out_node = ctx.get("output_location_node_id") or after.get("output_location_node_id")
+    operation = str(ctx.get("operation") or e.action)
+    # good / scrap / output describe a PRODUCTION batch, so only produce,
+    # close-out, and the production draft carry them. For any other event
+    # (issue / additional issue / return / create / cancel / edit) they must stay
+    # empty — the kit's ``after_state`` snapshot always holds the CUMULATIVE
+    # good/scrap/output, and falling back to it wrongly stamped e.g. an
+    # additional issue with "N made · M scrapped" (client 2026-07-24 bug).
+    if operation in ("produce", "close_out", "production_draft"):
+        good = ctx.get("good_qty")
+        good = after.get("good_qty") if good is None else good
+        scrap = ctx.get("scrap_qty")
+        scrap = after.get("scrap_qty") if scrap is None else scrap
+        out_node = ctx.get("output_location_node_id") or after.get("output_location_node_id")
+        out_expiry = ctx.get("output_expiration_date")
+    else:
+        good = scrap = out_node = out_expiry = None
     out_label: str | None = None
     if out_node and node_labels:
         try:
@@ -1116,15 +1202,49 @@ def _audit_event_row(e, node_labels: dict | None = None) -> KitAuditEventRow:
     return KitAuditEventRow(
         id=str(e.id),
         occurred_at=e.occurred_at,
-        operation=str(ctx.get("operation") or e.action),
+        operation=operation,
         action=e.action,
         actor_user_id=str(e.actor_user_id) if e.actor_user_id else None,
         good_qty=good,
         scrap_qty=scrap,
         output_location=out_label,
-        output_expiration_date=ctx.get("output_expiration_date"),
+        output_expiration_date=out_expiry,
         consumed=consumed,
         diff=e.diff,
+    )
+
+
+@kits_router.get(
+    "/by-item/{item_id}/audit",
+    response_model=ItemKitAuditResponse,
+    summary="Per-item kitting audit history (every kit this item took part in)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def item_kit_audit(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> ItemKitAuditResponse:
+    """Kitting & reconciliation events for kits this item was built in, issued
+    to, or back-flushed from (AUD-001, "viewable per item"). Complements the
+    item's Unit Ledger movements with the good/scrap/consumed/output detail that
+    never moves stock. Each row names + links its kit."""
+    events = await kit_repo.audit_events_for_item(db, item_id, limit=limit)
+    node_labels = await loc_repo.node_label_map(db) if events else {}
+    return ItemKitAuditResponse(
+        events=[_item_kit_audit_row(e, node_labels) for e in events]
+    )
+
+
+def _item_kit_audit_row(e, node_labels: dict | None = None) -> ItemKitAuditEventRow:
+    """Same shape as :func:`_audit_event_row`, plus the owning kit (from the
+    event's ``subject_id`` / ``subject_label``) and its e-signature."""
+    base = _audit_event_row(e, node_labels)
+    return ItemKitAuditEventRow(
+        **base.model_dump(),
+        kit_id=str(e.subject_id),
+        kit_number=e.subject_label,
+        signature_id=str(e.signature_id) if e.signature_id else None,
     )
 
 
@@ -1578,8 +1698,12 @@ async def return_excess(
     payload: ReturnExcessRequest,
 ) -> KitRead:
     """REQ-2026-07-01-TRX-008 — the admin/manual "15 pulled, 3 returned" action.
-    Returns stock on a fresh unassigned lot so it can never be stranded.
-    Unsigned, matching issue / additional issue (only close-out is e-signed)."""
+    The operator picks which on-floor LOT(s) to hand back and where (client
+    2026-07-24, ``sources[]``); each returned unit keeps its origin lot (moved
+    back, never re-minted), so nothing is stranded. The legacy single
+    ``qty`` + ``return_location_node_id`` (FIFO across the floor's lots) still
+    works when ``sources`` is empty. Unsigned, matching issue / additional issue
+    (only close-out is e-signed)."""
     kit = await _require_kit(db, kit_id)
     if kit.status not in ("issued", "in_production"):
         raise ValidationError(
@@ -1590,40 +1714,103 @@ async def return_excess(
     if line is None:
         raise NotFoundError(f"Line {line_id} not on kit {kit_id}", code="line_not_found")
 
-    on_floor = _on_floor(line)
-    if payload.qty > on_floor:
-        raise ValidationError(
-            f"Line {line.line_no}: only {on_floor} on the production floor "
-            f"(tried to return {payload.qty}).",
-            code="return_exceeds_on_floor",
-        )
     # No recipe cap on returns (REQ-2026-07-22-KIT-007): the operator may hand
-    # back whatever wasn't used, even below the BOM requirement — the system
-    # records reality, it doesn't force enough to stay on the floor. The old
-    # ``return_below_need`` cap (client 2026-07-22) is removed. The only limit is
-    # physical: you can't return more than is on the floor (checked above).
-    to_node = _parse_uuid_or_422(payload.return_location_node_id, field="return_location_node_id")
-    node = await _require_placeable(db, to_node, "Return location")
-    await _validate_return_cells(db, node, payload.qty, payload.return_cells, "Return location")
-
+    # back whatever wasn't used, even below the BOM requirement. The only limit is
+    # physical: you can't return more than is on the floor (checked below).
+    on_floor = _on_floor(line)
     before = _kit_snapshot(kit)
-    note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
-    if payload.reason:
-        note = f"{note} — {payload.reason}"
-    await _return_to_inventory(
-        db,
-        kit=kit,
-        line=line,
-        qty=payload.qty,
-        to_node=to_node,
-        evidence=None,
-        note=note,
-        current=current,
-        return_cells=payload.return_cells,
-        movement_type="kit_return",
-    )
-    line.early_returned_qty += payload.qty
-    line.return_location_node_id = to_node
+
+    if payload.sources:
+        # Multi-source: the operator picked which on-floor LOT(s) to return and
+        # where. Validate each pick placeable + its cells, cap the total at the
+        # floor, and cap each lot at that lot's own on-floor qty.
+        floor = await kit_repo.floor_lots_by_item_at_node(
+            db, kit.production_location_node_id, {line.item_id}
+        )
+        avail_by_lot = {lid: q for (lid, _num, q) in floor.get(line.item_id, [])}
+        picks: list[tuple[uuid.UUID, int, uuid.UUID, list]] = []
+        per_lot: dict[uuid.UUID, int] = {}
+        total = 0
+        for s in payload.sources:
+            lot_uuid = _parse_uuid_or_422(s.lot_id, field="lot_id")
+            node_uuid = _parse_uuid_or_422(
+                s.return_location_node_id, field="return_location_node_id"
+            )
+            node = await _require_placeable(db, node_uuid, "Return location")
+            await _validate_return_cells(db, node, s.qty, s.return_cells, "Return location")
+            per_lot[lot_uuid] = per_lot.get(lot_uuid, 0) + s.qty
+            total += s.qty
+            picks.append((lot_uuid, s.qty, node_uuid, s.return_cells))
+        if total > on_floor:
+            raise ValidationError(
+                f"Line {line.line_no}: only {on_floor} on the production floor "
+                f"(tried to return {total}).",
+                code="return_exceeds_on_floor",
+            )
+        for lot_uuid, req in per_lot.items():
+            avail = avail_by_lot.get(lot_uuid, 0)
+            if req > avail:
+                raise ValidationError(
+                    f"Line {line.line_no}: only {avail} of that lot on the floor "
+                    f"(tried to return {req}).",
+                    code="return_exceeds_lot_on_floor",
+                )
+        note = f"Returned {total} to inventory from {kit.kit_number}"
+        if payload.reason:
+            note = f"{note} — {payload.reason}"
+        for lot_uuid, q, node_uuid, cells in picks:
+            await _return_to_inventory(
+                db,
+                kit=kit,
+                line=line,
+                qty=q,
+                to_node=node_uuid,
+                evidence=None,
+                note=note,
+                current=current,
+                return_cells=cells,
+                movement_type="kit_return",
+                only_lot_id=lot_uuid,
+            )
+        line.early_returned_qty += total
+        line.return_location_node_id = picks[-1][2]
+        returned_qty = total
+    else:
+        # Legacy single: FIFO across the floor's lots (unchanged path).
+        if payload.qty is None or payload.return_location_node_id is None:
+            raise ValidationError(
+                "Provide sources[] or a qty with a return_location_node_id.",
+                code="return_input_required",
+            )
+        if payload.qty > on_floor:
+            raise ValidationError(
+                f"Line {line.line_no}: only {on_floor} on the production floor "
+                f"(tried to return {payload.qty}).",
+                code="return_exceeds_on_floor",
+            )
+        to_node = _parse_uuid_or_422(
+            payload.return_location_node_id, field="return_location_node_id"
+        )
+        node = await _require_placeable(db, to_node, "Return location")
+        await _validate_return_cells(db, node, payload.qty, payload.return_cells, "Return location")
+        note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
+        if payload.reason:
+            note = f"{note} — {payload.reason}"
+        await _return_to_inventory(
+            db,
+            kit=kit,
+            line=line,
+            qty=payload.qty,
+            to_node=to_node,
+            evidence=None,
+            note=note,
+            current=current,
+            return_cells=payload.return_cells,
+            movement_type="kit_return",
+        )
+        line.early_returned_qty += payload.qty
+        line.return_location_node_id = to_node
+        returned_qty = payload.qty
     kit.updated_by_user_id = current.id
     await db.flush()
     await record_entity_change(
@@ -1638,7 +1825,7 @@ async def return_excess(
         context={
             "operation": "early_return",
             "line_no": line.line_no,
-            "qty": payload.qty,
+            "qty": returned_qty,
             "reason": payload.reason,
         },
     )
@@ -1730,6 +1917,7 @@ async def produce_kit(
             "The produced lot's expiry can't be in the past", code="expiry_in_past"
         )
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    lot_no = await _resolve_output_lot_number(db, payload)
     destinations = await _resolve_output_destinations(db, payload, payload.good_qty)
     lines_by_id = {ln.id: ln for ln in kit.lines}
     used_by_line: dict[uuid.UUID, int] = {}
@@ -1746,6 +1934,7 @@ async def produce_kit(
         scrap=payload.scrap_qty,
         destinations=destinations,
         expiration_date=payload.output_expiration_date,
+        lot_number=lot_no,
         used_by_line=used_by_line,
         evidence=evidence_uuid,
         note=f"Produced batch of {payload.good_qty} for {kit.kit_number}",
@@ -1767,6 +1956,7 @@ async def produce_kit(
             "operation": "produce",
             "good_qty": payload.good_qty,
             "scrap_qty": payload.scrap_qty,
+            "output_lot_number": lot_no,
             "output_location_node_id": (
                 str(destinations[0][0]) if destinations else None
             ),
@@ -1835,6 +2025,9 @@ async def close_out_kit(
         )
 
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    # Operator-entered lot number for this final batch (client 2026-07-24) —
+    # required + globally unique when good_qty >= 1, None when the close makes 0.
+    lot_no = await _resolve_output_lot_number(db, payload)
     # The output may target an LN2 box (KIT-005) and may be SPLIT across several
     # boxes / freezers / shelves (client 2026-07-23) when one box can't hold every
     # unit — each destination is checked placeable and its cells validated up
@@ -1871,6 +2064,7 @@ async def close_out_kit(
         scrap=payload.scrap_qty,
         destinations=destinations,
         expiration_date=payload.output_expiration_date,
+        lot_number=lot_no,
         used_by_line=used_by_line,
         evidence=evidence_uuid,
         note=f"{payload.good_qty} produced and stocked for {kit.kit_number}",
@@ -1926,6 +2120,7 @@ async def close_out_kit(
             "operation": "close_out",
             "good_qty": payload.good_qty,
             "scrap_qty": payload.scrap_qty,
+            "output_lot_number": lot_no,
             "output_location_node_id": (
                 str(destinations[0][0]) if destinations else None
             ),

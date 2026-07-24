@@ -97,5 +97,16 @@ export function ItemForecastPanel() {
 
 export function ItemAuditPanel() {
   const { item } = useInventoryDetail();
-  return <EntityAuditTimeline subjectTable="app.items" subjectId={item.uuid} />;
+  // EVERY item (raw material, sub-assembly, finished good) folds in the
+  // kitting/reconciliation events for kits it took part in (AUD-001) — the
+  // good/scrap/consumed/output that never moves stock. A raw material consumed
+  // in a batch must show that consumption too, not just built items (client
+  // 2026-07-24). The per-event involvement filter scopes each to this item.
+  return (
+    <EntityAuditTimeline
+      subjectTable="app.items"
+      subjectId={item.uuid}
+      kitAuditItemId={item.uuid}
+    />
+  );
 }

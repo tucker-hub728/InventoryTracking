@@ -8,7 +8,7 @@ import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Pagination, usePagination } from '@/components/ui/pagination';
+import { NumberedPagination } from '@/components/ui/numbered-pagination';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -39,25 +39,56 @@ export function ReconciliationPageClient() {
   const canCreate = usePermission('inventory', 'create');
 
   const [kits, setKits] = React.useState<ApiKitListItem[]>([]);
+  const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [filter, setFilter] = React.useState<Filter>('all');
   const [query, setQuery] = React.useState('');
+  // Debounced search term — the request fires off this, not every keystroke.
+  const [debouncedQuery, setDebouncedQuery] = React.useState('');
+  const [page, setPage] = React.useState(1);
+  const [pageSize, setPageSize] = React.useState(15);
   const [creating, setCreating] = React.useState(false);
 
-  const load = React.useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const res = await kitsApi.list({ limit: 200 }, { signal });
-      setKits(res.items);
-    } catch (err) {
-      if ((err as DOMException)?.name === 'AbortError') return;
-      setLoadError(err instanceof ApiError ? err.message : 'Failed to load kits.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Debounce the search box so typing doesn't fire a request per character.
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Any filter/search/page-size change returns to page 1 — otherwise you can be
+  // stranded on a page that no longer exists in the new result set.
+  React.useEffect(() => {
+    setPage(1);
+  }, [debouncedQuery, filter, pageSize]);
+
+  // Server-side fetch: status, search, and the page window all go to the API,
+  // and we page off the server's `total` (not a client slice).
+  const load = React.useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const res = await kitsApi.list(
+          {
+            status: filter === 'all' ? undefined : filter,
+            q: debouncedQuery || undefined,
+            limit: pageSize,
+            offset: (page - 1) * pageSize,
+          },
+          { signal },
+        );
+        setKits(res.items);
+        setTotal(res.total);
+      } catch (err) {
+        if ((err as DOMException)?.name === 'AbortError') return;
+        setLoadError(err instanceof ApiError ? err.message : 'Failed to load kits.');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [filter, debouncedQuery, page, pageSize],
+  );
 
   React.useEffect(() => {
     const ctrl = new AbortController();
@@ -65,33 +96,14 @@ export function ReconciliationPageClient() {
     return () => ctrl.abort();
   }, [load]);
 
-  const counts = React.useMemo(() => {
-    const out: Record<string, number> = { all: kits.length };
-    for (const k of kits) out[k.status] = (out[k.status] ?? 0) + 1;
-    return out;
-  }, [kits]);
-  const visible = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return kits.filter(
-      (k) =>
-        (filter === 'all' || k.status === filter) &&
-        (!q ||
-          k.kit_number.toLowerCase().includes(q) ||
-          k.item_number.toLowerCase().includes(q) ||
-          k.description.toLowerCase().includes(q)),
-    );
-  }, [kits, filter, query]);
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const startIdx = (page - 1) * pageSize;
 
-  // Client-side, over the already-filtered list — same idiom as the users and
-  // invitations tables. The fetch pulls up to 200 kits in one go, so paging
-  // never needs a round trip.
-  const pager = usePagination(visible, 15);
-
-  // Searching or switching status should land you on page 1, not on an empty
-  // page left over from the previous result set.
+  // If the data shrank under us (e.g. a kit was closed elsewhere) and left the
+  // current page past the end, step back to the last real page.
   React.useEffect(() => {
-    pager.setPage(1);
-  }, [query, filter]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!loading && total > 0 && page > pageCount) setPage(pageCount);
+  }, [loading, total, page, pageCount]);
 
   return (
     <>
@@ -125,7 +137,7 @@ export function ReconciliationPageClient() {
             <SelectContent>
               {FILTERS.map((s) => (
                 <SelectItem key={s} value={s}>
-                  {s === 'all' ? 'All statuses' : KIT_STATUS_LABEL[s]} ({counts[s] ?? 0})
+                  {s === 'all' ? 'All statuses' : KIT_STATUS_LABEL[s]}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -172,7 +184,7 @@ export function ReconciliationPageClient() {
                 </tbody>
               </table>
             </div>
-          ) : !loading && visible.length === 0 ? (
+          ) : !loading && total === 0 ? (
             <EmptyState
               icon={FlaskConical}
               title={filter === 'all' ? 'No kits yet' : 'No kits here'}
@@ -206,7 +218,7 @@ export function ReconciliationPageClient() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pager.pageItems.map((kit) => (
+                  {kits.map((kit) => (
                     <tr
                       key={kit.id}
                       className="border-b border-border/60 transition-colors hover:bg-surface"
@@ -259,15 +271,17 @@ export function ReconciliationPageClient() {
               </table>
             </div>
           )}
-          {!loading && visible.length > 0 && (
+          {!loadError && total > 0 && (
             <div className="border-t border-border px-1 pt-3">
-              <Pagination
-                page={pager.page}
-                pageCount={pager.pageCount}
-                total={pager.total}
-                rangeStart={pager.rangeStart}
-                rangeEnd={pager.rangeEnd}
-                onPageChange={pager.setPage}
+              <NumberedPagination
+                page={page}
+                pageCount={pageCount}
+                pageSize={pageSize}
+                total={total}
+                startIdx={startIdx}
+                rowsOnPage={kits.length}
+                onPageChange={setPage}
+                onPageSizeChange={setPageSize}
                 noun="kit"
               />
             </div>

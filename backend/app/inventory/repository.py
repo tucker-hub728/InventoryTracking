@@ -662,21 +662,17 @@ async def get_lot_by_item_and_number(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def count_lots_by_number_prefix(
-    session: AsyncSession, *, item_id: uuid.UUID, prefix: str
-) -> int:
-    """How many (live) lots of an item have a lot number starting with ``prefix``.
+async def lot_number_exists(session: AsyncSession, *, lot_number: str) -> bool:
+    """True if any live lot (of any item) already uses this lot number.
 
-    Used to number the per-batch produced lots in kitting (``KIT-0289-1``,
-    ``-2`, …): the next batch is ``count + 1``. ``prefix`` is a literal string,
-    so LIKE metacharacters in it are escaped."""
-    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    stmt = select(func.count()).where(
-        Lot.item_id == item_id,
-        Lot.lot_number.like(f"{escaped}%", escape="\\"),
+    Enforces global uniqueness for operator-entered produced-batch lot numbers in
+    kitting (client 2026-07-24): the operator types the lot number at produce /
+    close-out, so it must not collide with an existing lot anywhere."""
+    stmt = select(Lot.id).where(
+        Lot.lot_number == lot_number.strip(),
         Lot.deleted_at.is_(None),
-    )
-    return int((await session.execute(stmt)).scalar_one())
+    ).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def create_lot(

@@ -307,6 +307,7 @@ def main() -> int:
             "good_qty": 5,  # needs 5 per line, but we only enter 2 used
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{yk['kit_number']}-1",
             "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in yk["lines"]],
             "evidence_id": _reauth(token, "kit.closeout"),
         },
@@ -325,6 +326,7 @@ def main() -> int:
             "good_qty": 2,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{yk['kit_number']}-1",
             "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in yk["lines"]],
             "evidence_id": _reauth(token, "kit.closeout"),
         },
@@ -359,6 +361,60 @@ def main() -> int:
         (s, b),
     )
     _cancel(token, rk["id"], reason="return test")
+
+    # (e) Per-lot return (client 2026-07-24): the operator picks WHICH on-floor
+    # lot to hand back and where (like issue), via ``sources[]``. Units keep their
+    # origin lot.
+    s, prk = _create(token)
+    s, prk = _issue(token, prk, extra=2)
+    check("per-lot-return kit issued", s == 200, (s, prk))
+    prl = prk["lines"][0]
+    check(
+        "line exposes on_floor_lots",
+        len(prl.get("on_floor_lots", [])) >= 1,
+        prl.get("on_floor_lots"),
+    )
+    lot0 = prl["on_floor_lots"][0]
+    s, b = _req(
+        "POST",
+        f"/kits/{prk['id']}/lines/{prl['id']}/return",
+        token=token,
+        json_body={
+            "sources": [
+                {"lot_id": lot0["lot_id"], "qty": 1, "return_location_node_id": OUTPUT_SHELF_ID}
+            ],
+            "reason": "per-lot",
+        },
+    )
+    check("per-lot return -> 200", s == 200, (s, b))
+    rl2 = next(x for x in b["lines"] if x["id"] == prl["id"])
+    check(
+        "per-lot return incremented early_returned",
+        rl2["early_returned_qty"] == 1,
+        rl2["early_returned_qty"],
+    )
+    after0 = next((lt for lt in rl2["on_floor_lots"] if lt["lot_id"] == lot0["lot_id"]), None)
+    check(
+        "picked lot's floor qty dropped by 1",
+        (after0["qty"] if after0 else 0) == lot0["qty"] - 1,
+        (lot0["qty"], after0),
+    )
+    s, b = _req(
+        "POST",
+        f"/kits/{prk['id']}/lines/{prl['id']}/return",
+        token=token,
+        json_body={
+            "sources": [
+                {"lot_id": lot0["lot_id"], "qty": 999999, "return_location_node_id": OUTPUT_SHELF_ID}
+            ]
+        },
+    )
+    check(
+        "per-lot over-return -> 422",
+        s == 422 and b.get("code") in ("return_exceeds_on_floor", "return_exceeds_lot_on_floor"),
+        (s, b),
+    )
+    _cancel(token, prk["id"], reason="per-lot return test")
 
     print("== issue ==")
     # Re-fetch so source_lots are current (other kits moved stock since create),
@@ -456,6 +512,7 @@ def main() -> int:
             "good_qty": 2,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{kit['kit_number']}-1",
             "lines": body_lines,
             "evidence_id": ev,
         },
@@ -535,6 +592,7 @@ def main() -> int:
             "good_qty": floor2 + 5,  # needs floor+5 per line
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{k2['kit_number']}-1",
             "lines": [{"line_id": ln["id"], "used_qty": floor2} for ln in k2["lines"]],
             "evidence_id": ev2,
         },
@@ -553,6 +611,7 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{k2['kit_number']}-1",
             "lines": [{"line_id": ln["id"], "used_qty": floor2 + 5} for ln in k2["lines"]],
             "evidence_id": ev3,
         },
@@ -575,6 +634,7 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{k2['kit_number']}-1",
             "lines": valid_lines,
             "evidence_id": ev,
         },
@@ -593,6 +653,7 @@ def main() -> int:
             "good_qty": 1,
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": f"{k2['kit_number']}-1",
             "lines": valid_lines,
             "evidence_id": ev_wrong,
         },
@@ -702,6 +763,7 @@ def main() -> int:
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
             "output_expiration_date": produce_exp,
+            "output_lot_number": f"{pk['kit_number']}-1",
             "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in pk["lines"]],
             "evidence_id": evp,
         },
@@ -723,6 +785,9 @@ def main() -> int:
             "good_qty": 2,  # need 2 per line; enter used 1 (all that's left)
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
+            # A fresh, unused number so the lot check passes and we reach the
+            # used_below_need guard (the request fails, so this lot is never minted).
+            "output_lot_number": f"{pk['kit_number']}-x",
             "lines": [{"line_id": ln["id"], "used_qty": 1} for ln in b["lines"]],
             "evidence_id": evp2,
         },
@@ -746,19 +811,21 @@ def main() -> int:
             "scrap_qty": 0,
             "output_location_node_id": OUTPUT_SHELF_ID,
             "output_expiration_date": close_exp,
+            "output_lot_number": f"{pk['kit_number']}-2",
             "lines": [{"line_id": ln["id"], "used_qty": 1} for ln in b["lines"]],
             "evidence_id": evc,
         },
     )
     check("close after produce -> 200 closed", s == 200 and b.get("status") == "closed", (s, b))
     check("cumulative good = 3 (2 batch + 1 close)", b.get("good_qty") == 3, b.get("good_qty"))
-    # Two per-batch lots — KIT-xxxx-1 (produce) and KIT-xxxx-2 (close) — each
-    # carrying its OWN expiry, NOT a single shared/last-wins value.
+    # Two per-batch lots — each named by the OPERATOR-ENTERED output_lot_number
+    # (client 2026-07-24; here f"{kit_number}-1"/"-2") — each carrying its OWN
+    # expiry, NOT a single shared/last-wins value.
     s, lots = _req("GET", f"/lots?item_id={BUILT_ITEM_ID}&limit=500", token=token)
     b1 = next((lt for lt in lots if lt.get("lot_number") == f"{pk['kit_number']}-1"), None)
     b2 = next((lt for lt in lots if lt.get("lot_number") == f"{pk['kit_number']}-2"), None)
-    check("produce batch minted its own lot (KIT-…-1)", b1 is not None, [lt.get("lot_number") for lt in lots])
-    check("close batch minted its own lot (KIT-…-2)", b2 is not None, [lt.get("lot_number") for lt in lots])
+    check("produce batch minted the entered lot (…-1)", b1 is not None, [lt.get("lot_number") for lt in lots])
+    check("close batch minted the entered lot (…-2)", b2 is not None, [lt.get("lot_number") for lt in lots])
     check(
         "per-batch lots keep independent expiries",
         b1 is not None
@@ -797,6 +864,7 @@ def main() -> int:
                 {"location_node_id": OUTPUT_SHELF_ID, "qty": 2},
                 {"location_node_id": OUTPUT_SHELF_B_ID, "qty": 1},
             ],
+            "output_lot_number": f"{sk['kit_number']}-1",
             "lines": [{"line_id": ln["id"], "used_qty": 3} for ln in sk["lines"]],
             "evidence_id": ev,
         },
@@ -822,6 +890,7 @@ def main() -> int:
             "good_qty": 3,
             "scrap_qty": 0,
             "outputs": [{"location_node_id": OUTPUT_SHELF_ID, "qty": 2}],
+            "output_lot_number": f"{sk['kit_number']}-2",
             "lines": [{"line_id": ln["id"], "used_qty": 3} for ln in b["lines"]],
             "evidence_id": ev2,
         },
@@ -840,12 +909,100 @@ def main() -> int:
                 {"location_node_id": OUTPUT_SHELF_ID, "qty": 1},
                 {"location_node_id": OUTPUT_SHELF_ID, "qty": 1},
             ],
+            "output_lot_number": f"{sk['kit_number']}-3",
             "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in b["lines"]],
             "evidence_id": ev3,
         },
     )
     check("split duplicate node -> 422", s == 422 and dup.get("code") == "output_duplicate_node", (s, dup))
     _cancel(token, sk["id"], reason="split-output smoke")
+
+    print("== operator-entered produced lot number (client 2026-07-24) ==")
+    s, ck = _create(token, qty=3)
+    s, ck = _issue(token, ck)  # issue needed (3) per line
+    check("lotno-test kit issued", s == 200, (s, ck))
+    custom_lot = f"SMOKE-LOTNO-{ck['kit_number']}"
+    # (a) Producing with good ≥ 1 but no lot number is rejected.
+    s, b = _req(
+        "POST",
+        f"/kits/{ck['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 2,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in ck["lines"]],
+            "evidence_id": _reauth(token, "kit.produce"),
+        },
+    )
+    check(
+        "produce without lot number -> 422 output_lot_number_required",
+        s == 422 and b.get("code") == "output_lot_number_required",
+        (s, b),
+    )
+    # (b) An operator-entered number is honored VERBATIM (not an auto suffix).
+    s, b = _req(
+        "POST",
+        f"/kits/{ck['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 2,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": custom_lot,
+            "lines": [{"line_id": ln["id"], "used_qty": 2} for ln in ck["lines"]],
+            "evidence_id": _reauth(token, "kit.produce"),
+        },
+    )
+    check("produce with entered lot -> 200", s == 200 and b.get("good_qty") == 2, (s, b))
+    s, lots = _req("GET", f"/lots?item_id={BUILT_ITEM_ID}&limit=500", token=token)
+    check(
+        "produced lot carries the entered number verbatim",
+        any(lt.get("lot_number") == custom_lot for lt in lots),
+        [lt.get("lot_number") for lt in lots][:20],
+    )
+    check(
+        "no auto {kit_number}-N lot minted (auto scheme retired)",
+        not any(lt.get("lot_number") == f"{ck['kit_number']}-1" for lt in lots),
+        [lt.get("lot_number") for lt in lots][:20],
+    )
+    # (c) Reusing an existing lot number is rejected (global uniqueness).
+    s, b = _req(
+        "POST",
+        f"/kits/{ck['id']}/produce",
+        token=token,
+        json_body={
+            "good_qty": 1,
+            "scrap_qty": 0,
+            "output_location_node_id": OUTPUT_SHELF_ID,
+            "output_lot_number": custom_lot,
+            "lines": [{"line_id": ln["id"], "used_qty": 1} for ln in ck["lines"]],
+            "evidence_id": _reauth(token, "kit.produce"),
+        },
+    )
+    check(
+        "duplicate lot number -> 422 output_lot_number_taken",
+        s == 422 and b.get("code") == "output_lot_number_taken",
+        (s, b),
+    )
+    # (d) A good=0 close needs NO lot number (nothing is minted) — cumulative good
+    #     is already 2 from the produce above, so it just back-flushes and locks.
+    s, b = _req(
+        "POST",
+        f"/kits/{ck['id']}/close-out",
+        token=token,
+        json_body={
+            "good_qty": 0,
+            "scrap_qty": 0,
+            "lines": [{"line_id": ln["id"], "used_qty": 0} for ln in ck["lines"]],
+            "evidence_id": _reauth(token, "kit.closeout"),
+        },
+    )
+    check(
+        "good=0 close without lot number -> 200 closed",
+        s == 200 and b.get("status") == "closed",
+        (s, b),
+    )
 
     print("== list + filter ==")
     s, b = _req("GET", "/kits?status=closed", token=token)

@@ -64,11 +64,14 @@ const RAW_TABS_WITH_USED_IN: readonly DetailTab[] = [
 // a sub-assembly can be kitted into a parent), so they get the Unit Ledger
 // too: REQ-2026-07-01-INV requires that "drilling into a finished good shall
 // reveal its storage location(s)".
-// (Forecast + Audit for built items are deferred.)
+// Tab order follows the raw-material tabs for consistency (client 2026-07-24):
+// Unit Ledger first, Audit History last. AUD-001 requires kitting/reconciliation
+// events viewable per item, so built items now get the Audit History tab.
 const PRODUCT_TABS: readonly DetailTab[] = [
-  { seg: 'structure', label: 'Structure' },
-  { seg: 'bom', label: 'BOM' },
   { seg: 'ledger', label: 'Unit Ledger' },
+  { seg: 'bom', label: 'BOM' },
+  { seg: 'structure', label: 'Structure' },
+  { seg: 'audit', label: 'Audit History' },
 ];
 
 // …plus "Used in" for a sub-assembly (AY), which can be a component of an FG's
@@ -76,10 +79,11 @@ const PRODUCT_TABS: readonly DetailTab[] = [
 // rule (Transaction Spec §1.1), so its "Used in" would always be empty and the
 // tab is omitted.
 const PRODUCT_TABS_WITH_USED_IN: readonly DetailTab[] = [
-  { seg: 'structure', label: 'Structure' },
-  { seg: 'bom', label: 'BOM' },
   { seg: 'ledger', label: 'Unit Ledger' },
+  { seg: 'bom', label: 'BOM' },
+  { seg: 'structure', label: 'Structure' },
   { seg: 'products', label: 'Used in' },
+  { seg: 'audit', label: 'Audit History' },
 ];
 
 /** Tabs for an item: built tiers get the BOM views (a sub-assembly also gets

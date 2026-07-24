@@ -35,6 +35,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
@@ -55,7 +62,7 @@ import {
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { cn } from '@/lib/utils';
 
-import { BoxCellPicker, useBoxGrid } from './cell-grid-picker';
+import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
 import {
   LotSourcePicker,
@@ -111,6 +118,9 @@ interface OutputDraft {
   output_location_node_id: string;
   /** Expiry of the produced lot — REQ-2026-07-01-INV-008. */
   output_expiration_date: string;
+  /** Operator-entered lot number for this produced batch (client 2026-07-24 —
+   *  replaces the old auto KIT-0289-N suffix). Required when good_qty >= 1. */
+  output_lot_number: string;
 }
 
 /** One place a produced batch is stocked. A batch may be split across several
@@ -179,6 +189,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     scrap_qty: 0,
     output_location_node_id: '',
     output_expiration_date: '',
+    output_lot_number: '',
   });
   /** Operator-entered material used per component this batch (≥ recipe need). */
   const [used, setUsed] = React.useState<Record<string, number | null>>({});
@@ -203,11 +214,15 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         setKit(k);
         setActiveStep(stepModel(k.status).def);
         setOutput((prev) => ({
-          good_qty: k.good_qty ?? prev.good_qty ?? k.target_qty,
+          // "This batch" holds only the NEXT batch's amount — never the kit's
+          // cumulative good (that's priorGood). Default to 1 (client 2026-07-24);
+          // keep a value the operator already typed this session.
+          good_qty: prev.good_qty ?? 1,
           scrap_qty: k.scrap_qty ?? prev.scrap_qty ?? 0,
           output_location_node_id:
             k.output_location_node_id ?? prev.output_location_node_id ?? '',
           output_expiration_date: prev.output_expiration_date ?? '',
+          output_lot_number: prev.output_lot_number ?? '',
         }));
         setReturnLoc(
           Object.fromEntries(
@@ -376,6 +391,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     return isBox(l.id) ? (returnCells[l.id]?.length ?? 0) !== left : false;
   });
   const usedValid = usedComplete && !usedBelowNeed && !usedOverFloor;
+  // The operator types the produced batch's lot number (client 2026-07-24 —
+  // replaces the old auto KIT-0289-N suffix). Required only when this batch makes
+  // output; a good-0 close mints no lot, so it's not needed then.
+  const lotNumberValid = !producingNow || Boolean(output.output_lot_number.trim());
   // Produce a batch NOW (keep open): make ≥ 1, with output + valid used. No
   // back-flush, so no return-cell check.
   const produceReady =
@@ -383,6 +402,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     output.scrap_qty !== null &&
     expiryValid &&
     outputComplete &&
+    lotNumberValid &&
     usedValid;
   // Close (finalize): cumulative good (prior + this batch) ≥ 1. Output required
   // only if producing a final batch; a good-0 close just back-flushes the rest.
@@ -391,6 +411,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     output.scrap_qty !== null &&
     expiryValid &&
     (producingNow ? outputComplete : true) &&
+    lotNumberValid &&
     usedValid &&
     !cellsIncomplete;
   // No recipe gating at issue (KIT-007): a short or even empty issue is allowed
@@ -459,6 +480,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         scrap_qty: output.scrap_qty ?? 0,
         outputs: (output.good_qty ?? 0) >= 1 ? buildOutputs() : [],
         output_expiration_date: output.output_expiration_date || null,
+        output_lot_number: output.output_lot_number?.trim() || undefined,
         lines: kit.lines.map((l) => ({
           line_id: l.id,
           used_qty: used[l.id] ?? 0,
@@ -490,6 +512,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         scrap_qty: output.scrap_qty ?? 0,
         outputs: buildOutputs(),
         output_expiration_date: output.output_expiration_date || null,
+        output_lot_number: output.output_lot_number?.trim() || undefined,
         lines: kit.lines.map((l) => ({ line_id: l.id, used_qty: used[l.id] as number })),
         evidence_id: evidence.evidence_id,
         reason: evidence.comment ?? '',
@@ -498,10 +521,11 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       setKit(k);
       // Reset the batch form for the next batch.
       setOutput((p) => ({
-        good_qty: null,
+        good_qty: 1, // default the next batch to 1 (client 2026-07-24)
         scrap_qty: 0,
         output_location_node_id: p.output_location_node_id,
         output_expiration_date: '',
+        output_lot_number: '',
       }));
       setOutputDests([emptyDest()]);
       setUsed(Object.fromEntries(k.lines.map((l) => [l.id, null])));
@@ -555,7 +579,14 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <KitStatusBadge status={kit.status} />
             <span>
               Building <span className="font-mono text-text">{kit.target_qty}</span> ×{' '}
-              <span className="font-mono text-text">{kit.item_number}</span> — {kit.description}
+              {/* The built item links to its Unit Ledger, matching ItemCell. */}
+              <Link
+                href={`/inventory/${kit.item_id}/ledger`}
+                className="rounded-sm font-mono text-text hover:text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {kit.item_number}
+              </Link>{' '}
+              — {kit.description}
             </span>
             <span className="text-text-3">· at {prodName || '…'}</span>
           </span>
@@ -1371,7 +1402,11 @@ function OutputPlacement({
                   aria-label={`Output location ${i + 1}`}
                   value={d.location_node_id}
                   onChange={(v) =>
-                    update(d.key, { location_node_id: v, isBox: false, cells: [], qty: null })
+                    // Prefill the bulk quantity with what's still left to place
+                    // (client 2026-07-24) — for a single location that equals the
+                    // good count. A box overrides this once it resolves (below);
+                    // its quantity follows the picked cells.
+                    update(d.key, { location_node_id: v, isBox: false, cells: [], qty: cap })
                   }
                   areas={['ln2', 'cold', 'warehouse']}
                   allowedNodeIds={rowAllowed}
@@ -1403,7 +1438,9 @@ function OutputPlacement({
                   value={d.cells}
                   onChange={(cells) => update(d.key, { cells })}
                   onResolved={(isBox) => {
-                    if (isBox !== d.isBox) update(d.key, { isBox, cells: [], qty: null });
+                    // A box derives its quantity from picked cells (clear qty); a
+                    // bulk location keeps the prefilled remaining-to-place.
+                    if (isBox !== d.isBox) update(d.key, { isBox, cells: [], qty: isBox ? null : cap });
                   }}
                   reserved={reservedFor(d.location_node_id, d.cells)}
                 />
@@ -1617,7 +1654,7 @@ function CloseOutStep({
             </span>
           )}
         </div>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">Quantity made (good)</label>
             <NumberInput
@@ -1665,6 +1702,29 @@ function CloseOutStep({
               <p className="mt-1 text-xs text-danger">Expiry can’t be in the past.</p>
             ) : (
               <p className="mt-1 text-[11px] text-text-3">Optional — carried onto the produced lot.</p>
+            )}
+          </div>
+          {/* Operator-entered lot number for this produced batch (client
+              2026-07-24 — replaces the old auto KIT-0289-N suffix). Required when
+              this batch makes output; must be globally unique (checked server-side). */}
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-text-2">Lot number</label>
+            <Input
+              type="text"
+              aria-label="Produced lot number"
+              value={closed ? '' : output.output_lot_number}
+              disabled={closed}
+              aria-invalid={!closed && producingNow && !output.output_lot_number.trim()}
+              wrapperClassName={cn(
+                !closed && producingNow && !output.output_lot_number.trim() && 'border-danger',
+              )}
+              placeholder="Lot"
+              onChange={(e) => onOutputChange({ ...output, output_lot_number: e.target.value })}
+            />
+            {!closed && producingNow && !output.output_lot_number.trim() ? (
+              <p className="mt-1 text-xs text-danger">Enter the produced lot number.</p>
+            ) : (
+              <p className="mt-1 text-[11px] text-text-3">Assigned to the produced batch.</p>
             )}
           </div>
         </div>
@@ -2218,52 +2278,62 @@ function ReturnExcessDialog({
   onOpenChange: (open: boolean) => void;
   onDone: (kit: ApiKit) => void;
 }) {
-  const [qty, setQty] = React.useState<number | null>(1);
-  const [node, setNode] = React.useState('');
+  const floorLots = React.useMemo(() => line?.on_floor_lots ?? [], [line?.on_floor_lots]);
+  const [rows, setRows] = React.useState<ReturnRow[]>([]);
   const [reason, setReason] = React.useState('');
-  const [cells, setCells] = React.useState<string[]>([]);
   const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
     if (!line) return;
-    setQty(line.on_floor_qty > 0 ? 1 : null);
-    setNode(line.return_location_node_id ?? line.source_location_node_id ?? '');
+    const first = line.on_floor_lots[0];
+    const node = line.return_location_node_id ?? line.source_location_node_id ?? '';
+    // Start on the earliest-expiry floor lot, its full qty pre-filled — the
+    // operator adjusts or splits with "Add another lot".
+    setRows([
+      { key: 'ret-0', lot_id: first?.lot_id ?? '', node, isBox: false, cells: [], qty: first?.qty ?? null },
+    ]);
     setReason('');
-    setCells([]);
   }, [line?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Changing the destination invalidates cell picks made against the old box.
-  React.useEffect(() => setCells([]), [node]);
-
-  // Geometry + occupancy come from the LOCATION, not the kit's source options —
-  // you can return into any box, including one this kit never pulled from.
-  const { grid: destBox } = useBoxGrid(node || null);
-  const destGrid = destBox !== null;
 
   if (!line) return null;
 
   const onFloor = line.on_floor_qty;
-  // No recipe cap (KIT-007): you may hand back anything up to what's physically
-  // on the floor, even below the BOM requirement. The only limit is arithmetic.
-  const maxReturn = onFloor;
-  // For an LN2 box the quantity is a consequence of the cells picked (like
-  // issuing from a box), never typed. For a bulk shelf it's the typed number.
-  const effectiveQty = destGrid ? cells.length : (qty ?? 0);
-  const over = effectiveQty > maxReturn;
-  const ready = Boolean(node && effectiveQty > 0 && !over);
+  const lotAvail = (lotId: string) => floorLots.find((l) => l.lot_id === lotId)?.qty ?? 0;
+  const rowEff = (r: ReturnRow) => (r.isBox ? r.cells.length : r.qty ?? 0);
+  // This row's cap = its lot's on-floor qty minus what other rows already take
+  // from the SAME lot (a lot can be split to more than one destination).
+  const rowCap = (r: ReturnRow) => {
+    const usedElsewhere = rows
+      .filter((x) => x.key !== r.key && x.lot_id === r.lot_id)
+      .reduce((s, x) => s + rowEff(x), 0);
+    return Math.max(0, lotAvail(r.lot_id) - usedElsewhere);
+  };
+  const setRow = (key: string, patch: Partial<ReturnRow>) =>
+    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  const totalReturn = rows.reduce((s, r) => s + rowEff(r), 0);
+  const ready =
+    rows.length > 0 &&
+    rows.every((r) => r.lot_id && r.node && rowEff(r) > 0 && rowEff(r) <= rowCap(r));
+
+  // The next earliest-expiry floor lot not yet used by a row (for "Add another").
+  const nextLot = floorLots.find((l) => !rows.some((r) => r.lot_id === l.lot_id));
 
   const submit = async () => {
     if (!ready) return;
     setBusy(true);
     try {
       const k = await kitsApi.returnExcess(kit.id, line.id, {
-        qty: effectiveQty,
-        return_location_node_id: node,
-        return_cells: destGrid ? cells.map(toCell) : undefined,
+        sources: rows.map((r) => ({
+          lot_id: r.lot_id,
+          qty: rowEff(r),
+          return_location_node_id: r.node,
+          return_cells: r.isBox ? r.cells.map(toCell) : undefined,
+        })),
         reason: reason.trim() || null,
       });
       toast.success('Returned to inventory', {
-        description: `${effectiveQty} × ${line.item_number} back in stock.`,
+        description: `${totalReturn} × ${line.item_number} back in stock.`,
       });
       onDone(k);
     } catch (err) {
@@ -2281,8 +2351,9 @@ function ReturnExcessDialog({
         <DialogHeader>
           <DialogTitle>Return excess from {kit.kit_number}</DialogTitle>
           <DialogDescription>
-            Hand unused material back to inventory without closing the kit. It posts as an
-            explicit back-flush and returns without a lot assignment, so it is never stranded.
+            Hand unused material back to inventory without closing the kit. Pick which
+            on-floor lot to return and where — each unit goes back on its own lot, so it is
+            never stranded.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3">
@@ -2303,53 +2374,117 @@ function ReturnExcessDialog({
               <dd className="mt-0.5 font-mono text-sm text-text">{line.early_returned_qty}</dd>
             </div>
           </dl>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">Return quantity</label>
-            {destGrid ? (
-              // LN2: quantity is set by the cells picked below — show it as a
-              // read-out, not a typed field (mirrors issuing from a box).
-              <div className="flex h-9 items-center justify-between rounded-md border border-border bg-bg-elev px-3">
-                <span className="font-mono text-sm text-text">{effectiveQty}</span>
-                <span className="text-[11px] uppercase tracking-wide text-text-3">
-                  from {effectiveQty === 1 ? 'cell' : 'cells'} selected
-                </span>
+
+          {floorLots.length === 0 ? (
+            <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-text-3">
+              Nothing on the floor to return.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-text-2">Return from lot</label>
+                <span className="font-mono text-[11px] text-text-3">{totalReturn} returning</span>
               </div>
-            ) : (
-              <>
-                <NumberInput
-                  aria-label="Return quantity"
-                  value={qty}
-                  min={1}
-                  invalid={over}
-                  onChange={setQty}
-                />
-                {over && (
-                  <p className="mt-1 text-xs text-danger">You can return at most {maxReturn}.</p>
-                )}
-              </>
-            )}
-          </div>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-text-2">Return to</label>
-            <LocationTreePicker
-              aria-label="Return location"
-              value={node}
-              onChange={setNode}
-              areas={['ln2', 'cold', 'warehouse']}
-              allowedNodeIds={allowedIds}
-              modal
-              showPath
-            />
-            {/* Box destination: the cap is the surplus (on-floor − needed), and
-                the quantity follows the selection (derive). */}
-            <BoxCellPicker
-              nodeId={node}
-              qty={maxReturn}
-              value={cells}
-              onChange={setCells}
-              derive
-            />
-          </div>
+              {rows.map((r, i) => {
+                const cap = rowCap(r);
+                return (
+                  <div key={r.key} className="rounded-lg border border-border bg-surface/40 p-3">
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1 space-y-2">
+                        {/* Which on-floor lot's units to return. */}
+                        <Select
+                          value={r.lot_id}
+                          onValueChange={(v) => setRow(r.key, { lot_id: v })}
+                        >
+                          <SelectTrigger aria-label={`Return lot ${i + 1}`} className="h-8">
+                            <SelectValue placeholder="Pick a lot" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {floorLots.map((l) => (
+                              <SelectItem key={l.lot_id} value={l.lot_id}>
+                                {l.lot_number ?? '—'} · {l.qty} on floor
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {/* Where it goes back to. */}
+                        <LocationTreePicker
+                          aria-label={`Return location ${i + 1}`}
+                          value={r.node}
+                          onChange={(v) => setRow(r.key, { node: v, isBox: false, cells: [] })}
+                          areas={['ln2', 'cold', 'warehouse']}
+                          allowedNodeIds={allowedIds}
+                          modal
+                          showPath
+                        />
+                        {r.node && (
+                          <>
+                            {/* Box → pick exact cells (qty follows); bulk → typed qty. */}
+                            <BoxCellPicker
+                              nodeId={r.node}
+                              qty={cap}
+                              value={r.cells}
+                              onChange={(cells) => setRow(r.key, { cells })}
+                              onResolved={(isBox) => {
+                                if (isBox !== r.isBox) setRow(r.key, { isBox, cells: [], qty: isBox ? null : cap });
+                              }}
+                              derive
+                            />
+                            {!r.isBox && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs text-text-3">Quantity</span>
+                                <NumberInput
+                                  aria-label={`Return quantity ${i + 1}`}
+                                  value={r.qty}
+                                  min={1}
+                                  invalid={rowEff(r) > cap}
+                                  onChange={(v) => setRow(r.key, { qty: v == null ? null : Math.min(v, cap) })}
+                                  className="h-8 w-24"
+                                />
+                                <span className="text-[11px] text-text-3">of {cap} left</span>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {rows.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
+                          aria-label="Remove this lot"
+                          className="mt-1 grid size-8 shrink-0 place-items-center rounded-md text-text-3 transition-colors hover:bg-surface-2 hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              {nextLot && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRows((rs) => [
+                      ...rs,
+                      {
+                        key: `ret-${rs.length}-${nextLot.lot_id}`,
+                        lot_id: nextLot.lot_id,
+                        node: line.return_location_node_id ?? line.source_location_node_id ?? '',
+                        isBox: false,
+                        cells: [],
+                        qty: nextLot.qty,
+                      },
+                    ])
+                  }
+                  className="flex items-center gap-1.5 text-xs font-medium text-accent hover:underline"
+                >
+                  <Plus size={13} /> Add another lot
+                </button>
+              )}
+            </div>
+          )}
+
           <div>
             <label className="mb-1.5 block text-xs font-medium text-text-2">
               Reason <span className="text-text-3">(optional)</span>
@@ -2367,12 +2502,23 @@ function ReturnExcessDialog({
             Cancel
           </Button>
           <Button variant="primary" onClick={() => void submit()} disabled={busy || !ready}>
-            Return {effectiveQty}
+            Return {totalReturn}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+/** One row in the Return dialog: which on-floor lot to return, how many, and
+ *  the destination location (with box cells when the target is an LN2 box). */
+interface ReturnRow {
+  key: string;
+  lot_id: string;
+  node: string;
+  isBox: boolean;
+  cells: string[];
+  qty: number | null;
 }
 
 // ── Cancel dialog (per-line returns, D1) ────────────────────────────────────
@@ -2734,30 +2880,65 @@ function TimelineItem({ node, last }: { node: TimelineNode; last: boolean }) {
           </div>
         )}
 
-        {node.moves.length > 0 && (
-          <ul className="mt-2 space-y-1.5">
-            {node.moves.map((m) => (
-              <li
-                key={m.id}
-                className="flex items-center gap-2 rounded-md border border-border/70 bg-bg-elev px-2.5 py-1.5"
-              >
-                <span
-                  className={cn(
-                    'w-11 shrink-0 text-right font-mono text-xs font-semibold tabular-nums',
-                    m.qty_delta > 0 ? 'text-success' : 'text-danger',
-                  )}
-                >
-                  {m.qty_delta > 0 ? `+${m.qty_delta}` : m.qty_delta}
-                </span>
-                <span className="shrink-0 font-mono text-xs text-text-2">{m.item_number}</span>
-                <span className="truncate text-[11px] text-text-3" title={m.notes ?? undefined}>
-                  {m.notes}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+        {/* Split the step's stock moves into self-describing sub-sections
+            (client 2026-07-24): the produced output ("Made") and the leftover
+            returns ("Back-flushed") — mirroring the "Consumed this batch"
+            section — instead of one flat, mixed list. Issue rows have no
+            category here, so they render plainly under their own step. */}
+        {(() => {
+          const made = node.moves.filter((m) => m.movement_type === 'production_output');
+          // Only the CLOSE-OUT reconciliation is a "back-flush". A mid-production
+          // return (kit_return) or a cancel return (kit_cancel_return) is NOT —
+          // those render plainly under their own step ("Excess returned" /
+          // "Cancelled"), whose title already says what happened.
+          const backflushed = node.moves.filter((m) => m.movement_type === 'backflush');
+          const plain = node.moves.filter(
+            (m) => m.movement_type !== 'production_output' && m.movement_type !== 'backflush',
+          );
+          return (
+            <>
+              <MoveList moves={plain} />
+              <MoveList title="Made" moves={made} />
+              <MoveList title="Back-flushed" moves={backflushed} />
+            </>
+          );
+        })()}
       </div>
     </li>
+  );
+}
+
+/** One labelled block of stock moves in a timeline step. Without a title it
+ *  renders the moves plainly (e.g. issue rows under their own step); with one
+ *  it's a sub-section ("Made" / "Back-flushed") like "Consumed this batch". */
+function MoveList({ title, moves }: { title?: string; moves: ApiKitActivityRow[] }) {
+  if (moves.length === 0) return null;
+  return (
+    <div className="mt-2">
+      {title && (
+        <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-text-3">{title}</p>
+      )}
+      <ul className="space-y-1.5">
+        {moves.map((m) => (
+          <li
+            key={m.id}
+            className="flex items-center gap-2 rounded-md border border-border/70 bg-bg-elev px-2.5 py-1.5"
+          >
+            <span
+              className={cn(
+                'w-11 shrink-0 text-right font-mono text-xs font-semibold tabular-nums',
+                m.qty_delta > 0 ? 'text-success' : 'text-danger',
+              )}
+            >
+              {m.qty_delta > 0 ? `+${m.qty_delta}` : m.qty_delta}
+            </span>
+            <span className="shrink-0 font-mono text-xs text-text-2">{m.item_number}</span>
+            <span className="truncate text-[11px] text-text-3" title={m.notes ?? undefined}>
+              {m.notes}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

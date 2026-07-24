@@ -96,6 +96,17 @@ class KitLineIssuedFrom(BaseModel):
     qty: int
 
 
+class KitLineFloorLot(BaseModel):
+    """One lot of a component currently on the production floor (WIP) — a pickable
+    RETURN source (client 2026-07-24). The Return dialog lists these FIFO-ordered
+    so the operator picks which lot's units to hand back; each returned unit keeps
+    its origin lot (TRX-008: moved back, never re-minted, never stranded)."""
+
+    lot_id: str
+    lot_number: str | None = None
+    qty: int
+
+
 class KitLineRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -128,6 +139,9 @@ class KitLineRead(BaseModel):
     source_lots: list[KitLineSourceLot] = Field(default_factory=list)
     # The (lot, location) the line was ISSUED from — the post-issue snapshot.
     issued_from: list[KitLineIssuedFrom] = Field(default_factory=list)
+    # Per-LOT WIP on the production floor — pickable RETURN sources (client
+    # 2026-07-24): the operator picks which floor lot's units to hand back.
+    on_floor_lots: list[KitLineFloorLot] = Field(default_factory=list)
     # Available at the currently-chosen source node (the issue cap).
     source_available: int = 0
 
@@ -257,9 +271,30 @@ class FloorKitLine(BaseModel):
     on_floor_qty: int
 
 
+class FloorKitBatch(BaseModel):
+    """One batch a kit has already produced while still open (KIT-007 incremental
+    production) — its operator-entered lot number, the good units placed, and
+    when. Powers the "Batches produced" list in the Production view."""
+
+    lot_number: str | None = None
+    qty: int
+    produced_at: datetime | None = None
+
+
+class FloorKitConsumedLine(BaseModel):
+    """A component a kit consumed on the floor (produced batches, or a close-out)."""
+
+    item_id: str
+    item_number: str
+    description: str
+    used_qty: int
+
+
 class FloorKit(BaseModel):
     """An open kit building on a production floor, with its on-floor material —
-    so the Production view can attribute WIP to the kit it belongs to."""
+    so the Production view can attribute WIP to the kit it belongs to. Carries
+    what it has already produced/consumed (incremental production, KIT-007): the
+    per-batch lots, the cumulative good/scrap, and the material consumed so far."""
 
     id: str
     kit_number: str
@@ -269,16 +304,14 @@ class FloorKit(BaseModel):
     target_qty: int
     status: KitStatus
     on_floor_total: int
+    good_qty: int = 0
+    scrap_qty: int = 0
+    consumed_total: int = 0
     lines: list[FloorKitLine] = Field(default_factory=list)
-
-
-class FloorKitConsumedLine(BaseModel):
-    """A component a completed kit consumed on the floor."""
-
-    item_id: str
-    item_number: str
-    description: str
-    used_qty: int
+    # Batches produced so far (each a minted lot) and the material consumed by
+    # them — shown alongside the live WIP so the floor reflects work already done.
+    batches: list[FloorKitBatch] = Field(default_factory=list)
+    consumed: list[FloorKitConsumedLine] = Field(default_factory=list)
 
 
 class FloorKitConsumed(BaseModel):
@@ -310,6 +343,23 @@ class KitActivityResponse(BaseModel):
     # The audit-trail events for the kit (newest first) — carry good/scrap and
     # per-line changes the stock ledger can't show.
     events: list[KitAuditEventRow] = Field(default_factory=list)
+
+
+class ItemKitAuditEventRow(KitAuditEventRow):
+    """A kit audit event surfaced on an ITEM's audit history (AUD-001) — the same
+    event shape plus which kit it belongs to, so the per-item timeline can label
+    and link it."""
+
+    kit_id: str
+    kit_number: str | None = None
+    # The e-signature (re-auth) recorded on the event, so the row can show the
+    # "e-signed" badge (produce / close-out / cancel are signed).
+    signature_id: str | None = None
+
+
+class ItemKitAuditResponse(BaseModel):
+    # Kit audit events for every kit this item took part in (newest first).
+    events: list[ItemKitAuditEventRow] = Field(default_factory=list)
 
 
 # ── Writes ──────────────────────────────────────────────────────────────
@@ -442,14 +492,37 @@ class AdditionalIssueRequest(BaseModel):
     cell_allocation_ids: list[str] = Field(default_factory=list)
 
 
-class ReturnExcessRequest(BaseModel):
-    """Return excess material from the floor back into inventory
-    (REQ-2026-07-01-TRX-008) — no lot assignment, so stock is never stranded."""
+class ReturnSourceInput(BaseModel):
+    """One (floor lot → storage) return pick (client 2026-07-24): hand back ``qty``
+    of a specific on-floor lot to a chosen location, mirroring the Issue picker.
+    The units keep their origin lot (TRX-008: moved back, never re-minted)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    qty: int = Field(gt=0, description="How much to hand back (≤ on-floor qty)")
+    lot_id: str = Field(description="Which on-floor lot's units to return")
+    qty: int = Field(gt=0, description="How many of this lot to hand back")
     return_location_node_id: str = Field(description="Storage node the material goes back to")
+    # Required when the return target is a box: one free cell per returned unit.
+    return_cells: list[ReturnCellInput] = Field(default_factory=list)
+
+
+class ReturnExcessRequest(BaseModel):
+    """Return excess material from the floor back into inventory
+    (REQ-2026-07-01-TRX-008). Prefers the multi-source ``sources`` list — the
+    operator picks which on-floor LOT to return and where (client 2026-07-24), so
+    each pick keeps its origin lot and nothing is stranded. The legacy single
+    ``qty`` + ``return_location_node_id`` (FIFO across the floor's lots) is used
+    only when ``sources`` is empty."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Multi-source: one or more (floor lot, destination) picks.
+    sources: list[ReturnSourceInput] = Field(default_factory=list)
+    # ── Legacy single (used only when ``sources`` is empty) ──
+    qty: int | None = Field(default=None, gt=0, description="How much to hand back (≤ on-floor qty)")
+    return_location_node_id: str | None = Field(
+        default=None, description="Storage node the material goes back to"
+    )
     # Required when the return target is a box: one free cell per returned unit.
     return_cells: list[ReturnCellInput] = Field(default_factory=list)
     reason: str | None = Field(default=None, max_length=512)
@@ -524,6 +597,12 @@ class ProduceRequest(_ESignFields):
     output_expiration_date: date | None = Field(
         default=None, description="Expiry of the produced AY/FG lot"
     )
+    # Operator-entered lot number for this produced batch (client 2026-07-24 —
+    # replaces the old auto KIT-0289-N suffix). Optional on the wire so a
+    # good_qty == 0 batch can post; required-when-producing is enforced in the route.
+    output_lot_number: str | None = Field(
+        default=None, description="Operator-entered lot number for the produced batch"
+    )
     lines: list[ProduceLineInput] = Field(
         min_length=1, description="Material consumed per component this batch"
     )
@@ -552,6 +631,13 @@ class CloseOutRequest(_ESignFields):
     # but the UI prompts for it.
     output_expiration_date: date | None = Field(
         default=None, description="Expiry of the produced AY/FG lot"
+    )
+    # Operator-entered lot number for the final produced batch (client 2026-07-24 —
+    # replaces the old auto KIT-0289-N suffix). Optional on the wire so a
+    # good_qty == 0 close (no lot minted) is valid; required-when-producing is
+    # enforced in the route.
+    output_lot_number: str | None = Field(
+        default=None, description="Operator-entered lot number for the produced batch"
     )
     # Optional per-line back-flush destinations for the leftover; omitted lines
     # default to the source they were pulled from.
