@@ -70,7 +70,6 @@ export const navSections: readonly NavSection[] = [
         href: '/reconciliation',
         icon: Scale,
         resource: 'inventory',
-        comingSoon: true,
       },
       {
         id: 'customers',
@@ -109,7 +108,6 @@ export const navSections: readonly NavSection[] = [
         href: '/production',
         icon: Factory,
         resource: 'inventory',
-        comingSoon: true,
       },
     ],
   },
