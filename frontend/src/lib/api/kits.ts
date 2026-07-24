@@ -108,8 +108,18 @@ export interface ApiKitLine {
   source_lots: KitLineSourceLot[];
   /** The (lot, location) this line was ISSUED from — the post-issue snapshot. */
   issued_from: KitLineIssuedFrom[];
+  /** Per-lot WIP on the production floor — pickable RETURN sources (the operator
+   *  picks which floor lot's units to hand back). FIFO-ordered by expiry. */
+  on_floor_lots: KitLineFloorLot[];
   /** Available at the currently-chosen source node (the issue cap). */
   source_available: number;
+}
+
+/** One lot of a component on the production floor — a pickable return source. */
+export interface KitLineFloorLot {
+  lot_id: string;
+  lot_number: string | null;
+  qty: number;
 }
 
 /** One (lot, source location) a line was issued from, with the quantity. */
@@ -214,6 +224,19 @@ export interface ApiKitActivityResponse {
   events: ApiKitAuditEvent[];
 }
 
+/** A kit audit event surfaced on an ITEM's audit history (AUD-001) — the kit
+ *  event shape plus which kit it belongs to and its e-signature. */
+export interface ApiItemKitAuditEvent extends ApiKitAuditEvent {
+  kit_id: string;
+  kit_number: string | null;
+  signature_id: string | null;
+}
+
+export interface ApiItemKitAuditResponse {
+  /** Kit audit events for every kit this item took part in, newest first. */
+  events: ApiItemKitAuditEvent[];
+}
+
 export interface ApiFloorKitLine {
   item_id: string;
   item_number: string;
@@ -221,7 +244,22 @@ export interface ApiFloorKitLine {
   on_floor_qty: number;
 }
 
-/** An open kit building on a production floor, with its on-floor material. */
+export interface ApiFloorKitConsumedLine {
+  item_id: string;
+  item_number: string;
+  description: string;
+  used_qty: number;
+}
+
+/** One batch a kit has already produced while still open (KIT-007) — its lot. */
+export interface ApiFloorKitBatch {
+  lot_number: string | null;
+  qty: number;
+  produced_at: string | null;
+}
+
+/** An open kit building on a production floor, with its on-floor material and
+ *  what it has already produced/consumed (incremental production, KIT-007). */
 export interface ApiFloorKit {
   id: string;
   kit_number: string;
@@ -231,14 +269,13 @@ export interface ApiFloorKit {
   target_qty: number;
   status: KitStatus;
   on_floor_total: number;
+  good_qty: number;
+  scrap_qty: number;
+  consumed_total: number;
   lines: ApiFloorKitLine[];
-}
-
-export interface ApiFloorKitConsumedLine {
-  item_id: string;
-  item_number: string;
-  description: string;
-  used_qty: number;
+  /** Batches produced so far (each a minted lot) and the material they consumed. */
+  batches: ApiFloorKitBatch[];
+  consumed: ApiFloorKitConsumedLine[];
 }
 
 /** A closed kit that built on a floor — what it consumed and yielded. */
@@ -336,11 +373,24 @@ export interface AdditionalIssueInput {
   cell_allocation_ids?: string[];
 }
 
-/** REQ-2026-07-01-TRX-008 — return excess from the floor, no lot assignment. */
-export interface ReturnExcessInput {
+/** One (floor lot → storage) return pick — hand back qty of a specific on-floor
+ *  lot to a location. The unit keeps its origin lot (TRX-008: never stranded). */
+export interface ReturnSourceInput {
+  lot_id: string;
   qty: number;
   return_location_node_id: string;
-  /** Required when returning into a box: one free cell per unit. */
+  /** Required when the return target is a box: one free cell per returned unit. */
+  return_cells?: ReturnCellInput[];
+}
+
+/** REQ-2026-07-01-TRX-008 — return excess from the floor. Prefers `sources` (the
+ *  operator picks which on-floor lot to return and where); the legacy single
+ *  `qty` + `return_location_node_id` (FIFO across lots) is used when omitted. */
+export interface ReturnExcessInput {
+  sources?: ReturnSourceInput[];
+  qty?: number;
+  return_location_node_id?: string;
+  /** Required when returning into a box: one free cell per unit (legacy path). */
   return_cells?: ReturnCellInput[];
   reason?: string | null;
 }
@@ -377,6 +427,9 @@ export interface ProduceInput {
   /** Multi-destination output (split across locations). */
   outputs: OutputDestinationInput[];
   output_expiration_date?: string | null;
+  /** Operator-entered lot number for the produced batch (client 2026-07-24 —
+   *  replaces the old auto KIT-0289-N suffix). Required when good_qty >= 1. */
+  output_lot_number?: string;
   lines: ProduceLineInput[];
   /** Signed write (action kit.produce). */
   evidence_id: string;
@@ -390,6 +443,9 @@ export interface CloseOutInput {
   outputs: OutputDestinationInput[];
   /** Expiry of the produced lot (REQ-2026-07-01-INV-008). ISO yyyy-mm-dd. */
   output_expiration_date?: string | null;
+  /** Operator-entered lot number for the final produced batch (client 2026-07-24).
+   *  Required when good_qty >= 1; omitted for a good-0 close (no lot minted). */
+  output_lot_number?: string;
   lines: CloseOutLineInput[];
   /** Signed write. */
   evidence_id: string;
@@ -430,12 +486,13 @@ export const MOVEMENT_TYPE_LABEL: Record<string, string> = {
 
 export const kitsApi = {
   list: (
-    params: { status?: KitStatus; limit?: number; offset?: number } = {},
+    params: { status?: KitStatus; q?: string; limit?: number; offset?: number } = {},
     opts?: { signal?: AbortSignal },
   ) =>
     api.get<ApiKitListResponse>('/kits', {
       query: {
         status: params.status ?? undefined,
+        q: params.q?.trim() || undefined,
         limit: params.limit ?? undefined,
         offset: params.offset ?? undefined,
       },
@@ -447,6 +504,10 @@ export const kitsApi = {
 
   activity: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiKitActivityResponse>(`/kits/${id}/activity`, { signal: opts?.signal }),
+
+  /** Per-ITEM kit audit history — every kit this item took part in (AUD-001). */
+  itemAudit: (itemId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiItemKitAuditResponse>(`/kits/by-item/${itemId}/audit`, { signal: opts?.signal }),
 
   /** Open kits building on a production floor + their on-floor material. */
   onFloor: (nodeId: string, opts?: { signal?: AbortSignal }) =>

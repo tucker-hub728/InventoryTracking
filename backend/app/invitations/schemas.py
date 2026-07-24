@@ -3,9 +3,9 @@
 Reuses the shared ``Email`` normaliser (lowercases + validates at the edge so
 invite dedup is case-insensitive) and the ``AssignableRole`` domain from the
 users module (admin/operator/read_only only — super_admin is a fixed singleton).
-Request models forbid unknown fields. Cognito emails the temporary password; the
-create/resend responses surface it back only in local dev (where cognito-local
-can't deliver mail), never in production.
+Request models forbid unknown fields. Cognito generates and emails the temporary
+password (via SES in prod); the backend never sees, returns, or logs it, so no
+credential appears in any API response.
 """
 
 from __future__ import annotations
@@ -31,9 +31,8 @@ class InviteCreateRequest(BaseModel):
 class InviteResult(BaseModel):
     """Returned to the admin on create/resend.
 
-    Cognito emails the invitee a temporary password. ``temporary_password`` is
-    populated ONLY in local dev (cognito-local can't deliver mail, so the admin
-    UI shows it for testing); it is always ``null`` in production.
+    Carries no credential: Cognito emails the invitee their temporary password
+    directly, so the response never exposes it in any environment.
     """
 
     id: str
@@ -43,8 +42,6 @@ class InviteResult(BaseModel):
     role: str
     status: str
     expires_at: datetime
-    # Dev-only convenience: the temp password Cognito would have emailed.
-    temporary_password: str | None = None
 
 
 class InvitationRead(BaseModel):

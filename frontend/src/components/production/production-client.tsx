@@ -169,7 +169,7 @@ export function ProductionClient() {
                             <Factory size={18} />
                           </div>
                           {busy ? (
-                            <Badge tone="warning">{floor.active_allocation_count} WIP</Badge>
+                            <Badge tone="warning">{floor.active_allocation_count} In Production</Badge>
                           ) : (
                             <span className="text-[11px] font-medium uppercase tracking-wide text-text-3">
                               Idle
@@ -469,27 +469,87 @@ function ProductionFloorSheet({
                           </div>
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
+                          {/* What this kit has already produced (KIT-007
+                              incremental) alongside its remaining WIP. */}
+                          {kit.good_qty > 0 && <Badge tone="success">{kit.good_qty} made</Badge>}
                           <Badge tone="warning">{kit.on_floor_total} on floor</Badge>
                           <ArrowRight size={14} className="text-text-3" />
                         </div>
                       </Link>
-                      <ul className="divide-y divide-border/50">
-                        {kit.lines.map((line) => (
-                          <li
-                            key={line.item_id}
-                            className="flex items-center justify-between gap-2 px-3 py-1.5"
-                          >
-                            <ItemLink
-                              itemNumber={line.item_number}
-                              itemId={line.item_id}
-                              className="truncate font-mono text-xs"
-                            />
-                            <span className="shrink-0 font-mono text-xs tabular-nums text-text">
-                              {line.on_floor_qty}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
+                      {/* On floor — remaining WIP */}
+                      {kit.lines.length > 0 && (
+                        <div className="px-3 pt-2">
+                          <SubHead icon={<Wrench size={11} />}>On floor</SubHead>
+                          <ul className="divide-y divide-border/50">
+                            {kit.lines.map((line) => (
+                              <li
+                                key={line.item_id}
+                                className="flex items-center justify-between gap-2 py-1.5"
+                              >
+                                <ItemLink
+                                  itemNumber={line.item_number}
+                                  itemId={line.item_id}
+                                  className="truncate font-mono text-xs"
+                                />
+                                <span className="shrink-0 font-mono text-xs tabular-nums text-text">
+                                  {line.on_floor_qty}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {/* Batches produced so far — each a minted lot (KIT-007). */}
+                      {kit.batches.length > 0 && (
+                        <div className="border-t border-border/60 px-3 pt-2">
+                          <SubHead icon={<Boxes size={11} />}>Batches produced</SubHead>
+                          <ul className="divide-y divide-border/50">
+                            {kit.batches.map((b, i) => (
+                              <li
+                                key={`${b.lot_number ?? 'lot'}-${i}`}
+                                className="flex items-center justify-between gap-2 py-1.5"
+                              >
+                                <span className="min-w-0 truncate">
+                                  <span className="font-mono text-xs text-text">
+                                    {b.lot_number ?? '—'}
+                                  </span>
+                                  {b.produced_at && (
+                                    <span className="ml-1.5 text-[11px] text-text-3">
+                                      · {new Date(b.produced_at).toLocaleDateString()}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="shrink-0 font-mono text-xs tabular-nums text-success">
+                                  {b.qty} made
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {/* Consumed so far — material the produced batches drew from the floor. */}
+                      {kit.consumed.length > 0 && (
+                        <div className="border-t border-border/60 px-3 pt-2">
+                          <SubHead icon={<CheckCircle2 size={11} />}>Consumed so far</SubHead>
+                          <ul className="divide-y divide-border/50">
+                            {kit.consumed.map((line) => (
+                              <li
+                                key={line.item_id}
+                                className="flex items-center justify-between gap-2 py-1.5"
+                              >
+                                <ItemLink
+                                  itemNumber={line.item_number}
+                                  itemId={line.item_id}
+                                  className="truncate font-mono text-xs"
+                                />
+                                <span className="shrink-0 font-mono text-xs tabular-nums text-text-3">
+                                  −{line.used_qty}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
@@ -553,6 +613,16 @@ function ProductionFloorSheet({
         </SheetBody>
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** Small labelled divider inside a kit card (On floor / Batches / Consumed). */
+function SubHead({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <p className="flex items-center gap-1 pb-0.5 text-[10px] font-medium uppercase tracking-wider text-text-3">
+      {icon}
+      {children}
+    </p>
   );
 }
 

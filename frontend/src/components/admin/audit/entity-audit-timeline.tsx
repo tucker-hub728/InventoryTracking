@@ -1,10 +1,12 @@
 'use client';
 
 import * as React from 'react';
+import Link from 'next/link';
 import {
   ArrowDownToLine,
   ArrowRightLeft,
   ArrowUpFromLine,
+  Factory,
   History,
   Pencil,
   Plus,
@@ -31,6 +33,11 @@ import {
   type ApiMovement,
   type MovementType,
 } from '@/lib/api/movements';
+import {
+  kitsApi,
+  KIT_OPERATION_LABEL,
+  type ApiItemKitAuditEvent,
+} from '@/lib/api/kits';
 import { LotLink } from '@/components/inventory/lot-link';
 import { cn } from '@/lib/utils';
 
@@ -42,6 +49,10 @@ interface Props {
   subjectId: string;
   /** Cap on audit-event rows. Movements are unbounded (500-row v1 cap). */
   limit?: number;
+  /** When set (built AY/FG items), also merge the kitting/reconciliation audit
+   *  events for every kit this item took part in (AUD-001) — good/scrap made,
+   *  components consumed, output location — the detail that never moves stock. */
+  kitAuditItemId?: string;
 }
 
 // ── Per-event icon + tint ───────────────────────────────────────────────
@@ -119,6 +130,25 @@ const MOVEMENT_ICON: Record<MovementType, IconStyle> = {
   },
 };
 
+// Kit audit operations → icon + tint (per-item history for built AY/FG items).
+const KIT_OP_ICON: Record<string, IconStyle> = {
+  create: { Icon: Plus, tint: 'text-success', pill: 'border-success/30 bg-success/5 text-success' },
+  edit_kit: { Icon: Pencil, tint: 'text-text-2', pill: 'border-border bg-bg-elev text-text-2' },
+  edit_line: { Icon: Pencil, tint: 'text-text-2', pill: 'border-border bg-bg-elev text-text-2' },
+  issue: { Icon: ArrowUpFromLine, tint: 'text-warning', pill: 'border-warning/30 bg-warning/5 text-warning' },
+  additional_issue: { Icon: ArrowUpFromLine, tint: 'text-warning', pill: 'border-warning/30 bg-warning/5 text-warning' },
+  early_return: { Icon: Undo2, tint: 'text-accent', pill: 'border-accent/30 bg-accent/5 text-accent' },
+  production_draft: { Icon: Factory, tint: 'text-accent', pill: 'border-accent/30 bg-accent/5 text-accent' },
+  produce: { Icon: Factory, tint: 'text-success', pill: 'border-success/30 bg-success/5 text-success' },
+  close_out: { Icon: Factory, tint: 'text-success', pill: 'border-success/30 bg-success/5 text-success' },
+  cancel: { Icon: Trash2, tint: 'text-danger', pill: 'border-danger/30 bg-danger/5 text-danger' },
+};
+const KIT_OP_FALLBACK: IconStyle = {
+  Icon: History,
+  tint: 'text-text-2',
+  pill: 'border-border bg-bg-elev text-text-2',
+};
+
 const AUDIT_ACTION_ICON: Record<ApiAuditAction, IconStyle> = {
   created: {
     Icon: Plus,
@@ -156,6 +186,12 @@ type TimelineEntry =
       id: string;
       occurred_at: string;
       event: ApiAuditEvent;
+    }
+  | {
+      kind: 'kit';
+      id: string;
+      occurred_at: string;
+      kit: ApiItemKitAuditEvent;
     };
 
 function formatTime(iso: string): string {
@@ -189,7 +225,7 @@ function formatTime(iso: string): string {
  * Clicking an audit row opens the side-sheet with the field-level diff,
  * the recorded reason, and forensic snapshots.
  */
-export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100 }: Props) {
+export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100, kitAuditItemId }: Props) {
   const [entries, setEntries] = React.useState<TimelineEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -211,9 +247,38 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100 }: Pr
       subjectTable === 'app.items'
         ? movementsApi.listForItem(subjectId, { limit: 500 }, { signal: ctrl.signal })
         : Promise.resolve({ items: [] as ApiMovement[] });
+    // Built items (AY/FG) also fold in the kitting/reconciliation audit events
+    // for every kit they took part in (AUD-001) — good/scrap/consumed detail.
+    const kitP =
+      kitAuditItemId && subjectTable === 'app.items'
+        ? kitsApi.itemAudit(kitAuditItemId, { signal: ctrl.signal })
+        : Promise.resolve({ events: [] as ApiItemKitAuditEvent[] });
 
-    Promise.all([auditP, ledgerP])
-      .then(([auditResp, ledgerResp]) => {
+    Promise.all([auditP, ledgerP, kitP])
+      .then(([auditResp, ledgerResp, kitResp]) => {
+        const moveTimes = new Set(
+          ledgerResp.items.map((m) => new Date(m.performed_at).getTime()),
+        );
+        const kitEvents = kitResp.events.filter((k) => {
+          // Only surface a kit event that actually involves THIS item: it either
+          // physically moved the item (a movement shares its timestamp) or
+          // consumed it (`consumed[]`). A kit's events about its OTHER components
+          // — e.g. an additional issue of a different part — must NOT appear on
+          // this item's history.
+          const hasMovement = moveTimes.has(new Date(k.occurred_at).getTime());
+          const inConsumed = k.consumed.some((c) => c.item_id === subjectId);
+          if (!hasMovement && !inConsumed) return false;
+          // Of the events that do involve this item, drop the ones that add no
+          // stock-invisible detail (good / scrap / consumed / output) AND are
+          // already shown by their coinciding movement (issue / return / cancel)
+          // — keep produce / close-out, and consumed-only events (no movement).
+          const hasDetail =
+            k.good_qty != null ||
+            k.scrap_qty != null ||
+            k.consumed.length > 0 ||
+            Boolean(k.output_location);
+          return hasDetail || !hasMovement;
+        });
         const merged: TimelineEntry[] = [
           ...ledgerResp.items.map<TimelineEntry>((m) => ({
             kind: 'movement',
@@ -227,6 +292,16 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100 }: Pr
             occurred_at: e.occurred_at,
             event: e,
           })),
+          ...kitEvents.map<TimelineEntry>((k) => ({
+            kind: 'kit',
+            id: `k:${k.id}`,
+            occurred_at: k.occurred_at,
+            // This is a PER-ITEM history, so the consumed line shows only THIS
+            // item's consumption — the whole-batch recipe lives in the kit's own
+            // Activity log. (On the built item's own audit this is empty; its
+            // "N made" + output location carry the meaning.)
+            kit: { ...k, consumed: k.consumed.filter((c) => c.item_id === subjectId) },
+          })),
         ];
         merged.sort((a, b) => b.occurred_at.localeCompare(a.occurred_at));
         setEntries(merged);
@@ -238,7 +313,7 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100 }: Pr
       .finally(() => setLoading(false));
 
     return () => ctrl.abort();
-  }, [subjectTable, subjectId, limit]);
+  }, [subjectTable, subjectId, limit, kitAuditItemId]);
 
   if (showSkeleton) {
     return <TableSkeleton rows={5} columns={4} label="Loading audit history…" />;
@@ -314,8 +389,77 @@ function TimelineRow({
       />
     );
   }
+  if (entry.kind === 'kit') {
+    return <KitEventRow event={entry.kit} index={index} />;
+  }
   return (
     <AuditRow event={entry.event} index={index} onSelect={() => onSelectAudit(entry.event.id)} />
+  );
+}
+
+/** A kitting / reconciliation audit event on the item's per-item history — the
+ *  good/scrap/consumed/output detail that never moves stock, labelled + linked
+ *  to its kit. Back-flush returns appear here as their kit's `close_out` /
+ *  `early_return` entries (reconciliation). */
+function KitEventRow({ event, index }: { event: ApiItemKitAuditEvent; index: number }) {
+  const style = KIT_OP_ICON[event.operation] ?? KIT_OP_FALLBACK;
+  const { Icon } = style;
+  const label = KIT_OPERATION_LABEL[event.operation] ?? event.operation;
+  const hasYield = event.good_qty != null || (event.scrap_qty ?? 0) > 0;
+
+  return (
+    <li className="group relative flex items-start gap-3 rounded-md border border-border bg-surface px-3 py-2.5">
+      <RowIcon Icon={Icon} pillClass={style.pill} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="text-text-1 text-sm font-medium">{label}</span>
+          {event.kit_number && event.kit_id && (
+            <Link
+              href={`/reconciliation/${event.kit_id}`}
+              className="rounded-sm font-mono text-[11px] font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {event.kit_number}
+            </Link>
+          )}
+          {hasYield && (
+            <span className={cn('font-mono text-xs font-semibold', style.tint)}>
+              {event.good_qty ?? 0} made
+              {(event.scrap_qty ?? 0) > 0 && (
+                <span className="text-danger"> · {event.scrap_qty} scrapped</span>
+              )}
+            </span>
+          )}
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-xs text-text-3">
+          <span className="font-mono">{formatTime(event.occurred_at)}</span>
+          {event.output_location && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="font-mono">stocked to {event.output_location}</span>
+            </>
+          )}
+          {event.output_expiration_date && (
+            <>
+              <span aria-hidden>·</span>
+              <span>expires {event.output_expiration_date}</span>
+            </>
+          )}
+        </div>
+        {event.consumed.length > 0 && (
+          <p className="mt-1 text-xs text-text-2">
+            Consumed:{' '}
+            {event.consumed.map((c, i) => (
+              <span key={c.item_id + i} className="font-mono">
+                {i > 0 && ', '}
+                <span className="text-text-3">−{c.qty}</span> {c.item_number}
+              </span>
+            ))}
+          </p>
+        )}
+      </div>
+      {event.signature_id && <ESignedBadge />}
+      <span className="font-mono text-[10px] text-text-3">#{index}</span>
+    </li>
   );
 }
 
@@ -370,6 +514,18 @@ function MovementRow({
             <>
               <span aria-hidden>·</span>
               <span className="font-mono">{locText}</span>
+            </>
+          )}
+          {movement.kit_number && movement.kit_id && (
+            <>
+              <span aria-hidden>·</span>
+              <Link
+                href={`/reconciliation/${movement.kit_id}`}
+                onClick={(e) => e.stopPropagation()}
+                className="rounded-sm font-mono text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {movement.kit_number}
+              </Link>
             </>
           )}
         </div>

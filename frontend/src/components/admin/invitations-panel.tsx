@@ -7,16 +7,6 @@ import { toast } from '@/components/ui/sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Label } from '@/components/ui/label';
-import {
   Table,
   TableBody,
   TableCell,
@@ -33,7 +23,6 @@ import {
   type Invitation,
   type InviteStatus,
 } from '@/lib/api/invitations';
-import { CopyableLink } from './copyable-link';
 
 const ROLE_LABEL: Record<string, string> = {
   super_admin: 'Super Admin',
@@ -64,9 +53,6 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
-  const [revealed, setRevealed] = React.useState<{ email: string; tempPassword: string } | null>(
-    null,
-  );
   const pg = usePagination(invites, 10);
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
@@ -94,10 +80,7 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
     setBusyId(invite.id);
     try {
       const result = await invitationsApi.resend(invite.id);
-      // In dev the temp password comes back for testing; in prod Cognito emails it.
-      if (result.temporary_password) {
-        setRevealed({ email: result.email, tempPassword: result.temporary_password });
-      }
+      // Cognito emails the fresh temporary password directly; nothing to reveal here.
       toast.success(`A fresh temporary password was sent to ${result.email}.`);
       await load();
     } catch (err) {
@@ -213,31 +196,6 @@ export function InvitationsPanel({ canManage, reloadSignal }: Props) {
         onPageChange={pg.setPage}
         noun="invitation"
       />
-
-      {/* Fresh temp-password reveal after a resend (dev only). */}
-      <Dialog open={revealed !== null} onOpenChange={(o) => !o && setRevealed(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>New temporary password</DialogTitle>
-            <DialogDescription>
-              A fresh temporary password was sent to{' '}
-              <strong className="text-text">{revealed?.email}</strong>. The previous one no longer
-              works. Shown here only in development, where email isn’t delivered.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogBody>
-            <div className="space-y-1.5">
-              <Label htmlFor="resend-temp-pw">Temporary password</Label>
-              {revealed && <CopyableLink id="resend-temp-pw" value={revealed.tempPassword} />}
-            </div>
-          </DialogBody>
-          <DialogFooter>
-            <Button type="button" variant="primary" onClick={() => setRevealed(null)}>
-              Done
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {confirmDialog}
     </>

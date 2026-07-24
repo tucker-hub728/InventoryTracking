@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from decimal import ROUND_CEILING, Decimal
 
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -242,6 +242,34 @@ async def occupied_cells(session: AsyncSession, node_id: uuid.UUID) -> set[tuple
     return {(int(r), int(c)) for r, c in (await session.execute(stmt)).all()}
 
 
+async def floor_lots_by_item_at_node(
+    session: AsyncSession, node_id: uuid.UUID, item_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[uuid.UUID, str | None, int]]]:
+    """Per item, the WIP on a production node split by lot —
+    ``{item_id: [(lot_id, lot_number, qty)]}``, FIFO by expiry then age. Powers
+    the Return picker (client 2026-07-24): the operator picks which floor lot's
+    units to hand back. Same active/qty filters as
+    :func:`allocations_for_item_at_node`."""
+    if not item_ids:
+        return {}
+    stmt = (
+        select(Lot.item_id, Lot.id, Lot.lot_number, func.sum(LotAllocation.qty))
+        .join(LotAllocation, LotAllocation.lot_id == Lot.id)
+        .where(
+            Lot.item_id.in_(item_ids),
+            LotAllocation.location_node_id == node_id,
+            LotAllocation.is_active.is_(True),
+            LotAllocation.qty > 0,
+        )
+        .group_by(Lot.item_id, Lot.id, Lot.lot_number, Lot.expiration_date, Lot.created_at)
+        .order_by(Lot.expiration_date.asc().nullslast(), Lot.created_at.asc())
+    )
+    out: dict[uuid.UUID, list[tuple[uuid.UUID, str | None, int]]] = {}
+    for item_id, lot_id, lot_number, qty in (await session.execute(stmt)).all():
+        out.setdefault(item_id, []).append((lot_id, lot_number, int(qty)))
+    return out
+
+
 async def allocations_for_item_at_node(
     session: AsyncSession, item_id: uuid.UUID, node_id: uuid.UUID
 ) -> list[LotAllocation]:
@@ -279,6 +307,7 @@ async def list_kits(
     session: AsyncSession,
     *,
     status: str | None,
+    q: str | None = None,
     limit: int,
     offset: int,
 ) -> tuple[list[Kit], int]:
@@ -287,6 +316,24 @@ async def list_kits(
         where.append(Kit.status == status)
 
     base: Select = select(Kit).where(*where)
+    if q and q.strip():
+        # Server-side search across the kit number, the built item's number
+        # (derived ``<prefix code>-<sku_suffix>``), and its description — the same
+        # fields the list used to filter client-side. Join the item + prefix so
+        # the full derived number matches (e.g. "AY-SSY001"). One item / prefix
+        # per kit, so the join doesn't multiply rows (count stays correct).
+        like = f"%{q.strip().lower()}%"
+        base = (
+            base.join(Item, Item.id == Kit.item_id)
+            .join(ItemPrefix, ItemPrefix.id == Item.prefix_id)
+            .where(
+                or_(
+                    func.lower(Kit.kit_number).like(like),
+                    func.lower(Item.description).like(like),
+                    func.lower(func.concat(ItemPrefix.code, "-", Item.sku_suffix)).like(like),
+                )
+            )
+        )
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
         (
@@ -377,6 +424,69 @@ async def kits_completed_on_floor(
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def produced_batches_for_kits(
+    session: AsyncSession, kit_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[str | None, int, object]]]:
+    """Per kit, the produced batches — ``{kit_id: [(lot_number, qty, produced_at)]}``,
+    oldest first. Each Produce / close batch mints ONE lot (operator-entered
+    number, client 2026-07-24); a batch split across destinations writes several
+    ``production_output`` rows for that one lot, so we group by lot and sum the
+    units. Powers the "Batches produced" list on the Production floor view."""
+    if not kit_ids:
+        return {}
+    stmt = (
+        select(
+            StockMovement.kit_id,
+            Lot.lot_number,
+            func.coalesce(func.sum(StockMovement.qty_abs), 0),
+            func.min(StockMovement.performed_at),
+        )
+        .select_from(StockMovement)
+        .join(Lot, Lot.id == StockMovement.lot_id, isouter=True)
+        .where(
+            StockMovement.kit_id.in_(kit_ids),
+            StockMovement.movement_type == "production_output",
+        )
+        .group_by(StockMovement.kit_id, Lot.lot_number)
+        .order_by(func.min(StockMovement.performed_at))
+    )
+    out: dict[uuid.UUID, list[tuple[str | None, int, object]]] = {}
+    for kit_id, lot_number, qty, produced_at in (await session.execute(stmt)).all():
+        if kit_id is None:
+            continue
+        out.setdefault(kit_id, []).append((lot_number, int(qty), produced_at))
+    return out
+
+
+async def audit_events_for_item(
+    session: AsyncSession, item_id: uuid.UUID, *, limit: int = 200
+) -> list[AuditEvent]:
+    """Every kit audit event for kits this item took part in — the per-ITEM audit
+    history (AUD-001: kitting & reconciliation events viewable per item). The
+    item's stock movements carry the ``kit_id`` of every kit it was issued to,
+    built in, or back-flushed from, so we collect those kits and load their audit
+    events (``subject_table='app.kits'``; each event's ``subject_id`` is the kit
+    id and ``subject_label`` the kit number). Newest first, capped."""
+    kit_ids = (
+        select(StockMovement.kit_id)
+        .where(
+            StockMovement.item_id == item_id,
+            StockMovement.kit_id.is_not(None),
+        )
+        .distinct()
+    )
+    stmt = (
+        select(AuditEvent)
+        .where(
+            AuditEvent.subject_table == "app.kits",
+            AuditEvent.subject_id.in_(kit_ids),
+        )
+        .order_by(AuditEvent.occurred_at.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def kit_audit_events(session: AsyncSession, kit_id: uuid.UUID) -> list[AuditEvent]:

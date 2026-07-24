@@ -31,7 +31,7 @@ router = APIRouter(prefix="/invitations", tags=["invitations"])
 StatusFilter = Literal["pending", "accepted", "revoked", "expired"]
 
 
-def _to_result(invite: Invitation, temporary_password: str | None) -> InviteResult:
+def _to_result(invite: Invitation) -> InviteResult:
     return InviteResult(
         id=str(invite.id),
         email=invite.email,
@@ -40,7 +40,6 @@ def _to_result(invite: Invitation, temporary_password: str | None) -> InviteResu
         role=invite.role,
         status=service.effective_status(invite),
         expires_at=invite.expires_at,
-        temporary_password=temporary_password,
     )
 
 
@@ -70,7 +69,7 @@ async def create_invitation(
     actor: CurrentDbUserDep,
     payload: InviteCreateRequest,
 ) -> InviteResult:
-    invite, temp_password = await service.create_invitation(
+    invite = await service.create_invitation(
         db,
         actor=actor,
         email=payload.email,
@@ -78,7 +77,7 @@ async def create_invitation(
         last_name=payload.last_name,
         role=payload.role,
     )
-    return _to_result(invite, temp_password)
+    return _to_result(invite)
 
 
 @router.get(
@@ -120,5 +119,5 @@ async def resend_invitation(
     db: DBSession,
     invitation_id: Annotated[uuid.UUID, Path()],
 ) -> InviteResult:
-    invite, temp_password = await service.resend_invitation(db, invitation_id=invitation_id)
-    return _to_result(invite, temp_password)
+    invite = await service.resend_invitation(db, invitation_id=invitation_id)
+    return _to_result(invite)

@@ -22,15 +22,15 @@ The ``invitations`` table is a display/lifecycle record for the admin panel
 (who was invited, in what role, by whom, pending/accepted/revoked/expired). It
 holds no credential — there is no app-issued token anymore.
 
-In local dev cognito-local cannot deliver email, so the temporary password is
-generated here, logged, and returned to the admin UI. In production it is
-Cognito/SES-emailed and never logged or returned.
+Cognito generates the temporary password and emails it (via Amazon SES in prod);
+the backend never generates, logs, or returns the plaintext — so there is no
+credential to leak and no environment flag gating the exposure. Local dev does
+not use this flow at all (cognito-local can't deliver mail); test users are
+created with a known permanent password via ``scripts/seed_users.py`` instead.
 """
 
 from __future__ import annotations
 
-import secrets
-import string
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -53,25 +53,6 @@ from app.models.invitations import Invitation
 log = get_logger(__name__)
 
 
-# ── Temporary-password helper ────────────────────────────────────────────────
-# Cognito generates a temporary password itself, but we supply one so the value
-# is known in local dev (cognito-local can't email it). It must satisfy the pool
-# policy: 12+ chars with upper, lower, digit and symbol.
-
-_TMP_SYMBOLS = "!@#$%^&*-_"
-
-
-def _generate_temp_password() -> str:
-    pools = (string.ascii_uppercase, string.ascii_lowercase, string.digits, _TMP_SYMBOLS)
-    # One guaranteed char from each class, then fill to length 16 from all of them.
-    chars = [secrets.choice(p) for p in pools]
-    alphabet = "".join(pools)
-    chars += [secrets.choice(alphabet) for _ in range(12)]
-    # Shuffle so the guaranteed chars aren't always in the first four positions.
-    secrets.SystemRandom().shuffle(chars)
-    return "".join(chars)
-
-
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -88,15 +69,6 @@ def _is_active(user: User) -> bool:
     return user.status == "active"
 
 
-def _dev_temp_password(raw: str) -> str | None:
-    """Return the temp password to surface to the admin — only in local dev.
-
-    In production the value is Cognito/SES-emailed and must never leave the
-    backend, so this returns ``None`` there.
-    """
-    return raw if get_settings().is_development else None
-
-
 def _assert_can_grant(actor: User, role: str) -> None:
     """Who-can-invite-whom guard. v1: only ``super_admin`` may invite, and may
     grant any assignable role. Defence in depth behind the route's
@@ -110,23 +82,19 @@ def _assert_can_grant(actor: User, role: str) -> None:
     )
 
 
-def _reserve_cognito_identity(
-    email: str, display_name: str, role: str, temp_password: str
-) -> str:
+def _reserve_cognito_identity(email: str, display_name: str, role: str) -> str:
     """Create (or recover) the Cognito identity for an invitee and return its
-    ``sub``. Cognito emails the temporary password. Idempotent: an email that
-    already has a not-yet-confirmed identity is re-enabled and re-emailed a fresh
-    temporary password so a re-invite works cleanly."""
+    ``sub``. Cognito generates the temporary password and emails it. Idempotent:
+    an email that already has a not-yet-confirmed identity is re-enabled and
+    re-emailed a fresh temporary password so a re-invite works cleanly."""
     try:
-        return cognito_client.admin_create_user(
-            email=email, name=display_name, role=role, temporary_password=temp_password
-        )
+        return cognito_client.admin_create_user(email=email, name=display_name, role=role)
     except ConflictError:
         got = cognito_client.admin_get_user(email=email)
         if got is None or not got.get("sub"):
             raise
         cognito_client.admin_set_user_enabled(email=email, enabled=True)
-        cognito_client.admin_resend_invite(email=email, temporary_password=temp_password)
+        cognito_client.admin_resend_invite(email=email)
         return str(got["sub"])
 
 
@@ -141,12 +109,12 @@ async def create_invitation(
     first_name: str,
     last_name: str,
     role: str,
-) -> tuple[Invitation, str | None]:
-    """Invite a new user. Returns ``(invitation, temp_password_or_None)``.
+) -> Invitation:
+    """Invite a new user. Returns the created invitation.
 
-    Cognito emails the invitee a temporary password; on first login they set a
-    real one. The returned temp password is non-null only in local dev (where
-    cognito-local can't deliver mail).
+    Cognito generates the invitee's temporary password and emails it (via SES in
+    prod); on first login they set a real one. The plaintext never touches the
+    backend, so nothing is returned or logged.
 
     Edge cases: existing active member (409), an existing live pending invite
     (409 — resend/revoke instead), a stale expired pending invite (recycled),
@@ -171,10 +139,9 @@ async def create_invitation(
         pending.status = "expired"
         await session.flush()
 
-    # 3. Reserve the Cognito identity (Cognito emails the temporary password).
+    # 3. Reserve the Cognito identity (Cognito generates + emails the temp password).
     display_name = _display_name(first_name, last_name)
-    temp_password = _generate_temp_password()
-    sub = _reserve_cognito_identity(email, display_name, role, temp_password)
+    sub = _reserve_cognito_identity(email, display_name, role)
 
     # 4. Persist the pending tracking row.
     settings = get_settings()
@@ -200,10 +167,8 @@ async def create_invitation(
 
     await session.refresh(invite)
 
-    if settings.is_development:
-        log.info("invitations.dev_temp_password", email=email, temporary_password=temp_password)
     log.info("invitations.created", invitation_id=str(invite.id), role=role, invited_by=str(actor.id))
-    return invite, _dev_temp_password(temp_password)
+    return invite
 
 
 # ── Accept (mark) ─────────────────────────────────────────────────────────────
@@ -263,12 +228,10 @@ async def revoke_invitation(session: AsyncSession, *, invitation_id: uuid.UUID) 
 # ── Resend ────────────────────────────────────────────────────────────────────
 
 
-async def resend_invitation(
-    session: AsyncSession, *, invitation_id: uuid.UUID
-) -> tuple[Invitation, str | None]:
+async def resend_invitation(session: AsyncSession, *, invitation_id: uuid.UUID) -> Invitation:
     """Re-email a fresh temporary password for a pending invite and re-arm its
-    expiry. Returns ``(invitation, temp_password_or_None)`` (temp password is
-    non-null only in local dev).
+    expiry. Returns the invitation. Cognito generates + emails the new temporary
+    password; the backend never sees the plaintext.
 
     Refuses an already-accepted invite. Re-enables the identity in case it was
     disabled.
@@ -284,23 +247,18 @@ async def resend_invitation(
         raise ConflictError("This email already belongs to an active user.", code="user_exists")
 
     settings = get_settings()
-    temp_password = _generate_temp_password()
 
     if invite.cognito_sub is not None:
         cognito_client.admin_set_user_enabled(email=invite.email, enabled=True)
-    cognito_client.admin_resend_invite(email=invite.email, temporary_password=temp_password)
+    cognito_client.admin_resend_invite(email=invite.email)
 
     invite.status = "pending"
     invite.expires_at = _now() + timedelta(days=settings.invite_ttl_days)
     await session.commit()
     await session.refresh(invite)
 
-    if settings.is_development:
-        log.info(
-            "invitations.dev_temp_password", email=invite.email, temporary_password=temp_password
-        )
     log.info("invitations.resent", invitation_id=str(invite.id))
-    return invite, _dev_temp_password(temp_password)
+    return invite
 
 
 # ── Listing / display ─────────────────────────────────────────────────────────
