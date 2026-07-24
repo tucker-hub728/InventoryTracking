@@ -25,7 +25,6 @@ import {
 import { ApiError } from '@/lib/api/client';
 import type { AssignableRole } from '@/lib/api/users';
 import { invitationsApi, type InviteResult } from '@/lib/api/invitations';
-import { CopyableLink } from './copyable-link';
 
 interface Props {
   open: boolean;
@@ -90,7 +89,7 @@ export function InviteUserDialog({ open, onOpenChange, onInvited }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         {result ? (
-          // ── Success: confirm the emailed temp password (+ reveal it in dev) ──
+          // ── Success: confirm the invitee was emailed a temporary password ──
           <>
             <DialogHeader>
               <DialogTitle>Invitation sent</DialogTitle>
@@ -101,18 +100,6 @@ export function InviteUserDialog({ open, onOpenChange, onInvited }: Props) {
                 {new Date(result.expires_at).toLocaleDateString()}.
               </DialogDescription>
             </DialogHeader>
-            <DialogBody className="space-y-3">
-              {result.temporary_password && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="invite-temp-pw">Temporary password (dev)</Label>
-                  <CopyableLink id="invite-temp-pw" value={result.temporary_password} />
-                  <p className="text-xs text-text-3">
-                    Shown only in development, where email isn’t delivered. In production this is
-                    emailed by Cognito and never displayed here.
-                  </p>
-                </div>
-              )}
-            </DialogBody>
             <DialogFooter>
               <Button type="button" variant="primary" onClick={() => onOpenChange(false)}>
                 Done

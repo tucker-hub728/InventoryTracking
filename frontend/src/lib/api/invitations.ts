@@ -18,9 +18,8 @@ export interface InviteInput {
   role: AssignableRole;
 }
 
-/** Returned on create/resend. ``temporary_password`` is populated only in local
- * dev (cognito-local can't deliver mail, so the admin UI shows it for testing);
- * it is always null in production, where Cognito emails it. */
+/** Returned on create/resend. Carries no credential — Cognito emails the invitee
+ * their temporary password directly, so it is never exposed in the response. */
 export interface InviteResult {
   id: string;
   email: string;
@@ -29,7 +28,6 @@ export interface InviteResult {
   role: string;
   status: InviteStatus;
   expires_at: string;
-  temporary_password: string | null;
 }
 
 /** Directory view of an invitation. */

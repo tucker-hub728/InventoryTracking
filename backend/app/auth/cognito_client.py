@@ -348,8 +348,9 @@ def admin_create_user(*, email: str, name: str, role: str, temporary_password: s
 
     Email delivery is Cognito's job now (its built-in message, sent via Amazon SES
     when the pool is configured for it) — the app sends no invite email of its own.
-    ``temporary_password`` is only passed in local dev, where cognito-local can't
-    deliver mail, so the caller can log/return the value for testing.
+    ``temporary_password`` is optional: when omitted (the invite flow's path)
+    Cognito generates a policy-compliant one itself, so the plaintext never
+    touches the backend. It is retained only for tooling that needs a known value.
 
     Raises :class:`ConflictError` if the email already exists in the pool.
     """
@@ -393,8 +394,9 @@ def admin_resend_invite(*, email: str, temporary_password: str | None = None) ->
     """Re-email the invitation for an existing, not-yet-confirmed identity with a
     fresh temporary password (``MessageAction=RESEND``).
 
-    Used by the resend flow and to recover a re-invited identity. ``temporary_password``
-    is supplied in local dev (where the caller logs it) so the value is known.
+    Used by the resend flow and to recover a re-invited identity. When
+    ``temporary_password`` is omitted (the invite flow's path) Cognito generates
+    and emails a fresh one; the backend never sees the plaintext.
     """
     _ensure_configured()
     client = get_cognito_client()
