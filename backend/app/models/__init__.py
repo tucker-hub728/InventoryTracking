@@ -33,13 +33,12 @@ from app.models.locations import (
     LocationNode,
     LotAllocation,
 )
-from app.models.products import Customer, CustomerItem
+from app.models.products import Customer
 
 __all__ = [
     "AuditEvent",
     "BomLine",
     "Customer",
-    "CustomerItem",
     "ForecastEntry",
     "Invitation",
     "Item",

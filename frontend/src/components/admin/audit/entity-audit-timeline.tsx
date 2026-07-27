@@ -12,6 +12,7 @@ import {
   Plus,
   Scale,
   Trash2,
+  Truck,
   Undo2,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -125,6 +126,12 @@ const MOVEMENT_ICON: Record<MovementType, IconStyle> = {
   },
   kit_cancel_return: {
     Icon: Undo2,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
+  // Terminal customer shipment — stock leaves to a customer (unit-out).
+  customer_shipment: {
+    Icon: Truck,
     tint: 'text-warning',
     pill: 'border-warning/30 bg-warning/5 text-warning',
   },
@@ -478,6 +485,12 @@ function MovementRow({
   const fromCode = movement.from_location_node_name;
   const toCode = movement.to_location_node_name;
   const locText = (() => {
+    // A customer shipment leaves inventory TO a customer (CUST-001) — show the
+    // named customer as the destination, not just the source shelf.
+    if (movement.movement_type === 'customer_shipment') {
+      const cust = movement.customer_name ?? 'Catalog (no customer)';
+      return fromCode ? `from ${fromCode} → ${cust}` : `→ ${cust}`;
+    }
     if (fromCode && toCode) return `${fromCode} → ${toCode}`;
     if (toCode) return `into ${toCode}`;
     if (fromCode) return `from ${fromCode}`;
@@ -526,6 +539,13 @@ function MovementRow({
               >
                 {movement.kit_number}
               </Link>
+            </>
+          )}
+          {/* Reference / tracking number on a customer shipment (TRX-005). */}
+          {movement.reference_number && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="font-mono">Ref {movement.reference_number}</span>
             </>
           )}
         </div>

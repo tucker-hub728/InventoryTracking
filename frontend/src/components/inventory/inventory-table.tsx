@@ -128,11 +128,8 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
           // list, not just detail.
           const availableShown = Math.max(0, item.qtyAvailable);
           const expired = Math.max(0, item.qty - item.qtyAvailable);
-          // Products open on their Structure tab; Purchased on the Ledger.
-          const detailHref =
-            isBuiltTier(item.tierType)
-              ? `/inventory/${item.uuid}/structure`
-              : `/inventory/${item.uuid}/ledger`;
+          // Every item opens on its Unit Ledger tab (the default).
+          const detailHref = `/inventory/${item.uuid}/ledger`;
           return (
             <TableRow key={item.id} className="group">
               <TableCell className="font-mono text-xs">

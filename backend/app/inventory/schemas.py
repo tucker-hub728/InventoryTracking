@@ -382,6 +382,8 @@ MovementType = Literal[
     "backflush",
     "kit_return",
     "kit_cancel_return",
+    # Terminal customer shipment (CUST-001 / TRX-005) — see MOVEMENT_TYPES (ship01).
+    "customer_shipment",
 ]
 
 
@@ -426,6 +428,15 @@ class MovementRead(BaseModel):
     # reference only — SRS §7 excludes finished-good → component-lot tracing.
     kit_id: str | None = None
     kit_number: str | None = None
+
+    # Customer shipment (CUST-001 / TRX-005). Set only on ``customer_shipment``
+    # rows: the named customer the finished good left inventory to (null = a
+    # catalog / unassigned shipment, TRX-007), and the free-text reference /
+    # tracking / sales-order number. Drives the ledger's "to the named customer"
+    # display CUST-001 requires.
+    customer_id: str | None = None
+    customer_name: str | None = None
+    reference_number: str | None = None
 
     # Mandatory §3 comment captured on every e-signed movement.
     notes: str | None

@@ -38,7 +38,12 @@ function subjectLabel(m: ApiMovement): string {
   const sign = Number(m.qty_delta) > 0 ? '+' : '−';
   const qty = `${sign}${Number(m.qty_abs).toLocaleString()}`;
   const lot = m.lot_number ? ` · lot ${m.lot_number}` : '';
-  return `${item} · ${qty}${lot}`;
+  // A customer shipment names the customer it left inventory to (CUST-001).
+  const shipTo =
+    m.movement_type === 'customer_shipment'
+      ? ` · → ${m.customer_name ?? 'Catalog'}`
+      : '';
+  return `${item} · ${qty}${lot}${shipTo}`;
 }
 
 /** ``inventory.movement.receipt`` / ``…transfer_out`` / ``…reversal``

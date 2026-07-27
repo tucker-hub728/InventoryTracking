@@ -6,7 +6,6 @@ import { Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { PageHeader } from '@/components/shared/page-header';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
@@ -19,8 +18,7 @@ import { ApiError } from '@/lib/api/client';
 import { CustomerFormDialog } from './customer-form-dialog';
 
 /**
- * Customers list — name, contact, email, and the products each customer
- * orders (linked from the customer form). Create / edit / delete inline.
+ * Customers list — name, contact, email. Create / edit / delete inline.
  */
 export function CustomersPageClient() {
   const canCreate = usePermission('inventory', 'create');
@@ -153,7 +151,6 @@ export function CustomersPageClient() {
                     <th className="px-3 py-2 font-medium">Customer</th>
                     <th className="px-3 py-2 font-medium">Contact</th>
                     <th className="px-3 py-2 font-medium">Email</th>
-                    <th className="px-3 py-2 font-medium">Linked finished goods</th>
                     {canCreate && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
@@ -169,19 +166,6 @@ export function CustomersPageClient() {
                       </td>
                       <td className="px-3 py-2.5 text-xs text-text-2">
                         {c.email ?? <span className="text-text-3">—</span>}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        {c.items.length === 0 ? (
-                          <span className="text-text-3">—</span>
-                        ) : (
-                          <div className="flex flex-wrap gap-1">
-                            {c.items.map((p) => (
-                              <Badge key={p.id} tone="neutral">
-                                {p.name}
-                              </Badge>
-                            ))}
-                          </div>
-                        )}
                       </td>
                       {canCreate && (
                         <td className="px-3 py-2.5">

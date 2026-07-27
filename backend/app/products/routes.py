@@ -4,8 +4,9 @@ Master-data writes, same gate as suppliers/items: reads need ``inventory:view``,
 writes need ``inventory:create``. Updates + deletes are audit-logged via
 ``record_entity_change``. No e-signature — these aren't GxP stock movements.
 
-Customers link to **finished-good items** (built items) many-to-many, managed
-from the customer payload's ``item_ids``.
+A customer is simple master data (name / contact / email). Customers are NOT
+linked to inventory items — the part number is the source of truth for inventory
+identity; a shipment names a customer at ship time.
 """
 
 from __future__ import annotations
@@ -19,16 +20,9 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
-from app.inventory import repository as inv_repo
-from app.models.inventory import BUILT_TIER_TYPES
 from app.models.products import Customer
 from app.products import repository as products_repo
-from app.products.schemas import (
-    CustomerCreate,
-    CustomerRead,
-    CustomerUpdate,
-    LinkedRef,
-)
+from app.products.schemas import CustomerCreate, CustomerRead, CustomerUpdate
 from app.security.permissions import RequirePermission
 
 customers_router = APIRouter(prefix="/customers", tags=["customers"])
@@ -37,22 +31,7 @@ customers_router = APIRouter(prefix="/customers", tags=["customers"])
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
-def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
-    try:
-        return uuid.UUID(value)
-    except (ValueError, AttributeError) as exc:
-        raise ValidationError(
-            f"{field} is not a valid UUID", code=f"invalid_{field}"
-        ) from exc
-
-
-def _refs(pairs: list[tuple[uuid.UUID, str]]) -> list[LinkedRef]:
-    return [LinkedRef(id=str(i), name=n) for i, n in pairs]
-
-
-def _customer_to_read(
-    customer: Customer, items: list[LinkedRef] | None = None
-) -> CustomerRead:
+def _customer_to_read(customer: Customer) -> CustomerRead:
     return CustomerRead(
         id=str(customer.id),
         name=customer.name,
@@ -62,29 +41,7 @@ def _customer_to_read(
         updated_at=customer.updated_at,
         created_by_user_id=str(customer.created_by_user_id),
         updated_by_user_id=str(customer.updated_by_user_id),
-        items=items or [],
     )
-
-
-async def _validate_item_ids(db: DBSession, item_ids: list[str]) -> list[uuid.UUID]:
-    """Each id must be an existing built (finished-good) item."""
-    out: list[uuid.UUID] = []
-    seen: set[uuid.UUID] = set()
-    for raw in item_ids:
-        iu = _parse_uuid_or_422(raw, field="item_id")
-        if iu in seen:
-            continue
-        item = await inv_repo.get_item(db, iu)
-        if item is None:
-            raise NotFoundError(f"Item {raw} not found")
-        if item.tier is None or item.tier.type not in BUILT_TIER_TYPES:
-            raise ValidationError(
-                "Customers can only be linked to sub-assembly or finished-good items",
-                code="item_not_built",
-            )
-        seen.add(iu)
-        out.append(iu)
-    return out
 
 
 # ── Customers ──────────────────────────────────────────────────────────
@@ -101,11 +58,7 @@ async def list_customers(
     q: Annotated[str | None, Query(description="Search name/contact/email")] = None,
 ) -> list[CustomerRead]:
     customers = await products_repo.list_customers(db, q=q)
-    ids = [c.id for c in customers]
-    item_map = await products_repo.items_for_customers(db, ids)
-    return [
-        _customer_to_read(c, items=_refs(item_map.get(c.id, []))) for c in customers
-    ]
+    return [_customer_to_read(c) for c in customers]
 
 
 @customers_router.get(
@@ -120,15 +73,14 @@ async def get_customer(
     customer = await products_repo.get_customer(db, customer_id)
     if customer is None:
         raise NotFoundError(f"Customer {customer_id} not found")
-    item_map = await products_repo.items_for_customers(db, [customer.id])
-    return _customer_to_read(customer, items=_refs(item_map.get(customer.id, [])))
+    return _customer_to_read(customer)
 
 
 @customers_router.post(
     "",
     response_model=CustomerRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a customer (details + linked finished-good items)",
+    summary="Create a customer",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def create_customer(
@@ -139,7 +91,6 @@ async def create_customer(
             f"A customer named '{payload.name}' already exists",
             code="customer_name_conflict",
         )
-    item_uuids = await _validate_item_ids(db, payload.item_ids)
 
     try:
         customer = await products_repo.create_customer(
@@ -159,15 +110,7 @@ async def create_customer(
             ) from exc
         raise
 
-    if item_uuids:
-        await products_repo.set_customer_items(
-            db,
-            customer_id=customer.id,
-            item_ids=item_uuids,
-            created_by_user_id=current.id,
-        )
-    item_map = await products_repo.items_for_customers(db, [customer.id])
-    response = _customer_to_read(customer, items=_refs(item_map.get(customer.id, [])))
+    response = _customer_to_read(customer)
     await db.commit()
     return response
 
@@ -175,7 +118,7 @@ async def create_customer(
 @customers_router.patch(
     "/{customer_id}",
     response_model=CustomerRead,
-    summary="Update a customer (details and/or linked items)",
+    summary="Update a customer",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def update_customer(
@@ -184,10 +127,8 @@ async def update_customer(
     customer_id: Annotated[uuid.UUID, Path()],
     payload: CustomerUpdate,
 ) -> CustomerRead:
-    data = payload.model_dump(exclude_unset=True)
-    item_ids = data.pop("item_ids", None)
-    column_patch = data  # name / contact_person / email, if set
-    if not column_patch and item_ids is None:
+    column_patch = payload.model_dump(exclude_unset=True)  # name / contact / email
+    if not column_patch:
         raise ValidationError("No fields to update", code="empty_patch")
 
     customer = await products_repo.get_customer(db, customer_id)
@@ -205,10 +146,6 @@ async def update_customer(
                     code="customer_name_conflict",
                 )
 
-    item_uuids: list[uuid.UUID] | None = None
-    if item_ids is not None:
-        item_uuids = await _validate_item_ids(db, item_ids)
-
     before = products_repo.customer_to_audit_snapshot(customer)
     try:
         updated = await products_repo.apply_customer_patch(
@@ -222,13 +159,6 @@ async def update_customer(
                 "Customer name conflict", code="customer_name_conflict"
             ) from exc
         raise
-    if item_uuids is not None:
-        await products_repo.set_customer_items(
-            db,
-            customer_id=updated.id,
-            item_ids=item_uuids,
-            created_by_user_id=current.id,
-        )
     after = products_repo.customer_to_audit_snapshot(updated)
 
     await record_entity_change(
@@ -243,8 +173,7 @@ async def update_customer(
     )
 
     await db.refresh(updated)
-    item_map = await products_repo.items_for_customers(db, [updated.id])
-    response = _customer_to_read(updated, items=_refs(item_map.get(updated.id, [])))
+    response = _customer_to_read(updated)
     await db.commit()
     return response
 

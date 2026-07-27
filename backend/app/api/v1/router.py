@@ -24,6 +24,7 @@ from app.invitations.routes import router as invitations_router
 from app.kitting.routes import kits_router
 from app.locations.routes import alloc_router, nodes_router
 from app.products.routes import customers_router
+from app.shipments.routes import shipments_router
 from app.users.routes import router as users_router
 
 api_router = APIRouter()
@@ -43,5 +44,6 @@ api_router.include_router(tiers_router)
 api_router.include_router(bom_router)
 api_router.include_router(kits_router)
 api_router.include_router(customers_router)
+api_router.include_router(shipments_router)
 api_router.include_router(forecasts_router)
 api_router.include_router(audit_router)

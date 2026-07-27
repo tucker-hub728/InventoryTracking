@@ -17,10 +17,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Checkbox } from '@/components/ui/checkbox';
 import { ApiError } from '@/lib/api/client';
-import { itemsApi, type ApiItem } from '@/lib/api/items';
-import { isBuiltTier } from '@/lib/api/tiers';
 import {
   customersApi,
   type Customer,
@@ -40,12 +37,6 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 
-function sameSet(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -57,10 +48,6 @@ interface Props {
 export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Props) {
   const isEdit = Boolean(customer);
   const [submitError, setSubmitError] = React.useState<string | null>(null);
-  // Finished-good (built) items a customer can be linked to.
-  const [products, setProducts] = React.useState<ApiItem[]>([]);
-  const [productsLoading, setProductsLoading] = React.useState(false);
-  const [selected, setSelected] = React.useState<Set<string>>(new Set());
 
   const {
     register,
@@ -71,27 +58,6 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
     resolver: zodResolver(schema),
     defaultValues: { name: '', contact_person: '', email: '' },
   });
-
-  // Original linked set, to detect changes on edit.
-  const originalIds = React.useMemo(
-    () => new Set((customer?.items ?? []).map((p) => p.id)),
-    [customer],
-  );
-
-  React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    setProductsLoading(true);
-    itemsApi
-      .list({ limit: 200 }, { signal: ctrl.signal })
-      .then((resp) =>
-        // Customers link to finished-good (Product / built) items only.
-        setProducts(resp.items.filter((i) => isBuiltTier(i.tier_type))),
-      )
-      .catch(() => {})
-      .finally(() => setProductsLoading(false));
-    return () => ctrl.abort();
-  }, [open]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -104,17 +70,8 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
           }
         : { name: '', contact_person: '', email: '' },
     );
-    setSelected(new Set((customer?.items ?? []).map((p) => p.id)));
     setSubmitError(null);
   }, [open, customer, reset]);
-
-  const toggle = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
 
   const onSubmit = async (values: FormValues): Promise<void> => {
     setSubmitError(null);
@@ -126,7 +83,6 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
         if (dirtyFields.contact_person)
           patch.contact_person = values.contact_person?.trim() || null;
         if (dirtyFields.email) patch.email = values.email?.trim() || null;
-        if (!sameSet(selected, originalIds)) patch.item_ids = [...selected];
         if (Object.keys(patch).length === 0) {
           setSubmitError('No changes to save.');
           return;
@@ -137,7 +93,6 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
           name: values.name.trim(),
           contact_person: values.contact_person?.trim() || null,
           email: values.email?.trim() || null,
-          item_ids: [...selected],
         };
         saved = await customersApi.create(input);
       }
@@ -163,7 +118,8 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
           <DialogHeader>
             <DialogTitle>{isEdit ? 'Edit customer' : 'Add customer'}</DialogTitle>
             <DialogDescription>
-              Customer details and the finished goods they order.
+              Customer details. Finished goods are shipped to a customer at the point of
+              the shipment.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
@@ -185,6 +141,21 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
             </div>
 
             <div className="space-y-1.5">
+              <Label htmlFor="cust-contact">Contact name</Label>
+              <Input
+                id="cust-contact"
+                placeholder="e.g. Jane Doe"
+                aria-invalid={Boolean(errors.contact_person)}
+                {...register('contact_person')}
+              />
+              {errors.contact_person && (
+                <p role="alert" className="text-xs text-danger">
+                  {errors.contact_person.message}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
               <Label htmlFor="cust-email">Email</Label>
               <Input
                 id="cust-email"
@@ -198,36 +169,6 @@ export function CustomerFormDialog({ open, onOpenChange, customer, onSaved }: Pr
                   {errors.email.message}
                 </p>
               )}
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>Linked finished goods</Label>
-              <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-border p-2">
-                {productsLoading ? (
-                  <p className="px-2 py-3 text-center text-xs text-text-3">Loading items…</p>
-                ) : products.length === 0 ? (
-                  <p className="px-2 py-3 text-center text-xs text-text-3">
-                    No Product items yet — create finished-good items first to link
-                    them.
-                  </p>
-                ) : (
-                  products.map((p) => (
-                    <label
-                      key={p.id}
-                      className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-surface"
-                    >
-                      <Checkbox
-                        checked={selected.has(p.id)}
-                        onCheckedChange={() => toggle(p.id)}
-                      />
-                      <span className="font-mono text-xs text-text-2">
-                        {p.item_number}
-                      </span>
-                      <span>{p.description}</span>
-                    </label>
-                  ))
-                )}
-              </div>
             </div>
 
             {submitError && (

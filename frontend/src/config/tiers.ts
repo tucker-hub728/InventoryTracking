@@ -73,8 +73,9 @@ export const SUB_ASSEMBLY_TIER: TierConfig = {
   plural: 'sub-assemblies',
   newLabel: 'New Sub-Assembly',
   createdLabel: 'Sub-assembly created',
-  // Built items have no ledger tab — open the multi-level structure instead.
-  detailSegment: 'structure',
+  // Built items open on their Unit Ledger — the default tab (since kitting,
+  // built items hold real stock and get a ledger).
+  detailSegment: 'ledger',
   filters: [ALL, MISSING_BOM, NEEDS_REORDER],
 };
 
@@ -87,6 +88,6 @@ export const FINISHED_GOOD_TIER: TierConfig = {
   plural: 'finished goods',
   newLabel: 'New Finished Good',
   createdLabel: 'Finished good created',
-  detailSegment: 'structure',
+  detailSegment: 'ledger',
   filters: [ALL, MISSING_BOM, NEEDS_REORDER],
 };

@@ -79,6 +79,8 @@ const TXN_LABEL: Record<string, { label: string; tone: BadgeTone }> = {
   adjustment: { label: 'Adjusted', tone: 'warning' },
   transfer_in: { label: 'Transfer in', tone: 'neutral' },
   transfer_out: { label: 'Transfer out', tone: 'neutral' },
+  // Terminal customer shipment (CUST-001) — the finished good leaves inventory.
+  customer_shipment: { label: 'Shipped', tone: 'danger' },
 };
 
 function TransactionCell({ entry }: { entry: LedgerEntry }) {
@@ -89,6 +91,15 @@ function TransactionCell({ entry }: { entry: LedgerEntry }) {
       <Badge tone={meta.tone}>{meta.label}</Badge>
       {entry.kitNumber && (
         <span className="font-mono text-[11px] text-text-3">{entry.kitNumber}</span>
+      )}
+      {/* Reference / tracking number on a shipment (TRX-005). */}
+      {entry.referenceNumber && (
+        <span
+          className="font-mono text-[11px] text-text-3"
+          title={`Reference: ${entry.referenceNumber}`}
+        >
+          {entry.referenceNumber}
+        </span>
       )}
     </span>
   );
@@ -349,6 +360,9 @@ interface Props {
    * who lack the ``inventory:sign`` permission.
    */
   onReverseRequest?: (entry: LedgerEntry) => void;
+  /** Show the Customer column. Only built items (finished goods / sub-assemblies)
+   *  can ship to a customer, so raw materials omit it (it would always be —). */
+  showCustomer?: boolean;
 }
 
 export function LedgerTable({
@@ -358,6 +372,7 @@ export function LedgerTable({
   onCycleSort,
   filtersActive,
   onReverseRequest,
+  showCustomer = false,
 }: Props) {
   const showActions = Boolean(onReverseRequest);
 
@@ -373,8 +388,8 @@ export function LedgerTable({
   const grandIn = groups.reduce((s, g) => s + g.totalIn, 0);
   const grandOut = groups.reduce((s, g) => s + g.totalOut, 0);
   const grandBalance = grandIn - grandOut;
-  // Date, Transaction, In, Out, Balance, Location, Lot, Expiry, By (+ actions)
-  const cols = 9 + (showActions ? 1 : 0);
+  // Date, Transaction, In, Out, Balance, Location, [Customer], Lot, Expiry, By (+ actions)
+  const cols = 9 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0);
 
   const SortIcon = sortDir === 'asc' ? ArrowUp : sortDir === 'desc' ? ArrowDown : ChevronsUpDown;
   const sortAria = sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none';
@@ -389,6 +404,7 @@ export function LedgerTable({
           <TableHead className="w-[90px] text-right">Units Out</TableHead>
           <TableHead className="w-[100px] text-right">Balance</TableHead>
           <TableHead className="w-[160px]">Location</TableHead>
+          {showCustomer && <TableHead className="w-[150px]">Customer</TableHead>}
           <TableHead className="w-[140px]">Lot</TableHead>
           <TableHead className="w-[150px]" aria-sort={sortAria}>
             <button
@@ -460,14 +476,32 @@ export function LedgerTable({
                   </TableCell>
                   {/* Per-row balance lives on the lot Total row, like the workbook. */}
                   <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
-                  {/* Just the location. The "Transfer" badge that used to sit
-                      here is now a proper chip in the Transaction column; the
-                      row tint still flags transfers at a glance. */}
+                  {/* The storage location the movement touched. For a shipment
+                      that's the source the finished good left from. */}
                   <TableCell className="text-xs text-text-2">
                     <span className="block truncate" title={e.locationPath ?? undefined}>
                       {e.location}
                     </span>
                   </TableCell>
+                  {/* Customer — the named recipient a shipment left inventory to
+                      (CUST-001). Shown only for built items (raw materials never
+                      ship). Only shipments populate it; other rows are —. */}
+                  {showCustomer && (
+                    <TableCell className="text-xs text-text-2">
+                      {e.movementType === 'customer_shipment' ? (
+                        <span
+                          className="block truncate"
+                          title={e.referenceNumber ? `Ref ${e.referenceNumber}` : undefined}
+                        >
+                          {e.customerName ?? (
+                            <span className="italic text-text-3">Catalog (no customer)</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-text-3">—</span>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell className="font-mono text-xs text-text-2">
                     <LotLink lotId={e.lotId} lotNumber={e.lot} />
                   </TableCell>
@@ -524,6 +558,7 @@ export function LedgerTable({
               </TableCell>
               <TableCell className="text-right font-mono text-xs">{group.balance}</TableCell>
               <TableCell />
+              {showCustomer && <TableCell />}
               <TableCell className="font-mono text-xs text-text-2">
                 <LotLink lotId={group.lotId} lotNumber={group.lot} />
               </TableCell>

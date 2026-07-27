@@ -673,6 +673,45 @@ async def create_node_dispense_movement(
     return movement
 
 
+async def create_node_shipment_movement(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    from_location_node_id: uuid.UUID,
+    qty: int,
+    performed_by_user_id: uuid.UUID,
+    customer_id: uuid.UUID | None = None,
+    reference_number: str | None = None,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> StockMovement:
+    """Ship a finished good OUT to a customer — the terminal transaction
+    (REQ-2026-07-22-CUST-001 / 07-01 TRX-005). Unit-out from the source node with
+    **no destination**: stock leaves the system. ``customer_id`` is optional — a
+    named customer honours CUST-001, ``None`` is the catalog / unassigned
+    shipment (TRX-007). ``reference_number`` is the free-text tracking / sales
+    number (TRX-005). Only the finished good's own stock changes; there is no
+    cascade to component inventory (TRX-006)."""
+    movement = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_location_node_id,
+        to_location_node_id=None,
+        movement_type="customer_shipment",
+        qty_delta=-qty,
+        qty_abs=qty,
+        customer_id=customer_id,
+        reference_number=reference_number,
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
 async def create_node_transfer_pair(
     session: AsyncSession,
     *,

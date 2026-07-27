@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeft, Loader2, Pencil } from 'lucide-react';
+import { ArrowLeft, Loader2, Pencil, Truck } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,6 +13,7 @@ import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { ItemEditDialog } from './item-edit-dialog';
+import { ShipToCustomerDialog } from './ship-to-customer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber, isUuid } from '@/lib/utils';
@@ -126,6 +127,7 @@ export function InventoryDetailShell({
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [editing, setEditing] = React.useState(false);
+  const [shipping, setShipping] = React.useState(false);
 
   const [ledgerRows, setLedgerRows] = React.useState<ApiMovement[]>([]);
   const [ledgerTotal, setLedgerTotal] = React.useState(0);
@@ -329,6 +331,14 @@ export function InventoryDetailShell({
                 <Pencil size={14} /> Edit
               </Button>
             )}
+            {/* Ship-to-customer is the terminal transaction for a built item —
+                a finished good, or a sub-assembly sold directly (INV-004 /
+                CUST-001). E-signed, so gate on ``inventory:sign``. */}
+            {built && canSign && (
+              <Button variant="primary" onClick={() => setShipping(true)}>
+                <Truck size={14} /> Ship to customer
+              </Button>
+            )}
           </>
         }
       />
@@ -452,6 +462,13 @@ export function InventoryDetailShell({
         onOpenChange={setEditing}
         itemId={item.uuid}
         onUpdated={refresh}
+      />
+
+      <ShipToCustomerDialog
+        open={shipping}
+        onOpenChange={setShipping}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+        onDone={refresh}
       />
     </>
   );

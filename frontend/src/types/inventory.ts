@@ -86,6 +86,11 @@ export interface LedgerEntry {
    *  excludes finished-good → component-lot traceability. */
   kitNumber?: string | null;
   kitId?: string | null;
+  /** Customer shipment (CUST-001 / TRX-005): the named customer the finished
+   *  good left inventory to (null = catalog / unassigned), and the reference /
+   *  tracking number. Set only on ``customer_shipment`` rows. */
+  customerName?: string | null;
+  referenceNumber?: string | null;
   /** True if this row is itself a reversal of an earlier row. */
   isReversal?: boolean;
   /** True if a later row already reverses this one (one reversal per original). */
