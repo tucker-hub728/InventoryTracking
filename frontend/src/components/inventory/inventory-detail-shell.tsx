@@ -298,7 +298,6 @@ export function InventoryDetailShell({
       <PageHeader
         title={item.desc}
         crumbs={[
-          { label: 'Inventory', href: '/inventory' },
           ...(tierCrumb(item.tierType) ? [tierCrumb(item.tierType)!] : []),
           { label: item.id },
         ]}
@@ -478,7 +477,7 @@ function FallbackHeader({ label }: { label: string }) {
   return (
     <PageHeader
       title={label}
-      crumbs={[{ label: 'Inventory', href: '/inventory' }, { label }]}
+      crumbs={[{ label }]}
       actions={
         <Button variant="ghost" asChild>
           <Link href="/inventory">

@@ -4,7 +4,6 @@ import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Plus } from 'lucide-react';
 
 import {
   Dialog,
@@ -139,6 +138,8 @@ export function NewItemDialog({
     register,
     handleSubmit,
     setValue,
+    setError,
+    clearErrors,
     watch,
     reset,
     formState: { errors, isSubmitting },
@@ -282,6 +283,15 @@ export function NewItemDialog({
 
   const onSubmit = async (data: Values): Promise<void> => {
     setSubmitError(null);
+    // A raw material is purchased, so it must have at least one supplier
+    // (built items are manufactured and have none — the field is hidden there).
+    if (showPurchasing && data.supplierIds.length === 0) {
+      setError('supplierIds', {
+        type: 'manual',
+        message: 'Select at least one supplier.',
+      });
+      return;
+    }
     try {
       const created = await createItem({
         sku_suffix: data.suffix,
@@ -409,13 +419,6 @@ export function NewItemDialog({
                               </span>
                             </SelectItem>
                           ))}
-                          {canManagePrefixes && (
-                            <SelectItem value={NEW_PREFIX_VALUE}>
-                              <span className="flex items-center gap-1.5 text-accent">
-                                <Plus size={13} /> New prefix…
-                              </span>
-                            </SelectItem>
-                          )}
                         </SelectContent>
                       </Select>
                     ) : (
@@ -488,13 +491,24 @@ export function NewItemDialog({
                     />
                   </div>
 
-                  <Field id="ni-suppliers" label="Suppliers" error={errors.supplierIds?.message}>
+                  <Field
+                    id="ni-suppliers"
+                    label={
+                      <>
+                        Suppliers <span className="text-danger">*</span>
+                      </>
+                    }
+                    error={errors.supplierIds?.message}
+                  >
                     <SupplierMultiSelect
                       id="ni-suppliers"
                       modal
                       suppliers={suppliers}
                       value={supplierIds}
-                      onChange={(next) => setValue('supplierIds', next, { shouldValidate: true })}
+                      onChange={(next) => {
+                        setValue('supplierIds', next, { shouldValidate: true });
+                        if (next.length > 0) clearErrors('supplierIds');
+                      }}
                       loading={suppliersLoading}
                       error={suppliersError}
                     />
@@ -590,7 +604,7 @@ function Field({
   children,
 }: {
   id: string;
-  label: string;
+  label: React.ReactNode;
   error?: string;
   children: React.ReactNode;
 }) {

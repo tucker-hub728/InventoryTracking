@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -90,6 +91,7 @@ function findTier(tiers: ApiTier[], cfg: TierConfig): ApiTier | null {
 
 export function TierListClient({ config }: { config: TierConfig }) {
   const canCreate = usePermission('inventory', 'create');
+  const router = useRouter();
 
   // The consumable flag is CR-only — Transaction Spec §1.1: "A CR item may be
   // designated as either a raw material or a consumable."
@@ -222,7 +224,6 @@ export function TierListClient({ config }: { config: TierConfig }) {
     <>
       <PageHeader
         title={config.title}
-        crumbs={[{ label: 'Inventory' }, { label: config.title }]}
         subtitle={
           loading
             ? `Loading ${config.plural}…`
@@ -311,10 +312,21 @@ export function TierListClient({ config }: { config: TierConfig }) {
                 {tableHeader}
                 <TableBody>
                   {rows.map((row) => (
-                    <TableRow key={row.uuid} interactive className="group">
+                    <TableRow
+                      key={row.uuid}
+                      interactive
+                      className="group"
+                      // The whole row opens the item's detail (its ledger). Nested
+                      // links (SKU, BOM) stop propagation so they keep their own
+                      // targets and there's no double navigation.
+                      onClick={() =>
+                        router.push(`/inventory/${row.uuid}/${config.detailSegment}`)
+                      }
+                    >
                       <TableCell className="font-mono">
                         <Link
                           href={`/inventory/${row.uuid}/${config.detailSegment}`}
+                          onClick={(e) => e.stopPropagation()}
                           className="rounded-sm text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                         >
                           {row.id}
@@ -334,6 +346,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
                         <TableCell>
                           <Link
                             href={`/inventory/${row.uuid}/bom`}
+                            onClick={(e) => e.stopPropagation()}
                             className={cn(
                               'rounded-sm tabular-nums hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
                               row.bomLineCount > 0 ? 'text-text' : 'text-text-3',

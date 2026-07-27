@@ -33,7 +33,9 @@ import { NewKitDialog } from './new-kit-dialog';
 import { ItemCell, KitStatusBadge, RuleNote, formatDate } from './recon-bits';
 
 type Filter = KitStatus | 'all';
-const FILTERS: Filter[] = ['all', ...KIT_STATUSES];
+// 'issued' is a transient state (a kit moves straight to In Production once
+// material is issued), so it's omitted from the filter options.
+const FILTERS: Filter[] = ['all', ...KIT_STATUSES.filter((s) => s !== 'issued')];
 
 export function ReconciliationPageClient() {
   const canCreate = usePermission('inventory', 'create');
