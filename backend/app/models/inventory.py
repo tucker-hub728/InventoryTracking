@@ -739,6 +739,11 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     "backflush",
     "kit_return",
     "kit_cancel_return",
+    # Terminal customer shipment (REQ-2026-07-22-CUST-001 / 07-01 TRX-005): the
+    # finished good leaves the system to a customer. Unit-OUT (qty_delta < 0),
+    # from a storage node with NO destination — stock leaves inventory. Does not
+    # cascade to component stock (TRX-006).
+    "customer_shipment",
 )
 
 
@@ -853,6 +858,17 @@ class StockMovement(Base):
         ForeignKey("audit.reauth_events.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    # Customer shipment fields (only set on ``customer_shipment`` rows). The
+    # customer is NULLABLE by design: a named customer honours CUST-001, while a
+    # NULL customer is the catalog / arbitrary-recipient shipment (TRX-007).
+    # ``reference_number`` is the free-text tracking / sales-order number
+    # (TRX-005), which may differ from the drug-product identifier.
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.customers.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    reference_number: Mapped[str | None] = mapped_column(Text, nullable=True)
     performed_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.users.id", ondelete="RESTRICT"),
@@ -883,6 +899,16 @@ class StockMovement(Base):
     kit: Mapped["Kit | None"] = relationship(  # noqa: F821, UP037
         "Kit",
         foreign_keys=[kit_id],
+        lazy="joined",
+        viewonly=True,
+    )
+    # Quoted for the same reason as ``kit``: ``Customer`` lives in
+    # app.models.products, which does not import this module, so the name only
+    # resolves through SQLAlchemy's registry. Joined so a shipment row can be
+    # labelled with the customer it went to without an N+1.
+    customer: Mapped["Customer | None"] = relationship(  # noqa: F821, UP037
+        "Customer",
+        foreign_keys=[customer_id],
         lazy="joined",
         viewonly=True,
     )

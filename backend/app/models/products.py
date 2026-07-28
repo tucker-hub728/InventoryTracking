@@ -1,10 +1,11 @@
-"""Customer module ORM — customers and their linked finished-good items.
+"""Customer module ORM — the **Customer** master-data entity.
 
-Historically this module also held ``Product`` / ``ProductMaterial``. Under the
-unified catalogue (requirements v2 §6) those are gone: a "product" is now just
-an :class:`~app.models.inventory.Item` in a *built* tier, and a BOM is an
-:class:`~app.models.inventory.BomLine`. What remains here is the **Customer**
-and its many-to-many link to finished-good items (:class:`CustomerItem`).
+Historically this module also held ``Product`` / ``ProductMaterial`` (gone under
+the unified catalogue — a "product" is now an :class:`~app.models.inventory.Item`
+in a *built* tier) and a ``CustomerItem`` link table. Customers are no longer
+linked to items (the part number is the source of truth for inventory identity);
+a shipment names a customer at ship time. What remains here is just the
+**Customer**.
 """
 
 from __future__ import annotations
@@ -74,40 +75,6 @@ class Customer(Base):
         nullable=False,
     )
     updated_by_user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.users.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-
-
-class CustomerItem(Base):
-    """Many-to-many link between a customer and a finished-good item.
-
-    A pure link row — PK is ``(customer_id, item_id)``. Rows are
-    hard-inserted/deleted when a customer's linked items are edited (the
-    customer / item themselves soft-delete).
-    """
-
-    __tablename__ = "customer_items"
-    __table_args__ = (
-        Index("ix_customer_items_item_id", "item_id"),
-        {"schema": "app"},
-    )
-
-    customer_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.customers.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    item_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.items.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.users.id", ondelete="RESTRICT"),
         nullable=False,

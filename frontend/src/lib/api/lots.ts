@@ -114,6 +114,15 @@ export const lotsApi = {
   get: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<Lot>(`/lots/${lotId}`, { signal: opts?.signal }),
 
+  /** Is an operator-typed lot number still free? Advisory pre-check for the
+   *  kitting close-out — the produce / close-out call re-checks and remains the
+   *  authority (422 ``output_lot_number_taken``). */
+  numberAvailable: (lotNumber: string, opts?: { signal?: AbortSignal }) =>
+    api.get<{ lot_number: string; available: boolean }>('/lots/number-available', {
+      query: { lot_number: lotNumber },
+      signal: opts?.signal,
+    }),
+
   listForItem: (itemId: string, opts?: { status?: LotStatus; signal?: AbortSignal }) =>
     api.get<Lot[]>(`/items/${itemId}/lots`, {
       query: { status: opts?.status },

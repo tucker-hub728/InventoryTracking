@@ -357,6 +357,21 @@ class LotRead(BaseModel):
     updated_by_user_id: str
 
 
+class LotNumberAvailability(BaseModel):
+    """Whether an operator-typed lot number is still free.
+
+    Lets the kitting close-out screen tell the operator their produced-batch lot
+    number is taken **while they are typing it**, instead of after they have
+    composed the batch and signed. The authority stays server-side
+    (``_resolve_output_lot_number`` → 422 ``output_lot_number_taken``): this is
+    advisory, and a number free at check time can still be claimed by someone
+    else before the produce lands.
+    """
+
+    lot_number: str
+    available: bool
+
+
 # ── Stock movements / ledger ───────────────────────────────────────────
 
 
@@ -382,6 +397,8 @@ MovementType = Literal[
     "backflush",
     "kit_return",
     "kit_cancel_return",
+    # Terminal customer shipment (CUST-001 / TRX-005) — see MOVEMENT_TYPES (ship01).
+    "customer_shipment",
 ]
 
 
@@ -426,6 +443,15 @@ class MovementRead(BaseModel):
     # reference only — SRS §7 excludes finished-good → component-lot tracing.
     kit_id: str | None = None
     kit_number: str | None = None
+
+    # Customer shipment (CUST-001 / TRX-005). Set only on ``customer_shipment``
+    # rows: the named customer the finished good left inventory to (null = a
+    # catalog / unassigned shipment, TRX-007), and the free-text reference /
+    # tracking / sales-order number. Drives the ledger's "to the named customer"
+    # display CUST-001 requires.
+    customer_id: str | None = None
+    customer_name: str | None = None
+    reference_number: str | None = None
 
     # Mandatory §3 comment captured on every e-signed movement.
     notes: str | None

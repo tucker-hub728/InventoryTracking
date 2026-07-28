@@ -67,6 +67,24 @@ export interface BomLineDeleteInput {
   reason: string;
 }
 
+/** Every change staged in the BOM tab, saved under ONE signature. Applied
+ *  atomically — an invalid line leaves the stored BOM untouched. */
+export interface BomBatchSaveInput {
+  adds: { child_item_id: string; qty_per_unit: number }[];
+  updates: { line_id: string; qty_per_unit: number }[];
+  deletes: string[];
+  evidence_id: string;
+  reason: string;
+}
+
+export interface BomBatchResult {
+  item_id: string;
+  lines: ApiBomLine[];
+  added: number;
+  updated: number;
+  deleted: number;
+}
+
 export const bomApi = {
   /** An item's BOM lines. By default just the direct lines; pass
    *  `{ nested: true }` to get the whole multi-level tree in one call, with
@@ -82,6 +100,10 @@ export const bomApi = {
 
   addLine: (itemId: string, input: BomLineCreateInput) =>
     api.post<ApiBomLine>(`/items/${itemId}/bom`, { json: input }),
+
+  /** Commit every staged add / re-quantify / remove in one signed transaction. */
+  saveBatch: (itemId: string, input: BomBatchSaveInput) =>
+    api.post<BomBatchResult>(`/items/${itemId}/bom/batch`, { json: input }),
 
   updateLine: (lineId: string, input: BomLineUpdateInput) =>
     api.patch<ApiBomLine>(`/bom-lines/${lineId}`, { json: input }),

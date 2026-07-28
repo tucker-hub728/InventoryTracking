@@ -29,7 +29,10 @@ export type MovementType =
   // icon map compile and then crash the audit timeline at runtime.
   | 'backflush'
   | 'kit_return'
-  | 'kit_cancel_return';
+  | 'kit_cancel_return'
+  // Terminal customer shipment (CUST-001 / TRX-005) — the finished good leaves
+  // inventory to a customer. Unit-out.
+  | 'customer_shipment';
 
 /** Display labels — keep aligned with the backend ``MovementType`` enum. */
 export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
@@ -46,6 +49,7 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   backflush: 'Back-flushed',
   kit_return: 'Returned',
   kit_cancel_return: 'Cancel return',
+  customer_shipment: 'Shipped to customer',
 };
 
 /** Sign of the qty_delta enforced by each type — useful for colouring the row. */
@@ -64,6 +68,7 @@ export const MOVEMENT_TYPE_SIGN: Record<MovementType, 'in' | 'out' | 'signed'> =
   backflush: 'in',
   kit_return: 'in',
   kit_cancel_return: 'in',
+  customer_shipment: 'out',
 };
 
 export interface ApiMovement {
@@ -95,6 +100,13 @@ export interface ApiMovement {
    *  production_output / backflush); null for every other movement. */
   kit_id: string | null;
   kit_number: string | null;
+
+  /** Customer shipment (CUST-001 / TRX-005): the named customer the finished
+   *  good left inventory to (null = catalog / unassigned, TRX-007) and the
+   *  reference / tracking number. Set only on ``customer_shipment`` rows. */
+  customer_id: string | null;
+  customer_name: string | null;
+  reference_number: string | null;
 
   /** Mandatory §3 comment. */
   notes: string | null;

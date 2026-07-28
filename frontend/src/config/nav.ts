@@ -77,8 +77,6 @@ export const navSections: readonly NavSection[] = [
         href: '/customers',
         icon: Contact,
         resource: 'inventory',
-        disabled: true,
-        disabledReason: 'Customers is a work in progress.',
       },
       {
         id: 'forecast',

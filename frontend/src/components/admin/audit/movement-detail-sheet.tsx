@@ -39,6 +39,7 @@ const TYPE_STYLE: Record<MovementType, string> = {
   backflush: 'border-success/40 bg-success/10 text-success',
   kit_return: 'border-accent/40 bg-accent/10 text-accent',
   kit_cancel_return: 'border-warning/40 bg-warning/10 text-warning',
+  customer_shipment: 'border-warning/40 bg-warning/10 text-warning',
 };
 
 /**
@@ -167,6 +168,21 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
             )
           }
         />
+        {/* Customer shipment (CUST-001 / TRX-005): who the finished good left
+            inventory to, and the reference / tracking number. */}
+        {movement.movement_type === 'customer_shipment' && (
+          <KV
+            label="Customer"
+            value={
+              movement.customer_name ?? (
+                <span className="italic text-text-3">Catalog (no customer)</span>
+              )
+            }
+          />
+        )}
+        {movement.reference_number && (
+          <KV label="Reference" value={movement.reference_number} />
+        )}
         {movement.notes && <KV label="Comment" value={movement.notes} />}
         <KV label="Movement ID" value={<span className="font-mono text-xs">{movement.id}</span>} />
         {movement.reauth_evidence_id && (

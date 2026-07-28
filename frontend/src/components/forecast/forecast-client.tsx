@@ -211,8 +211,9 @@ export function ForecastClient() {
     if (customerId !== UNASSIGNED) {
       for (const customer of customers) {
         if (customerId !== ALL_CUSTOMERS && customerId !== customer.id) continue;
+        // Customers are no longer linked to products, so a customer's group
+        // shows only the products that already have forecast entries for them.
         const ids = new Set<string>();
-        for (const ref of customer.items) ids.add(ref.id);
         for (const e of entries) {
           if (e.customerId === customer.id) ids.add(e.productId);
         }

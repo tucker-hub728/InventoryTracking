@@ -26,6 +26,7 @@ from app.inventory.schemas import (
     ItemSupplierRead,
     ItemUpdate,
     LotCreate,
+    LotNumberAvailability,
     LotRead,
     LotStatus,
     LotUpdate,
@@ -98,6 +99,9 @@ def _movement_to_read(
         qty_abs=m.qty_abs,
         kit_id=str(m.kit_id) if m.kit_id else None,
         kit_number=m.kit.kit_number if m.kit else None,
+        customer_id=str(m.customer_id) if m.customer_id else None,
+        customer_name=m.customer.name if m.customer else None,
+        reference_number=m.reference_number,
         notes=m.notes,
         reauth_evidence_id=str(m.reauth_evidence_id) if m.reauth_evidence_id else None,
         performed_by_user_id=str(m.performed_by_user_id),
@@ -852,6 +856,31 @@ async def list_lots(
         offset=offset,
     )
     return [_lot_to_read(r) for r in rows]
+
+
+@lots_router.get(
+    "/number-available",
+    response_model=LotNumberAvailability,
+    summary="Is this lot number still free? (advisory pre-check)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def lot_number_available(
+    db: DBSession,
+    lot_number: Annotated[str, Query(min_length=1, max_length=128)],
+) -> LotNumberAvailability:
+    """Pre-flight for the operator-typed produced-batch lot number (kitting
+    close-out). Uniqueness is global across live lots — the same rule
+    ``_resolve_output_lot_number`` enforces at produce / close-out, which remains
+    the authority; this only moves the feedback earlier.
+
+    MUST stay declared above ``/{lot_id}`` — that route's path param is a UUID,
+    so a later declaration would swallow this path and 422.
+    """
+    trimmed = lot_number.strip()
+    if not trimmed:
+        return LotNumberAvailability(lot_number=trimmed, available=False)
+    taken = await inv_repo.lot_number_exists(db, lot_number=trimmed)
+    return LotNumberAvailability(lot_number=trimmed, available=not taken)
 
 
 @lots_router.get(
