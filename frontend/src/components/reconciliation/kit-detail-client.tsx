@@ -909,16 +909,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <ChevronLeft size={14} /> Back
           </Button>
           <div className="flex items-center gap-3">
-            {/* Why the primary action is disabled. Rendered only when it really
-                is disabled, so it can never contradict a live button. */}
+            {/* Why the primary action is disabled — a COUNT only. Each of these
+                already prints in red under its own field, so listing them here
+                too was pure duplication; this just points at them. The full list
+                is the button's tooltip. Rendered only when the button really is
+                disabled, so it can never contradict a live button. */}
             {primaryBlocked && blockers.length > 0 && (
-              <ul className="max-w-md space-y-0.5 text-right text-xs text-danger">
-                {blockers.map((b) => (
-                  <li key={b}>{b}</li>
-                ))}
-              </ul>
+              <span className="text-xs text-danger">
+                {blockers.length} thing{blockers.length === 1 ? '' : 's'} to fix above
+              </span>
             )}
             {footerPrimary(kit, activeStep, model, {
+              blockers: primaryBlocked ? blockers : [],
               canWrite,
               canSign,
               busy,
@@ -1124,6 +1126,9 @@ function footerPrimary(
     produceReady: boolean;
     producingNow: boolean;
     issueBlocked: boolean;
+    /** Outstanding reasons, shown as the disabled button's tooltip. Empty when
+     *  the button is live. */
+    blockers: string[];
     onIssue: () => void;
     onNext: () => void;
     onProductionNext: () => void;
@@ -1134,6 +1139,9 @@ function footerPrimary(
   },
 ) {
   const open = kit.status === 'issued' || kit.status === 'in_production';
+  // The outstanding reasons, one per line, as the disabled button's tooltip —
+  // the detail lives under each field, so the footer only summarises.
+  const blockerTitle = ctx.blockers.length > 0 ? ctx.blockers.join('\n') : undefined;
   const nextBtn = (onClick: () => void, disabled = false, title?: string) => (
     <Button variant="primary" onClick={onClick} disabled={ctx.busy || disabled} title={title}>
       Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
@@ -1169,7 +1177,7 @@ function footerPrimary(
         variant="primary"
         onClick={ctx.onCloseOutNext}
         disabled={ctx.busy || !canAdvance}
-        title={canAdvance ? undefined : 'Enter the output and used quantities first'}
+        title={canAdvance ? undefined : blockerTitle}
       >
         {finalize ? (
           <>
@@ -1193,7 +1201,9 @@ function footerPrimary(
               variant="primary"
               onClick={ctx.onProduce}
               disabled={ctx.busy || !ctx.produceReady}
-              title={ctx.produceReady ? 'Make this batch and keep the kit open' : 'Fix the batch on Close-Out first'}
+              title={
+                ctx.produceReady ? 'Make this batch and keep the kit open' : blockerTitle
+              }
             >
               <FlaskConical size={14} /> Produce this batch
             </Button>
@@ -1208,7 +1218,7 @@ function footerPrimary(
             variant={ctx.producingNow ? 'secondary' : 'primary'}
             onClick={ctx.onClose}
             disabled={!ctx.closeReady || ctx.busy}
-            title={ctx.closeReady ? undefined : 'Enter the used quantities (and output, if producing a final batch) first'}
+            title={ctx.closeReady ? undefined : blockerTitle}
           >
             Sign &amp; close kit <ArrowRight size={14} />
           </Button>
