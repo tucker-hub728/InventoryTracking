@@ -34,13 +34,22 @@ import type { ReauthResponse } from '@/lib/api/auth';
 import type { KitLineSourceLot } from '@/lib/api/kits';
 import { shipmentsApi, type ShipSource } from '@/lib/api/shipments';
 import { customersApi, type Customer } from '@/lib/api/customers';
+import type { TierType } from '@/lib/api/tiers';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The finished good being shipped. */
-  item: { uuid: string; id: string; desc: string } | null;
+  /** The built item being shipped — a finished good, or a sub-assembly sold
+   *  directly (INV-004). ``tierType`` only shapes the wording. */
+  item: { uuid: string; id: string; desc: string; tierType?: TierType | null } | null;
   onDone: () => void;
+}
+
+/** What to call the thing being shipped. A sub-assembly may be sold straight to
+ *  a customer (INV-004), so the dialog can't call every shipment a finished
+ *  good — it reads as the wrong item to whoever is signing. */
+function tierNoun(tierType: TierType | null | undefined): string {
+  return tierType === 'sub_assembly' ? 'sub-assembly' : 'finished good';
 }
 
 /** Map a shippable source to the shape the (reused) kitting lot picker expects. */
@@ -123,8 +132,11 @@ export function ShipToCustomerDialog({ open, onOpenChange, item, onDone }: Props
     [customers],
   );
 
+  const noun = tierNoun(item?.tierType);
+  const noStockMessage = `No ${noun} stock is available to ship.`;
+
   const validate = (): string | null => {
-    if (!lots || lots.length === 0) return 'No finished-goods stock is available to ship.';
+    if (!lots || lots.length === 0) return noStockMessage;
     if (total < 1) return 'Pick at least one lot and quantity to ship.';
     if (!picksValid(lots, picks)) return 'One or more picks exceed the available quantity.';
     if (!customerSel) return 'Choose a customer.';
@@ -188,13 +200,13 @@ export function ShipToCustomerDialog({ open, onOpenChange, item, onDone }: Props
             <DialogTitle>Ship to customer</DialogTitle>
             <DialogDescription>
               Ship <span className="font-medium">{item?.desc}</span> out of inventory. This
-              is the finished good&apos;s terminal transaction.
+              is the {noun}&apos;s terminal transaction.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
             {noStock ? (
               <p className="rounded-md border border-border bg-bg-subtle px-3 py-2 text-sm text-text-2">
-                No finished-goods stock is available to ship.
+                {noStockMessage}
               </p>
             ) : (
               <>

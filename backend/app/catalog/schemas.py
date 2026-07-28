@@ -232,6 +232,50 @@ class BomLineDelete(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
 
+class BomBatchAdd(BaseModel):
+    """One new line staged in a batch save."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    child_item_id: str = Field(min_length=1)
+    qty_per_unit: Decimal = Field(gt=Decimal("0"))
+
+
+class BomBatchUpdate(BaseModel):
+    """A re-quantified existing line staged in a batch save."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: str = Field(min_length=1)
+    qty_per_unit: Decimal = Field(gt=Decimal("0"))
+
+
+class BomBatchSave(_ESignFields):
+    """Every BOM change staged in the tab, committed under ONE signature.
+
+    The operator builds the whole bill in the UI and signs once, rather than
+    signing each line as it is typed. All three lists are optional but at least
+    one change must be present; the whole batch is applied atomically, so an
+    invalid line leaves the stored BOM untouched.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    adds: list[BomBatchAdd] = Field(default_factory=list)
+    updates: list[BomBatchUpdate] = Field(default_factory=list)
+    deletes: list[str] = Field(default_factory=list)
+
+
+class BomBatchResult(BaseModel):
+    """The BOM as it stands after a batch save, plus what the save did."""
+
+    item_id: str
+    lines: list[BomLineRead] = Field(default_factory=list)
+    added: int
+    updated: int
+    deleted: int
+
+
 class WhereUsedRead(BaseModel):
     """A parent item that consumes the queried item in its BOM."""
 

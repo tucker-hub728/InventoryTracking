@@ -357,6 +357,21 @@ class LotRead(BaseModel):
     updated_by_user_id: str
 
 
+class LotNumberAvailability(BaseModel):
+    """Whether an operator-typed lot number is still free.
+
+    Lets the kitting close-out screen tell the operator their produced-batch lot
+    number is taken **while they are typing it**, instead of after they have
+    composed the batch and signed. The authority stays server-side
+    (``_resolve_output_lot_number`` → 422 ``output_lot_number_taken``): this is
+    advisory, and a number free at check time can still be claimed by someone
+    else before the produce lands.
+    """
+
+    lot_number: str
+    available: bool
+
+
 # ── Stock movements / ledger ───────────────────────────────────────────
 
 

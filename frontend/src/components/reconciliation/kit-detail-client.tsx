@@ -60,6 +60,7 @@ import {
   type ReturnCellInput,
 } from '@/lib/api/kits';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
+import { lotsApi } from '@/lib/api/lots';
 import { cn } from '@/lib/utils';
 
 import { BoxCellPicker } from './cell-grid-picker';
@@ -143,8 +144,21 @@ const emptyDest = (): OutputDest => ({
   cells: [],
   qty: null,
 });
-/** Units this destination will place — cells for a box, the typed qty for bulk. */
-const destPlaced = (d: OutputDest): number => (d.isBox ? d.cells.length : d.qty ?? 0);
+/** Units this destination will place — cells for a box, the typed qty for bulk.
+ *  A row with no location chosen places NOTHING, however its quantity reads:
+ *  the quantity is pre-filled from the batch size before a location is picked
+ *  (client 2026-07-28), and counting it would show "1 / 1 placed" while the
+ *  output actually has nowhere to go. */
+const destPlaced = (d: OutputDest): number =>
+  d.location_node_id ? (d.isBox ? d.cells.length : d.qty ?? 0) : 0;
+
+/** The batch size to offer for the NEXT produce: what is still owed against the
+ *  kit's target (client 2026-07-28). Target 5 with nothing made yet → 5; after a
+ *  batch of 3 → 2. Once the target is met or overshot it floors at **1**, so the
+ *  operator can keep producing extras until they close the kit — production is
+ *  incremental and the target is a plan, not a cap (KIT-007). */
+const remainingToTarget = (k: ApiKit): number =>
+  Math.max(1, (k.target_qty ?? 0) - (k.good_qty ?? 0));
 
 /** The BOM need for a line, rounded up to whole units (matches the backend). */
 const lineNeededQty = (l: ApiKitLine) => Math.ceil(Number(l.needed_qty));
@@ -204,6 +218,12 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const [returnIsBox, setReturnIsBox] = React.useState<Record<string, boolean>>({});
   /** Per-line multi-lot issue picks — held locally, committed only on Issue. */
   const [linePicks, setLinePicks] = React.useState<Record<string, LotPick[]>>({});
+  /** Live availability of the typed produced-batch lot number. ``unknown`` also
+   *  covers a failed check — the server re-validates, so we never hard-block on
+   *  a network hiccup. */
+  const [lotStatus, setLotStatus] = React.useState<'unknown' | 'checking' | 'free' | 'taken'>(
+    'unknown',
+  );
 
   const load = React.useCallback(
     async (signal?: AbortSignal) => {
@@ -215,9 +235,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         setActiveStep(stepModel(k.status).def);
         setOutput((prev) => ({
           // "This batch" holds only the NEXT batch's amount — never the kit's
-          // cumulative good (that's priorGood). Default to 1 (client 2026-07-24);
-          // keep a value the operator already typed this session.
-          good_qty: prev.good_qty ?? 1,
+          // cumulative good (that's priorGood). Default to what's still owed
+          // against the target (client 2026-07-28, replacing the flat 1 of
+          // 2026-07-24); keep a value the operator already typed this session.
+          good_qty: prev.good_qty ?? remainingToTarget(k),
           scrap_qty: k.scrap_qty ?? prev.scrap_qty ?? 0,
           output_location_node_id:
             k.output_location_node_id ?? prev.output_location_node_id ?? '',
@@ -308,6 +329,54 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     }
   };
 
+  // ── Close-out draft side-effects ────────────────────────────────────────
+  // Declared BEFORE the loading/not-found early returns — hooks must run in the
+  // same order on every render. They read ``output`` state, which exists from
+  // the first render, so they don't need the loaded kit.
+  const lotDraft = output.output_lot_number.trim();
+  const makingOutput = (output.good_qty ?? 0) >= 1;
+
+  // Lot numbers are globally unique, and a collision used to surface only after
+  // the operator had reached Review and signed. Check it as they type so a taken
+  // number blocks them on Close-Out instead (client 2026-07-28). The produce /
+  // close-out call re-checks and stays the authority — a number free now can
+  // still be claimed by someone else before this batch lands.
+  React.useEffect(() => {
+    if (!makingOutput || !lotDraft) {
+      setLotStatus('unknown');
+      return;
+    }
+    setLotStatus('checking');
+    const ctrl = new AbortController();
+    // Debounced so a typed lot number doesn't fire a request per keystroke.
+    const timer = setTimeout(() => {
+      lotsApi
+        .numberAvailable(lotDraft, { signal: ctrl.signal })
+        .then((r) => setLotStatus(r.available ? 'free' : 'taken'))
+        .catch(() => {
+          if (!ctrl.signal.aborted) setLotStatus('unknown');
+        });
+    }, 350);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [lotDraft, makingOutput]);
+
+  // A single destination has to take the whole batch, so keep its quantity on
+  // "Quantity made (good)" automatically (client 2026-07-28). Deliberately NOT
+  // applied to a box row (its quantity IS the picked cells) or once the operator
+  // has SPLIT across several locations — that split is their decision to make.
+  React.useEffect(() => {
+    const good = output.good_qty ?? 0;
+    setOutputDests((prev) => {
+      const only = prev.length === 1 ? prev[0] : undefined;
+      if (!only || only.isBox) return prev;
+      const next = good > 0 ? good : null;
+      return only.qty === next ? prev : [{ ...only, qty: next }];
+    });
+  }, [output.good_qty]);
+
   if (loading && !kit) {
     return (
       <>
@@ -394,7 +463,14 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // The operator types the produced batch's lot number (client 2026-07-24 —
   // replaces the old auto KIT-0289-N suffix). Required only when this batch makes
   // output; a good-0 close mints no lot, so it's not needed then.
-  const lotNumberValid = !producingNow || Boolean(output.output_lot_number.trim());
+  // Lot numbers are globally unique, and the collision used to surface only when
+  // the operator had already reached Review and signed. Check it as they type so
+  // a taken number blocks them HERE, on Close-Out (client 2026-07-28). The
+  // produce / close-out call re-checks and stays the authority — a number free
+  // now can still be claimed by someone else before this batch lands.
+  const lotEntered = output.output_lot_number.trim();
+  const lotNumberValid =
+    !producingNow || (Boolean(lotEntered) && lotStatus !== 'taken' && lotStatus !== 'checking');
   // Produce a batch NOW (keep open): make ≥ 1, with output + valid used. No
   // back-flush, so no return-cell check.
   const produceReady =
@@ -414,6 +490,78 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     lotNumberValid &&
     usedValid &&
     !cellsIncomplete;
+  // Why the Produce / Close button is disabled, in the order the operator reads
+  // the form. A silently greyed-out button is unreadable — every gate above must
+  // be able to say what it wants (client 2026-07-28). Same conditions as
+  // ``produceReady`` / ``closeReady``, so the list is empty exactly when the
+  // button is live.
+  const finalizeOnly = !producingNow;
+  const blockers: string[] = [];
+  if (finalizeOnly && priorGood + (output.good_qty ?? 0) < 1) {
+    blockers.push('Nothing produced yet — make at least one unit before closing.');
+  }
+  if (output.scrap_qty === null) blockers.push('Enter the scrapped quantity (0 if none).');
+  if (!expiryValid) blockers.push('The expiry date can’t be in the past.');
+  if (producingNow) {
+    if (!lotEntered) {
+      blockers.push('Enter the produced lot number.');
+    } else if (lotStatus === 'taken') {
+      blockers.push(`Lot number “${lotEntered}” is already used — choose another.`);
+    } else if (lotStatus === 'checking') {
+      blockers.push('Checking the lot number…');
+    }
+    if (!outputComplete) {
+      const missingLoc = outputDests.some((d) => !d.location_node_id);
+      const short = (output.good_qty ?? 0) - outputPlaced;
+      if (missingLoc) {
+        blockers.push('Choose where to stock the output.');
+      } else if (short > 0) {
+        blockers.push(`Place all ${output.good_qty} units — ${short} still to place.`);
+      } else if (short < 0) {
+        blockers.push(`Placed ${outputPlaced} but only ${output.good_qty} were made.`);
+      }
+    }
+  }
+  if (!usedComplete) {
+    blockers.push('Enter how much of each component this batch used.');
+  } else {
+    const below = kit.lines.filter(
+      (l) => used[l.id] != null && (used[l.id] as number) < lineNeed(l),
+    );
+    const over = kit.lines.filter(
+      (l) => used[l.id] != null && (used[l.id] as number) > l.on_floor_qty,
+    );
+    if (below.length > 0) {
+      blockers.push(
+        `Used is below the recipe need for ${below.map((l) => l.item_number).join(', ')}.`,
+      );
+    }
+    if (over.length > 0) {
+      blockers.push(
+        `Used is more than what’s on the floor for ${over.map((l) => l.item_number).join(', ')}.`,
+      );
+    }
+  }
+  // Back-flush cells gate the CLOSE only — a produce batch back-flushes nothing,
+  // so "Produce" can be live while this is outstanding. The list is only rendered
+  // when the button is actually disabled, so it never contradicts the button.
+  if (cellsIncomplete) {
+    blockers.push('Pick a back-flush cell for every leftover unit before closing.');
+  }
+
+  // The reasons show only while a button on this step is actually disabled — on
+  // Close-Out (step 2) and Review (step 3), where these gates apply. Step 2 has
+  // one button, so its own gate governs. Step 3 shows Produce AND Sign & close
+  // together, so either being blocked is worth explaining; the close-only
+  // reasons say "before closing" so they never read as blocking Produce.
+  const kitOpen = kit.status === 'issued' || kit.status === 'in_production';
+  const stepBlocked = finalizeOnly
+    ? !closeReady
+    : activeStep === 3
+      ? !produceReady || !closeReady
+      : !produceReady;
+  const primaryBlocked = kitOpen && (activeStep === 2 || activeStep === 3) && stepBlocked;
+
   // No recipe gating at issue (KIT-007): a short or even empty issue is allowed
   // — issue for a campaign up front, or assign at point of use and top up later.
   // The ONLY block is physical: a pick can't pull more of a lot than exists.
@@ -521,13 +669,20 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       setKit(k);
       // Reset the batch form for the next batch.
       setOutput((p) => ({
-        good_qty: 1, // default the next batch to 1 (client 2026-07-24)
+        // Default the next batch to what's still owed against the target — the
+        // just-produced batch is already folded into ``k.good_qty`` (client
+        // 2026-07-28). Floors at 1 once the target is met, so extras stay easy.
+        good_qty: remainingToTarget(k),
         scrap_qty: 0,
         output_location_node_id: p.output_location_node_id,
         output_expiration_date: '',
         output_lot_number: '',
       }));
-      setOutputDests([emptyDest()]);
+      // Seed the fresh destination with the next batch size directly. The sync
+      // effect keys off ``good_qty`` alone, so it would NOT fire when the new
+      // default equals the old one (e.g. producing while already at 1-per-batch)
+      // and the row would come back blank.
+      setOutputDests([{ ...emptyDest(), qty: remainingToTarget(k) }]);
       setUsed(Object.fromEntries(k.lines.map((l) => [l.id, null])));
       setActiveStep(3);
       toast.success(`Produced ${made} × ${k.item_number}`, {
@@ -725,6 +880,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             }}
             returnCells={returnCells}
             onReturnCells={(id, v) => setReturnCells((c) => ({ ...c, [id]: v }))}
+            lotStatus={lotStatus}
             returnIsBox={returnIsBox}
             onReturnIsBox={(id, v) =>
               setReturnIsBox((m) => (m[id] === v ? m : { ...m, [id]: v }))
@@ -752,22 +908,33 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           >
             <ChevronLeft size={14} /> Back
           </Button>
-          {footerPrimary(kit, activeStep, model, {
-            canWrite,
-            canSign,
-            busy,
-            closeReady,
-            produceReady,
-            producingNow,
-            issueBlocked,
-            onIssue,
-            onNext: () => setActiveStep((s) => Math.min(model.reachable, s + 1)),
-            onProductionNext,
-            onCloseOutNext: () => setActiveStep(3),
-            onProduce: () => setProduceReauthOpen(true),
-            onProduceAnother: enterCloseOut,
-            onClose: () => setReauthOpen(true),
-          })}
+          <div className="flex items-center gap-3">
+            {/* Why the primary action is disabled. Rendered only when it really
+                is disabled, so it can never contradict a live button. */}
+            {primaryBlocked && blockers.length > 0 && (
+              <ul className="max-w-md space-y-0.5 text-right text-xs text-danger">
+                {blockers.map((b) => (
+                  <li key={b}>{b}</li>
+                ))}
+              </ul>
+            )}
+            {footerPrimary(kit, activeStep, model, {
+              canWrite,
+              canSign,
+              busy,
+              closeReady,
+              produceReady,
+              producingNow,
+              issueBlocked,
+              onIssue,
+              onNext: () => setActiveStep((s) => Math.min(model.reachable, s + 1)),
+              onProductionNext,
+              onCloseOutNext: () => setActiveStep(3),
+              onProduce: () => setProduceReauthOpen(true),
+              onProduceAnother: enterCloseOut,
+              onClose: () => setReauthOpen(true),
+            })}
+          </div>
         </div>
       </div>
 
@@ -1503,6 +1670,7 @@ function CloseOutStep({
   returnIsBox,
   onReturnIsBox,
   allowedIds,
+  lotStatus,
 }: {
   kit: ApiKit;
   output: OutputDraft;
@@ -1519,6 +1687,8 @@ function CloseOutStep({
   returnIsBox: Record<string, boolean>;
   onReturnIsBox: (id: string, isBox: boolean) => void;
   allowedIds: Set<string>;
+  /** Live availability of the typed produced lot number (checked upstream). */
+  lotStatus: 'unknown' | 'checking' | 'free' | 'taken';
 }) {
   const closed = kit.status === 'closed';
   const cancelled = kit.status === 'cancelled';
@@ -1528,6 +1698,8 @@ function CloseOutStep({
   const goodQty = closed ? kit.good_qty : output.good_qty;
   const scrapQty = closed ? kit.scrap_qty : output.scrap_qty;
   const expiryBad = Boolean(output.output_expiration_date) && output.output_expiration_date < todayStr();
+  const lotMissing = !output.output_lot_number.trim();
+  const lotTaken = lotStatus === 'taken';
   // Good/scrap accumulate across produce batches (KIT-007). A good of 0 is only
   // valid at CLOSE once earlier batches already produced something.
   const priorGood = kit.good_qty ?? 0;
@@ -1714,15 +1886,25 @@ function CloseOutStep({
               aria-label="Produced lot number"
               value={closed ? '' : output.output_lot_number}
               disabled={closed}
-              aria-invalid={!closed && producingNow && !output.output_lot_number.trim()}
+              aria-invalid={!closed && producingNow && (lotMissing || lotTaken)}
               wrapperClassName={cn(
-                !closed && producingNow && !output.output_lot_number.trim() && 'border-danger',
+                !closed && producingNow && (lotMissing || lotTaken) && 'border-danger',
               )}
               placeholder="Lot"
               onChange={(e) => onOutputChange({ ...output, output_lot_number: e.target.value })}
             />
-            {!closed && producingNow && !output.output_lot_number.trim() ? (
+            {!closed && producingNow && lotMissing ? (
               <p className="mt-1 text-xs text-danger">Enter the produced lot number.</p>
+            ) : !closed && producingNow && lotTaken ? (
+              /* Surfaced here so a taken number blocks on Close-Out rather than
+                 after the operator reaches Review and signs (client 2026-07-28). */
+              <p className="mt-1 text-xs text-danger">
+                Lot “{output.output_lot_number.trim()}” is already used. Enter a different one.
+              </p>
+            ) : !closed && producingNow && lotStatus === 'checking' ? (
+              <p className="mt-1 text-[11px] text-text-3">Checking availability…</p>
+            ) : !closed && producingNow && lotStatus === 'free' ? (
+              <p className="mt-1 text-[11px] text-success">Lot number is available.</p>
             ) : (
               <p className="mt-1 text-[11px] text-text-3">Assigned to the produced batch.</p>
             )}

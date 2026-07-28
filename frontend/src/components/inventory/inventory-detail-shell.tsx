@@ -466,7 +466,7 @@ export function InventoryDetailShell({
       <ShipToCustomerDialog
         open={shipping}
         onOpenChange={setShipping}
-        item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc, tierType: item.tierType }}
         onDone={refresh}
       />
     </>

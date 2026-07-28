@@ -2099,6 +2099,12 @@ async def close_out_kit(
                 f"used {line.used_qty}, backflushed {returned}"
             ),
             current=current,
+            # Back-flushing into an LN2 box places one unit per chosen cell. The
+            # cells are validated just above, and were being dropped here — the
+            # units landed in the box as one cell-less allocation, so the grid
+            # showed nothing and the vial positions were lost (KIT-005). Every
+            # other return path (excess, cancel) already passes them.
+            return_cells=ret_cells,
         )
 
     kit.status = "closed"

@@ -19,6 +19,8 @@ from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
 from app.catalog import repository as cat_repo
 from app.catalog.schemas import (
+    BomBatchResult,
+    BomBatchSave,
     BomLineCreate,
     BomLineDelete,
     BomLineRead,
@@ -53,6 +55,64 @@ def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
         raise ValidationError(
             f"{field} is not a valid UUID", code=f"invalid_{field}"
         ) from exc
+
+
+# A stored BOM never holds exactly one line: a bill of materials describes a
+# combination, and Transaction Spec §1.1 states every legal build as a pair of
+# components (CR+CR→AY, AY+AY→AY, CR+CR→FG, CR+AY→FG). So a BOM is either empty
+# (not yet defined) or has at least two lines — client rule, confirmed
+# 2026-07-28. It is enforced on the batch save, which is the only path that can
+# compose a whole bill in one go.
+BOM_MIN_LINES = 2
+
+#: Reauth action for the batch save — one signature covering every staged
+#: add / re-quantify / remove on one item's BOM.
+BOM_SAVE_ACTION = "bom.save"
+
+
+async def _require_built_parent(db: DBSession, item_id: uuid.UUID):
+    """The BOM owner must exist and be a built item (AY or FG)."""
+    parent = await inv_repo.get_item(db, item_id)
+    if parent is None:
+        raise NotFoundError(f"Item {item_id} not found")
+    if parent.tier is None or parent.tier.type not in BUILT_TIER_TYPES:
+        raise ConflictError(
+            "Only sub-assembly and finished-good items can have a bill of "
+            "materials",
+            code="parent_not_built",
+        )
+    return parent
+
+
+async def _require_eligible_child(db: DBSession, child_uuid: uuid.UUID, *, raw: str):
+    """Resolve a candidate component and reject the two tiers that can't be one.
+
+    Shared by the single-line add and the batch save so both enforce exactly the
+    same rules.
+    """
+    child = await inv_repo.get_item(db, child_uuid)
+    if child is None:
+        raise NotFoundError(f"Item {raw} not found")
+    # Transaction Spec §1.1 lists every legal combination — CR+CR→AY, AY+AY→AY,
+    # CR+CR→FG, CR+AY→FG. A finished good never appears as a component: it is
+    # terminal and leaves via the customer shipment (REQ-2026-07-01-TRX-005).
+    if child.tier is None or child.tier.type == "finished_good":
+        raise ConflictError(
+            "A finished good can't be a component of another item. BOM "
+            "components must be raw materials or sub-assemblies.",
+            code="child_finished_good",
+        )
+    # Transaction Spec §4.3: "Consumables are not tracked directly against an
+    # FG or AY BOM." They are issued blindly to a location and follow a separate
+    # calculation path from one-for-one product items (REQ-2026-07-09-PLN-005),
+    # so a consumable in a BOM would corrupt the planning maths.
+    if child.is_consumable:
+        raise ConflictError(
+            "Consumables can't be part of a bill of materials — they're "
+            "issued directly to a location and reconciled by back-flush.",
+            code="child_consumable",
+        )
+    return child
 
 
 def _prefix_to_read(prefix: ItemPrefix, item_count: int = 0) -> PrefixRead:
@@ -670,37 +730,10 @@ async def add_bom_line(
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
     child_uuid = _parse_uuid_or_422(payload.child_item_id, field="child_item_id")
 
-    parent = await inv_repo.get_item(db, item_id)
-    if parent is None:
-        raise NotFoundError(f"Item {item_id} not found")
-    if parent.tier is None or parent.tier.type not in BUILT_TIER_TYPES:
-        raise ConflictError(
-            "Only sub-assembly and finished-good items can have a bill of "
-            "materials",
-            code="parent_not_built",
-        )
-    child = await inv_repo.get_item(db, child_uuid)
-    if child is None:
-        raise NotFoundError(f"Item {payload.child_item_id} not found")
-    # Transaction Spec §1.1 lists every legal combination — CR+CR→AY, AY+AY→AY,
-    # CR+CR→FG, CR+AY→FG. A finished good never appears as a component: it is
-    # terminal and leaves via the customer shipment (REQ-2026-07-01-TRX-005).
-    if child.tier is None or child.tier.type == "finished_good":
-        raise ConflictError(
-            "A finished good can't be a component of another item. BOM "
-            "components must be raw materials or sub-assemblies.",
-            code="child_finished_good",
-        )
-    # Transaction Spec §4.3: "Consumables are not tracked directly against an
-    # FG or AY BOM." They are issued blindly to a location and follow a separate
-    # calculation path from one-for-one product items (REQ-2026-07-09-PLN-005),
-    # so a consumable in a BOM would corrupt the planning maths.
-    if child.is_consumable:
-        raise ConflictError(
-            "Consumables can't be part of a bill of materials — they're "
-            "issued directly to a location and reconciled by back-flush.",
-            code="child_consumable",
-        )
+    parent = await _require_built_parent(db, item_id)
+    child = await _require_eligible_child(
+        db, child_uuid, raw=payload.child_item_id
+    )
     if await cat_repo.get_bom_line_by_pair(db, item_id, child_uuid) is not None:
         raise ConflictError(
             "This item is already a BOM line", code="bom_line_conflict"
@@ -836,6 +869,213 @@ async def delete_bom_line(
         target_id=updated.id,
     )
     result = await _line_read(db, updated)
+    await db.commit()
+    return result
+
+
+@bom_router.post(
+    "/items/{item_id}/bom/batch",
+    response_model=BomBatchResult,
+    summary="Save every staged BOM change under one signature (e-signed)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def save_item_bom(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    item_id: Annotated[uuid.UUID, Path()],
+    payload: BomBatchSave,
+) -> BomBatchResult:
+    """Apply adds, re-quantifications and removals to one item's BOM at once.
+
+    The operator composes the whole bill in the UI and signs **once**. Everything
+    is validated up front and applied in a single transaction, so a bad line
+    leaves the stored BOM exactly as it was — no half-saved bill. Each line still
+    gets its own audit row (identical in shape to the single-line endpoints), all
+    carrying the same signature.
+    """
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+    parent = await _require_built_parent(db, item_id)
+
+    if not payload.adds and not payload.updates and not payload.deletes:
+        raise ValidationError(
+            "Nothing to save — no BOM changes were staged", code="no_changes"
+        )
+
+    existing = await cat_repo.list_bom_lines(db, item_id)
+    by_id = {ln.id: ln for ln in existing}
+
+    # ── Resolve + validate the staged removals ─────────────────────────
+    delete_uuids: list[uuid.UUID] = []
+    for raw_id in payload.deletes:
+        line_uuid = _parse_uuid_or_422(raw_id, field="line_id")
+        if line_uuid in delete_uuids:
+            raise ValidationError(
+                "The same BOM line was removed twice in one save",
+                code="duplicate_line_change",
+            )
+        if line_uuid not in by_id:
+            raise NotFoundError(
+                f"BOM line {raw_id} is not a line of this item",
+                code="bom_line_not_found",
+            )
+        delete_uuids.append(line_uuid)
+    delete_set = set(delete_uuids)
+
+    # ── Resolve + validate the staged re-quantifications ───────────────
+    update_pairs: list[tuple[uuid.UUID, Decimal]] = []
+    seen_updates: set[uuid.UUID] = set()
+    for upd in payload.updates:
+        line_uuid = _parse_uuid_or_422(upd.line_id, field="line_id")
+        if line_uuid in seen_updates:
+            raise ValidationError(
+                "The same BOM line was changed twice in one save",
+                code="duplicate_line_change",
+            )
+        if line_uuid not in by_id:
+            raise NotFoundError(
+                f"BOM line {upd.line_id} is not a line of this item",
+                code="bom_line_not_found",
+            )
+        # A line that is on its way out can't also be re-quantified — the UI
+        # collapses that to a plain removal.
+        if line_uuid in delete_set:
+            raise ValidationError(
+                "A BOM line can't be both changed and removed in one save",
+                code="duplicate_line_change",
+            )
+        seen_updates.add(line_uuid)
+        update_pairs.append((line_uuid, upd.qty_per_unit))
+
+    # ── Resolve + validate the staged additions ───────────────────────
+    # Components that will still be on the bill once the removals land — a
+    # child freed by a removal in this same batch may be re-added below it.
+    remaining_children = {
+        ln.child_item_id for ln in existing if ln.id not in delete_set
+    }
+    add_pairs: list[tuple[uuid.UUID, Decimal]] = []
+    for add in payload.adds:
+        child_uuid = _parse_uuid_or_422(add.child_item_id, field="child_item_id")
+        if child_uuid == item_id:
+            raise ConflictError(
+                "An item can't be a component of itself", code="bom_cycle"
+            )
+        await _require_eligible_child(db, child_uuid, raw=add.child_item_id)
+        if child_uuid in remaining_children:
+            raise ConflictError(
+                "This item is already a BOM line", code="bom_line_conflict"
+            )
+        remaining_children.add(child_uuid)
+        add_pairs.append((child_uuid, add.qty_per_unit))
+
+    # ── The two-line floor ────────────────────────────────────────────
+    final_count = len(existing) - len(delete_uuids) + len(add_pairs)
+    if final_count == 1:
+        raise ValidationError(
+            "A bill of materials needs at least two components. Add another "
+            "line, or remove them all to clear the BOM.",
+            code="bom_min_lines",
+        )
+
+    # ── Apply: removals, then re-quantifications, then additions ──────
+    # Removals go first so a child freed here can be re-added below, and so the
+    # cycle check each addition runs sees the bill as it will actually stand.
+    for line_uuid in delete_uuids:
+        line = by_id[line_uuid]
+        before = cat_repo.bom_line_to_audit_snapshot(line)
+        removed = await cat_repo.soft_delete_bom_line(
+            db, line=line, deleted_by_user_id=current.id
+        )
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="deleted",
+            subject_table="app.bom_lines",
+            subject_id=removed.id,
+            subject_label=None,
+            before=before,
+            after=cat_repo.bom_line_to_audit_snapshot(removed),
+            context={"reason": payload.reason},
+            signature_id=evidence_uuid,
+        )
+
+    for line_uuid, qty in update_pairs:
+        line = by_id[line_uuid]
+        before = cat_repo.bom_line_to_audit_snapshot(line)
+        updated = await cat_repo.apply_bom_line_patch(
+            db,
+            line=line,
+            patch={"qty_per_unit": qty},
+            updated_by_user_id=current.id,
+        )
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="updated",
+            subject_table="app.bom_lines",
+            subject_id=updated.id,
+            subject_label=None,
+            before=before,
+            after=cat_repo.bom_line_to_audit_snapshot(updated),
+            context={"reason": payload.reason},
+            signature_id=evidence_uuid,
+        )
+
+    for child_uuid, qty in add_pairs:
+        # Checked per addition rather than once up front: each insert is flushed,
+        # so a batch that would close a loop between two of its own new lines
+        # (A→B and B→A) is caught on the second one.
+        if await cat_repo.would_create_cycle(
+            db, parent_item_id=item_id, child_item_id=child_uuid
+        ):
+            raise ConflictError(
+                "Adding this item would create a circular reference (A→B→A)",
+                code="bom_cycle",
+            )
+        line = await cat_repo.create_bom_line(
+            db,
+            parent_item_id=item_id,
+            child_item_id=child_uuid,
+            qty_per_unit=qty,
+            created_by_user_id=current.id,
+        )
+        child_number = line.child_item.item_number if line.child_item else ""
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="created",
+            subject_table="app.bom_lines",
+            subject_id=line.id,
+            subject_label=f"{parent.item_number} → {child_number}",
+            before=None,
+            after=cat_repo.bom_line_to_audit_snapshot(line),
+            context={"reason": payload.reason},
+            signature_id=evidence_uuid,
+        )
+
+    # One signature covers the whole batch, so it is bound to a synthetic batch
+    # id rather than any single line (same pattern as the forecast batch save).
+    batch_id = uuid.uuid4()
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action=BOM_SAVE_ACTION,
+        target_table="app.bom_lines",
+        target_id=batch_id,
+    )
+
+    lines = await cat_repo.list_bom_lines(db, item_id)
+    have_bom = await inv_repo.items_with_bom(db, [ln.child_item_id for ln in lines])
+    result = BomBatchResult(
+        item_id=str(item_id),
+        lines=[
+            _bom_line_to_read(ln, child_has_bom=ln.child_item_id in have_bom)
+            for ln in lines
+        ],
+        added=len(add_pairs),
+        updated=len(update_pairs),
+        deleted=len(delete_uuids),
+    )
     await db.commit()
     return result
 
