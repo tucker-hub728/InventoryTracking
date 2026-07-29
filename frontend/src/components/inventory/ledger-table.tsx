@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/select';
 import { EmptyState } from '@/components/shared/empty-state';
 import { LotLink } from '@/components/inventory/lot-link';
+import type { ApiItemKitConsumption } from '@/lib/api/kits';
 import type { LedgerEntry } from '@/types/inventory';
 import type { BadgeTone } from '@/types/ui';
 import { expiryStatus } from '@/lib/inventory-helpers';
@@ -363,6 +364,37 @@ interface Props {
   /** Show the Customer column. Only built items (finished goods / sub-assemblies)
    *  can ship to a customer, so raw materials omit it (it would always be —). */
   showCustomer?: boolean;
+  /**
+   * Per-kit reconciliation for this item — issued / used / returned.
+   *
+   * Using material writes NO stock movement (it already left ``v_item_stock``
+   * at issue, kitting.md §4.3), so the ledger alone can show ``Kitted`` and
+   * ``Back-flushed`` but never the *used* figure between them. These rows
+   * supply it, rendered as a non-balance sub-line so the ledger reads the way
+   * REQ-2026-07-09-TRX-003 describes: "issued fifteen, used twelve,
+   * backflushed three" (client 2026-07-28).
+   */
+  kitUsage?: ApiItemKitConsumption[];
+}
+
+/** The reconciliation sentence for one kit, phrased for its status. ``remainder``
+ *  means different things per status, so each reads differently:
+ *   - closed    → the remainder was back-flushed at close-out
+ *   - open      → the remainder is still on the production floor, and ``used``
+ *                 is live (cumulative across Produce batches, KIT-007)
+ *   - cancelled → nothing stays on the floor; everything not used came back */
+function kitUsageSentence(u: ApiItemKitConsumption): string {
+  const parts = [`issued ${u.issued_total}`, `used ${u.used_qty}`];
+  if (u.status === 'closed') {
+    parts.push(`back-flushed ${u.remainder}`);
+    if (u.early_returned_qty > 0) parts.push(`returned early ${u.early_returned_qty}`);
+  } else if (u.status === 'cancelled') {
+    parts.push(`returned ${u.early_returned_qty + u.remainder} on cancel`);
+  } else {
+    parts.push(`${u.remainder} still on floor`);
+    if (u.early_returned_qty > 0) parts.push(`returned early ${u.early_returned_qty}`);
+  }
+  return parts.join(' · ');
 }
 
 export function LedgerTable({
@@ -373,8 +405,30 @@ export function LedgerTable({
   filtersActive,
   onReverseRequest,
   showCustomer = false,
+  kitUsage,
 }: Props) {
   const showActions = Boolean(onReverseRequest);
+
+  // ``used_qty`` belongs to the kit LINE, not to any single issue row — a kit
+  // can issue twice, and can draw from several lots — so the sentence is
+  // rendered ONCE per kit, after that kit's last visible row anywhere in the
+  // table. Keyed "lot|rowIndex" so the row loop can look itself up.
+  const usageByKit = React.useMemo(
+    () => new Map((kitUsage ?? []).map((u) => [u.kit_id, u])),
+    [kitUsage],
+  );
+  const usageAnchor = React.useMemo(() => {
+    const anchor = new Map<string, ApiItemKitConsumption>();
+    if (usageByKit.size === 0) return anchor;
+    const lastSeen = new Map<string, string>();
+    groups.forEach((g) =>
+      g.rows.forEach((e, i) => {
+        if (e.kitId && usageByKit.has(e.kitId)) lastSeen.set(e.kitId, `${g.lot}|${i}`);
+      }),
+    );
+    lastSeen.forEach((key, kitId) => anchor.set(key, usageByKit.get(kitId)!));
+    return anchor;
+  }, [groups, usageByKit]);
 
   if (groups.length === 0) {
     return (
@@ -442,9 +496,12 @@ export function LedgerTable({
               const expiry = expiryStatus(e.exp, nearExpiryThresholdDays);
               const isTransfer =
                 e.movementType === 'transfer_out' || e.movementType === 'transfer_in';
+              // Rendered under this row when it is the kit's LAST row in the
+              // table (see usageAnchor) — one sentence per kit, not per row.
+              const usage = usageAnchor.get(`${group.lot}|${i}`);
               return (
+                <React.Fragment key={e.movementId ?? `${group.lot}-${e.date}-${i}`}>
                 <TableRow
-                  key={e.movementId ?? `${group.lot}-${e.date}-${i}`}
                   className={cn(
                     'group',
                     isTransfer && 'bg-accent-soft/60',
@@ -541,6 +598,37 @@ export function LedgerTable({
                     </TableCell>
                   )}
                 </TableRow>
+
+                {/* Kit reconciliation — NOT a stock movement. The material left
+                    the balance at Kitted time (TRX-001 / kitting.md §4.3); this
+                    only spells out how much of it was actually used, which the
+                    ledger otherwise can't say (REQ-2026-07-09-TRX-003). Deliberately
+                    contributes nothing to Units in/out, Balance or the totals. */}
+                {usage && (
+                  <TableRow className="border-none bg-surface/50 hover:bg-surface/50">
+                    <TableCell />
+                    <TableCell
+                      colSpan={9 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0)}
+                      className="py-1.5 text-[11px] text-text-3"
+                    >
+                      <span
+                        className="inline-flex flex-wrap items-center gap-1.5"
+                        title="Consumption is not a stock movement — the material left inventory when it was kitted. This line only reconciles how much of it was used."
+                      >
+                        <span aria-hidden className="text-text-3">
+                          └
+                        </span>
+                        <span className="font-mono text-text-2">{usage.kit_number}</span>
+                        <span>· {kitUsageSentence(usage)}</span>
+                        {(usage.status === 'issued' || usage.status === 'in_production') && (
+                          <Badge tone="warning">in production</Badge>
+                        )}
+                        {usage.status === 'cancelled' && <Badge tone="danger">cancelled</Badge>}
+                      </span>
+                    </TableCell>
+                  </TableRow>
+                )}
+                </React.Fragment>
               );
             })}
 

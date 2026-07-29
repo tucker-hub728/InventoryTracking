@@ -293,11 +293,72 @@ export interface ApiFloorKitConsumed {
   lines: ApiFloorKitConsumedLine[];
 }
 
+/** A kit CANCELLED after it had already produced on this floor. The cancel
+ *  doesn't undo those batches — the units are real stock on real lots — so the
+ *  floor still accounts for them (client 2026-07-28). */
+export interface ApiFloorKitCancelled {
+  id: string;
+  kit_number: string;
+  item_id: string;
+  item_number: string;
+  description: string;
+  target_qty: number;
+  good_qty: number | null;
+  scrap_qty: number | null;
+  cancelled_at: string | null;
+  consumed_total: number;
+  batches: ApiFloorKitBatch[];
+  lines: ApiFloorKitConsumedLine[];
+}
+
+/**
+ * What ONE kit did with one item — issued, used, handed back.
+ *
+ * Consumption writes no stock movement (the material left `v_item_stock` at
+ * issue, kitting.md §4.3), so the ledger can show `Kitted` and `Back-flushed`
+ * but never the *used* figure between them. This supplies it, so the ledger can
+ * read the way REQ-2026-07-09-TRX-003 describes: "issued fifteen, used twelve,
+ * backflushed three".
+ *
+ * `remainder` = issued_total − early_returned_qty − used_qty. On a **closed**
+ * kit that's what was back-flushed at close-out; on an **open** one it's what is
+ * still on the production floor.
+ */
+export interface ApiItemKitConsumption {
+  kit_id: string;
+  kit_number: string;
+  status: KitStatus;
+  issued_total: number;
+  used_qty: number;
+  early_returned_qty: number;
+  remainder: number;
+}
+
+/** The three tabs of a production floor's page, named for the kit STATUS each
+ *  holds — `closed` is what the rest of the app calls that state (see
+ *  KIT_STATUS_LABEL), so the tab and the badge inside it agree. */
+export type FloorSection = 'in_production' | 'closed' | 'cancelled';
+
+export interface ApiFloorKitCounts {
+  in_production: number;
+  closed: number;
+  cancelled: number;
+}
+
+/** One PAGE of one section, plus the counts for every tab. Only the array
+ *  matching `section` is populated — the floor page fetches the tab being
+ *  viewed rather than all three. */
 export interface ApiFloorKitsResponse {
+  section: FloorSection;
+  /** Rows in the requested section across all pages (drives the pager). */
+  total: number;
+  counts: ApiFloorKitCounts;
   /** Open kits with material still on the floor. */
   active: ApiFloorKit[];
-  /** Recently closed kits that built here — what they consumed. */
+  /** Closed kits that built here — what they consumed. */
   completed: ApiFloorKitConsumed[];
+  /** Cancelled kits that had already produced here before being abandoned. */
+  cancelled: ApiFloorKitCancelled[];
 }
 
 export const KIT_OPERATION_LABEL: Record<string, string> = {
@@ -510,8 +571,22 @@ export const kitsApi = {
     api.get<ApiItemKitAuditResponse>(`/kits/by-item/${itemId}/audit`, { signal: opts?.signal }),
 
   /** Open kits building on a production floor + their on-floor material. */
-  onFloor: (nodeId: string, opts?: { signal?: AbortSignal }) =>
-    api.get<ApiFloorKitsResponse>(`/kits/floor/${nodeId}`, { signal: opts?.signal }),
+  /** What each kit actually USED of this item — the reconciliation the Unit
+   *  Ledger can't show on its own (consumption writes no stock movement). */
+  itemConsumption: (itemId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<{ lines: ApiItemKitConsumption[] }>(`/kits/by-item/${itemId}/consumption`, {
+      signal: opts?.signal,
+    }),
+
+  /** One page of one section of a production floor, plus every tab's count. */
+  onFloor: (
+    nodeId: string,
+    opts?: { section?: FloorSection; limit?: number; offset?: number; signal?: AbortSignal },
+  ) =>
+    api.get<ApiFloorKitsResponse>(`/kits/floor/${nodeId}`, {
+      query: { section: opts?.section, limit: opts?.limit, offset: opts?.offset },
+      signal: opts?.signal,
+    }),
 
   /** A free KIT-#### to pre-fill the name field. Peeks, never consumes. */
   nextNumber: (opts?: { signal?: AbortSignal }) =>

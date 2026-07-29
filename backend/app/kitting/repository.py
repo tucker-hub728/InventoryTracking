@@ -407,21 +407,72 @@ async def kits_on_floor(session: AsyncSession, node_id: uuid.UUID) -> list[Kit]:
     return list((await session.execute(stmt)).scalars().unique().all())
 
 
+def _completed_on_floor_where(node_id: uuid.UUID):
+    return (
+        Kit.production_location_node_id == node_id,
+        Kit.status == "closed",
+        Kit.deleted_at.is_(None),
+    )
+
+
 async def kits_completed_on_floor(
-    session: AsyncSession, node_id: uuid.UUID, *, limit: int = 25
+    session: AsyncSession, node_id: uuid.UUID, *, limit: int = 25, offset: int = 0
 ) -> list[Kit]:
-    """Recently CLOSED kits that built on ``node_id`` — their lines carry the
-    ``used_qty`` consumed on the floor. Newest first, capped."""
+    """CLOSED kits that built on ``node_id`` — their lines carry the ``used_qty``
+    consumed on the floor. Newest first, one page at a time."""
     stmt = (
         select(Kit)
-        .where(
-            Kit.production_location_node_id == node_id,
-            Kit.status == "closed",
-            Kit.deleted_at.is_(None),
-        )
+        .where(*_completed_on_floor_where(node_id))
         .options(selectinload(Kit.lines))
         .order_by(Kit.closed_at.desc().nullslast())
         .limit(limit)
+        .offset(offset)
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def count_kits_completed_on_floor(session: AsyncSession, node_id: uuid.UUID) -> int:
+    stmt = select(func.count()).select_from(Kit).where(*_completed_on_floor_where(node_id))
+    return int((await session.execute(stmt)).scalar_one())
+
+
+def _cancelled_on_floor_where(node_id: uuid.UUID):
+    return (
+        Kit.production_location_node_id == node_id,
+        Kit.status == "cancelled",
+        Kit.good_qty.is_not(None),
+        Kit.good_qty > 0,
+        Kit.deleted_at.is_(None),
+    )
+
+
+async def count_kits_cancelled_on_floor(session: AsyncSession, node_id: uuid.UUID) -> int:
+    stmt = select(func.count()).select_from(Kit).where(*_cancelled_on_floor_where(node_id))
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def kits_cancelled_on_floor(
+    session: AsyncSession, node_id: uuid.UUID, *, limit: int = 25, offset: int = 0
+) -> list[Kit]:
+    """Cancelled kits that PRODUCED something on ``node_id`` before being
+    abandoned. Newest first, capped.
+
+    A kit can be cancelled from ``in_production``, and under incremental
+    production (KIT-007) it may already have produced batches by then — real
+    stock, on real lots, sitting in storage. Without this the floor showed no
+    trace of that work (client 2026-07-28). Kits cancelled having produced
+    nothing are excluded: their material went back to inventory and there is no
+    output to account for.
+
+    ``closed_at`` is stamped on cancel as well as close, so it orders both.
+    """
+    stmt = (
+        select(Kit)
+        .where(*_cancelled_on_floor_where(node_id))
+        .options(selectinload(Kit.lines))
+        .order_by(Kit.closed_at.desc().nullslast())
+        .limit(limit)
+        .offset(offset)
     )
     return list((await session.execute(stmt)).scalars().unique().all())
 
@@ -458,6 +509,36 @@ async def produced_batches_for_kits(
             continue
         out.setdefault(kit_id, []).append((lot_number, int(qty), produced_at))
     return out
+
+
+async def consumption_lines_for_item(
+    session: AsyncSession, item_id: uuid.UUID, *, limit: int = 200
+) -> list[KitLine]:
+    """Every kit LINE that draws this item, newest kit first, with its kit loaded.
+
+    The ledger shows what a kit took OUT of stock (``kit_issue``) and what came
+    back (``backflush``), but never what was actually **used** — consumption
+    writes no stock movement, because the material already left ``v_item_stock``
+    at issue (kitting.md §4.3). REQ-2026-07-09-TRX-003 wants the ledger to
+    "self-explain: issued fifteen, used twelve, backflushed three", so the middle
+    term has to come from ``kit_lines.used_qty``, which is what this returns.
+
+    ``used_qty`` is cumulative across produce batches (KIT-007), so an OPEN kit's
+    figure is live and still moving — the caller flags that rather than hiding it
+    (client 2026-07-28).
+    """
+    stmt = (
+        select(KitLine)
+        .join(Kit, Kit.id == KitLine.kit_id)
+        .where(
+            KitLine.item_id == item_id,
+            Kit.deleted_at.is_(None),
+        )
+        .options(joinedload(KitLine.kit))
+        .order_by(Kit.created_at.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
 
 
 async def audit_events_for_item(

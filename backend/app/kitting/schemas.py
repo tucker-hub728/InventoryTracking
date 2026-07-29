@@ -331,11 +331,65 @@ class FloorKitConsumed(BaseModel):
     lines: list[FloorKitConsumedLine] = Field(default_factory=list)
 
 
+class FloorKitCancelled(BaseModel):
+    """A kit that was cancelled AFTER producing on this floor.
+
+    Cancelling from ``in_production`` is allowed, and under incremental
+    production (KIT-007) the kit may already have made batches — real stock on
+    real lots. Those batches are not undone by the cancel, so the floor still
+    has to account for them (client 2026-07-28). Carries the same detail as an
+    open kit's history: the per-batch lots and the per-component consumption.
+    """
+
+    id: str
+    kit_number: str
+    item_id: str
+    item_number: str
+    description: str
+    target_qty: int
+    good_qty: int | None = None
+    scrap_qty: int | None = None
+    # ``closed_at`` is stamped on cancel as well as on close.
+    cancelled_at: datetime | None = None
+    consumed_total: int = 0
+    batches: list[FloorKitBatch] = Field(default_factory=list)
+    lines: list[FloorKitConsumedLine] = Field(default_factory=list)
+
+
+#: The three tabs of a production floor's detail page. Named for the kit STATUS
+#: each holds — ``closed`` is the status the rest of the system uses (and the
+#: badge the operator sees), so the tab, the badge and the SRS's "close-out"
+#: language all agree (client 2026-07-28, replacing an earlier "consumed").
+FloorSection = Literal["in_production", "closed", "cancelled"]
+
+
+class FloorKitCounts(BaseModel):
+    """Row counts for all three sections, so the tabs can show their counts
+    without fetching every section's rows."""
+
+    in_production: int = 0
+    closed: int = 0
+    cancelled: int = 0
+
+
 class FloorKitsResponse(BaseModel):
+    """One PAGE of one section, plus the counts for every tab.
+
+    Only the list matching ``section`` is populated — the floor page fetches the
+    tab being viewed rather than all three, which is the point of paging it
+    (client 2026-07-28).
+    """
+
+    section: FloorSection
+    # Rows in the requested section across all pages (drives the pager).
+    total: int = 0
+    counts: FloorKitCounts = Field(default_factory=FloorKitCounts)
     # Open kits with material still on the floor (WIP).
     active: list[FloorKit] = Field(default_factory=list)
-    # Recently closed kits that built here — what they consumed.
+    # Closed kits that built here — what they consumed.
     completed: list[FloorKitConsumed] = Field(default_factory=list)
+    # Cancelled kits that had already produced here before being abandoned.
+    cancelled: list[FloorKitCancelled] = Field(default_factory=list)
 
 
 class KitActivityResponse(BaseModel):
@@ -343,6 +397,35 @@ class KitActivityResponse(BaseModel):
     # The audit-trail events for the kit (newest first) — carry good/scrap and
     # per-line changes the stock ledger can't show.
     events: list[KitAuditEventRow] = Field(default_factory=list)
+
+
+class ItemKitConsumptionRow(BaseModel):
+    """What ONE kit did with this item — the reconciliation the ledger can't
+    show on its own.
+
+    Consumption writes no stock movement (the material left ``v_item_stock`` at
+    issue), so ``used_qty`` is read straight off the kit line. Raw figures are
+    returned rather than a formatted sentence: how it reads depends on the kit's
+    status, and that's the caller's business.
+
+    ``remainder`` = ``issued_total − early_returned_qty − used_qty``. For a
+    CLOSED kit that is what was back-flushed at close-out; for an OPEN one it is
+    what is still on the production floor.
+    """
+
+    kit_id: str
+    kit_number: str
+    status: KitStatus
+    #: ``issued_qty + additional_issued_qty`` — everything this kit ever pulled.
+    issued_total: int
+    used_qty: int
+    #: Handed back before close-out (TRX-008), plus anything returned on cancel.
+    early_returned_qty: int
+    remainder: int
+
+
+class ItemKitConsumptionResponse(BaseModel):
+    lines: list[ItemKitConsumptionRow] = Field(default_factory=list)
 
 
 class ItemKitAuditEventRow(KitAuditEventRow):

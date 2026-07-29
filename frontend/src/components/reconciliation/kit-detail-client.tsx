@@ -892,6 +892,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           <ReviewStep
             kit={kit}
             output={output}
+            outputDests={outputDests}
             used={used}
             returnLoc={returnLoc}
             nodeOptions={nodeOptions}
@@ -909,16 +910,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <ChevronLeft size={14} /> Back
           </Button>
           <div className="flex items-center gap-3">
-            {/* Why the primary action is disabled. Rendered only when it really
-                is disabled, so it can never contradict a live button. */}
+            {/* Why the primary action is disabled — a COUNT only. Each of these
+                already prints in red under its own field, so listing them here
+                too was pure duplication; this just points at them. The full list
+                is the button's tooltip. Rendered only when the button really is
+                disabled, so it can never contradict a live button. */}
             {primaryBlocked && blockers.length > 0 && (
-              <ul className="max-w-md space-y-0.5 text-right text-xs text-danger">
-                {blockers.map((b) => (
-                  <li key={b}>{b}</li>
-                ))}
-              </ul>
+              <span className="text-xs text-danger">
+                {blockers.length} thing{blockers.length === 1 ? '' : 's'} to fix above
+              </span>
             )}
             {footerPrimary(kit, activeStep, model, {
+              blockers: primaryBlocked ? blockers : [],
               canWrite,
               canSign,
               busy,
@@ -1124,6 +1127,9 @@ function footerPrimary(
     produceReady: boolean;
     producingNow: boolean;
     issueBlocked: boolean;
+    /** Outstanding reasons, shown as the disabled button's tooltip. Empty when
+     *  the button is live. */
+    blockers: string[];
     onIssue: () => void;
     onNext: () => void;
     onProductionNext: () => void;
@@ -1134,6 +1140,9 @@ function footerPrimary(
   },
 ) {
   const open = kit.status === 'issued' || kit.status === 'in_production';
+  // The outstanding reasons, one per line, as the disabled button's tooltip —
+  // the detail lives under each field, so the footer only summarises.
+  const blockerTitle = ctx.blockers.length > 0 ? ctx.blockers.join('\n') : undefined;
   const nextBtn = (onClick: () => void, disabled = false, title?: string) => (
     <Button variant="primary" onClick={onClick} disabled={ctx.busy || disabled} title={title}>
       Next: {STEPS[activeStep + 1]?.label} <ArrowRight size={14} />
@@ -1169,7 +1178,7 @@ function footerPrimary(
         variant="primary"
         onClick={ctx.onCloseOutNext}
         disabled={ctx.busy || !canAdvance}
-        title={canAdvance ? undefined : 'Enter the output and used quantities first'}
+        title={canAdvance ? undefined : blockerTitle}
       >
         {finalize ? (
           <>
@@ -1193,7 +1202,9 @@ function footerPrimary(
               variant="primary"
               onClick={ctx.onProduce}
               disabled={ctx.busy || !ctx.produceReady}
-              title={ctx.produceReady ? 'Make this batch and keep the kit open' : 'Fix the batch on Close-Out first'}
+              title={
+                ctx.produceReady ? 'Make this batch and keep the kit open' : blockerTitle
+              }
             >
               <FlaskConical size={14} /> Produce this batch
             </Button>
@@ -1208,7 +1219,7 @@ function footerPrimary(
             variant={ctx.producingNow ? 'secondary' : 'primary'}
             onClick={ctx.onClose}
             disabled={!ctx.closeReady || ctx.busy}
-            title={ctx.closeReady ? undefined : 'Enter the used quantities (and output, if producing a final batch) first'}
+            title={ctx.closeReady ? undefined : blockerTitle}
           >
             Sign &amp; close kit <ArrowRight size={14} />
           </Button>
@@ -2092,6 +2103,7 @@ function CloseOutStep({
 function ReviewStep({
   kit,
   output,
+  outputDests,
   used,
   returnLoc,
   nodeOptions,
@@ -2099,6 +2111,10 @@ function ReviewStep({
 }: {
   kit: ApiKit;
   output: OutputDraft;
+  /** Where this batch's units go — one row, or several when the batch is SPLIT
+   *  across locations (client 2026-07-23). Review used to render only the draft's
+   *  single ``output_location_node_id``, which was wrong for a split batch. */
+  outputDests: OutputDest[];
   used: Record<string, number | null>;
   returnLoc: Record<string, string>;
   nodeOptions: SelectOption[];
@@ -2109,214 +2125,172 @@ function ReviewStep({
   // Good/scrap accumulate on the kit across produce batches (KIT-007).
   const producedSoFar = kit.good_qty ?? 0;
   const scrapSoFar = kit.scrap_qty ?? 0;
-  const pendingGood = closed ? 0 : output.good_qty ?? 0; // a batch entered but not yet made
-  const pendingScrap = closed ? 0 : output.scrap_qty ?? 0;
+  const pendingGood = closed ? 0 : (output.good_qty ?? 0); // a batch entered but not yet made
+  const pendingScrap = closed ? 0 : (output.scrap_qty ?? 0);
   const producingNow = pendingGood >= 1;
   const totalMade = producedSoFar + scrapSoFar;
   const yieldPct = totalMade > 0 ? producedSoFar / totalMade : null;
   const label = (id: string | null | undefined) =>
     id ? (nodeOptions.find((o) => o.value === id)?.label ?? '—') : '—';
-  const outLoc = closed ? kit.output_location_node_id : output.output_location_node_id;
   // ``on_floor_qty`` already nets out cumulative used, so it is the material
   // still physically on the floor — which is exactly what back-flushes at close.
   const floorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
   const usedTotal = kit.lines.reduce((a, l) => a + (l.used_qty ?? 0), 0);
+  // Both come from the close-out draft. The batch card below only renders while
+  // a batch is pending (never once closed), so there is no closed-kit branch to
+  // take here — ApiKit doesn't carry the produced expiry anyway.
+  const lotNumber = output.output_lot_number.trim();
+  const expiry = output.output_expiration_date;
+  // Destinations actually filled in. Falls back to the kit's stored output
+  // location once closed, when the draft is empty.
+  const dests = outputDests.filter((d) => d.location_node_id && destPlaced(d) > 0);
 
   return (
     <div className="space-y-4">
-      {/* Producing NOW — detail of the batch about to be made (the "Produce"
-          button posts exactly this and keeps the kit open). */}
+      {/* ── THIS BATCH — everything the signature covers, in one place ── */}
       {producingNow && (
-        <Card className="border-accent/40 bg-accent-soft/15 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-accent">Producing now</div>
+        <Card className="overflow-hidden border-accent/40">
+          <div className="flex flex-wrap items-start justify-between gap-x-8 gap-y-4 bg-accent-soft/15 p-5">
+            <div className="min-w-0">
+              <div className="text-[11px] uppercase tracking-wider text-accent">This batch</div>
               <div className="mt-1 flex items-baseline gap-2">
                 <span className="text-3xl font-semibold text-text">{pendingGood}</span>
                 <span className="text-text-3">×</span>
                 <span className="font-mono text-lg text-text">{kit.item_number}</span>
-                {pendingScrap > 0 && (
-                  <span className="text-sm text-text-3">+ {pendingScrap} scrap</span>
-                )}
+                {pendingScrap > 0 && <Badge tone="danger">{pendingScrap} scrap</Badge>}
               </div>
-              <div className="mt-0.5 text-sm text-text-2">
-                Stocking to <span className="text-text">{label(outLoc)}</span>
-              </div>
+              <div className="mt-0.5 text-sm text-text-2">{kit.description}</div>
             </div>
+
+            {/* The produced lot + its expiry — what the operator typed at
+                close-out, and the identity every unit in this batch carries.
+                It was missing from Review entirely (client 2026-07-28). */}
+            <dl className="flex shrink-0 gap-8 text-sm">
+              <div>
+                <dt className="text-[11px] uppercase tracking-wider text-text-3">Lot</dt>
+                <dd className="mt-0.5 font-mono text-text">{lotNumber || '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] uppercase tracking-wider text-text-3">Expiry</dt>
+                <dd className="mt-0.5 font-mono text-text-2">{expiry || 'None'}</dd>
+              </div>
+            </dl>
           </div>
-          <div className="mt-3 overflow-x-auto rounded-md border border-border bg-bg-elev/50">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border text-left text-[10px] uppercase tracking-wider text-text-3">
-                  <th className="px-3 py-1.5 font-medium">Component</th>
-                  <th className="px-3 py-1.5 text-right font-medium">Uses</th>
-                  <th className="px-3 py-1.5 text-right font-medium">Left after</th>
-                </tr>
-              </thead>
-              <tbody>
-                {kit.lines.map((line) => {
-                  const u = used[line.id] ?? 0;
-                  return (
-                    <tr key={line.id} className="border-b border-border/60 last:border-0">
-                      <td className="px-3 py-1.5">
-                        <span className="font-mono text-xs text-text">{line.item_number}</span>
-                        <span className="ml-2 text-text-3">{line.description}</span>
-                      </td>
-                      <td className="px-3 py-1.5 text-right font-mono tabular-nums text-text">{u}</td>
-                      <td className="px-3 py-1.5 text-right font-mono tabular-nums text-text-2">
-                        {line.on_floor_qty - u}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+
+          {/* Where the units land — a list, because one batch can be SPLIT
+              across several boxes / shelves when a box can't hold it all. */}
+          <div className="border-t border-border px-5 py-3">
+            <div className="text-[11px] uppercase tracking-wider text-text-3">Stocking to</div>
+            <ul className="mt-1 space-y-0.5">
+              {dests.length === 0 ? (
+                <li className="text-sm text-text-3">—</li>
+              ) : (
+                dests.map((d) => (
+                  <li key={d.key} className="flex items-baseline gap-2 text-sm">
+                    <ArrowRight size={12} className="shrink-0 text-text-3" aria-hidden />
+                    <span className="text-text">{label(d.location_node_id)}</span>
+                    <span className="font-mono tabular-nums text-text-2">×{destPlaced(d)}</span>
+                    {d.isBox && (
+                      <span className="text-[11px] text-text-3">
+                        {d.cells.length} cell{d.cells.length === 1 ? '' : 's'}
+                      </span>
+                    )}
+                  </li>
+                ))
+              )}
+            </ul>
           </div>
-          <p className="mt-2 text-xs text-text-3">
-            Press <span className="text-text-2">Produce this batch</span> to make these and keep the
-            kit open, or <span className="text-text-2">Sign &amp; close</span> to make them and
-            finish (the remainder back-flushes).
-          </p>
+
+          {/* The ONE component table: where it came from → what this batch
+              uses → what's left → where the leftover goes. Replaces the two
+              overlapping tables Review used to stack (client 2026-07-28). */}
+          <ComponentReviewTable
+            kit={kit}
+            mode="batch"
+            used={used}
+            returnLoc={returnLoc}
+            label={label}
+            closed={closed}
+          />
         </Card>
       )}
 
-      {/* Headline: cumulative production. */}
-      <Card className="p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
+      {/* ── THE KIT — running totals, one compact strip ── */}
+      <Card className="p-4">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+          <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-[11px] uppercase tracking-wider text-text-3">
                 {closed ? 'Produced' : 'Produced so far'}
               </span>
-              {!closed && (
-                <Badge tone="warning" className="text-[10px]">
-                  Kit open
-                </Badge>
-              )}
+              {!closed && <Badge tone="warning">Kit open</Badge>}
             </div>
-            <div className="mt-1 flex items-baseline gap-2">
-              <span className="text-3xl font-semibold text-text">{producedSoFar}</span>
-              {!closed && <span className="text-sm text-text-3">of {kit.target_qty} target</span>}
-              <span className="text-text-3">·</span>
-              <span className="font-mono text-lg text-text">{kit.item_number}</span>
+            <div className="mt-0.5 flex items-baseline gap-2">
+              <span className="text-2xl font-semibold text-text">{producedSoFar}</span>
+              {!closed && <span className="text-sm text-text-3">of {kit.target_qty}</span>}
+              <span className="font-mono text-sm text-text-2">{kit.item_number}</span>
             </div>
-            <div className="mt-0.5 text-sm text-text-2">{kit.description}</div>
-            {!closed && pendingGood > 0 && (
-              <p className="mt-1 text-xs text-accent">
-                Sign &amp; close will make {pendingGood} more, then finish the kit.
-              </p>
+          </div>
+
+          <div className="ml-auto flex flex-wrap items-center gap-x-6 gap-y-3 text-sm">
+            {yieldPct !== null && (
+              <ReviewStat label="Yield">
+                <span
+                  className={cn(
+                    'font-semibold',
+                    yieldPct >= 1
+                      ? 'text-success'
+                      : yieldPct >= 0.8
+                        ? 'text-warning'
+                        : 'text-danger',
+                  )}
+                >
+                  {Math.round(yieldPct * 100)}%
+                </span>
+                <span className="ml-1.5 text-[11px] text-text-3">
+                  {producedSoFar} good · {scrapSoFar} scrap
+                </span>
+              </ReviewStat>
             )}
+            <ReviewStat label="Built at">{prodName || 'Production floor'}</ReviewStat>
+            <ReviewStat label={closed ? 'Consumed / returned' : 'Consumed / on floor'}>
+              <span className="font-mono tabular-nums">{usedTotal}</span> used ·{' '}
+              <span className="font-mono tabular-nums">{floorTotal}</span>{' '}
+              {closed ? 'returned' : 'on floor'}
+            </ReviewStat>
           </div>
-          {yieldPct !== null && (
-            <div className="text-right">
-              <div className="text-[11px] uppercase tracking-wider text-text-3">Yield</div>
-              <div
-                className={cn(
-                  'text-3xl font-semibold',
-                  yieldPct >= 1 ? 'text-success' : yieldPct >= 0.8 ? 'text-warning' : 'text-danger',
-                )}
-              >
-                {Math.round(yieldPct * 100)}%
-              </div>
-              <div className="text-[11px] text-text-3">
-                {producedSoFar} good · {scrapSoFar} scrap
-              </div>
-            </div>
-          )}
         </div>
-        <dl className="mt-4 grid gap-3 border-t border-border pt-4 text-sm sm:grid-cols-3">
-          <div>
-            <dt className="text-[11px] uppercase tracking-wider text-text-3">Built at</dt>
-            <dd className="mt-0.5 text-text-2">{prodName || 'Production floor'}</dd>
-          </div>
-          <div>
-            <dt className="text-[11px] uppercase tracking-wider text-text-3">Output stored to</dt>
-            <dd className="mt-0.5 text-text-2">{label(outLoc)}</dd>
-          </div>
-          <div>
-            <dt className="text-[11px] uppercase tracking-wider text-text-3">
-              {closed ? 'Consumed / returned' : 'Consumed / on floor'}
-            </dt>
-            <dd className="mt-0.5 text-text-2">
-              <span className="font-mono">{usedTotal}</span> used ·{' '}
-              <span className="font-mono">{floorTotal}</span>{' '}
-              {closed ? 'back to stock' : 'still on floor'}
-            </dd>
-          </div>
-        </dl>
+
+        {!closed && pendingGood > 0 && (
+          <p className="mt-3 border-t border-border pt-3 text-xs text-accent">
+            Sign &amp; close will make {pendingGood} more, then finish the kit.
+          </p>
+        )}
       </Card>
 
-      {/* Per-component summary. */}
-      <Card className="p-4">
-        <div className="mb-3">
-          <h2 className="text-sm font-medium text-text">Component summary</h2>
-          <p className="mt-0.5 text-xs text-text-3">
-            {closed
-              ? 'What the kit consumed and what returned to inventory.'
-              : 'Consumed so far and what is still staged on the floor. Produce another batch, or sign & close to finish (the remainder back-flushes).'}
-          </p>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
-                <th className="px-3 py-2 font-medium">Component</th>
-                <th className="px-3 py-2 font-medium">Issued from</th>
-                <th className="px-3 py-2 text-right font-medium">Used</th>
-                <th className="px-3 py-2 text-right font-medium">
-                  {closed ? 'Back-flushed' : 'On floor'}
-                </th>
-                <th className="px-3 py-2 font-medium">
-                  {closed ? 'Returned to' : 'Back-flushes to'}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {kit.lines.map((line) => (
-                <tr key={line.id} className="border-b border-border/60 align-top">
-                  <td className="max-w-[220px] px-3 py-2.5">
-                    <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
-                  </td>
-                  <td className="px-3 py-2.5">
-                    {line.issued_from.length ? (
-                      <div className="flex flex-wrap gap-1">
-                        {line.issued_from.map((f, idx) => (
-                          <span
-                            key={idx}
-                            className="inline-flex items-center gap-1 rounded border border-border bg-surface/60 px-1.5 py-0.5 text-[11px]"
-                            title={f.location}
-                          >
-                            <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
-                            <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="text-xs text-text-3">—</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 text-right">
-                    <QtyCell value={line.used_qty ?? null} />
-                  </td>
-                  <td className="px-3 py-2.5 text-right">
-                    <QtyCell
-                      value={line.on_floor_qty || null}
-                      tone={line.on_floor_qty ? 'success' : 'muted'}
-                    />
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <span className="text-xs text-text-2">
-                      {line.on_floor_qty > 0
-                        ? label(closed ? line.return_location_node_id : returnLoc[line.id])
-                        : '—'}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      {/* The kit-level component picture. Shown on its own only when there is no
+          batch above — otherwise the batch table already covers the components
+          and repeating them is what made this page hard to read. */}
+      {!producingNow && (
+        <Card className="overflow-hidden">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="text-sm font-medium text-text">Components</h2>
+            <p className="mt-0.5 text-xs text-text-3">
+              {closed
+                ? 'What the kit consumed and what returned to inventory.'
+                : 'Consumed so far and what is still staged on the floor — the remainder back-flushes at close.'}
+            </p>
+          </div>
+          <ComponentReviewTable
+            kit={kit}
+            mode="kit"
+            used={used}
+            returnLoc={returnLoc}
+            label={label}
+            closed={closed}
+          />
+        </Card>
+      )}
 
       {closed ? (
         <Card className="flex items-start gap-3 border-success/30 bg-success-soft/40 p-4">
@@ -2337,6 +2311,114 @@ function ReviewStep({
           {floorTotal} unit{floorTotal === 1 ? '' : 's'} still on the floor back-flush to inventory.
         </RuleNote>
       )}
+    </div>
+  );
+}
+
+/** One labelled figure in the kit strip. */
+function ReviewStat({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-text-3">{label}</div>
+      <div className="mt-0.5 text-text-2">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * The single component table Review renders.
+ *
+ * ``mode='batch'`` answers *this batch*: what each component was issued from,
+ * what the pending batch uses, what is left on the floor afterwards, and where
+ * that leftover goes. ``mode='kit'`` answers the *whole kit*: cumulative used
+ * and what is still staged (or was returned, once closed).
+ *
+ * Two modes rather than two tables — Review used to stack both and the same
+ * component appeared twice under different headings, in different frames of
+ * reference, which is what made the page unreadable (client 2026-07-28).
+ */
+function ComponentReviewTable({
+  kit,
+  mode,
+  used,
+  returnLoc,
+  label,
+  closed,
+}: {
+  kit: ApiKit;
+  mode: 'batch' | 'kit';
+  used: Record<string, number | null>;
+  returnLoc: Record<string, string>;
+  label: (id: string | null | undefined) => string;
+  closed: boolean;
+}) {
+  const isBatch = mode === 'batch';
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-border bg-surface/50 text-left text-[10px] uppercase tracking-wider text-text-3">
+            <th className="px-4 py-2 font-medium">Component</th>
+            <th className="px-4 py-2 font-medium">Issued from</th>
+            <th className="px-4 py-2 text-right font-medium">{isBatch ? 'Uses' : 'Used'}</th>
+            <th className="px-4 py-2 text-right font-medium">
+              {isBatch ? 'Left after' : closed ? 'Back-flushed' : 'On floor'}
+            </th>
+            <th className="px-4 py-2 font-medium">
+              {closed ? 'Returned to' : 'Back-flushes to'}
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {kit.lines.map((line) => {
+            const thisBatch = used[line.id] ?? 0;
+            const leftAfter = line.on_floor_qty - thisBatch;
+            const remaining = isBatch ? leftAfter : line.on_floor_qty;
+            return (
+              <tr key={line.id} className="border-b border-border/60 align-top last:border-0">
+                <td className="max-w-[240px] px-4 py-2.5">
+                  <ItemCell
+                    itemNumber={line.item_number}
+                    description={line.description}
+                    itemId={line.item_id}
+                  />
+                </td>
+                <td className="px-4 py-2.5">
+                  {line.issued_from.length ? (
+                    <div className="flex flex-wrap gap-1">
+                      {line.issued_from.map((f, idx) => (
+                        <span
+                          key={idx}
+                          className="inline-flex items-center gap-1 rounded border border-border bg-surface/60 px-1.5 py-0.5 text-[11px]"
+                          title={f.location}
+                        >
+                          <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
+                          <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-text-3">—</span>
+                  )}
+                </td>
+                <td className="px-4 py-2.5 text-right">
+                  <QtyCell value={isBatch ? thisBatch || null : (line.used_qty ?? null)} />
+                </td>
+                <td className="px-4 py-2.5 text-right">
+                  <QtyCell value={remaining || null} tone={remaining ? 'success' : 'muted'} />
+                </td>
+                <td className="px-4 py-2.5">
+                  <span className="text-xs text-text-2">
+                    {remaining > 0
+                      ? label(closed ? line.return_location_node_id : returnLoc[line.id])
+                      : '—'}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

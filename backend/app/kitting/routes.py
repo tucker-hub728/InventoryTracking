@@ -47,14 +47,19 @@ from .schemas import (
     CloseOutRequest,
     FloorKit,
     FloorKitBatch,
+    FloorKitCancelled,
     FloorKitConsumed,
     FloorKitConsumedLine,
+    FloorKitCounts,
     FloorKitLine,
     FloorKitsResponse,
+    FloorSection,
     IssueRequest,
     IssueSourceInput,
     ItemKitAuditEventRow,
     ItemKitAuditResponse,
+    ItemKitConsumptionResponse,
+    ItemKitConsumptionRow,
     KitActivityResponse,
     KitActivityRow,
     KitAuditEventRow,
@@ -1027,16 +1032,51 @@ async def next_kit_number(db: DBSession) -> KitNumberSuggestion:
 @kits_router.get(
     "/floor/{node_id}",
     response_model=FloorKitsResponse,
-    summary="Open kits building on a production floor, with their on-floor material",
+    summary="One page of one section of a production floor's kits, plus tab counts",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
-async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> FloorKitsResponse:
-    """Powers the Production view — attributes the WIP on a floor to the kit it
-    belongs to (a floor holds material from every kit issued to it)."""
-    active_kits = await kit_repo.kits_on_floor(db, node_id)
-    done_kits = await kit_repo.kits_completed_on_floor(db, node_id)
-    item_ids = {k.item_id for k in (*active_kits, *done_kits)} | {
-        ln.item_id for k in (*active_kits, *done_kits) for ln in k.lines
+async def floor_kits(
+    db: DBSession,
+    node_id: Annotated[uuid.UUID, Path()],
+    section: Annotated[
+        FloorSection,
+        Query(description="Which tab of the floor page to return."),
+    ] = "in_production",
+    limit: Annotated[int, Query(ge=1, le=100)] = 15,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> FloorKitsResponse:
+    """Powers the Production floor page — attributes the work on a floor to the
+    kit it belongs to (a floor holds material from every kit issued to it).
+
+    Returns ONE section per call so a busy floor doesn't ship three lists at
+    once, plus the counts for all three tabs so their badges stay correct
+    whichever tab is open (client 2026-07-28).
+    """
+    counts = FloorKitCounts(
+        in_production=0,  # filled below — the open-kit count is display-filtered
+        closed=await kit_repo.count_kits_completed_on_floor(db, node_id),
+        cancelled=await kit_repo.count_kits_cancelled_on_floor(db, node_id),
+    )
+
+    # Open kits are loaded whole rather than paged in SQL: the "show it only if
+    # it has WIP or has produced here" rule below is computed in Python, so a
+    # SQL LIMIT would page over rows that the filter then drops, and the count
+    # would disagree with the list. A floor holds a handful of open kits, so
+    # this is cheap; the two history sections (which do grow) page in SQL.
+    open_kits = await kit_repo.kits_on_floor(db, node_id)
+    done_kits = (
+        await kit_repo.kits_completed_on_floor(db, node_id, limit=limit, offset=offset)
+        if section == "closed"
+        else []
+    )
+    cancelled_kits = (
+        await kit_repo.kits_cancelled_on_floor(db, node_id, limit=limit, offset=offset)
+        if section == "cancelled"
+        else []
+    )
+    all_kits = (*open_kits, *done_kits, *cancelled_kits)
+    item_ids = {k.item_id for k in all_kits} | {
+        ln.item_id for k in all_kits for ln in k.lines
     }
     items = await kit_repo.load_item_map(db, item_ids)
 
@@ -1046,10 +1086,14 @@ async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> Fl
 
     # Batches each open kit has already produced (incremental production, KIT-007)
     # — one lot per batch — so the floor can show work already done, not just WIP.
-    batch_map = await kit_repo.produced_batches_for_kits(db, [k.id for k in active_kits])
+    # Cancelled kits are included: their batches are exactly what the floor needs
+    # to show, and they'd otherwise resolve to an empty list.
+    batch_map = await kit_repo.produced_batches_for_kits(
+        db, [k.id for k in (*open_kits, *cancelled_kits)]
+    )
 
     active: list[FloorKit] = []
-    for k in active_kits:
+    for k in open_kits:
         lines = [
             FloorKitLine(
                 item_id=str(ln.item_id),
@@ -1127,7 +1171,57 @@ async def floor_kits(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> Fl
             )
         )
 
-    return FloorKitsResponse(active=active, completed=completed)
+    cancelled: list[FloorKitCancelled] = []
+    for k in cancelled_kits:
+        c_lines = [
+            FloorKitConsumedLine(
+                item_id=str(ln.item_id),
+                item_number=_num(ln.item_id)[0],
+                description=_num(ln.item_id)[1],
+                used_qty=ln.used_qty or 0,
+            )
+            for ln in sorted(k.lines, key=lambda x: x.line_no)
+            if (ln.used_qty or 0) > 0
+        ]
+        cancelled.append(
+            FloorKitCancelled(
+                id=str(k.id),
+                kit_number=k.kit_number,
+                item_id=str(k.item_id),
+                item_number=_num(k.item_id)[0],
+                description=_num(k.item_id)[1],
+                target_qty=k.target_qty,
+                good_qty=k.good_qty,
+                scrap_qty=k.scrap_qty,
+                cancelled_at=k.closed_at,
+                consumed_total=sum(ln.used_qty for ln in c_lines),
+                batches=[
+                    FloorKitBatch(lot_number=lot_number, qty=qty, produced_at=produced_at)
+                    for (lot_number, qty, produced_at) in batch_map.get(k.id, [])
+                ],
+                lines=c_lines,
+            )
+        )
+
+    # The open-kit count follows the same display filter as the list above, so
+    # the tab badge and the pager agree with what is actually rendered.
+    counts.in_production = len(active)
+    if section == "in_production":
+        total = len(active)
+        active = active[offset : offset + limit]
+    elif section == "closed":
+        total = counts.closed
+    else:
+        total = counts.cancelled
+
+    return FloorKitsResponse(
+        section=section,
+        total=total,
+        counts=counts,
+        active=active if section == "in_production" else [],
+        completed=completed,
+        cancelled=cancelled,
+    )
 
 
 @kits_router.get(
@@ -1212,6 +1306,51 @@ def _audit_event_row(e, node_labels: dict | None = None) -> KitAuditEventRow:
         consumed=consumed,
         diff=e.diff,
     )
+
+
+@kits_router.get(
+    "/by-item/{item_id}/consumption",
+    response_model=ItemKitConsumptionResponse,
+    summary="Per-item kit consumption (issued / used / returned per kit)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def item_kit_consumption(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> ItemKitConsumptionResponse:
+    """What each kit actually USED of this item.
+
+    The Unit Ledger can show the stock events — ``kit_issue`` out,
+    ``backflush`` in — but never the consumption between them, because using
+    material writes no movement (it already left ``v_item_stock`` at issue,
+    kitting.md §4.3). This supplies the missing middle term so the ledger can
+    read the way REQ-2026-07-09-TRX-003 describes: "issued fifteen, used twelve,
+    backflushed three".
+    """
+    lines = await kit_repo.consumption_lines_for_item(db, item_id, limit=limit)
+    rows: list[ItemKitConsumptionRow] = []
+    for ln in lines:
+        kit = ln.kit
+        if kit is None:
+            continue
+        issued_total = ln.issued_qty + ln.additional_issued_qty
+        used = ln.used_qty or 0
+        rows.append(
+            ItemKitConsumptionRow(
+                kit_id=str(kit.id),
+                kit_number=kit.kit_number,
+                status=kit.status,  # type: ignore[arg-type]
+                issued_total=issued_total,
+                used_qty=used,
+                early_returned_qty=ln.early_returned_qty,
+                # Back-flushed at close for a closed kit; still on the floor for
+                # an open one. Never negative — the DB CHECK caps used at
+                # issued + additional − early_returned.
+                remainder=max(0, issued_total - ln.early_returned_qty - used),
+            )
+        )
+    return ItemKitConsumptionResponse(lines=rows)
 
 
 @kits_router.get(
