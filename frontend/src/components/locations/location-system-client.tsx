@@ -26,15 +26,29 @@ type CreateMode =
   | { kind: 'child'; parent: LocationNode }
   | null;
 
-export function LocationSystemClient() {
+/** The address bar for a cascade: `/ln2/{tank}/{quadrant}/{rack}/{box}`. */
+function ln2Href(chain: NodeTree[]): string {
+  return chain.length ? `/ln2/${chain.map((n) => n.id).join('/')}` : '/ln2';
+}
+
+export function LocationSystemClient({
+  initialPath = [],
+}: {
+  /** Node-id chain from the URL. Only the last one drives selection. */
+  initialPath?: string[];
+}) {
   const canWrite = usePermission('inventory', 'create');
 
   const [tree, setTree] = React.useState<NodeTree[]>([]);
   const [loading, setLoading] = React.useState(true);
+  // Distinct from `!loading`: proves the tree actually arrived.
+  const [loaded, setLoaded] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [createMode, setCreateMode] = React.useState<CreateMode>(null);
-  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [selectedId, setSelectedId] = React.useState<string | null>(
+    initialPath.at(-1) ?? null,
+  );
 
   const reload = React.useCallback(
     async (signal?: AbortSignal, opts?: { silent?: boolean }) => {
@@ -44,12 +58,20 @@ export function LocationSystemClient() {
       try {
         const t = await locationNodesApi.ln2Tree({ signal });
         setTree(t);
+        setLoaded(true);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load locations.');
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        // An ABORTED request must not clear `loading`: `return` inside the catch
+        // still runs this block, and React StrictMode mounts, aborts and
+        // remounts in development. Clearing it here would leave loading=false
+        // with an empty tree, and the "selection vanished" guard below would
+        // then wipe a deep-linked selection on every refresh.
+        if (!signal?.aborted) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [],
@@ -74,30 +96,88 @@ export function LocationSystemClient() {
     return { byId, parentOf };
   }, [tree]);
 
-  // Resolve the selected node (LN2 tree) + its breadcrumb path.
-  const { selectedNode, path } = React.useMemo(() => {
-    if (!selectedId) return { selectedNode: null as NodeTree | null, path: [] as NodeTree[] };
-    const ln2 = byId.get(selectedId);
-    if (ln2) {
+  /** Root → node breadcrumb chain, or [] if the id isn't in the tree. */
+  const chainOf = React.useCallback(
+    (id: string | null): NodeTree[] => {
+      if (!id || !byId.has(id)) return [];
       const chain: NodeTree[] = [];
-      let cur: string | null = selectedId;
+      let cur: string | null = id;
       while (cur) {
         const n = byId.get(cur);
         if (!n) break;
         chain.unshift(n);
         cur = parentOf.get(cur) ?? null;
       }
-      return { selectedNode: ln2, path: chain };
-    }
-    return { selectedNode: null, path: [] };
-  }, [selectedId, byId, parentOf]);
+      return chain;
+    },
+    [byId, parentOf],
+  );
 
-  // Drop the selection if the node disappeared (e.g. after delete).
+  // Resolve the selected node (LN2 tree) + its breadcrumb path.
+  const { selectedNode, path } = React.useMemo(
+    () => ({
+      selectedNode: selectedId ? (byId.get(selectedId) ?? null) : null,
+      path: chainOf(selectedId),
+    }),
+    [selectedId, byId, chainOf],
+  );
+
+  /**
+   * Select a node and mirror the whole cascade in the address bar.
+   *
+   * ``history.pushState`` rather than a router navigation: the ids live in a
+   * dynamic route segment, and changing one remounts the page subtree — which
+   * would refetch the tree and collapse the sidebar on every click.
+   */
+  const select = React.useCallback(
+    (id: string | null, { replace = false } = {}) => {
+      setSelectedId(id);
+      if (typeof window === 'undefined') return;
+      const url = ln2Href(chainOf(id));
+      if (window.location.pathname === url) return;
+      if (replace) window.history.replaceState(null, '', url);
+      else window.history.pushState(null, '', url);
+    },
+    [chainOf],
+  );
+
+  // Back/Forward walk the entries pushed above — re-read the id from the URL
+  // rather than trusting our own state.
   React.useEffect(() => {
-    if (selectedId && !byId.has(selectedId) && !loading) {
-      setSelectedId(null);
+    const onPop = () => {
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      // /ln2/{tank}/{quadrant}/… — the last segment is the selection.
+      setSelectedId(parts.length > 1 ? decodeURIComponent(parts.at(-1)!) : null);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  // A stale or deleted id shouldn't strand the page on a URL that shows
+  // nothing. Gated on `loaded`, not `!loading` — the node can't be judged
+  // missing until the tree it would live in has actually arrived. Replaced,
+  // not pushed: a dead link should not become a Back target.
+  React.useEffect(() => {
+    if (selectedId && !byId.has(selectedId) && loaded) {
+      select(null, { replace: true });
     }
-  }, [selectedId, byId, loading]);
+  }, [selectedId, byId, loaded, select]);
+
+  // Ancestors of the selection. The sidebar collapses anything below depth 2,
+  // so without this a deep link to a box would select it while leaving it
+  // hidden inside a shut rack — selected, highlighted, and invisible.
+  const expandedIds = React.useMemo(
+    () => new Set(path.slice(0, -1).map((n) => n.id)),
+    [path],
+  );
+
+  // Once the tree lands, canonicalise the URL — a deep link that named only the
+  // box, or listed a stale ancestor chain, becomes the full current cascade.
+  React.useEffect(() => {
+    if (!loaded || !selectedNode) return;
+    const url = ln2Href(path);
+    if (window.location.pathname !== url) window.history.replaceState(null, '', url);
+  }, [loaded, selectedNode, path]);
 
   return (
     <div className="flex h-[calc(100vh-52px)] min-h-0">
@@ -110,7 +190,7 @@ export function LocationSystemClient() {
           {canWrite && (
             <button
               type="button"
-              title="Add tank quadrant"
+              title="Add tank"
               onClick={() => setCreateMode({ kind: 'ln2-root' })}
               className="rounded p-1 text-text-3 hover:bg-bg-elev hover:text-text"
             >
@@ -128,7 +208,7 @@ export function LocationSystemClient() {
             </div>
           ) : tree.length === 0 ? (
             <p className="px-3 py-6 text-sm text-text-3">
-              No locations yet. Use + to add a tank quadrant.
+              No tanks yet. Use + to add one, then add up to four quadrants inside it.
             </p>
           ) : (
             <>
@@ -138,7 +218,8 @@ export function LocationSystemClient() {
                   node={n}
                   depth={0}
                   selectedId={selectedId}
-                  onSelect={setSelectedId}
+                  expandedIds={expandedIds}
+                  onSelect={select}
                 />
               ))}
             </>
@@ -176,19 +257,27 @@ export function LocationSystemClient() {
             node={selectedNode}
             path={path}
             canWrite={canWrite}
-            onSelectChild={setSelectedId}
+            onSelectChild={select}
             onAddChild={(parent) => setCreateMode({ kind: 'child', parent })}
             onRemoved={() => {
-              setSelectedId(null);
+              select(null, { replace: true });
               void reload(undefined, { silent: true });
             }}
             onChanged={() => void reload(undefined, { silent: true })}
           />
+        ) : loading ? (
+          // Nothing yet — on a deep link the selection exists but the tree it
+          // resolves against hasn't arrived, and flashing "Select a location"
+          // at someone who just selected one reads as though it was lost.
+          <div className="space-y-3 p-6">
+            <Skeleton className="h-8 w-64" />
+            <Skeleton className="h-24 w-full" />
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center p-8">
             <EmptyState
               title="Select a location"
-              hint="Pick a quadrant, rack, container or box from the hierarchy to see its contents."
+              hint="Pick a tank, quadrant, rack or box from the hierarchy to see its contents."
             />
           </div>
         )}
@@ -215,22 +304,45 @@ function TreeRow({
   node,
   depth,
   selectedId,
+  expandedIds,
   onSelect,
 }: {
   node: NodeTree;
   depth: number;
   selectedId: string | null;
+  /** Ancestors of the selection — these rows open so the selection is visible. */
+  expandedIds: Set<string>;
   onSelect: (id: string) => void;
 }) {
-  const [open, setOpen] = React.useState(depth < 2);
+  const onSelectedPath = expandedIds.has(node.id);
+  const [open, setOpen] = React.useState(depth < 2 || onSelectedPath);
+  // Reveal the selection when it moves into this branch — on a refresh of a
+  // deep link, or when the detail panel jumps to a child. Only forces open as
+  // the row BECOMES on-path, so a manual collapse afterwards still sticks.
+  React.useEffect(() => {
+    if (onSelectedPath) setOpen(true);
+  }, [onSelectedPath]);
   const hasChildren = node.children.length > 0;
   const Icon = NODE_ICON[node.node_type];
   const stats = subtreeStats(node);
   const selected = selectedId === node.id;
 
+  // Bring a deep-linked selection into view. Once, on mount only: scrolling on
+  // every selection change would yank the list under someone who is clicking
+  // through it, and a row they clicked is on screen already.
+  const rowRef = React.useRef<HTMLDivElement>(null);
+  const didScroll = React.useRef(false);
+  React.useEffect(() => {
+    if (selected && !didScroll.current) {
+      didScroll.current = true;
+      rowRef.current?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [selected]);
+
   return (
     <div>
       <div
+        ref={rowRef}
         className={cn(
           'group flex items-center gap-1 rounded-md pr-2',
           selected ? 'bg-warning/10' : 'hover:bg-bg-elev',
@@ -253,7 +365,11 @@ function TreeRow({
           type="button"
           onClick={() => {
             onSelect(node.id);
-            if (hasChildren) setOpen((v) => !v);
+            // Selecting only ever OPENS. Toggling here meant a second click on
+            // the row you were already looking at hid its contents, so picking
+            // a node twice collapsed the thing you were trying to see.
+            // Collapsing belongs to the chevron alone.
+            if (hasChildren) setOpen(true);
           }}
           className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
         >
@@ -278,6 +394,7 @@ function TreeRow({
             node={c}
             depth={depth + 1}
             selectedId={selectedId}
+            expandedIds={expandedIds}
             onSelect={onSelect}
           />
         ))}

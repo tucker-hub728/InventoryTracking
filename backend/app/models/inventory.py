@@ -821,6 +821,19 @@ class StockMovement(Base):
         ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    # Where the material actually WAS, captured as text when the row is written.
+    #
+    # The node ids above answer "where is that node now", which is a different
+    # question once a node can be re-hung under a new parent: moving a rack to
+    # another quadrant silently rewrites the address of every historical
+    # movement in the boxes beneath it. These columns freeze the address at the
+    # time of the event, so the ledger stops shifting under the reader.
+    #
+    # Text on purpose — a snapshot, not a reference. Nothing joins on them.
+    # NULL on rows written before this existed, and on the empty side of a
+    # one-sided movement (a receipt has no source; a shipment no destination).
+    from_location_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    to_location_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     movement_type: Mapped[str] = mapped_column(Text, nullable=False)
     # Whole units only (integer). qty_delta is signed; qty_abs is the magnitude.
     qty_delta: Mapped[int] = mapped_column(Integer, nullable=False)

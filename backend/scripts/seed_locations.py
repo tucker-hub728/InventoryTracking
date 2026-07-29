@@ -1,19 +1,36 @@
-"""Seed the Freezer + Warehouse location nodes.
+"""Seed the Materials Management location tree (REQ-2026-07-15-LOC-005/006).
 
-These two areas started as frontend mock; this makes them real
-``meta.location_nodes`` so unit-in (from Receipt Admin) and transfers can write
-real allocations against them.
+One shape, three levels — the same everywhere:
 
-Structure (SRS 2026-07-09 §6):
-    Freezer:  rooms + locations are seeded; freezer SUB-LOCATIONS are left
-              empty (added on the Freezers page — they are variable T-number
-              units, not a fixed set).
-      Materials Management (room)
-        Open-Inventory, -20°C Freezer 1/2/3   (locations, no sub-locations)
-      Analytical Lab (room)
-        -20°C Freezer, -80°C Freezer          (locations, no sub-locations)
-    Warehouse: shelves are the fixed A–Z set, so they ARE seeded.
-      Warehouse One (warehouse)        -> Shelf A … Shelf Z         (shelves)
+    Room (what LOC-005 calls a "location category")
+      → Location (an area in that room)
+        → Sub-location (the free-storage leaf; stock lands here)
+
+Materials Management holds two PEER locations. They are different node types
+only so the UI can tab between them — structurally they hang off the same room:
+
+    Materials Management                        room
+      Warehouse One                             warehouse   (ambient)
+        Shelf A … Shelf Z                       shelf       26 leaves
+      Minus-20 Freezers                         room_location (Cold Storage)
+        T90020B, T90020C, T90020D               sub_location  the equipment units
+
+Rules this seed honours:
+  * Nothing below shelf level — no bins, positions or slots (LOC-005).
+  * Nothing inside a freezer unit; placement is by physical labeling (LOC-006).
+  * A unit's name is free text following the client's equipment numbering
+    (T-number + suffix). Nothing here parses or validates it — the suffixes
+    B/C/D below are the client's current values, not a permitted set (LOC-006).
+  * "Open inventory" is descriptive language only and appears nowhere — the
+    ambient shelving IS Warehouse One (LOC-005). The old ``MM-OPEN`` node and
+    its Shelf A/B/C are gone, along with the duplicate ``MM-F1/F2/F3``.
+
+Cold Storage (LOC-002) also covers −80 °C freezers and 2–8 °C refrigerators.
+Only the −20 °C units are seeded: the client removed the −80 °C group from
+scope on 2026-07-29, and the refrigerator list is still outstanding (LOC-004).
+Both are added on the Materials Management page when they arrive.
+
+Analytical Lab was deleted from scope on 2026-07-29 (client) and is not seeded.
 
 Nodes need a creating user (``created_by_user_id`` is NOT NULL), so this runs as
 a script after users exist — not in a migration. Idempotent: a node whose
@@ -38,39 +55,31 @@ from sqlalchemy import select
 # (node_type, code, name, children)
 Node = tuple[str, str, str, list]
 
+# The client's −20 °C units in the Materials Management room, from their
+# equipment list. Free text — never parsed (LOC-006).
+MINUS_20_UNITS: tuple[str, ...] = ("T90020B", "T90020C", "T90020D")
 
-def _freezer_structure() -> list[Node]:
-    # Sub-locations are intentionally empty — they're added on the Freezers page.
+
+def _materials_management() -> list[Node]:
+    """Materials Management: Warehouse One + Minus-20 Freezers, as peers."""
+    shelves: list[Node] = [
+        ("shelf", f"WH1-{letter}", f"Shelf {letter}", [])
+        for letter in string.ascii_uppercase
+    ]
+    cold_units: list[Node] = [
+        ("sub_location", unit, unit, []) for unit in MINUS_20_UNITS
+    ]
     return [
         (
             "room",
             "MM",
             "Materials Management",
             [
-                ("room_location", "MM-OPEN", "Open-Inventory", []),
-                ("room_location", "MM-F1", "-20°C Freezer 1", []),
-                ("room_location", "MM-F2", "-20°C Freezer 2", []),
-                ("room_location", "MM-F3", "-20°C Freezer 3", []),
-            ],
-        ),
-        (
-            "room",
-            "AL",
-            "Analytical Lab",
-            [
-                ("room_location", "AL-F20", "-20°C Freezer", []),
-                ("room_location", "AL-F80", "-80°C Freezer", []),
+                ("warehouse", "WH1", "Warehouse One", shelves),
+                ("room_location", "MM-F20", "Minus-20 Freezers", cold_units),
             ],
         ),
     ]
-
-
-def _warehouse_structure() -> list[Node]:
-    shelves: list[Node] = [
-        ("shelf", f"WH1-{letter}", f"Shelf {letter}", [])
-        for letter in string.ascii_uppercase
-    ]
-    return [("warehouse", "WH1", "Warehouse One", shelves)]
 
 
 async def _creator_id(session) -> object | None:
@@ -118,7 +127,9 @@ async def _seed(session, nodes: list[Node], parent_id, creator_id, *, apply: boo
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser(description="Seed Freezer + Warehouse locations.")
+    parser = argparse.ArgumentParser(
+        description="Seed the Materials Management location tree."
+    )
     parser.add_argument(
         "--yes",
         action="store_true",
@@ -136,21 +147,17 @@ async def main() -> int:
             )
             return 1
 
-        print("Freezer:")
-        n1 = await _seed(
-            session, _freezer_structure(), None, creator_id, apply=args.yes
-        )
-        print("Warehouse:")
-        n2 = await _seed(
-            session, _warehouse_structure(), None, creator_id, apply=args.yes
+        print("Materials Management:")
+        created = await _seed(
+            session, _materials_management(), None, creator_id, apply=args.yes
         )
 
         if args.yes:
             await session.commit()
-            print(f"\nDone — created {n1 + n2} node(s).")
+            print(f"\nDone — created {created} node(s).")
         else:
             print(
-                f"\nDRY RUN — {n1 + n2} node(s) would be created. "
+                f"\nDRY RUN — {created} node(s) would be created. "
                 "Re-run with --yes to apply."
             )
     return 0

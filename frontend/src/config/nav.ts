@@ -7,7 +7,6 @@ import {
   Layers,
   LineChart,
   Package,
-  Refrigerator,
   Scale,
   Snowflake,
   Tags,
@@ -94,10 +93,19 @@ export const navSections: readonly NavSection[] = [
     title: 'Locations',
     items: [
       // The old combined /locations page now lives at /ln2 (redirect kept for
-      // bookmarks). Freezer + Warehouse are the new per-area sections.
+      // bookmarks).
       { id: 'ln2', label: 'LN2', href: '/ln2', icon: Snowflake, resource: 'inventory' },
-      { id: 'freezer', label: 'Freezers', href: '/freezer', icon: Refrigerator, resource: 'inventory' },
-      { id: 'warehouse', label: 'Warehouse', href: '/warehouse', icon: Warehouse, resource: 'inventory' },
+      // REQ-2026-07-15-LOC-005: Warehouse One is a location INSIDE the Materials
+      // Management room, not a peer of it — so there is no top-level Warehouse
+      // entry any more. It is a tab on this page, alongside Cold Storage
+      // (LOC-002, renamed from "Freezers"). /freezer and /warehouse redirect.
+      {
+        id: 'materials-management',
+        label: 'Materials Management',
+        href: '/materials-management',
+        icon: Warehouse,
+        resource: 'inventory',
+      },
       // View-only: the 5 seeded production floors and the WIP currently on them
       // (client 2026-07-22). Material moves only through a kit's issue/close-out.
       {

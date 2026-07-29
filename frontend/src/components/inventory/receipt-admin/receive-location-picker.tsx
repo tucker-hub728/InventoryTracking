@@ -73,7 +73,9 @@ export function collectLeaves(roots: NodeTree[]): StoreLeaf[] {
   return out;
 }
 
-/** Label for a cascade level, e.g. "Rack" or "Cassette / Cryo Box Rack". */
+/** Label for a cascade level, e.g. "Quadrant" or "Rack". Joins with " / " when
+ *  a level accepts more than one node type — nothing does today, but the
+ *  Phase 2 configurable cascade can reintroduce that. */
 function levelLabel(options: NodeTree[]): string {
   const types = Array.from(new Set(options.map((o) => o.node_type)));
   return types.map((t) => NODE_TYPE_LABEL[t]).join(' / ');

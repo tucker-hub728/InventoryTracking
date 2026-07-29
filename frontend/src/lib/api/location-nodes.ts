@@ -2,11 +2,12 @@
  * Location system API — wraps ``/api/v1/location-nodes`` and
  * ``/api/v1/allocations`` (Requirements v2 §4.1).
  *
- * Hierarchy: tank_quadrant → rack → (cassette | cryo_box_rack) → box. The
- * **Box** is the grid-bearing leaf (grid_rows × grid_cols); a lot is placed
- * into a (grid_row, grid_col) cell. Cassette / Cryo Box Rack are navigation
- * containers. Flat operational locations store lots directly. Only ``box`` and
- * ``flat`` nodes can hold a lot.
+ * LN2 hierarchy (REQ-2026-07-15-LOC-001): tank → quadrant (``tank_quadrant``,
+ * at most four per tank) → rack → box. The **Box** is the grid-bearing leaf
+ * (grid_rows × grid_cols); a lot is placed into a (grid_row, grid_col) cell.
+ * Cassette / Cryo Box Rack used to sit between rack and box and are retired.
+ * Materials Management runs room → location → sub-location alongside it. Only
+ * ``box``, ``sub_location`` and ``shelf`` can hold a lot.
  *
  * Quantity events go to the GxP ledger: ``consume`` (dispense/discard) and
  * ``transfer`` are e-signed (pass an ``evidence_id`` from a reauth). ``place``
@@ -17,10 +18,10 @@
 import { api } from './client';
 
 export type NodeType =
+  // LN2: tank → quadrant → rack → box (REQ-2026-07-15-LOC-001)
+  | 'tank'
   | 'tank_quadrant'
   | 'rack'
-  | 'cassette'
-  | 'cryo_box_rack'
   | 'box'
   // Freezer area: room → room_location → sub_location (free leaf)
   | 'room'
@@ -30,18 +31,23 @@ export type NodeType =
   | 'warehouse'
   | 'shelf'
   | 'flat'
-  // Retired (read-only — old rows only):
+  // Retired (read-only — old rows only). Cassette / Cryo Box Rack sat between
+  // Rack and Box until the client dropped them on 2026-07-29.
+  | 'cassette'
+  | 'cryo_box_rack'
   | 'cassette_rack'
   | 'sub_slot';
 
-/** Node types the UI can create. Freezer rooms/locations and the warehouse are
- *  seed-managed; the only free leaf the UI creates is a freezer sub_location. */
+/** Node types the UI can create. Rooms and the warehouse (with its A–Z shelves)
+ *  stay seed-managed. A `room_location` — a Cold Storage group such as
+ *  "Minus-80 Freezers" or "2–8 °C Refrigerators" — is creatable by a Super
+ *  Admin, since LOC-002 names groups the client has yet to supply (LOC-004). */
 export type CreatableNodeType =
+  | 'tank'
   | 'tank_quadrant'
   | 'rack'
-  | 'cassette'
-  | 'cryo_box_rack'
   | 'box'
+  | 'room_location'
   | 'sub_location';
 
 export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials' | 'production';
@@ -55,11 +61,12 @@ export type MovementType =
 
 /** Human labels for each node level. */
 export const NODE_TYPE_LABEL: Record<NodeType, string> = {
-  tank_quadrant: 'Tank Quadrant',
+  tank: 'Tank',
+  tank_quadrant: 'Quadrant',
   rack: 'Rack',
-  cassette: 'Cassette',
-  cryo_box_rack: 'Cryo Box Rack',
   box: 'Box',
+  cassette: 'Cassette (retired)',
+  cryo_box_rack: 'Cryo Box Rack (retired)',
   room: 'Room',
   room_location: 'Location',
   sub_location: 'Sub-location',
@@ -91,18 +98,20 @@ export const FLAT_CATEGORIES: [FlatCategory, ...FlatCategory[]] = [
 ];
 
 /**
- * Allowed child types for each LN2 level. A Rack accepts EITHER a Cassette or a
- * Cryo Box Rack (the user picks); everything else has a single child type. An
- * empty array = leaf (no children — the Box stores units in its grid cells).
+ * Allowed child types for each level. Every level now has a single child type;
+ * an empty array = leaf (the Box stores units in its grid cells). Cassette and
+ * Cryo Box Rack are retired, so a Rack holds Boxes directly.
  */
 export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
+  tank: ['tank_quadrant'],
   tank_quadrant: ['rack'],
-  rack: ['cassette', 'cryo_box_rack'],
-  cassette: ['box'],
-  cryo_box_rack: ['box'],
+  rack: ['box'],
   box: [],
-  // Freezer area — a Location holds sub-locations; rooms/warehouse are seeded.
-  room: [],
+  cassette: [],
+  cryo_box_rack: [],
+  // Materials Management — a room holds Cold Storage locations (LOC-002), each
+  // holding its equipment units. The warehouse and its shelves are seeded.
+  room: ['room_location'],
   room_location: ['sub_location'],
   sub_location: [],
   warehouse: [],
@@ -111,6 +120,17 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   cassette_rack: [],
   sub_slot: [],
 };
+
+/**
+ * The inverse of {@link CHILD_TYPES_OF} — which node types a given type may
+ * hang under. Drives the "move to" picker: a rack may be re-hung under any
+ * quadrant, never onto a box. Empty = a root, which cannot be moved at all.
+ */
+export function parentTypesOf(type: NodeType): NodeType[] {
+  return (Object.keys(CHILD_TYPES_OF) as NodeType[]).filter((parent) =>
+    CHILD_TYPES_OF[parent].includes(type as CreatableNodeType),
+  );
+}
 
 export interface LocationNode {
   id: string;
@@ -346,6 +366,13 @@ export const locationNodesApi = {
 
   rename: (id: string, name: string) =>
     api.patch<LocationNode>(`/location-nodes/${id}`, { json: { name } }),
+
+  /** Re-hang a node under a new parent (super-admin). The whole subtree comes
+   *  along — nothing inside is re-placed and no stock moves. */
+  move: (id: string, parentId: string) =>
+    api.patch<LocationNode>(`/location-nodes/${id}/parent`, {
+      json: { parent_id: parentId },
+    }),
 
   updateGrid: (id: string, input: GridUpdateInput) =>
     api.put<LocationNode>(`/location-nodes/${id}/grid`, { json: input }),

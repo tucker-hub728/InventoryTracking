@@ -63,12 +63,13 @@ function autoCode(name: string): string {
   return `${base || 'NODE'}-${suffix}`;
 }
 
-/** Create a tank quadrant (root, optionally dedicated), an LN2 child node
- *  (cassette / cryo box rack under a rack, or a grid-bearing box), or a flat
- *  location. */
+/** Create an LN2 tank (the root) or a child node — a quadrant, a rack, or a
+ *  grid-bearing box. */
 export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props) {
   const [name, setName] = React.useState('');
-  // For a rack child the user chooses cassette vs cryo_box_rack.
+  // Every level now has exactly one child type, so this never offers a choice —
+  // kept because the picker costs nothing and Phase 2 (the configurable
+  // cascade) can reintroduce levels that branch.
   const childOptions = mode.kind === 'child' ? CHILD_TYPES_OF[mode.parent.node_type] : [];
   const [childType, setChildType] = React.useState<CreatableNodeType>(
     childOptions[0] ?? 'box',
@@ -88,7 +89,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
   // Resolve the node type being created.
   const nodeType: CreatableNodeType | null =
     mode.kind === 'ln2-root'
-      ? 'tank_quadrant'
+      ? 'tank'
       : childOptions.length === 0
         ? null
         : childOptions.length === 1
@@ -97,9 +98,6 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
 
   const isBox = nodeType === 'box';
   const isQuadrant = nodeType === 'tank_quadrant';
-  // A box directly under a cassette is single-column.
-  const parentIsCassette =
-    mode.kind === 'child' && mode.parent.node_type === 'cassette';
 
   React.useEffect(() => {
     if (!open) {
@@ -114,11 +112,6 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-
-  // Lock a cassette box to a single column.
-  React.useEffect(() => {
-    if (isBox && parentIsCassette) setGridCols('1');
-  }, [isBox, parentIsCassette]);
 
   // Load customers / products only when creating a quadrant (for dedication).
   React.useEffect(() => {
@@ -143,7 +136,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
 
   const title =
     mode.kind === 'ln2-root'
-      ? 'Add Tank Quadrant'
+      ? 'Add Tank'
       : `Add ${nodeType ? NODE_TYPE_LABEL[nodeType] : 'child'}`;
 
   const submit = async () => {
@@ -161,10 +154,6 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
       cols = Number(gridCols);
       if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
         setError('Grid rows and columns must be whole numbers ≥ 1.');
-        return;
-      }
-      if (parentIsCassette && cols !== 1) {
-        setError('A box under a cassette is single-column (columns = 1).');
         return;
       }
     }
@@ -210,11 +199,13 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
           <DialogDescription>
             {mode.kind === 'child'
               ? `Under ${NODE_TYPE_LABEL[mode.parent.node_type]} ${mode.parent.name}.`
-              : 'A top-level LN2 node. Build the hierarchy down to boxes.'}
+              : 'A tank, identified by its main tank number. Add up to four quadrants inside it, then racks and boxes.'}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="space-y-3">
-          {/* Cassette vs Cryo Box Rack choice (rack children only). */}
+          {/* Level picker — only shown when a level accepts more than one child
+              type. Nothing does today; kept for the Phase 2 configurable
+              cascade, which can reintroduce branching levels. */}
           {mode.kind === 'child' && childOptions.length > 1 && (
             <div className="space-y-1.5">
               <Label>Container type</Label>
@@ -234,7 +225,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
                 </SelectContent>
               </Select>
               <p className="text-xs text-text-3">
-                Cassette = single-column of boxes · Cryo Box Rack = grid of boxes.
+                Pick which kind of node to add under {mode.parent.name}.
               </p>
             </div>
           )}
@@ -274,17 +265,11 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
                   step="1"
                   aria-label="Columns"
                   value={gridCols}
-                  disabled={parentIsCassette}
                   onChange={(e) => setGridCols(e.target.value)}
                   className="w-20 font-mono"
                 />
                 <span className="text-xs text-text-3">rows × columns</span>
               </div>
-              {parentIsCassette && (
-                <p className="text-xs text-text-3">
-                  A cassette box is a single column — set the number of rows.
-                </p>
-              )}
             </div>
           )}
 

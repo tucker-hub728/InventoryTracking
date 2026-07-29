@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Container,
   Maximize2,
+  MoveRight,
   Package,
   Plus,
   Search,
@@ -40,6 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { SearchableSelect } from '@/components/ui/searchable-select';
 import { toast } from '@/components/ui/sonner';
 import {
   Sheet,
@@ -61,6 +63,7 @@ import type { ReauthResponse } from '@/lib/api/auth';
 import { cn } from '@/lib/utils';
 import {
   locationNodesApi,
+  parentTypesOf,
   subtreeStats,
   CHILD_TYPES_OF,
   NODE_TYPE_LABEL,
@@ -71,6 +74,7 @@ import {
   type NodeTree,
   type NodeType,
 } from '@/lib/api/location-nodes';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import {
   LocationLeafPicker,
@@ -80,11 +84,13 @@ import {
 import { BoxGrid, rowLabel } from './box-grid';
 
 export const NODE_ICON: Record<NodeType, LucideIcon> = {
+  tank: Container,
   tank_quadrant: Boxes,
   rack: Server,
+  box: Box,
+  // Retired LN2 levels — no longer creatable, kept so legacy rows still render.
   cassette: Container,
   cryo_box_rack: Boxes,
-  box: Box,
   // Freezer / warehouse nodes don't render in this (LN2) panel, but the map
   // must cover every NodeType.
   room: Container,
@@ -104,7 +110,14 @@ const LN2_UNIT_IN_ENABLED = false;
 
 /** Plural noun for a node's children, used in the "N boxes" header. */
 function childUnit(nodeType: NodeType, n: number): string {
-  const label = nodeType === 'tank_quadrant' ? 'rack' : nodeType === 'rack' ? 'container' : 'box';
+  const label =
+    nodeType === 'tank'
+      ? 'quadrant'
+      : nodeType === 'tank_quadrant'
+        ? 'rack'
+        : nodeType === 'rack'
+          ? 'box'
+          : 'box';
   return `${label}${n === 1 ? '' : 's'}`;
 }
 
@@ -183,6 +196,29 @@ export function NodeDetailPanel({
   const [placeQty, setPlaceQty] = React.useState(isBox ? '1' : '');
   const [showResize, setShowResize] = React.useState(false);
   const [showEdit, setShowEdit] = React.useState(false);
+  const [showMove, setShowMove] = React.useState(false);
+  // Re-hanging a node is super-admin-only (LOC-004, enforced by the API).
+  const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  // Which LN2 nodes could legally become this node's parent. Empty for a root.
+  const movableTo = React.useMemo(() => {
+    const allowed = parentTypesOf(node.node_type);
+    if (allowed.length === 0 || !trees?.ln2) return [];
+    const out: NodeTree[] = [];
+    const walk = (n: NodeTree) => {
+      if (allowed.includes(n.node_type) && n.id !== node.parent_id) out.push(n);
+      n.children.forEach(walk);
+    };
+    trees.ln2.forEach(walk);
+    // Never offer this node or anything inside it — that would detach the
+    // branch from every root. The API refuses it too.
+    const inside = new Set<string>();
+    const mark = (n: NodeTree) => {
+      inside.add(n.id);
+      n.children.forEach(mark);
+    };
+    mark(node);
+    return out.filter((n) => !inside.has(n.id));
+  }, [node, trees]);
   // Bumped after each successful action so open inline forms remount shut.
   const [opSeq, setOpSeq] = React.useState(0);
 
@@ -459,8 +495,6 @@ export function NodeDetailPanel({
   const utilisation = stats.capacity > 0 ? Math.round((stats.occupied / stats.capacity) * 100) : 0;
   // Occupied = holds units (its own, or a descendant's). Blocks remove/resize.
   const isOccupied = isFlat ? node.active_allocation_count > 0 : stats.occupied > 0;
-  // A box directly under a cassette is single-column (cols locked to 1).
-  const parentIsCassette = path[path.length - 2]?.node_type === 'cassette';
 
   // Would the current placement exceed the lot's remaining-to-place cap?
   const placingCount = isBox ? selectedCells.size : Number(placeQty) || 0;
@@ -516,6 +550,14 @@ export function NodeDetailPanel({
                 title={isOccupied ? 'Box is occupied — empty it before resizing' : undefined}
               >
                 <Maximize2 size={14} /> Resize
+              </Button>
+            )}
+            {/* Re-hang this node under a different parent (LOC-004). Hidden for
+                roots, which have nothing to hang under, and for non-super-admins
+                — the API refuses either way. */}
+            {isSuperAdmin && movableTo.length > 0 && (
+              <Button size="sm" variant="ghost" onClick={() => setShowMove(true)}>
+                <MoveRight size={14} /> Move
               </Button>
             )}
             {/* Remove is hidden for now. */}
@@ -823,12 +865,21 @@ export function NodeDetailPanel({
           onChanged();
         }}
       />
+      <MoveDialog
+        open={showMove}
+        onOpenChange={setShowMove}
+        node={node}
+        candidates={movableTo}
+        onDone={() => {
+          setShowMove(false);
+          onChanged();
+        }}
+      />
       {isBox && (
         <ResizeDialog
           open={showResize}
           onOpenChange={setShowResize}
           node={node}
-          parentIsCassette={parentIsCassette}
           onDone={() => {
             setShowResize(false);
             onChanged();
@@ -1579,36 +1630,131 @@ function BatchOutPanel({
   );
 }
 
+// ── Re-hang a node under a different parent (dialog) ─────────────────────
+
+/**
+ * Move a node — and everything inside it — to a new parent (LOC-004).
+ *
+ * Only the parent changes. Nothing inside is re-placed and no stock moves: a
+ * lot allocation points at its box's id, never at a path, so every address
+ * beneath recomputes on its own. That is the "cascade" part.
+ */
+function MoveDialog({
+  open,
+  onOpenChange,
+  node,
+  candidates,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  node: NodeTree;
+  /** Nodes that may legally become the parent — right type, not inside this one. */
+  candidates: NodeTree[];
+  onDone: () => void;
+}) {
+  const [target, setTarget] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) setTarget('');
+  }, [open]);
+
+  const inside = subtreeStats(node).occupied;
+
+  const save = async () => {
+    if (!target) return;
+    setBusy(true);
+    try {
+      await locationNodesApi.move(node.id, target);
+      toast.success(`${node.name} moved`);
+      onDone();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Failed to move.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Move {node.name}</DialogTitle>
+          <DialogDescription>
+            Everything inside comes along
+            {inside > 0 ? ` — including ${inside} stored unit${inside === 1 ? '' : 's'}` : ''}.
+            Past ledger entries keep the address they were recorded with.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="space-y-3">
+          <div className="space-y-1.5">
+            <Label className="text-xs">New parent</Label>
+            <SearchableSelect
+              value={target}
+              onChange={setTarget}
+              placeholder="Choose where it should hang…"
+              aria-label="New parent"
+              // Lives inside a Dialog, so the popover must own its scroll-lock.
+              modal
+              options={candidates.map((c) => ({
+                value: c.id,
+                label: `${c.name} · ${NODE_TYPE_LABEL[c.node_type]}`,
+                searchText: `${c.name} ${c.code}`,
+              }))}
+            />
+            {candidates.length === 0 && (
+              <p className="text-xs text-text-3">
+                Nowhere to move this — no other {NODE_TYPE_LABEL[node.node_type].toLowerCase()}{' '}
+                parent exists yet.
+              </p>
+            )}
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button type="button" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="button" variant="primary" onClick={save} disabled={busy || !target}>
+            {busy ? 'Moving…' : 'Move'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ── Resize a box's grid (dialog) ─────────────────────────────────────────
 
 function ResizeDialog({
   open,
   onOpenChange,
   node,
-  parentIsCassette,
   onDone,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   node: NodeTree;
-  parentIsCassette: boolean;
   onDone: () => void;
 }) {
   const [rows, setRows] = React.useState(String(node.grid_rows ?? 1));
-  const [cols, setCols] = React.useState(parentIsCassette ? '1' : String(node.grid_cols ?? 1));
+  // Columns are freely editable: the single-column lock belonged to a box under
+  // a cassette, and the cassette level is retired (client 2026-07-29). A box now
+  // hangs off a rack and carries whatever grid it is given.
+  const [cols, setCols] = React.useState(String(node.grid_cols ?? 1));
   const [busy, setBusy] = React.useState(false);
 
   // Reset the inputs whenever the dialog (re)opens for a node.
   React.useEffect(() => {
     if (open) {
       setRows(String(node.grid_rows ?? 1));
-      setCols(parentIsCassette ? '1' : String(node.grid_cols ?? 1));
+      setCols(String(node.grid_cols ?? 1));
     }
-  }, [open, node.grid_rows, node.grid_cols, parentIsCassette]);
+  }, [open, node.grid_rows, node.grid_cols]);
 
   const save = async () => {
     const r = Number(rows);
-    const c = parentIsCassette ? 1 : Number(cols);
+    const c = Number(cols);
     if (!Number.isInteger(r) || r < 1 || !Number.isInteger(c) || c < 1) {
       toast.error('Rows and columns must be whole numbers ≥ 1.');
       return;
@@ -1655,17 +1801,11 @@ function ResizeDialog({
                 min={1}
                 step="1"
                 value={cols}
-                disabled={parentIsCassette}
                 onChange={(e) => setCols(e.target.value)}
                 className="font-mono"
               />
             </div>
           </div>
-          {parentIsCassette && (
-            <p className="mt-2 text-xs text-text-3">
-              A box under a cassette is single-column — set the number of rows.
-            </p>
-          )}
         </DialogBody>
         <DialogFooter>
           <Button type="button" onClick={() => onOpenChange(false)} disabled={busy}>
