@@ -4,6 +4,7 @@ import * as React from 'react';
 
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { isBuiltTier } from '@/lib/api/tiers';
+import { kitsApi, type ApiItemKitConsumption } from '@/lib/api/kits';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timeline';
@@ -22,6 +23,19 @@ import { useInventoryDetail } from './inventory-detail-context';
 
 export function ItemLedgerPanel() {
   const { item, ledger, onReverseRequest } = useInventoryDetail();
+  // Per-kit consumption for this item. Using material writes no stock movement
+  // (it left the balance at Kitted time), so the ledger can't show the "used"
+  // figure REQ-2026-07-09-TRX-003 asks for without this. Failure is silent —
+  // the ledger is still perfectly readable without the reconciliation lines.
+  const [kitUsage, setKitUsage] = React.useState<ApiItemKitConsumption[]>([]);
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    kitsApi
+      .itemConsumption(item.uuid, { signal: ctrl.signal })
+      .then((r) => setKitUsage(r.lines))
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [item.uuid]);
   // The near-expiry window is a per-item setting, managed from the
   // create / edit item dialogs. The ledger only *reads* it to colour the
   // expiry pills (green / amber / red) — no editing here.
@@ -67,6 +81,7 @@ export function ItemLedgerPanel() {
           // Only built items (finished goods / sub-assemblies) can ship to a
           // customer, so the Customer column is shown only for them.
           showCustomer={isBuiltTier(item.tierType)}
+          kitUsage={kitUsage}
         />
       </div>
     </div>

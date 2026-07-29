@@ -2,12 +2,11 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { ArrowRight, Boxes, CheckCircle2, Factory, Pencil, Plus, Search, Wrench } from 'lucide-react';
+import { Boxes, Factory, Pencil, Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
-import { KitStatusBadge } from '@/components/reconciliation/recon-bits';
-import { ItemLink } from '@/components/inventory/item-link';
+import { DEFAULT_FLOOR_TAB } from '@/components/production/floor-tabs';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -19,12 +18,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { Sheet, SheetBody, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { useAuthStore, selectIsSuperAdmin } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
-import { kitsApi, type ApiFloorKitsResponse } from '@/lib/api/kits';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 
 /**
@@ -45,7 +42,6 @@ export function ProductionClient() {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState('');
-  const [selected, setSelected] = React.useState<LocationNode | null>(null);
   const [adding, setAdding] = React.useState(false);
   const [renaming, setRenaming] = React.useState<LocationNode | null>(null);
 
@@ -155,9 +151,10 @@ export function ProductionClient() {
                   const busy = floor.active_allocation_count > 0;
                   return (
                     <div key={floor.id} className="group relative">
-                      <button
-                        type="button"
-                        onClick={() => setSelected(floor)}
+                      {/* Opens the floor's own page (client 2026-07-28) — the
+                          slide-out couldn't carry a busy floor's history. */}
+                      <Link
+                        href={`/production/${floor.id}/${DEFAULT_FLOOR_TAB}`}
                         className={cn(
                           'flex w-full flex-col gap-3 rounded-lg border border-border bg-bg-elev p-4 text-left transition-colors',
                           'hover:border-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent',
@@ -177,7 +174,7 @@ export function ProductionClient() {
                           )}
                         </div>
                         <div className="text-sm font-medium text-text">{floor.name}</div>
-                      </button>
+                      </Link>
                       {canManage && (
                         <button
                           type="button"
@@ -201,8 +198,6 @@ export function ProductionClient() {
           </>
         )}
       </div>
-
-      <ProductionFloorSheet floor={selected} onOpenChange={(o) => !o && setSelected(null)} />
 
       <AddAreaDialog
         open={adding}
@@ -390,241 +385,6 @@ function RenameAreaDialog({
   );
 }
 
-/** Floor detail: the WIP on a floor grouped by the KIT it belongs to, so you can
- *  see which build each pile of material is for (client 2026-07-22). */
-function ProductionFloorSheet({
-  floor,
-  onOpenChange,
-}: {
-  floor: LocationNode | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const [data, setData] = React.useState<ApiFloorKitsResponse | null>(null);
-
-  React.useEffect(() => {
-    if (!floor) return;
-    const ctrl = new AbortController();
-    setData(null);
-    void kitsApi
-      .onFloor(floor.id, { signal: ctrl.signal })
-      .then((r) => setData(r))
-      .catch(() => setData({ active: [], completed: [] }));
-    return () => ctrl.abort();
-  }, [floor?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const active = data?.active ?? [];
-  const completed = data?.completed ?? [];
-  const wip = active.reduce((a, k) => a + k.on_floor_total, 0);
-
-  return (
-    <Sheet open={Boolean(floor)} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="sm:w-[560px]">
-        <SheetHeader>
-          <SheetTitle className="flex items-center gap-2">
-            <Factory size={16} className="text-accent" /> {floor?.name}
-          </SheetTitle>
-          <p className="text-xs text-text-3">
-            {data === null
-              ? 'Loading…'
-              : `${active.length} building · ${wip} unit${wip === 1 ? '' : 's'} of WIP · ${completed.length} completed here.`}
-          </p>
-        </SheetHeader>
-        <SheetBody className="space-y-4 px-4 py-4">
-          {data === null ? (
-            <p className="p-6 text-center text-xs text-text-3">Loading…</p>
-          ) : active.length === 0 && completed.length === 0 ? (
-            <EmptyState
-              icon={Factory}
-              title="Floor is idle"
-              hint="Material appears here when a kit is issued to this floor."
-            />
-          ) : (
-            <>
-              {/* Live WIP */}
-              <section className="space-y-2">
-                <h3 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-text-3">
-                  <Wrench size={12} /> In production
-                </h3>
-                {active.length === 0 ? (
-                  <p className="rounded-md border border-dashed border-border px-3 py-3 text-center text-xs text-text-3">
-                    Nothing building here right now.
-                  </p>
-                ) : (
-                  active.map((kit) => (
-                    <div key={kit.id} className="rounded-lg border border-border bg-bg-elev">
-                      <Link
-                        href={`/reconciliation/${kit.id}`}
-                        className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-2.5 transition-colors hover:bg-surface"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs font-semibold text-accent">
-                              {kit.kit_number}
-                            </span>
-                            <KitStatusBadge status={kit.status} />
-                          </div>
-                          <div className="mt-0.5 truncate text-[11px] text-text-3">
-                            Building {kit.target_qty} ×{' '}
-                            <span className="font-mono">{kit.item_number}</span>
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          {/* What this kit has already produced (KIT-007
-                              incremental) alongside its remaining WIP. */}
-                          {kit.good_qty > 0 && <Badge tone="success">{kit.good_qty} made</Badge>}
-                          <Badge tone="warning">{kit.on_floor_total} on floor</Badge>
-                          <ArrowRight size={14} className="text-text-3" />
-                        </div>
-                      </Link>
-                      {/* On floor — remaining WIP */}
-                      {kit.lines.length > 0 && (
-                        <div className="px-3 pt-2">
-                          <SubHead icon={<Wrench size={11} />}>On floor</SubHead>
-                          <ul className="divide-y divide-border/50">
-                            {kit.lines.map((line) => (
-                              <li
-                                key={line.item_id}
-                                className="flex items-center justify-between gap-2 py-1.5"
-                              >
-                                <ItemLink
-                                  itemNumber={line.item_number}
-                                  itemId={line.item_id}
-                                  className="truncate font-mono text-xs"
-                                />
-                                <span className="shrink-0 font-mono text-xs tabular-nums text-text">
-                                  {line.on_floor_qty}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      {/* Batches produced so far — each a minted lot (KIT-007). */}
-                      {kit.batches.length > 0 && (
-                        <div className="border-t border-border/60 px-3 pt-2">
-                          <SubHead icon={<Boxes size={11} />}>Batches produced</SubHead>
-                          <ul className="divide-y divide-border/50">
-                            {kit.batches.map((b, i) => (
-                              <li
-                                key={`${b.lot_number ?? 'lot'}-${i}`}
-                                className="flex items-center justify-between gap-2 py-1.5"
-                              >
-                                <span className="min-w-0 truncate">
-                                  <span className="font-mono text-xs text-text">
-                                    {b.lot_number ?? '—'}
-                                  </span>
-                                  {b.produced_at && (
-                                    <span className="ml-1.5 text-[11px] text-text-3">
-                                      · {new Date(b.produced_at).toLocaleDateString()}
-                                    </span>
-                                  )}
-                                </span>
-                                <span className="shrink-0 font-mono text-xs tabular-nums text-success">
-                                  {b.qty} made
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      {/* Consumed so far — material the produced batches drew from the floor. */}
-                      {kit.consumed.length > 0 && (
-                        <div className="border-t border-border/60 px-3 pt-2">
-                          <SubHead icon={<CheckCircle2 size={11} />}>Consumed so far</SubHead>
-                          <ul className="divide-y divide-border/50">
-                            {kit.consumed.map((line) => (
-                              <li
-                                key={line.item_id}
-                                className="flex items-center justify-between gap-2 py-1.5"
-                              >
-                                <ItemLink
-                                  itemNumber={line.item_number}
-                                  itemId={line.item_id}
-                                  className="truncate font-mono text-xs"
-                                />
-                                <span className="shrink-0 font-mono text-xs tabular-nums text-text-3">
-                                  −{line.used_qty}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  ))
-                )}
-              </section>
-
-              {/* Consumed by completed builds */}
-              {completed.length > 0 && (
-                <section className="space-y-2">
-                  <h3 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-text-3">
-                    <CheckCircle2 size={12} /> Consumed here
-                  </h3>
-                  {completed.map((kit) => (
-                    <div key={kit.id} className="rounded-lg border border-border bg-bg-elev">
-                      <Link
-                        href={`/reconciliation/${kit.id}`}
-                        className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-2.5 transition-colors hover:bg-surface"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs font-semibold text-accent">
-                              {kit.kit_number}
-                            </span>
-                            <Badge tone="success">{kit.good_qty ?? 0} made</Badge>
-                            {(kit.scrap_qty ?? 0) > 0 && (
-                              <Badge tone="danger">{kit.scrap_qty} scrapped</Badge>
-                            )}
-                          </div>
-                          <div className="mt-0.5 truncate text-[11px] text-text-3">
-                            Built <span className="font-mono">{kit.item_number}</span>
-                            {kit.closed_at && ` · ${new Date(kit.closed_at).toLocaleDateString()}`}
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          <Badge tone="neutral">{kit.consumed_total} consumed</Badge>
-                          <ArrowRight size={14} className="text-text-3" />
-                        </div>
-                      </Link>
-                      <ul className="divide-y divide-border/50">
-                        {kit.lines.map((line) => (
-                          <li
-                            key={line.item_id}
-                            className="flex items-center justify-between gap-2 px-3 py-1.5"
-                          >
-                            <ItemLink
-                              itemNumber={line.item_number}
-                              itemId={line.item_id}
-                              className="truncate font-mono text-xs"
-                            />
-                            <span className="shrink-0 font-mono text-xs tabular-nums text-text-3">
-                              −{line.used_qty}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </section>
-              )}
-            </>
-          )}
-        </SheetBody>
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-/** Small labelled divider inside a kit card (On floor / Batches / Consumed). */
-function SubHead({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <p className="flex items-center gap-1 pb-0.5 text-[10px] font-medium uppercase tracking-wider text-text-3">
-      {icon}
-      {children}
-    </p>
-  );
-}
 
 function Stat({
   label,
