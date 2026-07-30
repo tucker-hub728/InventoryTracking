@@ -12,9 +12,42 @@
  * throws at request time (which a build never catches). Same reasoning as
  * ``components/production/floor-tabs.ts``.
  */
+/**
+ * The Materials Management room's node code, as seeded by
+ * ``backend/scripts/seed_materials_management.py``.
+ *
+ * ``/location-nodes/freezer-tree`` returns EVERY room (Cold Storage and
+ * Analytical Lab are rooms too), so this page has to name the one it is, rather
+ * than take the first room off the list.
+ */
+export const MM_ROOM_CODE = 'MM';
+
+/**
+ * The room's Minus-20 Freezers location, as seeded.
+ *
+ * The second tab IS this location, so the tab resolves it by code and renders its
+ * units directly. Anything else that turns up as a location in this room is an
+ * anomaly — LOC-005 allows exactly two — and the page says so rather than
+ * quietly drawing it as though it belonged.
+ */
+export const MM_FREEZER_LOCATION_CODE = 'MM-F20';
+
+/**
+ * The second tab is labelled for what it actually holds, not for the category it
+ * belongs to. "Cold Storage" now names a room of its own (LOC-002), and using
+ * the same word for this tab meant two different things in the sidebar and the
+ * page carried one name. LOC-005 calls this location "Minus-20 Freezers", so
+ * that is what it says.
+ *
+ * The route segment stays ``cold-storage`` — existing links and bookmarks point
+ * at it, and a segment rename would break them for no gain.
+ */
 export const MM_TABS: readonly { seg: string; label: string }[] = [
-  { seg: 'warehouse', label: 'Warehouse' },
-  { seg: 'cold-storage', label: 'Cold Storage' },
+  // Both labels are LOC-005's own words — "Warehouse One" and "Minus-20
+  // Freezers" are what the requirement calls the room's two peer locations, so
+  // the UI says exactly that rather than a shortened form.
+  { seg: 'warehouse', label: 'Warehouse One' },
+  { seg: 'cold-storage', label: 'Minus-20 Freezers' },
 ];
 
 export const MM_TAB_SEGMENTS: readonly string[] = MM_TABS.map((t) => t.seg);

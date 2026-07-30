@@ -673,9 +673,28 @@ async def _require_placeable(db, node_id: uuid.UUID, field: str):
     return node
 
 
-async def _validate_return_cells(db, node, qty: int, cells: list, field: str) -> None:
+async def _validate_return_cells(
+    db,
+    node,
+    qty: int,
+    cells: list,
+    field: str,
+    claimed: dict[uuid.UUID, set[tuple[int, int]]] | None = None,
+) -> None:
     """A return into a box needs one free cell per unit (cells hold exactly one).
-    Bulk nodes take no cells at all."""
+    Bulk nodes take no cells at all.
+
+    ``claimed`` accumulates the cells already spoken for EARLIER IN THE SAME
+    REQUEST, keyed by node. Without it each line was validated in isolation:
+    two components both returning into Box 1.1.3 could each pick A1, since
+    neither is in ``occupied_cells`` until something commits. Both passed, and
+    the collision surfaced as a unique-violation on
+    ``uq_lot_allocations_cell`` — a 500 where the operator needed a sentence
+    telling them which cell to change.
+
+    Callers that validate more than one destination MUST pass one dict for the
+    whole request. It is mutated here.
+    """
     is_grid = node.grid_rows is not None
     if not is_grid:
         if cells:
@@ -705,6 +724,20 @@ async def _validate_return_cells(db, node, qty: int, cells: list, field: str) ->
                 code="cell_duplicated",
             )
         seen.add(pos)
+    # Cells another destination in THIS request already took. Checked before the
+    # stored ones because it is the more confusing collision: nothing in the
+    # database looks wrong, so "already occupied" would be a lie.
+    if claimed is not None:
+        conflict = seen & claimed.get(node.id, set())
+        if conflict:
+            row, col = sorted(conflict)[0]
+            raise ValidationError(
+                f"{field}: cell {row}×{col} in {node.name} is already taken by "
+                "another component in this same request — one cell holds one "
+                "unit. Pick a free cell, or send that component to another box.",
+                code="cell_taken_in_request",
+            )
+
     taken = await kit_repo.occupied_cells(db, node.id)
     clash = seen & taken
     if clash:
@@ -715,9 +748,12 @@ async def _validate_return_cells(db, node, qty: int, cells: list, field: str) ->
             code="cell_occupied",
         )
 
+    if claimed is not None:
+        claimed.setdefault(node.id, set()).update(seen)
+
 
 async def _resolve_output_destinations(
-    db, payload, good: int
+    db, payload, good: int, claimed: dict[uuid.UUID, set[tuple[int, int]]] | None = None
 ) -> list[tuple[uuid.UUID, int, list]]:
     """Normalise + validate the produce / close output into placeable
     ``(node, qty, cells)`` destinations.
@@ -754,9 +790,60 @@ async def _resolve_output_destinations(
             )
         seen.add(node_uuid)
         node_obj = await _require_placeable(db, node_uuid, "Output location")
-        await _validate_return_cells(db, node_obj, qty, cells, "Output location")
+        await _validate_return_cells(db, node_obj, qty, cells, "Output location", claimed)
         dests.append((node_uuid, qty, cells))
     return dests
+
+
+async def _resolve_return_destinations(
+    db,
+    *,
+    destinations: list,
+    fallback_node: uuid.UUID | None,
+    fallback_cells: list,
+    total: int,
+    claimed: dict[uuid.UUID, set[tuple[int, int]]] | None = None,
+) -> list[tuple[uuid.UUID, int, list]]:
+    """Normalise + validate a return into placeable ``(node, qty, cells)`` slices.
+
+    The return counterpart of :func:`_resolve_output_destinations`, and
+    deliberately the same shape: material coming back off the floor may be SPLIT
+    across several locations (client 2026-07-30) when one box hasn't enough free
+    cells for all of it. Before this, a nearly-full box dead-ended the return with
+    ``cell_count_mismatch`` and no way forward but choosing an entirely different
+    location for every unit.
+
+    ``destinations`` wins when present and must total ``total``; otherwise
+    ``fallback_node`` (+ ``fallback_cells``) takes the whole quantity, which is
+    the single-location path every caller used before.
+    """
+    if destinations:
+        raw = [(d.location_node_id, d.qty, d.return_cells) for d in destinations]
+        placed = sum(qty for _, qty, _ in raw)
+        if placed != total:
+            raise ValidationError(
+                f"Return placement must total {total} unit(s) — got {placed}.",
+                code="return_qty_mismatch",
+            )
+    elif fallback_node is not None:
+        raw = [(str(fallback_node), total, fallback_cells)]
+    else:
+        raise ValidationError("A return location is required", code="return_required")
+
+    seen: set[uuid.UUID] = set()
+    out: list[tuple[uuid.UUID, int, list]] = []
+    for node_str, qty, cells in raw:
+        node_uuid = _parse_uuid_or_422(node_str, field="return_location_node_id")
+        if node_uuid in seen:
+            raise ValidationError(
+                "Each return location can be used once — combine the quantities.",
+                code="return_duplicate_node",
+            )
+        seen.add(node_uuid)
+        node_obj = await _require_placeable(db, node_uuid, "Return location")
+        await _validate_return_cells(db, node_obj, qty, cells, "Return location", claimed)
+        out.append((node_uuid, qty, cells))
+    return out
 
 
 async def _resolve_output_lot_number(db, payload) -> str | None:
@@ -1859,6 +1946,10 @@ async def return_excess(
     on_floor = _on_floor(line)
     before = _kit_snapshot(kit)
 
+    # One cell can hold one unit, so every destination in THIS request competes
+    # for the same free cells. Accumulated across all of them below.
+    claimed_cells: dict[uuid.UUID, set[tuple[int, int]]] = {}
+
     if payload.sources:
         # Multi-source: the operator picked which on-floor LOT(s) to return and
         # where. Validate each pick placeable + its cells, cap the total at the
@@ -1872,14 +1963,26 @@ async def return_excess(
         total = 0
         for s in payload.sources:
             lot_uuid = _parse_uuid_or_422(s.lot_id, field="lot_id")
-            node_uuid = _parse_uuid_or_422(
-                s.return_location_node_id, field="return_location_node_id"
+            fallback = (
+                _parse_uuid_or_422(
+                    s.return_location_node_id, field="return_location_node_id"
+                )
+                if s.return_location_node_id
+                else None
             )
-            node = await _require_placeable(db, node_uuid, "Return location")
-            await _validate_return_cells(db, node, s.qty, s.return_cells, "Return location")
+            # One pick's units may themselves land in several places when no
+            # single box has enough free cells.
+            for node_uuid, q, cells in await _resolve_return_destinations(
+                db,
+                destinations=s.destinations,
+                fallback_node=fallback,
+                fallback_cells=s.return_cells,
+                total=s.qty,
+                claimed=claimed_cells,
+            ):
+                picks.append((lot_uuid, q, node_uuid, cells))
             per_lot[lot_uuid] = per_lot.get(lot_uuid, 0) + s.qty
             total += s.qty
-            picks.append((lot_uuid, s.qty, node_uuid, s.return_cells))
         if total > on_floor:
             raise ValidationError(
                 f"Line {line.line_no}: only {on_floor} on the production floor "
@@ -1916,7 +2019,9 @@ async def return_excess(
         returned_qty = total
     else:
         # Legacy single: FIFO across the floor's lots (unchanged path).
-        if payload.qty is None or payload.return_location_node_id is None:
+        if payload.qty is None or (
+            payload.return_location_node_id is None and not payload.destinations
+        ):
             raise ValidationError(
                 "Provide sources[] or a qty with a return_location_node_id.",
                 code="return_input_required",
@@ -1927,28 +2032,39 @@ async def return_excess(
                 f"(tried to return {payload.qty}).",
                 code="return_exceeds_on_floor",
             )
-        to_node = _parse_uuid_or_422(
-            payload.return_location_node_id, field="return_location_node_id"
+        to_node = (
+            _parse_uuid_or_422(
+                payload.return_location_node_id, field="return_location_node_id"
+            )
+            if payload.return_location_node_id
+            else None
         )
-        node = await _require_placeable(db, to_node, "Return location")
-        await _validate_return_cells(db, node, payload.qty, payload.return_cells, "Return location")
+        resolved = await _resolve_return_destinations(
+            db,
+            destinations=payload.destinations,
+            fallback_node=to_node,
+            fallback_cells=payload.return_cells,
+            total=payload.qty,
+            claimed=claimed_cells,
+        )
         note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
         if payload.reason:
             note = f"{note} — {payload.reason}"
-        await _return_to_inventory(
-            db,
-            kit=kit,
-            line=line,
-            qty=payload.qty,
-            to_node=to_node,
-            evidence=None,
-            note=note,
-            current=current,
-            return_cells=payload.return_cells,
-            movement_type="kit_return",
-        )
+        for node_uuid, q, cells in resolved:
+            await _return_to_inventory(
+                db,
+                kit=kit,
+                line=line,
+                qty=q,
+                to_node=node_uuid,
+                evidence=None,
+                note=note,
+                current=current,
+                return_cells=cells,
+                movement_type="kit_return",
+            )
         line.early_returned_qty += payload.qty
-        line.return_location_node_id = to_node
+        line.return_location_node_id = resolved[-1][0]
         returned_qty = payload.qty
     kit.updated_by_user_id = current.id
     await db.flush()
@@ -2057,7 +2173,12 @@ async def produce_kit(
         )
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
     lot_no = await _resolve_output_lot_number(db, payload)
-    destinations = await _resolve_output_destinations(db, payload, payload.good_qty)
+    # One cell can hold one unit, so every destination in THIS request competes
+    # for the same free cells. Accumulated across all of them below.
+    claimed_cells: dict[uuid.UUID, set[tuple[int, int]]] = {}
+    destinations = await _resolve_output_destinations(
+        db, payload, payload.good_qty, claimed_cells
+    )
     lines_by_id = {ln.id: ln for ln in kit.lines}
     used_by_line: dict[uuid.UUID, int] = {}
     for line_in in payload.lines:
@@ -2172,19 +2293,26 @@ async def close_out_kit(
     # unit — each destination is checked placeable and its cells validated up
     # front so a bad selection blocks before anything is written. Empty (no output)
     # when this final batch makes 0 good units.
-    destinations = await _resolve_output_destinations(db, payload, payload.good_qty)
+    # One cell can hold one unit, so every destination in THIS request competes
+    # for the same free cells. Accumulated across all of them below.
+    claimed_cells: dict[uuid.UUID, set[tuple[int, int]]] = {}
+    destinations = await _resolve_output_destinations(
+        db, payload, payload.good_qty, claimed_cells
+    )
 
     # Per-line consumption (used, validated in _produce_batch) + back-flush
     # destinations for the leftover. Omitted lines default to the source.
     lines_by_id = {ln.id: ln for ln in kit.lines}
     used_by_line: dict[uuid.UUID, int] = {}
     return_cells_by_line: dict[uuid.UUID, list] = {}
+    return_dests_by_line: dict[uuid.UUID, list] = {}
     for line_in in payload.lines:
         lid = _parse_uuid_or_422(line_in.line_id, field="line_id")
         if lid not in lines_by_id:
             raise ValidationError(f"Line {lid} is not on this kit", code="line_not_in_kit")
         used_by_line[lid] = line_in.used_qty
         return_cells_by_line[lid] = line_in.return_cells
+        return_dests_by_line[lid] = line_in.destinations
         if line_in.return_location_node_id is not None:
             ret = _parse_uuid_or_422(
                 line_in.return_location_node_id, field="return_location_node_id"
@@ -2219,32 +2347,42 @@ async def close_out_kit(
         if returned <= 0:
             continue
         ret_node = line.return_location_node_id or line.source_location_node_id
-        if ret_node is None:
+        dests = return_dests_by_line.get(line.id) or []
+        if ret_node is None and not dests:
             raise ValidationError(
                 f"Line {line.line_no} has nowhere to back-flush to", code="return_required"
             )
-        node = await _require_placeable(db, ret_node, "Return location")
-        ret_cells = return_cells_by_line.get(line.id, [])
-        await _validate_return_cells(db, node, returned, ret_cells, "Return location")
-        await _return_to_inventory(
+        resolved = await _resolve_return_destinations(
             db,
-            kit=kit,
-            line=line,
-            qty=returned,
-            to_node=ret_node,
-            evidence=evidence_uuid,
-            note=(
-                f"Issued {line.issued_qty + line.additional_issued_qty}, "
-                f"used {line.used_qty}, backflushed {returned}"
-            ),
-            current=current,
-            # Back-flushing into an LN2 box places one unit per chosen cell. The
-            # cells are validated just above, and were being dropped here — the
-            # units landed in the box as one cell-less allocation, so the grid
-            # showed nothing and the vial positions were lost (KIT-005). Every
-            # other return path (excess, cancel) already passes them.
-            return_cells=ret_cells,
+            destinations=dests,
+            fallback_node=ret_node,
+            fallback_cells=return_cells_by_line.get(line.id, []),
+            total=returned,
+            claimed=claimed_cells,
         )
+        # One back-flush movement per destination: the leftover may be split
+        # across boxes when no single one has enough free cells.
+        for node_uuid, qty, ret_cells in resolved:
+            await _return_to_inventory(
+                db,
+                kit=kit,
+                line=line,
+                qty=qty,
+                to_node=node_uuid,
+                evidence=evidence_uuid,
+                note=(
+                    f"Issued {line.issued_qty + line.additional_issued_qty}, "
+                    f"used {line.used_qty}, backflushed {qty}"
+                ),
+                current=current,
+                # Back-flushing into an LN2 box places one unit per chosen cell.
+                # The cells are validated just above, and were being dropped here
+                # — the units landed in the box as one cell-less allocation, so
+                # the grid showed nothing and the vial positions were lost
+                # (KIT-005). Every other return path already passes them.
+                return_cells=ret_cells,
+            )
+        line.return_location_node_id = resolved[-1][0]
 
     kit.status = "closed"
     kit.closed_at = _now()
@@ -2336,40 +2474,64 @@ async def cancel_kit(
                     f"(missing: {missing}).",
                     code="cancel_lines_missing",
                 )
+        # One cell can hold one unit, so every destination in THIS request competes
+        # for the same free cells. Accumulated across all of them below.
+        claimed_cells: dict[uuid.UUID, set[tuple[int, int]]] = {}
         for line in kit.lines:
             on_floor = _on_floor(line)
             if on_floor <= 0:
                 continue
             line_in = by_line.get(line.id)
             if line_in is not None:
-                ret_node = _parse_uuid_or_422(
-                    line_in.return_location_node_id, field="return_location_node_id"
+                fallback = (
+                    _parse_uuid_or_422(
+                        line_in.return_location_node_id, field="return_location_node_id"
+                    )
+                    if line_in.return_location_node_id
+                    else None
                 )
-                cells = line_in.return_cells
+                dests = await _resolve_return_destinations(
+                    db,
+                    destinations=line_in.destinations,
+                    fallback_node=fallback,
+                    fallback_cells=line_in.return_cells,
+                    total=on_floor,
+                    claimed=claimed_cells,
+                )
             else:
-                ret_node = line.return_location_node_id or line.source_location_node_id
-                cells = []
-            if ret_node is None:
-                raise ValidationError(
-                    f"Line {line.line_no} has nowhere to return to",
-                    code="return_required",
+                fallback = line.return_location_node_id or line.source_location_node_id
+                if fallback is None:
+                    raise ValidationError(
+                        f"Line {line.line_no} has nowhere to return to",
+                        code="return_required",
+                    )
+                dests = await _resolve_return_destinations(
+                    db,
+                    destinations=[],
+                    fallback_node=fallback,
+                    fallback_cells=[],
+                    total=on_floor,
+                    claimed=claimed_cells,
                 )
-            node = await _require_placeable(db, ret_node, "Return location")
-            await _validate_return_cells(db, node, on_floor, cells, "Return location")
-            await _return_to_inventory(
-                db,
-                kit=kit,
-                line=line,
-                qty=on_floor,
-                to_node=ret_node,
-                evidence=None,
-                note=f"{kit.kit_number} cancelled — {on_floor} returned to inventory",
-                current=current,
-                return_cells=cells,
-                movement_type="kit_cancel_return",
-            )
+            # One return movement per destination — the material may be split
+            # across boxes when no single one has enough free cells.
+            for node_uuid, qty, cells in dests:
+                await _return_to_inventory(
+                    db,
+                    kit=kit,
+                    line=line,
+                    qty=qty,
+                    to_node=node_uuid,
+                    evidence=None,
+                    note=f"{kit.kit_number} cancelled — {qty} returned to inventory",
+                    current=current,
+                    return_cells=cells,
+                    movement_type="kit_cancel_return",
+                )
             line.early_returned_qty += on_floor
-            line.return_location_node_id = ret_node
+            # The last destination is what the line remembers as "where it went"
+            # — the same convention the multi-source return already uses.
+            line.return_location_node_id = dests[-1][0]
     kit.status = "cancelled"
     kit.closed_at = _now()
     kit.closed_by_user_id = current.id

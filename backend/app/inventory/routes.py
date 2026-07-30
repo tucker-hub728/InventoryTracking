@@ -99,6 +99,24 @@ def _movement_to_read(
         qty_abs=m.qty_abs,
         kit_id=str(m.kit_id) if m.kit_id else None,
         kit_number=m.kit.kit_number if m.kit else None,
+        # Reuses the same node-label map the from/to ends resolve through, so
+        # this costs no extra query.
+        kit_production_location_node_id=(
+            str(m.kit.production_location_node_id)
+            if m.kit and m.kit.production_location_node_id
+            else None
+        ),
+        kit_production_location_name=(
+            prod_label[0]
+            if (
+                prod_label := (
+                    labels.get(m.kit.production_location_node_id)
+                    if m.kit and m.kit.production_location_node_id
+                    else None
+                )
+            )
+            else None
+        ),
         customer_id=str(m.customer_id) if m.customer_id else None,
         customer_name=m.customer.name if m.customer else None,
         reference_number=m.reference_number,

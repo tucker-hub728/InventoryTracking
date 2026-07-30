@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/select';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
+import { invalidateLocationForest } from '@/components/reconciliation/location-tree-picker';
 import { customersApi, type Customer } from '@/lib/api/customers';
 import { itemsApi } from '@/lib/api/items';
 import { isBuiltTier } from '@/lib/api/tiers';
@@ -181,6 +182,9 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
         dedicated_customer_id: dedCustomer,
         dedicated_product_id: dedProduct,
       });
+      // Drop the cached destination tree so Receipt Admin and kitting see the new
+      // node without a reload.
+      invalidateLocationForest();
       toast.success(`${NODE_TYPE_LABEL[nodeType]} created`, { description: node.name });
       onCreated(node);
       onOpenChange(false);

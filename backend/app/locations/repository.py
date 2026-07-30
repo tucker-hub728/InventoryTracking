@@ -16,7 +16,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory import Item, StockMovement
+from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
     LocationNode,
     LotAllocation,
@@ -526,6 +526,51 @@ async def list_lot_allocations(
     if active_only:
         stmt = stmt.where(LotAllocation.is_active.is_(True))
     stmt = stmt.order_by(LotAllocation.created_at)
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def search_stored_stock(
+    session: AsyncSession, *, query: str, limit: int = 400
+) -> list[LotAllocation]:
+    """Active allocations whose LOT NUMBER, ITEM NUMBER or ITEM NAME matches.
+
+    Backs "where is this stock" in the storage-hierarchy search: one call answers
+    which nodes hold it, instead of resolving ids first and then asking per node.
+    ``GET /lots`` cannot do this — it filters only by item and status.
+
+    Three things are matched, because an operator looking for stock knows any one
+    of them and shouldn't have to know which the box is labelled with:
+
+      * ``lots.lot_number``           — "PL-301-07"
+      * the item number               — "CR-301". DERIVED, not stored: it is
+        ``prefix.code || '-' || items.sku_suffix``, so the concatenation has to
+        happen in SQL. Matching ``sku_suffix`` alone would miss "CR-301" and
+        matching the prefix alone would return the entire tier.
+      * ``items.description``         — the item's name, "Protein 301"
+
+    ``%``, ``_`` and ``\\`` in the operator's text are escaped, so a value that
+    genuinely contains one is matched literally rather than read as a wildcard
+    that returns everything in the building.
+    """
+    escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    item_number = func.concat(ItemPrefix.code, "-", Item.sku_suffix)
+    stmt = (
+        select(LotAllocation)
+        .join(Lot, Lot.id == LotAllocation.lot_id)
+        .join(Item, Item.id == Lot.item_id)
+        .join(ItemPrefix, ItemPrefix.id == Item.prefix_id)
+        .where(LotAllocation.is_active.is_(True))
+        .where(
+            or_(
+                func.lower(Lot.lot_number).like(pattern, escape="\\"),
+                func.lower(item_number).like(pattern, escape="\\"),
+                func.lower(Item.description).like(pattern, escape="\\"),
+            )
+        )
+        .order_by(Lot.lot_number, LotAllocation.created_at)
+        .limit(limit)
+    )
     return list((await session.execute(stmt)).scalars().unique().all())
 
 

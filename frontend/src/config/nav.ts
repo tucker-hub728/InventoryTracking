@@ -3,6 +3,7 @@ import {
   Contact,
   Factory,
   FlaskConical,
+  FlaskRound,
   History,
   Layers,
   LineChart,
@@ -10,6 +11,7 @@ import {
   Scale,
   Snowflake,
   Tags,
+  Thermometer,
   Truck,
   Users,
   Warehouse,
@@ -90,15 +92,21 @@ export const navSections: readonly NavSection[] = [
     ],
   },
   {
+    // One row per room, in the order the client draws them: Materials
+    // Management, Cold Storage, Analytical Lab, LN2, Production. Each room runs
+    // the same three levels — room → location → sub-location, with stock landing
+    // at the sub-location — and each has its own screen so a room's own layout
+    // can differ (Materials Management is the only one with a warehouse in it).
+    //
+    // Rooms are matched to screens BY NODE CODE, never by position:
+    // ``/location-nodes/freezer-tree`` returns every room. See
+    // ``components/rooms/room-config.ts``.
     title: 'Locations',
     items: [
-      // The old combined /locations page now lives at /ln2 (redirect kept for
-      // bookmarks).
-      { id: 'ln2', label: 'LN2', href: '/ln2', icon: Snowflake, resource: 'inventory' },
       // REQ-2026-07-15-LOC-005: Warehouse One is a location INSIDE the Materials
       // Management room, not a peer of it — so there is no top-level Warehouse
-      // entry any more. It is a tab on this page, alongside Cold Storage
-      // (LOC-002, renamed from "Freezers"). /freezer and /warehouse redirect.
+      // entry. It is a tab on this page, beside the Minus-20 Freezers.
+      // /freezer and /warehouse redirect here.
       {
         id: 'materials-management',
         label: 'Materials Management',
@@ -106,8 +114,35 @@ export const navSections: readonly NavSection[] = [
         icon: Warehouse,
         resource: 'inventory',
       },
-      // View-only: the 5 seeded production floors and the WIP currently on them
-      // (client 2026-07-22). Material moves only through a kit's issue/close-out.
+      // LOC-002 renamed the Freezer category to Cold Storage, since the same
+      // level also holds refrigerators: −20 °C, −80 °C and 2–8 °C. This is the
+      // one room where a Super Admin adds a LOCATION as well as its units.
+      {
+        id: 'cold-storage',
+        label: 'Cold Storage',
+        href: '/cold-storage',
+        icon: Thermometer,
+        resource: 'inventory',
+      },
+      // PROVISIONAL room — LOC-005 supersedes REQ-2026-07-09-LOC-002, the only
+      // requirement that placed freezers in the Analytical Lab, and does not
+      // mention the room. Kept at the client's direction (2026-07-30) on the
+      // strength of Q-2026-07-01-002's resolution and the equipment list
+      // (T90020A, T90019D), pending an amendment that names it.
+      {
+        id: 'analytical-lab',
+        label: 'Analytical Lab',
+        href: '/analytical-lab',
+        icon: FlaskRound,
+        resource: 'inventory',
+      },
+      // The old combined /locations page now lives at /ln2 (redirect kept for
+      // bookmarks). LN2 is the one area deeper than three levels:
+      // tank → quadrant → rack → box grid (LOC-001).
+      { id: 'ln2', label: 'LN2', href: '/ln2', icon: Snowflake, resource: 'inventory' },
+      // The seeded production areas and the WIP currently on them (client
+      // 2026-07-22). Material moves only through a kit's issue/close-out, but a
+      // Super Admin may add an area — the second place a LOCATION is created.
       {
         id: 'production',
         label: 'Production',

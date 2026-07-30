@@ -38,10 +38,18 @@ export type NodeType =
   | 'cassette_rack'
   | 'sub_slot';
 
-/** Node types the UI can create. Rooms and the warehouse (with its A–Z shelves)
- *  stay seed-managed. A `room_location` — a Cold Storage group such as
- *  "Minus-80 Freezers" or "2–8 °C Refrigerators" — is creatable by a Super
- *  Admin, since LOC-002 names groups the client has yet to supply (LOC-004). */
+/** Node types the UI can create. Rooms, the warehouse and its shelves stay
+ *  seed-managed — they are named by requirement, not by an operator.
+ *
+ *  A `room_location` — a Cold Storage group such as "2–8 °C Refrigerators" — is
+ *  creatable by a Super Admin, since LOC-002 names groups the client has yet to
+ *  supply (LOC-004).
+ *
+ *  `shelf` is deliberately NOT here. LOC-003 gates shelf CREATION on the Super
+ *  Admin role rather than forbidding it, which reads like a capability — but
+ *  LOC-005 fixes Warehouse One's contents at "sub-locations Shelf A through
+ *  Shelf Z", a closed set with nothing to add (client 2026-07-30). Renaming a
+ *  shelf is still allowed; that needs no entry here. */
 export type CreatableNodeType =
   | 'tank'
   | 'tank_quadrant'
@@ -49,6 +57,15 @@ export type CreatableNodeType =
   | 'box'
   | 'room_location'
   | 'sub_location';
+
+/**
+ * REQ-2026-07-15-LOC-001: "four quadrants per tank". A hard cap, not a default —
+ * the API enforces it on create AND on relocate (it counts siblings, which a DB
+ * CHECK cannot do). Mirrored here only so the UI can explain a full tank before
+ * the request is sent; the server stays authoritative, since it also counts
+ * inactive quadrants the tree may not carry.
+ */
+export const MAX_QUADRANTS_PER_TANK = 4;
 
 export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials' | 'production';
 export type MovementType =
@@ -114,6 +131,8 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   room: ['room_location'],
   room_location: ['sub_location'],
   sub_location: [],
+  // LOC-005 fixes Warehouse One's contents at Shelf A through Shelf Z — a closed
+  // set, so nothing is creatable under it. Nothing hangs below a shelf either.
   warehouse: [],
   shelf: [],
   flat: [],
@@ -398,6 +417,16 @@ export const locationNodesApi = {
 
   lotAvailability: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<LotAvailability>(`/allocations/lot-availability/${lotId}`, {
+      signal: opts?.signal,
+    }),
+
+  /** Where stock is stored, from a partial LOT NUMBER, ITEM NUMBER or ITEM NAME
+   *  — "where is this stock". One call, rather than resolving ids and then asking
+   *  node by node. ``GET /lots`` cannot answer it: it filters only by item and
+   *  status, and the item number is derived rather than stored. */
+  searchAllocations: (query: string, opts?: { signal?: AbortSignal }) =>
+    api.get<Allocation[]>('/allocations/search', {
+      query: { q: query },
       signal: opts?.signal,
     }),
 

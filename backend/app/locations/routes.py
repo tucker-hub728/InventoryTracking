@@ -1501,6 +1501,27 @@ async def lot_availability(
 
 
 @alloc_router.get(
+    "/search",
+    response_model=list[AllocationRead],
+    summary="Where stock is stored — search by lot number, item number or name",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def search_allocations(
+    db: DBSession,
+    q: Annotated[str, Query(min_length=1, max_length=120)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 400,
+) -> list[AllocationRead]:
+    """Find where stock is, from a partial lot number, item number or item name.
+
+    Declared ABOVE ``/by-lot/{lot_id}``: a literal path must be registered before
+    any sibling that could capture it, or the dynamic route wins and ``/search``
+    arrives as a lot id that fails to parse as a UUID.
+    """
+    rows = await loc_repo.search_stored_stock(db, query=q, limit=limit)
+    return [_alloc_to_read(a) for a in rows]
+
+
+@alloc_router.get(
     "/by-lot/{lot_id}",
     response_model=list[AllocationRead],
     summary="Active allocations for a lot (where it's stored, incl. splits)",

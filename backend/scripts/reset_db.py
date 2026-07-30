@@ -11,7 +11,8 @@ modes below are schema-aware and discover schemas dynamically:
     ``_REFERENCE_TABLES`` (users, suppliers, item tiers + prefixes). Runs
     WITHOUT CASCADE on purpose, so Postgres aborts rather than silently
     emptying a kept table that turns out to depend on a wiped one. Pair it
-    with the seed scripts to rebuild locations, production areas and items.
+    with ``scripts/seed_locations.py`` to rebuild the rooms and production
+    areas; see ``_POST_TRUNCATE_NOTES`` for what no seed rebuilds.
   * ``--schema``: DROPs the application schemas outright (app/meta/audit) and
     resets ``public`` (clearing ``alembic_version``). Extensions are recreated
     idempotently by the first migration, so pair it with ``--migrate`` (or run
@@ -62,6 +63,10 @@ _PROTECTED_TABLES = {"alembic_version"}
 # tier/prefix taxonomy. Everything else is transactional or seedable, so a
 # reference-preserving wipe empties it and lets the seed scripts rebuild.
 #
+# "Seedable" is not the same as "all of it comes back". Items and the LN2 tree do
+# NOT — see ``_POST_TRUNCATE_NOTES``, which the script prints after a wipe so
+# that is discovered before the wipe rather than after.
+#
 # ``meta.item_suppliers`` is deliberately NOT here: it links a supplier to an
 # item, and every item is being wiped, so those rows would dangle.
 _REFERENCE_TABLES = {
@@ -99,6 +104,32 @@ _IMMUTABLE_TABLES = (
     "audit.reauth_events",
     "audit.reauth_consumptions",
 )
+
+# Printed after a TRUNCATE so the operator learns what a wipe costs while they
+# still remember running it. Two of these are permanent losses on a dev box, and
+# both used to be found out days later.
+_POST_TRUNCATE_NOTES = """
+Next steps
+  scripts/seed_locations.py --yes   rebuilds every room and the production areas:
+      Materials Management  Warehouse One (Shelf A-Z) + Minus-20 Freezers
+      Cold Storage          Minus-20 / Minus-80 groups
+      Analytical Lab        one Minus-20, one Minus-80
+      Production            six clean rooms
+    (or one area at a time: seed_cold_storage.py, seed_production.py, ...)
+
+NOT rebuilt by any seed - recreate these yourself
+  * The LN2 tree (tanks, quadrants, racks, boxes). LN2 is NEVER seeded: the tank
+    numbers are the client's, so tanks are always created by a user on the LN2
+    page. A wipe destroys the whole cascade and nothing brings it back.
+  * Items, their BOM lines and supplier links. No item seed exists - import with
+    scripts/sync-from-xlsx.py, or add them in the app. Smoke tests that expect an
+    item will fail until one exists.
+  * The audit trail and e-signature evidence. Gone for good; that is the one
+    sanctioned exception to the append-only guarantee.
+
+alembic_version was left alone, so the schema and migration history are intact
+and there is nothing to re-migrate.
+"""
 
 
 def _db_name(dsn: str) -> str:
@@ -308,7 +339,11 @@ async def _reset(args: argparse.Namespace) -> int:
             print(f"Tables ({len(tables)}) : {', '.join(tables) or '(none)'}")
 
             if not args.yes:
-                print("\nDRY RUN — nothing changed. Re-run with --yes to execute.")
+                # Show the cost in the DRY RUN too — that is the run where it can
+                # still change the operator's mind.
+                if not args.schema:
+                    print(_POST_TRUNCATE_NOTES)
+                print("DRY RUN — nothing changed. Re-run with --yes to execute.")
                 return 0
 
             if args.schema:
@@ -338,6 +373,7 @@ async def _reset(args: argparse.Namespace) -> int:
                 print(f"\nDone. Truncated {len(tables)} table(s). Schema + migrations intact.")
                 if kept:
                     print(f"Preserved {len(kept)} reference table(s): {', '.join(kept)}")
+                print(_POST_TRUNCATE_NOTES)
             else:
                 print("\nNothing to truncate.")
         return 0

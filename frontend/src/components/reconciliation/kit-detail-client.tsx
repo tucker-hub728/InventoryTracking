@@ -207,15 +207,14 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   });
   /** Operator-entered material used per component this batch (≥ recipe need). */
   const [used, setUsed] = React.useState<Record<string, number | null>>({});
-  const [returnLoc, setReturnLoc] = React.useState<Record<string, string>>({});
   /** Where the produced OUTPUT is stocked — one or more destinations. A batch is
    *  split across several when one box can't hold every unit (client 2026-07-23);
    *  the common case is a single row. */
   const [outputDests, setOutputDests] = React.useState<OutputDest[]>([emptyDest()]);
-  /** Close-out back-flush cells per line, when the return target is a box. */
-  const [returnCells, setReturnCells] = React.useState<Record<string, string[]>>({});
-  /** Whether each line's return destination resolved to a box (grid) node. */
-  const [returnIsBox, setReturnIsBox] = React.useState<Record<string, boolean>>({});
+  /** Per-line back-flush destinations. The leftover may be SPLIT across several
+   *  locations when no single box has enough free cells (client 2026-07-30) — the
+   *  same shape the produced output has used since 2026-07-23. */
+  const [returnDests, setReturnDests] = React.useState<Record<string, OutputDest[]>>({});
   /** Per-line multi-lot issue picks — held locally, committed only on Issue. */
   const [linePicks, setLinePicks] = React.useState<Record<string, LotPick[]>>({});
   /** Live availability of the typed produced-batch lot number. ``unknown`` also
@@ -245,15 +244,9 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           output_expiration_date: prev.output_expiration_date ?? '',
           output_lot_number: prev.output_lot_number ?? '',
         }));
-        setReturnLoc(
-          Object.fromEntries(
-            k.lines.map((l) => [
-              l.id,
-              // Default to the source it was pulled from; still editable.
-              l.source_location_node_id ?? l.return_location_node_id ?? '',
-            ]),
-          ),
-        );
+        // Back-flush destinations are no longer seeded here — ``returnRowsFor``
+        // defaults an unset line to the source it was pulled from, so there is
+        // one place that rule lives.
         // Pre-fill each line's issue with a FIFO split covering the need
         // (KIT-002 "default the issue quantity to the needed amount").
         setLinePicks(
@@ -451,13 +444,34 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const usedOverFloor = kit.lines.some(
     (l) => used[l.id] != null && (used[l.id] as number) > l.on_floor_qty,
   );
-  // Whether each line's back-flush destination resolved to a box (grid) node.
-  const isBox = (lineId: string) => returnIsBox[lineId] === true;
-  // A back-flush into a box needs one free cell per leftover unit (close only).
+  /** A line's back-flush rows, defaulted to one at its source.
+   *
+   *  A plain function, like ``lineLeft`` and ``isBox`` above — this component
+   *  has an early return above here, so a hook would be called conditionally. */
+  const returnRowsFor = (l: ApiKitLine): OutputDest[] =>
+    returnDests[l.id] ?? [
+      {
+        ...emptyDest(),
+        key: `ret-${l.id}`,
+        location_node_id: l.return_location_node_id ?? l.source_location_node_id ?? '',
+        qty: lineLeft(l),
+      },
+    ];
+  /** Units of a line's leftover already placed across its destinations. */
+  const returnPlaced = (l: ApiKitLine) =>
+    returnRowsFor(l).reduce((s, d) => s + destPlaced(d), 0);
+  /** First destination per line, for the Review step's "Back-flushes to" column.
+   *  Derived rather than held: the destinations are now the source of truth, and
+   *  a second copy would drift the moment a split is edited. */
+  const returnLoc: Record<string, string> = Object.fromEntries(
+    kit.lines.map((l) => [l.id, returnRowsFor(l)[0]?.location_node_id ?? '']),
+  );
+  // Every leftover unit must have somewhere to go — across ALL of a line's
+  // destinations, since the leftover may be split between boxes.
   const cellsIncomplete = kit.lines.some((l) => {
     const left = lineLeft(l);
     if (left <= 0) return false;
-    return isBox(l.id) ? (returnCells[l.id]?.length ?? 0) !== left : false;
+    return returnPlaced(l) !== left;
   });
   const usedValid = usedComplete && !usedBelowNeed && !usedOverFloor;
   // The operator types the produced batch's lot number (client 2026-07-24 —
@@ -596,15 +610,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         }
         return next;
       });
-      setReturnLoc((prev) => {
-        const next = { ...prev };
-        for (const l of kit.lines) {
-          if (!next[l.id]) {
-            next[l.id] = l.source_location_node_id ?? l.return_location_node_id ?? '';
-          }
-        }
-        return next;
-      });
+      // Back-flush destinations default themselves — see ``returnRowsFor``.
     }
     setActiveStep(2);
   };
@@ -632,8 +638,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         lines: kit.lines.map((l) => ({
           line_id: l.id,
           used_qty: used[l.id] ?? 0,
-          return_location_node_id: returnLoc[l.id] || null,
-          return_cells: isBox(l.id) ? (returnCells[l.id] ?? []).map(toCell) : undefined,
+          // Only lines with something left carry destinations; the rest have
+          // nothing to place, and an empty list means "use the default".
+          destinations:
+            lineLeft(l) > 0
+              ? returnRowsFor(l)
+                  .filter((d) => d.location_node_id && destPlaced(d) > 0)
+                  .map((d) => ({
+                    location_node_id: d.location_node_id,
+                    qty: destPlaced(d),
+                    return_cells: d.isBox ? d.cells.map(toCell) : undefined,
+                  }))
+              : [],
         })),
         evidence_id: evidence.evidence_id,
         reason: evidence.comment ?? '',
@@ -872,19 +888,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             }}
             used={used}
             onUsed={(id, v) => setUsed((u) => ({ ...u, [id]: v }))}
-            returnLoc={returnLoc}
-            onReturnLoc={(id, v) => {
-              setReturnLoc((r) => ({ ...r, [id]: v }));
-              // A new destination invalidates cells picked against the old one.
-              setReturnCells((c) => ({ ...c, [id]: [] }));
-            }}
-            returnCells={returnCells}
-            onReturnCells={(id, v) => setReturnCells((c) => ({ ...c, [id]: v }))}
             lotStatus={lotStatus}
-            returnIsBox={returnIsBox}
-            onReturnIsBox={(id, v) =>
-              setReturnIsBox((m) => (m[id] === v ? m : { ...m, [id]: v }))
-            }
+            returnRowsFor={returnRowsFor}
+            onReturnDests={(id, next) => setReturnDests((p) => ({ ...p, [id]: next }))}
+            returnPlaced={returnPlaced}
             allowedIds={returnableIds}
           />
         )}
@@ -1529,6 +1536,9 @@ function OutputPlacement({
   allowedIds,
   required,
   reservedFor,
+  label = 'Stock the output to',
+  noun = 'Output location',
+  hideHeader = false,
 }: {
   good: number;
   dests: OutputDest[];
@@ -1538,6 +1548,13 @@ function OutputPlacement({
   /** Cells claimed by other box pickers in the form (back-flush lines / other
    *  split rows), keyed off this row's node — blocked so no two claim one cell. */
   reservedFor: (nodeId: string | undefined, own: string[]) => Set<string>;
+  /** Heading above the rows. Returns say "Return to", output says "Stock to". */
+  label?: string;
+  /** Singular, for the per-row aria labels. */
+  noun?: string;
+  /** Drop the heading row — a per-component card already names the component,
+   *  so repeating "Return to" above every one is noise. */
+  hideHeader?: boolean;
 }) {
   const placed = dests.reduce((s, d) => s + destPlaced(d), 0);
   const remaining = good - placed;
@@ -1546,9 +1563,14 @@ function OutputPlacement({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <div
+        className={cn(
+          'flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1',
+          hideHeader && 'sr-only',
+        )}
+      >
         <label className="text-xs font-medium text-text-2">
-          Stock the output to {required && <span className="text-danger">*</span>}
+          {label} {required && <span className="text-danger">*</span>}
         </label>
         {good > 0 && (
           <span
@@ -1577,7 +1599,7 @@ function OutputPlacement({
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
                 <LocationTreePicker
-                  aria-label={`Output location ${i + 1}`}
+                  aria-label={`${noun} ${i + 1}`}
                   value={d.location_node_id}
                   onChange={(v) =>
                     // Prefill the bulk quantity with what's still left to place
@@ -1586,7 +1608,7 @@ function OutputPlacement({
                     // its quantity follows the picked cells.
                     update(d.key, { location_node_id: v, isBox: false, cells: [], qty: cap })
                   }
-                  areas={['ln2', 'cold', 'warehouse']}
+                  areas={['storage']}
                   allowedNodeIds={rowAllowed}
                   showPath
                   placeholder="Warehouse, freezer, or LN2 box"
@@ -1626,7 +1648,7 @@ function OutputPlacement({
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-text-3">Quantity here</span>
                     <NumberInput
-                      aria-label={`Quantity at location ${i + 1}`}
+                      aria-label={`${noun} ${i + 1} quantity`}
                       value={d.qty}
                       min={1}
                       onChange={(v) => update(d.key, { qty: v == null ? null : Math.min(v, cap) })}
@@ -1674,12 +1696,9 @@ function CloseOutStep({
   onOutputDests,
   used,
   onUsed,
-  returnLoc,
-  onReturnLoc,
-  returnCells,
-  onReturnCells,
-  returnIsBox,
-  onReturnIsBox,
+  returnRowsFor,
+  onReturnDests,
+  returnPlaced,
   allowedIds,
   lotStatus,
 }: {
@@ -1691,12 +1710,11 @@ function CloseOutStep({
   onOutputDests: (next: OutputDest[]) => void;
   used: Record<string, number | null>;
   onUsed: (id: string, v: number | null) => void;
-  returnLoc: Record<string, string>;
-  onReturnLoc: (id: string, v: string) => void;
-  returnCells: Record<string, string[]>;
-  onReturnCells: (id: string, v: string[]) => void;
-  returnIsBox: Record<string, boolean>;
-  onReturnIsBox: (id: string, isBox: boolean) => void;
+  /** A line's back-flush destination rows, defaulted to one at its source. */
+  returnRowsFor: (line: ApiKitLine) => OutputDest[];
+  onReturnDests: (lineId: string, next: OutputDest[]) => void;
+  /** Units of a line's leftover already placed across its destinations. */
+  returnPlaced: (line: ApiKitLine) => number;
   allowedIds: Set<string>;
   /** Live availability of the typed produced lot number (checked upstream). */
   lotStatus: 'unknown' | 'checking' | 'free' | 'taken';
@@ -1775,9 +1793,13 @@ function CloseOutStep({
   outputDests.forEach((d) => {
     if (d.isBox) claimCells(d.location_node_id, d.cells);
   });
-  kit.lines.forEach((l) => {
-    if (returnIsBox[l.id]) claimCells(returnLoc[l.id], returnCells[l.id] ?? []);
-  });
+  // Every back-flush destination row on every line — a split claims cells in
+  // more than one box, and two lines must not both take the same one.
+  kit.lines.forEach((l) =>
+    returnRowsFor(l).forEach((d) => {
+      if (d.isBox) claimCells(d.location_node_id, d.cells);
+    }),
+  );
   const reservedFor = (nodeId: string | undefined, own: string[]): Set<string> => {
     const all = nodeId ? claimedByNode.get(nodeId) : undefined;
     if (!all) return new Set();
@@ -1943,7 +1965,7 @@ function CloseOutStep({
                 aria-label="Output location"
                 value={kit.output_location_node_id}
                 onChange={() => {}}
-                areas={['ln2', 'cold', 'warehouse']}
+                areas={['storage']}
                 disabled
                 showPath
               />
@@ -2020,16 +2042,17 @@ function CloseOutStep({
                         </td>
                         <td className="px-3 py-2">
                           {left > 0 ? (
-                            <div className="w-52">
-                              <LocationTreePicker
-                                aria-label={`Back-flush location for ${line.item_number}`}
-                                value={returnLoc[line.id] ?? ''}
-                                onChange={(v) => onReturnLoc(line.id, v)}
-                                areas={['ln2', 'cold', 'warehouse']}
-                                allowedNodeIds={allowedIds}
-                                showPath
-                              />
-                            </div>
+                            // The destinations themselves live in the full-width
+                            // row below — a split needs more room than a table
+                            // cell. This says how much of the leftover is placed.
+                            <span
+                              className={cn(
+                                'font-mono text-xs tabular-nums',
+                                returnPlaced(line) === left ? 'text-success' : 'text-text-3',
+                              )}
+                            >
+                              {returnPlaced(line)} / {left} placed
+                            </span>
                           ) : (
                             <span className="text-xs text-text-3">Nothing left</span>
                           )}
@@ -2046,23 +2069,22 @@ function CloseOutStep({
                           </td>
                         </tr>
                       )}
-                      {/* Cryobox grid gets its own full-width row for the leftover. */}
+                      {/* Where the leftover goes — one row, or several when no
+                          single box has enough free cells. Full width because a
+                          split carries a cryobox grid per destination. */}
                       {left > 0 && (
-                        <tr
-                          className={cn(
-                            'border-b border-border/60',
-                            returnIsBox[line.id] && 'bg-surface/40',
-                          )}
-                        >
-                          <td colSpan={7} className={cn(returnIsBox[line.id] ? 'px-3 pb-3 pt-0' : 'p-0')}>
+                        <tr className="border-b border-border/60 bg-surface/40">
+                          <td colSpan={7} className="px-3 pb-3 pt-2">
                             <div className="max-w-xl">
-                              <BoxCellPicker
-                                nodeId={returnLoc[line.id]}
-                                qty={left}
-                                value={returnCells[line.id] ?? []}
-                                onChange={(v) => onReturnCells(line.id, v)}
-                                onResolved={(isBox) => onReturnIsBox(line.id, isBox)}
-                                reserved={reservedFor(returnLoc[line.id], returnCells[line.id] ?? [])}
+                              <OutputPlacement
+                                good={left}
+                                dests={returnRowsFor(line)}
+                                onChange={(next) => onReturnDests(line.id, next)}
+                                allowedIds={allowedIds}
+                                required
+                                reservedFor={reservedFor}
+                                label={`Back-flush ${line.item_number} to`}
+                                noun={`Back-flush location for ${line.item_number}`}
                               />
                             </div>
                           </td>
@@ -2676,7 +2698,7 @@ function ReturnExcessDialog({
                           aria-label={`Return location ${i + 1}`}
                           value={r.node}
                           onChange={(v) => setRow(r.key, { node: v, isBox: false, cells: [] })}
-                          areas={['ln2', 'cold', 'warehouse']}
+                          areas={['storage']}
                           allowedNodeIds={allowedIds}
                           modal
                           showPath
@@ -2803,28 +2825,40 @@ function CancelKitDialog({
   onSubmit: (lines: CancelLineInput[]) => void;
 }) {
   const lines = React.useMemo(() => kit.lines.filter((l) => l.on_floor_qty > 0), [kit.lines]);
-  const [loc, setLoc] = React.useState<Record<string, string>>({});
-  const [cells, setCells] = React.useState<Record<string, string[]>>({});
 
   // Default each line to where it was pulled from (D1).
   React.useEffect(() => {
     if (!open) return;
-    setLoc(
+    // One row per line, pre-set to where the material was pulled from — the
+    // common case is still a single location, and "Add another location" only
+    // appears once some of the quantity is still unplaced.
+    setDests(
       Object.fromEntries(
-        lines.map((l) => [l.id, l.return_location_node_id ?? l.source_location_node_id ?? '']),
+        lines.map((l) => [
+          l.id,
+          [
+            {
+              ...emptyDest(),
+              location_node_id:
+                l.return_location_node_id ?? l.source_location_node_id ?? '',
+              qty: l.on_floor_qty,
+            },
+          ],
+        ]),
       ),
     );
-    setCells({});
   }, [open, lines]);
 
-  // Resolved per line by BoxCellPicker (from the Location System), because the
-  // operator can return into a box this kit never pulled from.
-  const [isBoxMap, setIsBoxMap] = React.useState<Record<string, boolean>>({});
-  const ready = lines.every((l) => {
-    const node = loc[l.id];
-    if (!node) return false;
-    return isBoxMap[l.id] ? (cells[l.id]?.length ?? 0) === l.on_floor_qty : true;
-  });
+  // A line's material may be SPLIT across locations (client 2026-07-30) when no
+  // single box has enough free cells — the same shape the produced output has
+  // used since 2026-07-23, so there is one pattern for "put these units in more
+  // than one place".
+  const [dests, setDests] = React.useState<Record<string, OutputDest[]>>({});
+  const destsFor = (lineId: string): OutputDest[] => dests[lineId] ?? [];
+
+  const ready = lines.every(
+    (l) => destsFor(l.id).reduce((s, d) => s + destPlaced(d), 0) === l.on_floor_qty,
+  );
   const totalUnits = lines.reduce((a, l) => a + l.on_floor_qty, 0);
 
   const submit = () => {
@@ -2832,10 +2866,36 @@ function CancelKitDialog({
     onSubmit(
       lines.map((l) => ({
         line_id: l.id,
-        return_location_node_id: loc[l.id] ?? '',
-        return_cells: isBoxMap[l.id] ? (cells[l.id] ?? []).map(toCell) : undefined,
+        destinations: destsFor(l.id).map((d) => ({
+          location_node_id: d.location_node_id,
+          qty: destPlaced(d),
+          return_cells: d.isBox ? d.cells.map(toCell) : undefined,
+        })),
       })),
     );
+  };
+
+  // Cells another row in this same dialog has already taken, per box — across
+  // every line AND every split row within a line. A cell holds exactly one unit,
+  // so two components returning into the same box cannot both claim A1, and each
+  // picker only knew its own selection, so the dialog happily built a request the
+  // database would refuse. The close-out dialog has always reserved across its
+  // rows; this one did not.
+  const claimedByNode = new Map<string, Set<string>>();
+  lines.forEach((l) =>
+    destsFor(l.id).forEach((d) => {
+      if (!d.location_node_id || !d.isBox) return;
+      const taken = claimedByNode.get(d.location_node_id) ?? new Set<string>();
+      d.cells.forEach((c) => taken.add(c));
+      claimedByNode.set(d.location_node_id, taken);
+    }),
+  );
+  /** Everything claimed on ``nodeId`` except this row's own picks. */
+  const reservedFor = (nodeId: string | undefined, own: string[]): Set<string> => {
+    const all = nodeId ? claimedByNode.get(nodeId) : undefined;
+    if (!all) return new Set();
+    const ownSet = new Set(own);
+    return new Set([...all].filter((k) => !ownSet.has(k)));
   };
 
   return (
@@ -2851,38 +2911,32 @@ function CancelKitDialog({
         </DialogHeader>
         <DialogBody className="max-h-[55vh] space-y-3 overflow-y-auto">
           {lines.map((line) => {
-            const node = loc[line.id] ?? '';
-            const picked = cells[line.id] ?? [];
+            const rows = destsFor(line.id);
+            const placed = rows.reduce((s, d) => s + destPlaced(d), 0);
             return (
               <div key={line.id} className="rounded-md border border-border bg-surface p-3">
                 <div className="mb-2 flex items-start justify-between gap-3">
                   <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
-                  <span className="shrink-0 font-mono text-sm tabular-nums text-text">
-                    {line.on_floor_qty}
+                  <span
+                    className={cn(
+                      'shrink-0 font-mono text-sm tabular-nums',
+                      placed === line.on_floor_qty ? 'text-success' : 'text-text',
+                    )}
+                  >
+                    {placed} / {line.on_floor_qty}
                   </span>
                 </div>
-                <LocationTreePicker
-                  aria-label={`Return location for ${line.item_number}`}
-                  value={node}
-                  onChange={(v) => {
-                    setLoc((p) => ({ ...p, [line.id]: v }));
-                    setCells((p) => ({ ...p, [line.id]: [] }));
-                  }}
-                  areas={['ln2', 'cold', 'warehouse']}
-                  allowedNodeIds={allowedIds}
-                  modal
-                  showPath
+                <OutputPlacement
+                  good={line.on_floor_qty}
+                  dests={rows}
+                  onChange={(next) => setDests((p) => ({ ...p, [line.id]: next }))}
+                  allowedIds={allowedIds}
+                  required
+                  reservedFor={reservedFor}
+                  label={`Return ${line.item_number} to`}
+                  noun={`Return location for ${line.item_number}`}
+                  hideHeader
                 />
-                <BoxCellPicker
-                  nodeId={node}
-                  qty={line.on_floor_qty}
-                  value={picked}
-                  onChange={(v) => setCells((p) => ({ ...p, [line.id]: v }))}
-                  onResolved={(isBox) =>
-                    setIsBoxMap((m) => (m[line.id] === isBox ? m : { ...m, [line.id]: isBox }))
-                  }
-                />
-                {!node && <p className="mt-1 text-xs text-danger">Choose a return location.</p>}
               </div>
             );
           })}

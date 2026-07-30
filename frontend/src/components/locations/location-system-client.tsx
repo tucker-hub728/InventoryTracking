@@ -1,9 +1,10 @@
 'use client';
 
 import * as React from 'react';
-import { ChevronDown, ChevronRight, Loader2, Plus } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Plus, Search, X } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { usePermission } from '@/hooks/use-permission';
@@ -17,6 +18,7 @@ import {
 } from '@/lib/api/location-nodes';
 
 import { NodeCreateDialog } from './node-create-dialog';
+import { useHierarchySearch, type StockHit } from './use-hierarchy-search';
 import { NodeDetailPanel, NODE_ICON } from './node-detail-panel';
 
 // ``flat`` operational locations are retired — this view shows only the LN2
@@ -49,6 +51,7 @@ export function LocationSystemClient({
   const [selectedId, setSelectedId] = React.useState<string | null>(
     initialPath.at(-1) ?? null,
   );
+  const [search, setSearch] = React.useState('');
 
   const reload = React.useCallback(
     async (signal?: AbortSignal, opts?: { silent?: boolean }) => {
@@ -166,9 +169,18 @@ export function LocationSystemClient({
   // Ancestors of the selection. The sidebar collapses anything below depth 2,
   // so without this a deep link to a box would select it while leaving it
   // hidden inside a shut rack — selected, highlighted, and invisible.
-  const expandedIds = React.useMemo(
+  const selectionPath = React.useMemo(
     () => new Set(path.slice(0, -1).map((n) => n.id)),
     [path],
+  );
+
+  const found = useHierarchySearch(tree, search);
+
+  // Open for the selection AND for anything a search turned up — a match inside
+  // a shut rack has the same problem a deep-linked selection had.
+  const expandedIds = React.useMemo(
+    () => new Set([...selectionPath, ...found.revealIds]),
+    [selectionPath, found.revealIds],
   );
 
   // Once the tree lands, canonicalise the URL — a deep link that named only the
@@ -199,6 +211,84 @@ export function LocationSystemClient({
           )}
         </div>
 
+        {/* Search. Matches are highlighted in place and their ancestors opened —
+            never filtered out — so a hit keeps the structure that says where it
+            is. See ``use-hierarchy-search.ts`` for what a query matches. */}
+        <div className="px-3 pb-2">
+          <Input
+            icon={Search}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Tank, rack, box, lot…"
+            aria-label="Search the storage hierarchy"
+            trailing={
+              search ? (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  aria-label="Clear search"
+                  className="rounded p-0.5 text-text-3 hover:text-text"
+                >
+                  <X size={13} />
+                </button>
+              ) : undefined
+            }
+          />
+          {found.active && (
+            <p className="mt-1.5 px-0.5 text-[11px] leading-relaxed text-text-3">
+              {found.loading && found.matchCount === 0 ? (
+                'Searching…'
+              ) : found.matchCount === 0 ? (
+                <>
+                  Nothing here matches{' '}
+                  <span className="text-text-2">“{search.trim()}”</span>
+                  {/* Found, but not in LN2 — say so rather than claim nothing
+                      exists. This tree covers one area; the lookup covers all. */}
+                  {found.elsewhere > 0 && (
+                    <>
+                      {' — '}
+                      {found.elsewhere} unit{found.elsewhere === 1 ? '' : 's'} of it
+                      {found.elsewhere === 1 ? ' is' : ' are'} stored outside LN2
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  {found.matchCount} match{found.matchCount === 1 ? '' : 'es'}
+                  {/* Only what was found IN THIS TREE. Counting the endpoint's
+                      full result read "1 match · holding L-301-04, PL-301-04" —
+                      two lots named, one row lit. */}
+                  {found.lotNumbers.length > 0 && (
+                    <>
+                      {' · '}
+                      <span className="font-mono text-text-2">
+                        {found.lotNumbers.slice(0, 2).join(', ')}
+                        {found.lotNumbers.length > 2 && ` +${found.lotNumbers.length - 2}`}
+                      </span>
+                    </>
+                  )}
+                  {found.itemNumbers.length > 0 && (
+                    <>
+                      {' · '}
+                      <span className="font-mono text-text-2">
+                        {found.itemNumbers.slice(0, 2).join(', ')}
+                        {found.itemNumbers.length > 2 &&
+                          ` +${found.itemNumbers.length - 2}`}
+                      </span>
+                    </>
+                  )}
+                  {found.elsewhere > 0 && (
+                    <>
+                      {' · '}
+                      {found.elsewhere} more outside LN2
+                    </>
+                  )}
+                </>
+              )}
+            </p>
+          )}
+        </div>
+
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
           {loading ? (
             <div className="space-y-2 px-2">
@@ -219,6 +309,10 @@ export function LocationSystemClient({
                   depth={0}
                   selectedId={selectedId}
                   expandedIds={expandedIds}
+                  matchIds={found.matchIds}
+                  stockAt={found.stockAt}
+                  codeAt={found.codeAt}
+                  pathIds={found.revealIds}
                   onSelect={select}
                 />
               ))}
@@ -305,13 +399,25 @@ function TreeRow({
   depth,
   selectedId,
   expandedIds,
+  matchIds,
+  stockAt,
+  codeAt,
+  pathIds,
   onSelect,
 }: {
   node: NodeTree;
   depth: number;
   selectedId: string | null;
-  /** Ancestors of the selection — these rows open so the selection is visible. */
+  /** Ancestors of the selection and of any search match — these rows open. */
   expandedIds: Set<string>;
+  /** Nodes the current search matched. Empty when not searching. */
+  matchIds: Set<string>;
+  /** Stock found at a node, for rows matched by lot / item rather than by name. */
+  stockAt: Map<string, StockHit>;
+  /** Code of a row that matched on its code but not its name — see the hook. */
+  codeAt: Map<string, string>;
+  /** Ancestors of a match — tinted so the path down to it is traceable. */
+  pathIds: Set<string>;
   onSelect: (id: string) => void;
 }) {
   const onSelectedPath = expandedIds.has(node.id);
@@ -326,6 +432,13 @@ function TreeRow({
   const Icon = NODE_ICON[node.node_type];
   const stats = subtreeStats(node);
   const selected = selectedId === node.id;
+  const isMatch = matchIds.has(node.id);
+  // Set only when the row matched because of what's INSIDE it — the name gives
+  // no clue then, so the lot number is shown in place of the occupancy count.
+  const stock = stockAt.get(node.id);
+  // An ancestor of a match: tinted so the trail from tank to box is followable.
+  const onMatchPath = pathIds.has(node.id) && !isMatch;
+  const matchedCode = codeAt.get(node.id);
 
   // Bring a deep-linked selection into view. Once, on mount only: scrolling on
   // every selection change would yank the list under someone who is clicking
@@ -345,7 +458,18 @@ function TreeRow({
         ref={rowRef}
         className={cn(
           'group flex items-center gap-1 rounded-md pr-2',
-          selected ? 'bg-warning/10' : 'hover:bg-bg-elev',
+          // Selection wins over a match: you can only have selected one thing,
+          // and losing track of it inside a set of highlights would be worse.
+          // Below that, a match is solid and its ancestors are a fainter tint of
+          // the same colour — so the trail from the tank down to the box reads as
+          // one thing, and you can see WHERE the hit is, not just that it exists.
+          selected
+            ? 'bg-warning/10'
+            : isMatch
+              ? 'bg-accent/10 ring-1 ring-inset ring-accent/30'
+              : onMatchPath
+                ? 'bg-accent/[0.06]'
+                : 'hover:bg-bg-elev',
         )}
         style={{ paddingLeft: depth * 14 }}
       >
@@ -378,12 +502,47 @@ function TreeRow({
             label={node.name}
             className={cn(
               'text-sm',
-              selected ? 'font-medium text-text-1' : 'text-text-2',
+              selected
+                ? 'font-medium text-text-1'
+                : isMatch
+                  ? 'font-medium text-accent'
+                  : onMatchPath
+                    ? 'text-text-1'
+                    : 'text-text-2',
             )}
           />
-          <span className="ml-auto shrink-0 font-mono text-[11px] text-text-3">
-            {stats.occupied}/{stats.capacity}
-          </span>
+          {stock ? (
+            // What was found inside. Lots name the exact stock; the item number
+            // is the fallback for a lot with no number of its own.
+            <span
+              title={
+                [
+                  stock.lots.length ? `Holds ${stock.lots.join(', ')}` : null,
+                  stock.items.length ? `Item ${stock.items.join(', ')}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || undefined
+              }
+              className="ml-auto shrink-0 truncate rounded bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent"
+            >
+              {(stock.lots[0] ?? stock.items[0] ?? '')}
+              {stock.lots.length > 1 && ` +${stock.lots.length - 1}`}
+            </span>
+          ) : matchedCode ? (
+            // Matched on its code, not its name. Shown because a code drifts from
+            // the name — rename leaves it alone — so the row would otherwise look
+            // like a result that has nothing to do with the query.
+            <span
+              title={`Code ${matchedCode}`}
+              className="ml-auto shrink-0 truncate rounded bg-accent/10 px-1.5 py-0.5 font-mono text-[10px] text-text-3"
+            >
+              {matchedCode}
+            </span>
+          ) : (
+            <span className="ml-auto shrink-0 font-mono text-[11px] text-text-3">
+              {stats.occupied}/{stats.capacity}
+            </span>
+          )}
         </button>
       </div>
       {open &&
@@ -395,6 +554,10 @@ function TreeRow({
             depth={depth + 1}
             selectedId={selectedId}
             expandedIds={expandedIds}
+            matchIds={matchIds}
+            stockAt={stockAt}
+            codeAt={codeAt}
+            pathIds={pathIds}
             onSelect={onSelect}
           />
         ))}

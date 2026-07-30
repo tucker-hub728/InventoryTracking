@@ -460,6 +460,9 @@ export interface ReturnExcessInput {
 export interface CloseOutLineInput {
   line_id: string;
   used_qty: number;
+  /** Wins when present; must total the line's leftover. Split the back-flush
+   *  across boxes when no single one has enough free cells. */
+  destinations?: ReturnDestinationInput[];
   return_location_node_id?: string | null;
   return_cells?: ReturnCellInput[];
 }
@@ -513,9 +516,21 @@ export interface CloseOutInput {
   reason: string;
 }
 
+/** One place a slice of a line's returned material goes. Mirrors
+ *  `OutputDestinationInput` — material coming off the floor may be SPLIT across
+ *  locations when no single box has enough free cells (client 2026-07-30). */
+export interface ReturnDestinationInput {
+  location_node_id: string;
+  qty: number;
+  return_cells?: ReturnCellInput[];
+}
+
 export interface CancelLineInput {
   line_id: string;
-  return_location_node_id: string;
+  /** Wins when present; must total the line's on-floor quantity. */
+  destinations?: ReturnDestinationInput[];
+  /** The single-location path, kept for callers that don't split. */
+  return_location_node_id?: string;
   return_cells?: ReturnCellInput[];
 }
 

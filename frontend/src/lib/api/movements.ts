@@ -100,6 +100,10 @@ export interface ApiMovement {
    *  production_output / backflush); null for every other movement. */
   kit_id: string | null;
   kit_number: string | null;
+  /** Where the kit was BUILT. Not a movement end — a `production_output` mints a
+   *  new lot, so `from_location_node_id` is null by constraint. */
+  kit_production_location_node_id: string | null;
+  kit_production_location_name: string | null;
 
   /** Customer shipment (CUST-001 / TRX-005): the named customer the finished
    *  good left inventory to (null = catalog / unassigned, TRX-007) and the
