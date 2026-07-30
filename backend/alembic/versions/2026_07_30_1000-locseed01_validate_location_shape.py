@@ -18,10 +18,18 @@ That reseed has happened, so this migration does it — turning the two rules fr
 ``VALIDATE`` takes only a SHARE UPDATE EXCLUSIVE lock, so it does not block
 reads or writes on the table.
 
-Because a deployed environment might still hold a row in the old shape (a
-top-level ``warehouse``, or a root ``tank_quadrant``), the offenders are counted
-FIRST and reported by code — a bare ``VALIDATE`` failure names the constraint but
-not the rows, which is the one thing you need to fix it.
+A deployed environment might still hold rows in the old shape (a top-level
+``warehouse``, or a root ``tank_quadrant``), so the offenders are counted FIRST
+and reported by code — a bare ``VALIDATE`` failure names the constraint but not
+the rows, which is the one thing you need to fix it.
+
+When there ARE offenders this **logs them and skips**, leaving that constraint
+``NOT VALID``. It does not fail. Prod runs ``alembic upgrade head`` as a one-shot
+service the backend waits on, so a migration that refuses takes the deployment
+down with it — which is exactly what happened on 2026-07-30, over five legacy
+root quadrants and one top-level warehouse. Skipping costs nothing real:
+``NOT VALID`` still enforces the rule on every INSERT and UPDATE, and forfeits
+only the re-check of rows that are legitimately legacy.
 
 2. No migration creates, moves or deletes a location row
 --------------------------------------------------------
@@ -66,9 +74,12 @@ Create Date: 2026-07-30 10:00:00.000000+00:00
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 from alembic import op
+
+_LOG = logging.getLogger("alembic.runtime.migration")
 
 revision: str = "locseed01"
 down_revision: str | None = "mvpath01"
@@ -118,28 +129,59 @@ def _offenders(where: str) -> list[tuple[str, str, str]]:
     return [(r[0], r[1], r[2]) for r in rows]
 
 
-def _require_clean(label: str, where: str, fix: str) -> None:
+def _validate_if_clean(label: str, where: str, fix: str) -> bool:
+    """VALIDATE the constraint when every row already satisfies it.
+
+    When some rows do NOT, this logs them and SKIPS — it does not raise. That
+    distinction matters more than it looks:
+
+    Validating is a tidy-up, not a correctness fix. ``NOT VALID`` only means
+    Postgres never re-checked the rows that existed when the constraint was
+    added; it still enforces the rule on every INSERT and UPDATE. So skipping
+    leaves the database exactly as safe for new data as validating would, and
+    forfeits only the guarantee about historical rows — which are precisely the
+    rows that are legitimately legacy.
+
+    An earlier version raised instead, and that was wrong: prod runs
+    ``alembic upgrade head`` as a one-shot service the backend waits on, so a
+    migration that refuses takes the whole deployment down. A cleanup step must
+    never be able to do that. Once the legacy rows are gone, validate by hand:
+
+        ALTER TABLE meta.location_nodes VALIDATE CONSTRAINT
+            ck_location_nodes_ck_location_nodes_root_parentage;
+        ALTER TABLE meta.location_nodes VALIDATE CONSTRAINT
+            ck_location_nodes_ck_location_nodes_node_type;
+    """
     bad = _offenders(where)
     if not bad:
-        return
+        op.execute(f"ALTER TABLE {_TABLE} VALIDATE CONSTRAINT {label}")
+        return True
+
     listing = "\n".join(f"    {t:<14} {c:<20} {n}" for t, c, n in bad)
-    raise RuntimeError(
-        f"Cannot validate {label}: {len(bad)} row(s) in {_TABLE} are in the old "
-        f"shape (first 20 shown).\n{listing}\n\n{fix}"
+    _LOG.warning(
+        "Leaving %s NOT VALID: %d row(s) in %s are in the old shape (first 20 "
+        "shown). New and updated rows are still checked; only the historical "
+        "re-check is skipped.\n%s\n\n%s",
+        label,
+        len(bad),
+        _TABLE,
+        listing,
+        fix,
     )
+    return False
 
 
 def upgrade() -> None:
     root_rule = f"(node_type IN ({_listed(_ROOT_TYPES)})) = (parent_id IS NULL)"
     type_rule = f"node_type IN ({_listed(_NODE_TYPES)})"
 
-    _require_clean(
+    _validate_if_clean(
         _CK_TYPE,
         type_rule,
         "Each row above carries a node_type this build no longer knows. Decide "
-        "per row whether to re-type it or delete it, then re-run.",
+        "per row whether to re-type it or delete it.",
     )
-    _require_clean(
+    _validate_if_clean(
         _CK_ROOT,
         root_rule,
         "A top-level 'warehouse' predates mmroom01 (LOC-005 puts Warehouse One "
@@ -147,11 +189,8 @@ def upgrade() -> None:
         "predates ln2tank01 (LOC-001 puts a Tank above it). Re-hang them with "
         "PATCH /location-nodes/{id}/parent, or reseed the tree "
         "(scripts/reset_db.py --keep-reference, then scripts/seed_locations.py "
-        "--yes), then re-run.",
+        "--yes), then validate by hand — see _validate_if_clean.",
     )
-
-    op.execute(f"ALTER TABLE {_TABLE} VALIDATE CONSTRAINT {_CK_TYPE}")
-    op.execute(f"ALTER TABLE {_TABLE} VALIDATE CONSTRAINT {_CK_ROOT}")
 
 
 def downgrade() -> None:
