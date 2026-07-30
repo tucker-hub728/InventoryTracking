@@ -13,6 +13,7 @@ import {
 import { MOVEMENT_TYPE_LABEL, type ApiMovement, type MovementType } from '@/lib/api/movements';
 import { ItemLink } from '@/components/inventory/item-link';
 import { LotLink } from '@/components/inventory/lot-link';
+import { LocationLink } from '@/components/locations/location-link';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -144,13 +145,37 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
             )
           }
         />
+        {/* Where a kit's batch was BUILT. Not a movement end — a
+            ``production_output`` mints a new lot, so nothing moved from
+            anywhere and ``From`` is legitimately blank (the DB requires it,
+            exactly as for a receipt). The floor is still the answer to "where
+            was this made", so it gets its own line rather than being forced
+            into From, which would claim stock left the floor. */}
+        {movement.kit_production_location_name && (
+          <KV
+            label="Made in"
+            value={
+              <LocationLink
+                nodeId={movement.kit_production_location_node_id}
+                name={movement.kit_production_location_name}
+              />
+            }
+          />
+        )}
+        {/* Both ends open the page the location lives on — same link the ledger's
+            Location column uses, so the two views behave alike. */}
         <KV
           label="From"
           value={
             movement.from_location_node_name ? (
-              <span title={movement.from_location_node_path ?? undefined}>
-                {movement.from_location_node_name}
-              </span>
+              <LocationLink
+                nodeId={movement.from_location_node_id}
+                name={movement.from_location_node_name}
+                path={movement.from_location_node_path}
+              />
+            ) : movement.movement_type === 'production_output' ? (
+              // Say why it is blank, so it doesn't read as missing data.
+              <span className="text-text-3">— new stock, not moved</span>
             ) : (
               '—'
             )
@@ -160,9 +185,11 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           label="To"
           value={
             movement.to_location_node_name ? (
-              <span title={movement.to_location_node_path ?? undefined}>
-                {movement.to_location_node_name}
-              </span>
+              <LocationLink
+                nodeId={movement.to_location_node_id}
+                name={movement.to_location_node_name}
+                path={movement.to_location_node_path}
+              />
             ) : (
               '—'
             )

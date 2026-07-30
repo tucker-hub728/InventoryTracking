@@ -49,25 +49,44 @@ from app.models.inventory import Lot
 
 # ── Node taxonomy ───────────────────────────────────────────────────────
 #
-# LN2 levels (Requirements v2 §4.1). Below a Rack sits *either* a Cassette
-# (1×N column of boxes) *or* a Cryo Box Rack (R×C grid of boxes); both hold
-# Boxes. The **Box** is the grid-bearing leaf storage node — a lot is placed
-# into one of its ``(row, col)`` cells (the "sub-slot", a coordinate on the
-# allocation, not a node of its own). ``tank_quadrant`` and ``flat`` are roots.
+# LN2 levels (REQ-2026-07-15-LOC-001): TANK (the root, identified by its main
+# tank number) → QUADRANT (``tank_quadrant``, capped at four per tank) → RACK →
+# BOX. The **Box** is the grid-bearing leaf storage node — a lot is placed into
+# one of its ``(row, col)`` cells (the "sub-slot", a coordinate on the
+# allocation, not a node of its own).
+#
+# The quadrant kept its ``tank_quadrant`` type name: it is literally a quadrant
+# OF a tank, and renaming it would churn the dedication CHECK constraints for no
+# behavioural gain. The UI labels it "Quadrant".
+#
+# Cassette / Cryo Box Rack used to sit between Rack and Box. The client dropped
+# them on 2026-07-29 so the cascade matches LOC-004's four levels exactly, and a
+# Box now hangs directly off a Rack. Note this contradicts the Transaction Spec
+# of 2026-07-01, which addresses a location as "Tank 2, Cassette X" — raised
+# with the client, who chose to drop them anyway. Phase 2 (the configurable
+# cascade) will let them add the level back without a code change.
 LN2_LEVELS: tuple[str, ...] = (
+    "tank",
     "tank_quadrant",
     "rack",
-    "cassette",
-    "cryo_box_rack",
     "box",
 )
-# Freezer area (SRS 2026-07-09 §6): Room (category, e.g. Materials Management /
-# Analytical Lab) → Location (a freezer or open-inventory) → Sub-location (the
-# free-storage leaf — a freezer's T-number unit or a shelf). Units are placed at
-# the sub-location (free placement, no grid); there are no positions inside.
+# Room area (SRS 2026-07-15 LOC-005/LOC-006): Room → Location → Sub-location.
+# The Room is what LOC-005 calls a "location category" (Materials Management);
+# a Location is an area inside it; the Sub-location is the free-storage leaf.
+# Units are placed at the sub-location (free placement, no grid); there are no
+# positions inside — physical placement is controlled by labeling.
+#
+# A room's Locations come in two flavours, which are separate node types only so
+# the UI can tab between them; structurally they are PEERS under the same room:
+#   * ``warehouse`` — ambient shelving (Warehouse One), whose leaves are shelves
+#   * ``room_location`` — Cold Storage (LOC-002: −20 °C, −80 °C, 2–8 °C fridges),
+#     whose leaves are the equipment units
 FREEZER_LEVELS: tuple[str, ...] = ("room", "room_location", "sub_location")
-# Warehouse area (SRS LOC-001): Warehouse One → Shelf (A–Z), the free-storage
-# leaf. A shelf holds units freely — no positions.
+# Warehouse (LOC-005): Warehouse One → Shelf (A–Z), the free-storage leaf. A
+# shelf holds units freely — no bins, positions or slots below it. Warehouse One
+# is no longer a root: LOC-005 places it INSIDE the Materials Management room,
+# as a peer of the Cold Storage locations.
 WAREHOUSE_LEVELS: tuple[str, ...] = ("warehouse", "shelf")
 
 # Retired but kept in the CHECK enum so any pre-existing rows still validate
@@ -75,7 +94,14 @@ WAREHOUSE_LEVELS: tuple[str, ...] = ("warehouse", "shelf")
 #
 # ``flat`` is retired: the LN2 area keeps only its storage hierarchy, and
 # free-placement moved to the Freezer / Warehouse areas above.
-LEGACY_NODE_TYPES: tuple[str, ...] = ("flat", "cassette_rack", "sub_slot")
+# ``cassette`` / ``cryo_box_rack`` retired 2026-07-29 — see LN2_LEVELS.
+LEGACY_NODE_TYPES: tuple[str, ...] = (
+    "flat",
+    "cassette",
+    "cryo_box_rack",
+    "cassette_rack",
+    "sub_slot",
+)
 NODE_TYPES: tuple[str, ...] = (
     *LN2_LEVELS,
     *FREEZER_LEVELS,
@@ -87,21 +113,28 @@ NODE_TYPES: tuple[str, ...] = (
 # keys here are *creatable*; a Box may hang under either container type.
 # ``flat`` is intentionally absent — it is retired (not creatable).
 PARENT_OF: dict[str, tuple[str, ...] | None] = {
-    "tank_quadrant": None,
+    "tank": None,
+    "tank_quadrant": ("tank",),
     "rack": ("tank_quadrant",),
-    "cassette": ("rack",),
-    "cryo_box_rack": ("rack",),
-    "box": ("cassette", "cryo_box_rack"),
+    "box": ("rack",),
     "room": None,
     "room_location": ("room",),
     "sub_location": ("room_location",),
-    "warehouse": None,
+    # LOC-005: Warehouse One is a location INSIDE a room, not a root of its own.
+    "warehouse": ("room",),
     "shelf": ("warehouse",),
 }
 
 # Node types that are roots (parent_id must be NULL). ``flat`` kept for legacy
-# rows. Drives ``ck_location_nodes_root_parentage``.
-ROOT_NODE_TYPES: tuple[str, ...] = ("tank_quadrant", "room", "warehouse", "flat")
+# rows. Drives ``ck_location_nodes_root_parentage``. ``warehouse`` left this set
+# in migration ``mmroom01`` — LOC-005 puts Warehouse One under a room; and
+# ``tank_quadrant`` left it in ``ln2tank01`` — LOC-001 puts a Tank above it.
+ROOT_NODE_TYPES: tuple[str, ...] = ("tank", "room", "flat")
+
+# REQ-2026-07-15-LOC-001: "four quadrants per tank". Enforced as a hard cap in
+# the create route (the client chose a strict limit over a soft default), so a
+# tank can never carry a fifth. Quadrants are added by hand, one at a time.
+MAX_QUADRANTS_PER_TANK = 4
 
 # Node types that can hold a lot allocation. The Box is the LN2 grid leaf;
 # freezer sub-locations and warehouse shelves are free (qty) storage leaves.

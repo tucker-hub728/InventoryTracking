@@ -39,6 +39,14 @@ export interface BoxGridProps {
   selectedCells?: Set<string>;
   /** Multi-selected occupied cells (``"row:col"`` keys) for batch unit-out. */
   selectedOccupied?: Set<string>;
+  /**
+   * The lot a batch selection is bound to. While set, occupied cells holding a
+   * DIFFERENT lot render dimmed and disabled — a batch must be a single lot, and
+   * the grid should say so before the click rather than after it.
+   *
+   * Null / undefined means nothing is selected yet, so every unit is fair game.
+   */
+  batchLotId?: string | null;
   onSelectCell?: (cell: {
     row: number;
     col: number;
@@ -59,6 +67,7 @@ export function BoxGrid({
   selected,
   selectedCells,
   selectedOccupied,
+  batchLotId,
   onSelectCell,
 }: BoxGridProps) {
   const occupied = React.useMemo(() => {
@@ -102,24 +111,38 @@ export function BoxGrid({
                 const isSel = selected?.row === row && selected?.col === col;
                 const isMulti = !occ && (selectedCells?.has(`${row}:${col}`) ?? false);
                 const isOccSel = !!occ && (selectedOccupied?.has(`${row}:${col}`) ?? false);
+                // Holds a unit, but not one that can join the batch under way.
+                const otherLot = !!occ && !!batchLotId && occ.lot_id !== batchLotId;
+                const address = `${rowLabel(row)}${col}`;
                 return (
                   <button
                     key={`${row}:${col}`}
                     type="button"
+                    disabled={otherLot}
+                    aria-disabled={otherLot || undefined}
                     onClick={() => onSelectCell?.({ row, col, occupant: occ })}
                     title={
-                      occ
-                        ? `${rowLabel(row)}${col} · ${occ.item_number ?? ''} ${occ.lot_number ?? ''}`.trim()
-                        : `${rowLabel(row)}${col} · empty`
+                      otherLot
+                        ? `${address} · ${occ.lot_number ?? 'another lot'} — a batch must be a single lot`
+                        : occ
+                          ? `${address} · ${occ.item_number ?? ''} ${occ.lot_number ?? ''}`.trim()
+                          : `${address} · empty`
                     }
                     className={cn(
                       'flex aspect-square min-h-[2.25rem] items-center justify-center overflow-hidden rounded px-px font-mono text-[10px] leading-none tracking-tight transition-colors',
-                      occ
-                        ? 'bg-accent text-white hover:brightness-110'
-                        : isMulti
-                          ? 'border border-accent bg-accent/15 text-accent'
-                          : 'border border-dashed border-border text-text-3 hover:border-accent hover:text-accent',
-                      (isSel || isMulti || isOccSel) && 'ring-2 ring-accent ring-offset-1 ring-offset-bg',
+                      otherLot
+                        ? // Still legibly a unit — a faded fill rather than a
+                          // washed-out one, so the token stays readable in both
+                          // themes and the cell doesn't read as empty.
+                          'cursor-not-allowed border border-accent/20 bg-accent/15 text-accent/60'
+                        : occ
+                          ? 'bg-accent text-white hover:brightness-110'
+                          : isMulti
+                            ? 'border border-accent bg-accent/15 text-accent'
+                            : 'border border-dashed border-border text-text-3 hover:border-accent hover:text-accent',
+                      !otherLot &&
+                        (isSel || isMulti || isOccSel) &&
+                        'ring-2 ring-accent ring-offset-1 ring-offset-bg',
                       isOccSel && 'ring-warning',
                     )}
                   >

@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/select';
 import { EmptyState } from '@/components/shared/empty-state';
 import { LotLink } from '@/components/inventory/lot-link';
+import { LocationLink } from '@/components/locations/location-link';
 import type { ApiItemKitConsumption } from '@/lib/api/kits';
 import type { LedgerEntry } from '@/types/inventory';
 import type { BadgeTone } from '@/types/ui';
@@ -382,17 +383,22 @@ interface Props {
  *   - closed    → the remainder was back-flushed at close-out
  *   - open      → the remainder is still on the production floor, and ``used``
  *                 is live (cumulative across Produce batches, KIT-007)
- *   - cancelled → nothing stays on the floor; everything not used came back */
+ *   - cancelled → nothing stays on the floor; everything not used came back
+ *
+ * Early returns are deliberately NOT called out on closed and open kits (client
+ * 2026-07-30): issued / used / back-flushed is the reconciliation
+ * REQ-2026-07-09-TRX-003 asks for, and a fourth figure made the line harder to
+ * read without changing the arithmetic — an early return is already visible as
+ * its own ``Returned`` row in the ledger above. It stays in the cancelled
+ * phrasing, where it IS the whole story. */
 function kitUsageSentence(u: ApiItemKitConsumption): string {
   const parts = [`issued ${u.issued_total}`, `used ${u.used_qty}`];
   if (u.status === 'closed') {
     parts.push(`back-flushed ${u.remainder}`);
-    if (u.early_returned_qty > 0) parts.push(`returned early ${u.early_returned_qty}`);
   } else if (u.status === 'cancelled') {
     parts.push(`returned ${u.early_returned_qty + u.remainder} on cancel`);
   } else {
     parts.push(`${u.remainder} still on floor`);
-    if (u.early_returned_qty > 0) parts.push(`returned early ${u.early_returned_qty}`);
   }
   return parts.join(' · ');
 }
@@ -536,9 +542,17 @@ export function LedgerTable({
                   {/* The storage location the movement touched. For a shipment
                       that's the source the finished good left from. */}
                   <TableCell className="text-xs text-text-2">
-                    <span className="block truncate" title={e.locationPath ?? undefined}>
-                      {e.location}
-                    </span>
+                    <LocationLink
+                      nodeId={e.locationId}
+                      name={e.location}
+                      path={e.locationPath}
+                      // On a kit row the location is a production floor, whose
+                      // page is three tabs of kits. Pass the kit's state so the
+                      // link opens the tab holding THIS kit — without it a
+                      // closed kit landed on "In production".
+                      kitStatus={e.kitId ? usageByKit.get(e.kitId)?.status : undefined}
+                      className="block truncate"
+                    />
                   </TableCell>
                   {/* Customer — the named recipient a shipment left inventory to
                       (CUST-001). Shown only for built items (raw materials never

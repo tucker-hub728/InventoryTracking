@@ -13,10 +13,10 @@ import re
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory import Item, StockMovement
+from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
     LocationNode,
     LotAllocation,
@@ -178,6 +178,29 @@ async def count_children(session: AsyncSession, node_id: uuid.UUID) -> int:
     n = (
         await session.execute(
             select(func.count()).select_from(LocationNode).where(LocationNode.parent_id == node_id)
+        )
+    ).scalar_one()
+    return int(n)
+
+
+async def count_children_by_type(
+    session: AsyncSession, *, parent_id: uuid.UUID, node_type: str
+) -> int:
+    """How many children of one type a node has — including INACTIVE ones.
+
+    Backs the four-quadrants-per-tank cap (REQ-2026-07-15-LOC-001). Deactivated
+    quadrants are counted on purpose: a retired quadrant still occupies one of
+    the tank's four physical corners, and its code stays reserved by the sibling
+    uniqueness constraint, so excluding it would let a tank grow a fifth.
+    """
+    n = (
+        await session.execute(
+            select(func.count())
+            .select_from(LocationNode)
+            .where(
+                LocationNode.parent_id == parent_id,
+                LocationNode.node_type == node_type,
+            )
         )
     ).scalar_one()
     return int(n)
@@ -506,6 +529,51 @@ async def list_lot_allocations(
     return list((await session.execute(stmt)).scalars().unique().all())
 
 
+async def search_stored_stock(
+    session: AsyncSession, *, query: str, limit: int = 400
+) -> list[LotAllocation]:
+    """Active allocations whose LOT NUMBER, ITEM NUMBER or ITEM NAME matches.
+
+    Backs "where is this stock" in the storage-hierarchy search: one call answers
+    which nodes hold it, instead of resolving ids first and then asking per node.
+    ``GET /lots`` cannot do this — it filters only by item and status.
+
+    Three things are matched, because an operator looking for stock knows any one
+    of them and shouldn't have to know which the box is labelled with:
+
+      * ``lots.lot_number``           — "PL-301-07"
+      * the item number               — "CR-301". DERIVED, not stored: it is
+        ``prefix.code || '-' || items.sku_suffix``, so the concatenation has to
+        happen in SQL. Matching ``sku_suffix`` alone would miss "CR-301" and
+        matching the prefix alone would return the entire tier.
+      * ``items.description``         — the item's name, "Protein 301"
+
+    ``%``, ``_`` and ``\\`` in the operator's text are escaped, so a value that
+    genuinely contains one is matched literally rather than read as a wildcard
+    that returns everything in the building.
+    """
+    escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    item_number = func.concat(ItemPrefix.code, "-", Item.sku_suffix)
+    stmt = (
+        select(LotAllocation)
+        .join(Lot, Lot.id == LotAllocation.lot_id)
+        .join(Item, Item.id == Lot.item_id)
+        .join(ItemPrefix, ItemPrefix.id == Item.prefix_id)
+        .where(LotAllocation.is_active.is_(True))
+        .where(
+            or_(
+                func.lower(Lot.lot_number).like(pattern, escape="\\"),
+                func.lower(item_number).like(pattern, escape="\\"),
+                func.lower(Item.description).like(pattern, escape="\\"),
+            )
+        )
+        .order_by(Lot.lot_number, LotAllocation.created_at)
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
 async def create_allocation(
     session: AsyncSession,
     *,
@@ -604,6 +672,96 @@ async def reduce_allocation(
     return allocation
 
 
+async def is_descendant_of(
+    session: AsyncSession, *, ancestor_id: uuid.UUID, candidate_id: uuid.UUID
+) -> bool:
+    """True if ``candidate_id`` sits anywhere beneath ``ancestor_id``.
+
+    The cycle guard for a re-hang: dropping a node onto one of its own
+    descendants would detach that whole branch from every root, and the
+    recursive tree walks would then never reach it.
+    """
+    row = await session.execute(
+        text(
+            """
+            WITH RECURSIVE down AS (
+                SELECT id FROM meta.location_nodes WHERE id = :ancestor
+              UNION ALL
+                SELECT n.id
+                FROM meta.location_nodes n
+                JOIN down ON n.parent_id = down.id
+            )
+            SELECT EXISTS (SELECT 1 FROM down WHERE id = :candidate)
+            """
+        ),
+        {"ancestor": ancestor_id, "candidate": candidate_id},
+    )
+    return bool(row.scalar_one())
+
+
+async def move_node(
+    session: AsyncSession, *, node: LocationNode, new_parent_id: uuid.UUID
+) -> LocationNode:
+    """Re-hang a node under a new parent. Its whole subtree comes along.
+
+    Only ``parent_id`` changes. Nothing beneath is rewritten and no stock is
+    touched: children point at their parent, and an allocation points at its
+    box's id — never at a path — so every descendant's address recomputes
+    itself. That downhill ripple is what makes it a re-CASCADE.
+    """
+    node.parent_id = new_parent_id
+    await session.flush()
+    await session.refresh(node)
+    return node
+
+
+async def node_path_text(
+    session: AsyncSession, node_id: uuid.UUID | None
+) -> str | None:
+    """Root-to-leaf display address, e.g. ``Tank 2 / Quadrant 1 / Rack 1 / Box 1``.
+
+    Walks parents in one recursive query. Used to freeze the address onto a
+    ledger row at write time (see ``StockMovement.from_location_path``), so a
+    later re-hang of a node cannot rewrite where history says material was.
+
+    Returns ``None`` for ``None`` — callers pass the possibly-absent side of a
+    one-sided movement straight through.
+    """
+    if node_id is None:
+        return None
+    row = await session.execute(
+        text(
+            """
+            WITH RECURSIVE up AS (
+                SELECT id, parent_id, name, 0 AS depth
+                FROM meta.location_nodes
+                WHERE id = :node_id
+              UNION ALL
+                SELECT n.id, n.parent_id, n.name, up.depth + 1
+                FROM meta.location_nodes n
+                JOIN up ON n.id = up.parent_id
+            )
+            SELECT string_agg(name, ' / ' ORDER BY depth DESC) FROM up
+            """
+        ),
+        {"node_id": node_id},
+    )
+    return row.scalar_one_or_none()
+
+
+async def node_paths(
+    session: AsyncSession,
+    *,
+    from_node_id: uuid.UUID | None,
+    to_node_id: uuid.UUID | None,
+) -> tuple[str | None, str | None]:
+    """Both sides of a movement's frozen address, in one call."""
+    return (
+        await node_path_text(session, from_node_id),
+        await node_path_text(session, to_node_id),
+    )
+
+
 # ── Ledger writers (consume / transfer go to app.stock_movements) ───────
 #
 # The location system no longer keeps its own movement log: quantity-changing
@@ -630,6 +788,7 @@ async def create_node_receipt_movement(
         lot_id=lot_id,
         from_location_node_id=None,
         to_location_node_id=to_location_node_id,
+        to_location_path=await node_path_text(session, to_location_node_id),
         movement_type="receipt",
         qty_delta=qty,
         qty_abs=qty,
@@ -656,11 +815,16 @@ async def create_node_dispense_movement(
 ) -> StockMovement:
     """Consume = unit-out: a ``dispense`` row from the source node, recording
     the Flat location that consumed it as ``to_location_node_id``."""
+    from_path, to_path = await node_paths(
+        session, from_node_id=from_location_node_id, to_node_id=to_location_node_id
+    )
     movement = StockMovement(
         item_id=item_id,
         lot_id=lot_id,
         from_location_node_id=from_location_node_id,
         to_location_node_id=to_location_node_id,
+        from_location_path=from_path,
+        to_location_path=to_path,
         movement_type="dispense",
         qty_delta=-qty,
         qty_abs=qty,
@@ -698,6 +862,7 @@ async def create_node_shipment_movement(
         lot_id=lot_id,
         from_location_node_id=from_location_node_id,
         to_location_node_id=None,
+        from_location_path=await node_path_text(session, from_location_node_id),
         movement_type="customer_shipment",
         qty_delta=-qty,
         qty_abs=qty,
@@ -725,11 +890,18 @@ async def create_node_transfer_pair(
     notes: str | None = None,
 ) -> tuple[StockMovement, StockMovement]:
     """A node→node move: ``transfer_out`` + ``transfer_in`` pair (net-zero)."""
+    # Both legs carry BOTH addresses: each row on its own then says where the
+    # material came from and where it went, without having to find its partner.
+    from_path, to_path = await node_paths(
+        session, from_node_id=from_location_node_id, to_node_id=to_location_node_id
+    )
     out_leg = StockMovement(
         item_id=item_id,
         lot_id=lot_id,
         from_location_node_id=from_location_node_id,
         to_location_node_id=None,
+        from_location_path=from_path,
+        to_location_path=to_path,
         movement_type="transfer_out",
         qty_delta=-qty,
         qty_abs=qty,
@@ -745,6 +917,8 @@ async def create_node_transfer_pair(
         lot_id=lot_id,
         from_location_node_id=None,
         to_location_node_id=to_location_node_id,
+        from_location_path=from_path,
+        to_location_path=to_path,
         movement_type="transfer_in",
         qty_delta=qty,
         qty_abs=qty,

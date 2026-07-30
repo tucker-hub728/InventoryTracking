@@ -539,6 +539,30 @@ class ReturnCellInput(BaseModel):
     grid_col: int = Field(ge=1)
 
 
+class ReturnDestinationInput(BaseModel):
+    """One place a slice of a line's returned material goes.
+
+    Returns SPLIT across several locations the same way a produced batch already
+    can (client 2026-07-30): when one box hasn't enough free cells for everything
+    coming back, the remainder goes to another box, freezer or shelf. Without it
+    a nearly-full box dead-ended the return entirely.
+
+    Mirrors ``OutputDestinationInput`` deliberately — same shape, same rules — so
+    there is one pattern for "put these units in more than one place".
+
+    Declared here, above every request that uses it: Pydantic resolves the
+    annotation when the model is built, so a class defined further down the file
+    would fail at import.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    location_node_id: str
+    qty: int = Field(ge=1, description="Units returned to this location")
+    # LN2 only: the exact cells this slice occupies; ``qty`` must equal its length.
+    return_cells: list[ReturnCellInput] = Field(default_factory=list)
+
+
 class IssueRequest(BaseModel):
     """Optional body for ``POST /issue`` — the draft edits are saved here in one
     shot so the Issue button is the only write (no per-keystroke PATCH)."""
@@ -584,7 +608,12 @@ class ReturnSourceInput(BaseModel):
 
     lot_id: str = Field(description="Which on-floor lot's units to return")
     qty: int = Field(gt=0, description="How many of this lot to hand back")
-    return_location_node_id: str = Field(description="Storage node the material goes back to")
+    # Multi-destination (client 2026-07-30): this lot's units may land in several
+    # places when one box can't hold them all. Wins over the single field below.
+    destinations: list[ReturnDestinationInput] = Field(default_factory=list)
+    return_location_node_id: str | None = Field(
+        default=None, description="Storage node the material goes back to"
+    )
     # Required when the return target is a box: one free cell per returned unit.
     return_cells: list[ReturnCellInput] = Field(default_factory=list)
 
@@ -603,6 +632,8 @@ class ReturnExcessRequest(BaseModel):
     sources: list[ReturnSourceInput] = Field(default_factory=list)
     # ── Legacy single (used only when ``sources`` is empty) ──
     qty: int | None = Field(default=None, gt=0, description="How much to hand back (≤ on-floor qty)")
+    # Multi-destination (client 2026-07-30): split the returned qty across boxes.
+    destinations: list[ReturnDestinationInput] = Field(default_factory=list)
     return_location_node_id: str | None = Field(
         default=None, description="Storage node the material goes back to"
     )
@@ -619,6 +650,9 @@ class CloseOutLineInput(BaseModel):
 
     line_id: str
     used_qty: int = Field(ge=0, description="Material consumed by the final batch")
+    # Multi-destination back-flush (client 2026-07-30). Wins when present and must
+    # total the leftover; the single field below stays for the one-place case.
+    destinations: list[ReturnDestinationInput] = Field(default_factory=list)
     return_location_node_id: str | None = Field(
         default=None, description="Where leftover returns; defaults to the source"
     )
@@ -733,7 +767,11 @@ class CancelLineInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
-    return_location_node_id: str
+    # Multi-destination (client 2026-07-30). When present it wins and must total
+    # the line's on-floor quantity; the single field below stays for the common
+    # one-place case and for callers written before the split existed.
+    destinations: list[ReturnDestinationInput] = Field(default_factory=list)
+    return_location_node_id: str | None = None
     return_cells: list[ReturnCellInput] = Field(default_factory=list)
 
 

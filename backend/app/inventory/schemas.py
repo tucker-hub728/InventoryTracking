@@ -443,6 +443,15 @@ class MovementRead(BaseModel):
     # reference only — SRS §7 excludes finished-good → component-lot tracing.
     kit_id: str | None = None
     kit_number: str | None = None
+    # Where the kit was BUILT. Not a movement end: ``production_output`` mints a
+    # new lot, so those units never moved from anywhere and
+    # ``ck_movements_locations`` requires ``from_location_node_id IS NULL`` —
+    # same as a receipt. The floor is still the answer to "where was this made",
+    # so it travels beside the movement rather than being forced into ``from``,
+    # which would assert stock left the floor and mislead any location-based
+    # report.
+    kit_production_location_node_id: str | None = None
+    kit_production_location_name: str | None = None
 
     # Customer shipment (CUST-001 / TRX-005). Set only on ``customer_shipment``
     # rows: the named customer the finished good left inventory to (null = a

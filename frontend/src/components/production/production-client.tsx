@@ -22,6 +22,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { useAuthStore, selectIsSuperAdmin } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
+import { invalidateLocationForest } from '@/components/reconciliation/location-tree-picker';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 
 /**
@@ -250,6 +251,9 @@ function AddAreaDialog({
     setError(null);
     try {
       await locationNodesApi.createProductionArea(trimmed);
+      // A kit's production-floor picker reads the cached location tree, so a new
+      // area would not be offerable until the next full page load.
+      invalidateLocationForest();
       onCreated();
       onOpenChange(false);
     } catch (err) {

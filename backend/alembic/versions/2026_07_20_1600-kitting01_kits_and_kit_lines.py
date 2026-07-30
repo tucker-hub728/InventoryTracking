@@ -11,7 +11,9 @@ Adds the Kitting / back-flush data layer (docs/modules/kitting.md):
     are unit-OUT (from source, delta < 0); output/backflush are unit-IN
     (to a node, delta > 0).
   * ``meta.location_nodes``: ``production`` added to the ``flat_category``
-    CHECK, and the five advisory production floors seeded as ``flat`` nodes.
+    CHECK. Schema only — the production areas themselves are rows, and rows are
+    owned by ``scripts/seed_production.py`` (``created_by_user_id`` is NOT NULL,
+    so a fresh database has no user for a migration to seed as).
 
 No stock table is introduced — on-hand stays derived through
 ``app.v_item_stock``, which already sums every ``qty_delta``.
@@ -84,9 +86,9 @@ _FLAT_RULE_PREV = (
     "('kanban', 'lab', 'qc', 'engineering', 'materials')"
 )
 
-# Advisory production floors (§4.1) are seeded in ``upgrade`` as flat/root nodes
-# owned by the earliest user (created_by_user_id is NOT NULL); a no-op if there
-# are no users yet.
+# The advisory production floors (§4.1) are flat/root nodes created by
+# ``scripts/seed_production.py`` — never here. ``upgrade`` only widens the
+# ``flat_category`` CHECK so those rows are legal.
 
 
 def upgrade() -> None:

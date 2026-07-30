@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Container,
   Maximize2,
+  MoveRight,
   Package,
   Plus,
   Search,
@@ -49,6 +50,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { RelocateDialog } from '@/components/locations/relocate-dialog';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ItemLink } from '@/components/inventory/item-link';
 import { LotLink } from '@/components/inventory/lot-link';
@@ -61,6 +63,7 @@ import type { ReauthResponse } from '@/lib/api/auth';
 import { cn } from '@/lib/utils';
 import {
   locationNodesApi,
+  parentTypesOf,
   subtreeStats,
   CHILD_TYPES_OF,
   NODE_TYPE_LABEL,
@@ -71,6 +74,7 @@ import {
   type NodeTree,
   type NodeType,
 } from '@/lib/api/location-nodes';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import {
   LocationLeafPicker,
@@ -80,11 +84,13 @@ import {
 import { BoxGrid, rowLabel } from './box-grid';
 
 export const NODE_ICON: Record<NodeType, LucideIcon> = {
+  tank: Container,
   tank_quadrant: Boxes,
   rack: Server,
+  box: Box,
+  // Retired LN2 levels — no longer creatable, kept so legacy rows still render.
   cassette: Container,
   cryo_box_rack: Boxes,
-  box: Box,
   // Freezer / warehouse nodes don't render in this (LN2) panel, but the map
   // must cover every NodeType.
   room: Container,
@@ -104,7 +110,14 @@ const LN2_UNIT_IN_ENABLED = false;
 
 /** Plural noun for a node's children, used in the "N boxes" header. */
 function childUnit(nodeType: NodeType, n: number): string {
-  const label = nodeType === 'tank_quadrant' ? 'rack' : nodeType === 'rack' ? 'container' : 'box';
+  const label =
+    nodeType === 'tank'
+      ? 'quadrant'
+      : nodeType === 'tank_quadrant'
+        ? 'rack'
+        : nodeType === 'rack'
+          ? 'box'
+          : 'box';
   return `${label}${n === 1 ? '' : 's'}`;
 }
 
@@ -164,8 +177,10 @@ export function NodeDetailPanel({
   const [allocations, setAllocations] = React.useState<Allocation[]>([]);
   const [lots, setLots] = React.useState<Lot[]>([]);
   const [targets, setTargets] = React.useState<LocationNode[]>([]);
-  // Full area trees for the cascading transfer-destination picker.
+  // Full area trees for the transfer-destination picker and Relocate.
   const [trees, setTrees] = React.useState<AreaTrees | null>(null);
+  // Bump to refetch ``trees``. See the effect below for why it isn't fetch-once.
+  const [treesSeq, setTreesSeq] = React.useState(0);
   const [consumedHere, setConsumedHere] = React.useState<NodeMovement[]>([]);
   const [dedName, setDedName] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -183,6 +198,21 @@ export function NodeDetailPanel({
   const [placeQty, setPlaceQty] = React.useState(isBox ? '1' : '');
   const [showResize, setShowResize] = React.useState(false);
   const [showEdit, setShowEdit] = React.useState(false);
+  const [showMove, setShowMove] = React.useState(false);
+  // Relocating a node is super-admin-only (LOC-004, enforced by the API).
+  const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  // Can this node type be re-hung AT ALL? A root cannot — a tank is the top of
+  // its cascade (LOC-001) with nothing above it, so ``PARENT_OF`` has no entry
+  // and the API returns ``node_not_movable``.
+  //
+  // Note this no longer also requires a legal destination to EXIST. It used to,
+  // which meant the only quadrant on a one-tank system had no button and no
+  // explanation. The dialog now renders the cascade and says why nowhere is
+  // available, which teaches the constraint instead of hiding it.
+  const canRelocate = React.useMemo(
+    () => parentTypesOf(node.node_type).length > 0,
+    [node.node_type],
+  );
   // Bumped after each successful action so open inline forms remount shut.
   const [opSeq, setOpSeq] = React.useState(0);
 
@@ -222,7 +252,14 @@ export function NodeDetailPanel({
     }
   }, [node.id, node.can_store, node.node_type]);
 
-  // Load the destination trees once — they feed the transfer cascade picker.
+  // The destination trees, feeding the transfer picker and the Relocate dialog.
+  //
+  // These used to load ONCE per panel mount (`[]`), which was wrong as soon as
+  // the structure could change underneath them: adding a rack reloaded the page's
+  // own tree — so the panel's `node` prop updated — but never this copy, so the
+  // Relocate dialog offered a cascade with the new rack missing. Bumping
+  // `treesSeq` refetches; the Relocate button does that as it opens, which is the
+  // moment freshness actually matters.
   React.useEffect(() => {
     const ctrl = new AbortController();
     Promise.all([
@@ -235,7 +272,7 @@ export function NodeDetailPanel({
         /* the picker shows an empty state if the trees can't load */
       });
     return () => ctrl.abort();
-  }, []);
+  }, [treesSeq]);
 
   React.useEffect(() => {
     setSelectedCells(new Set());
@@ -334,6 +371,9 @@ export function NodeDetailPanel({
         if (next.size === 0) setBatchLotId(null);
         return;
       }
+      // Backstop only. The grid now dims and disables other-lot cells while a
+      // batch is under way (``batchLotId``), so this is unreachable by clicking —
+      // it stays because the rule belongs here too, not only in the rendering.
       if (selectedOccupied.size > 0 && batchLotId && c.occupant.lot_id !== batchLotId) {
         toast.error('A batch must be a single lot.');
         return;
@@ -459,8 +499,6 @@ export function NodeDetailPanel({
   const utilisation = stats.capacity > 0 ? Math.round((stats.occupied / stats.capacity) * 100) : 0;
   // Occupied = holds units (its own, or a descendant's). Blocks remove/resize.
   const isOccupied = isFlat ? node.active_allocation_count > 0 : stats.occupied > 0;
-  // A box directly under a cassette is single-column (cols locked to 1).
-  const parentIsCassette = path[path.length - 2]?.node_type === 'cassette';
 
   // Would the current placement exceed the lot's remaining-to-place cap?
   const placingCount = isBox ? selectedCells.size : Number(placeQty) || 0;
@@ -518,6 +556,30 @@ export function NodeDetailPanel({
                 <Maximize2 size={14} /> Resize
               </Button>
             )}
+            {/* Relocate this location — and its whole subtree — elsewhere in the
+                cascade (LOC-004). Deliberately NOT called "Move": Transfer owns
+                that word and moves stock, while this moves a location and no
+                stock at all.
+
+                A primary button, not a ghost one, because it is the only
+                structural action on this panel and it was being missed — but only
+                shown when it can actually do something. Hidden for roots (a tank
+                has nothing above it) and for non-super-admins; the API refuses
+                either way. */}
+            {isSuperAdmin && canRelocate && (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => {
+                  // Refetch the cascade as the dialog opens, so a rack or
+                  // quadrant added since this panel mounted is offered.
+                  setTreesSeq((s) => s + 1);
+                  setShowMove(true);
+                }}
+              >
+                <MoveRight size={14} /> Relocate
+              </Button>
+            )}
             {/* Remove is hidden for now. */}
           </div>
         )}
@@ -572,7 +634,22 @@ export function NodeDetailPanel({
               <p className="text-sm font-medium text-text-2">
                 Unit map · {gridRows}×{gridCols}
               </p>
-              <span className="text-xs text-text-3">Click a unit to move</span>
+              {/* Once a batch is under way it is bound to one lot, so say which
+                  — the grid dims the rest, and the two together explain the rule
+                  before a click instead of after it. */}
+              <span className="text-xs text-text-3">
+                {batchLotId && selectedOutAllocs.length > 0 ? (
+                  <>
+                    Only{' '}
+                    <span className="font-mono text-text-2">
+                      {selectedOutAllocs[0]?.lot_number ?? 'this lot'}
+                    </span>{' '}
+                    units can join
+                  </>
+                ) : (
+                  'Click a unit to move'
+                )}
+              </span>
             </div>
             <BoxGrid
               rows={gridRows}
@@ -580,6 +657,7 @@ export function NodeDetailPanel({
               allocations={allocations}
               selectedCells={selectedCells}
               selectedOccupied={selectedOccupied}
+              batchLotId={batchLotId}
               onSelectCell={handleSelectCell}
             />
             {/* Batch unit-out (transfer / consume) for the selected units. */}
@@ -823,12 +901,26 @@ export function NodeDetailPanel({
           onChanged();
         }}
       />
+      <RelocateDialog
+        open={showMove}
+        onOpenChange={setShowMove}
+        node={node}
+        // The WHOLE cascade, not the legal parents. The dialog classifies each
+        // node itself so it can show why a destination is unavailable.
+        forest={trees?.ln2 ?? []}
+        onDone={() => {
+          setShowMove(false);
+          // The relocation itself changed the cascade, so a second relocation
+          // from this same panel must not reuse the pre-move shape.
+          setTreesSeq((s) => s + 1);
+          onChanged();
+        }}
+      />
       {isBox && (
         <ResizeDialog
           open={showResize}
           onOpenChange={setShowResize}
           node={node}
-          parentIsCassette={parentIsCassette}
           onDone={() => {
             setShowResize(false);
             onChanged();
@@ -1585,30 +1677,31 @@ function ResizeDialog({
   open,
   onOpenChange,
   node,
-  parentIsCassette,
   onDone,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   node: NodeTree;
-  parentIsCassette: boolean;
   onDone: () => void;
 }) {
   const [rows, setRows] = React.useState(String(node.grid_rows ?? 1));
-  const [cols, setCols] = React.useState(parentIsCassette ? '1' : String(node.grid_cols ?? 1));
+  // Columns are freely editable: the single-column lock belonged to a box under
+  // a cassette, and the cassette level is retired (client 2026-07-29). A box now
+  // hangs off a rack and carries whatever grid it is given.
+  const [cols, setCols] = React.useState(String(node.grid_cols ?? 1));
   const [busy, setBusy] = React.useState(false);
 
   // Reset the inputs whenever the dialog (re)opens for a node.
   React.useEffect(() => {
     if (open) {
       setRows(String(node.grid_rows ?? 1));
-      setCols(parentIsCassette ? '1' : String(node.grid_cols ?? 1));
+      setCols(String(node.grid_cols ?? 1));
     }
-  }, [open, node.grid_rows, node.grid_cols, parentIsCassette]);
+  }, [open, node.grid_rows, node.grid_cols]);
 
   const save = async () => {
     const r = Number(rows);
-    const c = parentIsCassette ? 1 : Number(cols);
+    const c = Number(cols);
     if (!Number.isInteger(r) || r < 1 || !Number.isInteger(c) || c < 1) {
       toast.error('Rows and columns must be whole numbers ≥ 1.');
       return;
@@ -1655,17 +1748,11 @@ function ResizeDialog({
                 min={1}
                 step="1"
                 value={cols}
-                disabled={parentIsCassette}
                 onChange={(e) => setCols(e.target.value)}
                 className="font-mono"
               />
             </div>
           </div>
-          {parentIsCassette && (
-            <p className="mt-2 text-xs text-text-3">
-              A box under a cassette is single-column — set the number of rows.
-            </p>
-          )}
         </DialogBody>
         <DialogFooter>
           <Button type="button" onClick={() => onOpenChange(false)} disabled={busy}>

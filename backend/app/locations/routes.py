@@ -39,6 +39,7 @@ from app.locations.schemas import (
     LotAvailabilityRead,
     NodeCreate,
     NodeMovementRead,
+    NodeMoveRequest,
     NodeRead,
     NodeTreeRead,
     NodeUpdateRequest,
@@ -50,6 +51,7 @@ from app.locations.schemas import (
 )
 from app.models.inventory import StockMovement
 from app.models.locations import (
+    MAX_QUADRANTS_PER_TANK,
     PARENT_OF,
     LocationNode,
     LotAllocation,
@@ -160,6 +162,13 @@ def _build_tree(
 ) -> list[NodeTreeRead]:
     """Nest a flat node list into trees keyed by parent_id (roots returned).
 
+    A node is a root OF THIS FOREST when it has no parent *or* its parent is not
+    in ``nodes``. The second half matters because the callers fetch one area's
+    node types at a time: since LOC-005 put Warehouse One inside the Materials
+    Management room, ``/warehouse-tree`` fetches only ``warehouse``/``shelf`` and
+    the parent room is absent — keying strictly on ``parent_id IS NULL`` would
+    return an empty forest and the Warehouse page would silently go blank.
+
     Dedication is resolved by walking each node up to its quadrant within the
     same flat list (no extra queries). ``alloc_counts`` (node_id → active
     allocation count) populates each node's ``active_allocation_count`` so the
@@ -193,7 +202,9 @@ def _build_tree(
         )
         return NodeTreeRead(**base.model_dump(), children=[build(k) for k in kids])
 
-    roots = by_parent.get(None, [])
+    # Preserve the incoming order (the repository sorts) rather than grouping by
+    # parent, so siblings stay in the order the caller chose.
+    roots = [n for n in nodes if n.parent_id is None or n.parent_id not in by_id]
     return [build(r) for r in roots]
 
 
@@ -368,6 +379,8 @@ async def create_node(
     payload: NodeCreate,
 ) -> NodeRead:
     node_type = payload.node_type
+    # Shelves and Cold Storage nodes are super-admin-only (LOC-003 / LOC-006).
+    _require_super_admin_for_node_type(current, node_type)
     required_parents = PARENT_OF[node_type]
 
     # ── Strict hierarchy validation — fail fast, never auto-correct (§4.1) ──
@@ -403,7 +416,22 @@ async def create_node(
                 code="invalid_parent_type",
             )
 
-    # ── Grid dimensions — only on a Box; cassette boxes are single-column ──
+    # ── Four quadrants per tank (REQ-2026-07-15-LOC-001) ──────────────────
+    # A hard cap, the client's explicit choice. Counting siblings is why this
+    # lives here and not in a CHECK constraint.
+    if node_type == "tank_quadrant" and parent_uuid is not None:
+        existing = await loc_repo.count_children_by_type(
+            db, parent_id=parent_uuid, node_type="tank_quadrant"
+        )
+        if existing >= MAX_QUADRANTS_PER_TANK:
+            raise ValidationError(
+                f"A tank has {MAX_QUADRANTS_PER_TANK} quadrants; "
+                f"'{parent.name if parent else 'this tank'}' already has all of them",
+                code="quadrant_limit_reached",
+                details={"limit": MAX_QUADRANTS_PER_TANK, "existing": existing},
+            )
+
+    # ── Grid dimensions — only on a Box ───────────────────────────────────
     grid_rows: int | None = None
     grid_cols: int | None = None
     if is_grid_node(node_type):
@@ -412,11 +440,6 @@ async def create_node(
                 "A box requires grid_rows and grid_cols", code="grid_required"
             )
         grid_rows, grid_cols = payload.grid_rows, payload.grid_cols
-        if parent is not None and parent.node_type == "cassette" and grid_cols != 1:
-            raise ValidationError(
-                "A box under a cassette is single-column (grid_cols must be 1)",
-                code="cassette_box_single_column",
-            )
     elif payload.grid_rows is not None or payload.grid_cols is not None:
         raise ValidationError(
             "grid_rows / grid_cols are only valid for a box", code="grid_not_allowed"
@@ -515,10 +538,13 @@ async def update_node(
     node = await loc_repo.get_node(db, node_id)
     if node is None:
         raise NotFoundError(f"Location node {node_id} not found")
-    # Renaming a PRODUCTION area is super-admin-only (client 2026-07-23); other
-    # nodes (LN2 boxes, freezers, shelves) keep the inventory:create gate above.
+    # Renaming a PRODUCTION area is super-admin-only (client 2026-07-23), and so
+    # is renaming a shelf or a Cold Storage node (LOC-003 says operators may not
+    # create *or rename* shelves). LN2 nodes keep the inventory:create gate.
     if node.node_type == "flat" and node.flat_category == "production":
         _require_super_admin(current)
+    else:
+        _require_super_admin_for_node_type(current, node.node_type)
     before = loc_repo.node_to_audit_snapshot(node)
     updated = await loc_repo.update_node_name(db, node=node, name=payload.name)
     await record_entity_change(
@@ -539,17 +565,156 @@ async def update_node(
     return response
 
 
-def _require_super_admin(user) -> None:
-    """Managing production areas (add / rename) is super-admin-only (client
-    2026-07-23): new areas are added by an admin on request, not by every
-    operator. ``super_admin`` is told apart from ``admin`` by the DB role, since
-    both share the ``admin`` permission bucket."""
+@nodes_router.patch(
+    "/{node_id}/parent",
+    response_model=NodeRead,
+    summary="Re-hang a node under a different parent — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def move_node(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: NodeMoveRequest,
+) -> NodeRead:
+    """Move a node — and everything inside it — to a new parent (LOC-004).
+
+    Only this node's ``parent_id`` changes. Children point at their parent and a
+    lot allocation points at its box's *id*, never at a path, so a rack moved to
+    another quadrant carries its boxes and their vials with it and every address
+    beneath recomputes. Nothing is re-placed and no stock moves, so this is not
+    a ledger event — it is a structural edit, recorded in the audit log.
+
+    Ledger rows written BEFORE the move keep the address they were written with
+    (``stock_movements.from/to_location_path``), so history still reads as it
+    happened rather than following the node.
+    """
+    _require_super_admin(current, what="the location structure")
+
+    node = await loc_repo.get_node(db, node_id)
+    if node is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+
+    required_parents = PARENT_OF.get(node.node_type)
+    if required_parents is None:
+        # Roots (a tank, a room) have nothing to hang under, and retired types
+        # are absent from PARENT_OF entirely — neither can be moved.
+        raise ValidationError(
+            f"A '{node.node_type}' is a root and cannot be moved under a parent",
+            code="node_not_movable",
+        )
+
+    new_parent_id = _parse_uuid(payload.parent_id, field="parent_id")
+    if new_parent_id == node.id:
+        raise ValidationError("A node cannot be its own parent", code="invalid_parent")
+    if new_parent_id == node.parent_id:
+        # Already there. Return unchanged rather than writing a no-op audit row.
+        return _node_to_read(node)
+
+    new_parent = await loc_repo.get_node(db, new_parent_id)
+    if new_parent is None:
+        raise NotFoundError(f"Parent node {payload.parent_id} not found")
+    if not new_parent.is_active:
+        raise ValidationError("Parent node is inactive", code="parent_inactive")
+    if new_parent.node_type not in required_parents:
+        allowed = " or ".join(f"'{p}'" for p in required_parents)
+        raise ValidationError(
+            f"A '{node.node_type}' must hang under {allowed}, "
+            f"not a '{new_parent.node_type}'",
+            code="invalid_parent_type",
+        )
+
+    # Dropping a node onto its own descendant would orphan the whole branch from
+    # every root — it would still exist, but no tree walk could ever reach it.
+    if await loc_repo.is_descendant_of(
+        db, ancestor_id=node.id, candidate_id=new_parent_id
+    ):
+        raise ValidationError(
+            f"'{new_parent.name}' sits inside '{node.name}' — "
+            "a node cannot be moved into its own contents",
+            code="invalid_parent_cycle",
+        )
+
+    # The destination's own rules apply exactly as they would on create.
+    clash = await loc_repo.get_sibling_by_code(
+        db, parent_id=new_parent_id, code=node.code
+    )
+    if clash is not None:
+        raise ConflictError(
+            f"'{new_parent.name}' already contains something coded '{node.code}'",
+            code="node_code_conflict",
+        )
+    if node.node_type == "tank_quadrant":
+        existing = await loc_repo.count_children_by_type(
+            db, parent_id=new_parent_id, node_type="tank_quadrant"
+        )
+        if existing >= MAX_QUADRANTS_PER_TANK:
+            raise ValidationError(
+                f"A tank has {MAX_QUADRANTS_PER_TANK} quadrants; "
+                f"'{new_parent.name}' already has all of them",
+                code="quadrant_limit_reached",
+                details={"limit": MAX_QUADRANTS_PER_TANK, "existing": existing},
+            )
+
+    before = loc_repo.node_to_audit_snapshot(node)
+    from_path = await loc_repo.node_path_text(db, node.id)
+    moved = await loc_repo.move_node(db, node=node, new_parent_id=new_parent_id)
+    to_path = await loc_repo.node_path_text(db, moved.id)
+
+    # ``updated``, not a "moved" action: ``AuditAction`` is a closed set backed
+    # by a CHECK on audit.audit_events, and a re-hang genuinely is an update to
+    # the node's parentage. The before/after paths carry what actually changed.
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="meta.location_nodes",
+        subject_id=moved.id,
+        subject_label=f"{moved.node_type}:{moved.code}",
+        before={**before, "path": from_path},
+        after={**loc_repo.node_to_audit_snapshot(moved), "path": to_path},
+    )
+    response = _node_to_read(moved)
+    await db.commit()
+    return response
+
+
+# Node types whose creation and renaming is super-admin-only:
+#   * ``shelf`` — REQ-2026-07-15-LOC-003. Operators must not create or rename
+#     shelves: duplicate or ad-hoc shelf names split one physical spot into two
+#     and corrupt planning reorder points.
+#   * ``room_location`` / ``sub_location`` — REQ-2026-07-15-LOC-006, "only Super
+#     Admin may create Cold Storage locations". These are the cold locations
+#     (Minus-20 Freezers) and the equipment units inside them.
+#
+# This deliberately overrides LOC-003's older sentence that "adding freezers,
+# refrigerators, and LN2 tanks remains available to the appropriate admin role":
+# LOC-006 is the later requirement and was signed off on 2026-07-29. LN2 nodes
+# (tank_quadrant … box) are NOT listed here, so they keep the admin-level gate.
+SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset(
+    {"shelf", "room_location", "sub_location"}
+)
+
+
+def _require_super_admin(user, *, what: str = "production areas") -> None:
+    """Super-admin-only guard for the restricted location writes.
+
+    Covers production areas (client 2026-07-23) and, per LOC-003 / LOC-006,
+    shelves and Cold Storage nodes. ``super_admin`` is told apart from ``admin``
+    by the DB role, since both share the ``admin`` permission bucket."""
     if getattr(user, "role", None) != "super_admin":
         raise AuthorizationError(
-            "Only a super admin can manage production areas",
+            f"Only a super admin can manage {what}",
             code="permission_denied",
             details={"required_role": "super_admin"},
         )
+
+
+def _require_super_admin_for_node_type(user, node_type: str) -> None:
+    """Apply the LOC-003 / LOC-006 role gate to the restricted node types."""
+    if node_type in SUPER_ADMIN_NODE_TYPES:
+        what = "shelves" if node_type == "shelf" else "Cold Storage locations"
+        _require_super_admin(user, what=what)
 
 
 @nodes_router.post(
@@ -607,14 +772,9 @@ async def update_node_grid(
         raise ValidationError(
             "Only a box has a resizable grid", code="grid_not_allowed"
         )
-    # A box under a cassette stays single-column.
-    if node.parent_id is not None:
-        parent = await loc_repo.get_node(db, node.parent_id)
-        if parent is not None and parent.node_type == "cassette" and payload.grid_cols != 1:
-            raise ValidationError(
-                "A box under a cassette is single-column (grid_cols must be 1)",
-                code="cassette_box_single_column",
-            )
+    # The single-column rule for a box under a cassette is gone with the
+    # cassette level itself (client 2026-07-29) — a box now hangs off a rack and
+    # carries whatever grid it is given.
     max_row, max_col = await loc_repo.max_occupied_cell(db, node_id)
     if payload.grid_rows < max_row or payload.grid_cols < max_col:
         raise ConflictError(
@@ -1338,6 +1498,27 @@ async def lot_availability(
         placed=placed,
         remaining=remaining,
     )
+
+
+@alloc_router.get(
+    "/search",
+    response_model=list[AllocationRead],
+    summary="Where stock is stored — search by lot number, item number or name",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def search_allocations(
+    db: DBSession,
+    q: Annotated[str, Query(min_length=1, max_length=120)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 400,
+) -> list[AllocationRead]:
+    """Find where stock is, from a partial lot number, item number or item name.
+
+    Declared ABOVE ``/by-lot/{lot_id}``: a literal path must be registered before
+    any sibling that could capture it, or the dynamic route wins and ``/search``
+    arrives as a lot id that fails to parse as a UUID.
+    """
+    rows = await loc_repo.search_stored_stock(db, query=q, limit=limit)
+    return [_alloc_to_read(a) for a in rows]
 
 
 @alloc_router.get(

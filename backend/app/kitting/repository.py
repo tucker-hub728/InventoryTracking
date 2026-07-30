@@ -703,6 +703,13 @@ async def create_kit_movement(
     notes: str | None,
     lot_id: uuid.UUID | None = None,
 ) -> StockMovement:
+    # Freeze the addresses as text alongside the ids — a node re-hung later must
+    # not rewrite where this kit's history says the material was.
+    from app.locations.repository import node_paths
+
+    from_path, to_path = await node_paths(
+        session, from_node_id=from_location_node_id, to_node_id=to_location_node_id
+    )
     movement = StockMovement(
         item_id=item_id,
         lot_id=lot_id,
@@ -711,6 +718,8 @@ async def create_kit_movement(
         qty_abs=abs(qty_delta),
         from_location_node_id=from_location_node_id,
         to_location_node_id=to_location_node_id,
+        from_location_path=from_path,
+        to_location_path=to_path,
         kit_id=kit_id,
         kit_line_id=kit_line_id,
         reauth_evidence_id=reauth_evidence_id,

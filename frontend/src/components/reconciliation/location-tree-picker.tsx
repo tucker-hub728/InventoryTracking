@@ -8,34 +8,44 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { NODE_TYPE_LABEL, locationNodesApi, type NodeTree } from '@/lib/api/location-nodes';
 import { cn } from '@/lib/utils';
 
-export type LocationArea = 'ln2' | 'cold' | 'warehouse' | 'production';
+/**
+ * What a branch is FOR, which is the only distinction any caller draws: a place
+ * stock is stored, or a floor a kit is issued to. It used to be one value per
+ * fetch endpoint ('ln2' | 'cold' | 'warehouse'), but no caller ever filtered to
+ * one of those — and since LOC-005 put Warehouse One inside the Materials
+ * Management room, "warehouse" stopped being a top-level thing at all.
+ */
+export type LocationArea = 'storage' | 'production';
 
-/** A node in the picker's unified forest. Synthetic group nodes wrap each area. */
+/** A node in the picker's unified forest. Synthetic group nodes wrap LN2 and
+ *  Production; every other root is a real room. */
 export interface PNode {
   id: string;
   name: string;
+  /** The node's own code. Searchable, so "WH1-A" finds Shelf A. */
+  code: string;
   nodeType: string;
   canStore: boolean;
   isGroup: boolean;
   area: LocationArea | null;
-  /** Real breadcrumb (excludes the synthetic group), e.g. "Warehouse One › Shelf A". */
+  /** Real breadcrumb (excludes any synthetic group), e.g. "Warehouse One › Shelf A". */
   path: string;
   children: PNode[];
 }
 
-interface Forest {
+export interface Forest {
   roots: PNode[];
   byId: Map<string, PNode>;
   parentOf: Map<string, string | null>;
   real: PNode[];
 }
 
-const AREA_LABEL: Record<LocationArea, string> = {
-  ln2: 'LN2',
-  cold: 'Freezers',
-  warehouse: 'Warehouse',
-  production: 'Production / Lab',
-};
+/**
+ * Rooms come first, in the order the sidebar lists them, so the picker and the
+ * navigation agree. Anything not named here sorts after, by name — a new room
+ * appears without a code change.
+ */
+const ROOM_CODE_ORDER = ['MM', 'CS', 'AL'];
 
 // ── Cached forest (fetched once, shared across all picker instances) ─────────
 
@@ -50,11 +60,13 @@ function convertTree(
   byId: Map<string, PNode>,
   parentOf: Map<string, string | null>,
   real: PNode[],
+  extraChildren: NodeTree[] = [],
 ): PNode {
   const path = [...prefix, n.name];
   const p: PNode = {
     id: n.id,
     name: n.name,
+    code: n.code,
     nodeType: n.node_type,
     canStore: n.can_store,
     isGroup: false,
@@ -65,33 +77,52 @@ function convertTree(
   byId.set(n.id, p);
   parentOf.set(n.id, parentId);
   real.push(p);
-  p.children = n.children.map((c) => convertTree(c, path, n.id, area, byId, parentOf, real));
+  p.children = [...extraChildren, ...n.children].map((c) =>
+    convertTree(c, path, n.id, area, byId, parentOf, real),
+  );
   return p;
 }
 
+/**
+ * One tree that matches the real location model.
+ *
+ * The top level is the ROOMS — Materials Management, Cold Storage, the Analytical
+ * Lab — each holding its own locations, with LN2 and Production as the two
+ * synthetic groups for branches that live in no room.
+ *
+ * The grafting matters. The API serves one area's node types per endpoint, so
+ * ``/freezer-tree`` returns a room WITHOUT the warehouse inside it and
+ * ``/warehouse-tree`` returns that warehouse as a forest root of its own. Left
+ * alone, Materials Management's two locations render under two different
+ * top-level headings — which is what this picker used to do, and it stopped being
+ * true when LOC-005 moved Warehouse One into the room. A warehouse carries its
+ * ``parent_id``, so it is re-attached to the room it belongs to and the hierarchy
+ * reads the way the structure diagram does.
+ */
 async function buildForest(): Promise<Forest> {
-  const [ln2, freezer, warehouse, production] = await Promise.all([
+  const [ln2, rooms, warehouses, production] = await Promise.all([
     locationNodesApi.ln2Tree(),
     locationNodesApi.freezerTree(),
     locationNodesApi.warehouseTree(),
-    // Production/lab floors (Clean Room 1/2, Manufacturing Floor, PD Lab
-    // One/Two) — a kit's production location must be one of these
-    // (Transaction_Spec §2). They are root `flat` nodes, so they have no
-    // children of their own.
+    // Production floors — a kit's production location must be one of these
+    // (Transaction_Spec §2). Root `flat` nodes, so they have no children.
     locationNodesApi.flat({ category: 'production' }),
   ]);
   const byId = new Map<string, PNode>();
   const parentOf = new Map<string, string | null>();
   const real: PNode[] = [];
 
-  // `flatten` drops the single building level (e.g. "Warehouse One") so the
-  // storage leaves sit directly under the area group — Warehouse › Shelf A.
-  const group = (area: LocationArea, trees: NodeTree[], flatten = false): PNode => {
-    const roots = trees.map((n) => convertTree(n, [], null, area, byId, parentOf, real));
-    const children = flatten ? roots.flatMap((r) => r.children) : roots;
+  const warehousesByRoom = new Map<string, NodeTree[]>();
+  for (const w of warehouses) {
+    const key = w.parent_id ?? '';
+    warehousesByRoom.set(key, [...(warehousesByRoom.get(key) ?? []), w]);
+  }
+
+  const group = (id: string, name: string, area: LocationArea, children: PNode[]): PNode => {
     const g: PNode = {
-      id: `grp:${area}`,
-      name: AREA_LABEL[area],
+      id,
+      name,
+      code: '',
       nodeType: 'group',
       canStore: false,
       isGroup: true,
@@ -101,21 +132,57 @@ async function buildForest(): Promise<Forest> {
     };
     byId.set(g.id, g);
     parentOf.set(g.id, null);
-    // Re-parent the promoted leaves onto the group so pruning/ancestry walks
-    // skip the removed building level.
     children.forEach((c) => parentOf.set(c.id, g.id));
     return g;
   };
 
+  // Rooms, warehouses grafted in ahead of the cold-storage groups so the order
+  // matches the Materials Management page's tabs (Warehouse, then freezers).
+  const roomNodes = [...rooms]
+    .sort((a, b) => {
+      const ai = ROOM_CODE_ORDER.indexOf(a.code);
+      const bi = ROOM_CODE_ORDER.indexOf(b.code);
+      if (ai !== bi) return (ai < 0 ? Infinity : ai) - (bi < 0 ? Infinity : bi);
+      return a.name.localeCompare(b.name);
+    })
+    .map((room) =>
+      convertTree(
+        room,
+        [],
+        null,
+        'storage',
+        byId,
+        parentOf,
+        real,
+        warehousesByRoom.get(room.id) ?? [],
+      ),
+    );
+
+  // A warehouse whose room isn't in the room tree would otherwise vanish. Keep
+  // it as its own root rather than dropping stock somewhere unreachable.
+  const orphanWarehouses = warehouses
+    .filter((w) => !w.parent_id || !rooms.some((r) => r.id === w.parent_id))
+    .map((w) => convertTree(w, [], null, 'storage', byId, parentOf, real));
+
   const roots = [
-    group('ln2', ln2),
-    group('cold', freezer),
-    group('warehouse', warehouse, true),
+    ...roomNodes,
+    ...orphanWarehouses,
     group(
-      'production',
-      production.map((n) => ({ ...n, children: [] })),
+      'grp:ln2',
+      'LN2',
+      'storage',
+      ln2.map((n) => convertTree(n, [], null, 'storage', byId, parentOf, real)),
     ),
-  ].filter((g) => g.children.length > 0);
+    group(
+      'grp:production',
+      'Production',
+      'production',
+      production.map((n) =>
+        convertTree({ ...n, children: [] }, [], null, 'production', byId, parentOf, real),
+      ),
+    ),
+  ].filter((r) => r.isGroup ? r.children.length > 0 : true);
+
   return { roots, byId, parentOf, real };
 }
 
@@ -135,9 +202,55 @@ export function invalidateLocationForest() {
   _inflight = null;
 }
 
+/**
+ * The shared location forest, once it has loaded. Null on the first render.
+ *
+ * The forest is cached at module scope, so many components may hold this without
+ * costing more than one request. Anything that only needs to READ the tree —
+ * resolving a node id to its address or its route — should use this rather than
+ * fetching the four endpoints again.
+ */
+export function useLocationForest(): Forest | null {
+  const [forest, setForest] = React.useState<Forest | null>(_cache);
+  React.useEffect(() => {
+    // Already cached — nothing to wait for.
+    if (_cache) {
+      setForest(_cache);
+      return;
+    }
+    let alive = true;
+    void loadForest().then((f) => alive && setForest(f));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return forest;
+}
+
+/**
+ * A node's ancestry, root first and the node itself last. Empty when the id
+ * isn't in the forest — a node that was deleted, or one the current user's tree
+ * doesn't include.
+ */
+export function nodeChain(forest: Forest, nodeId: string): PNode[] {
+  const chain: PNode[] = [];
+  let cur = forest.byId.get(nodeId);
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    chain.unshift(cur);
+    const parentId = forest.parentOf.get(cur.id);
+    cur = parentId ? forest.byId.get(parentId) : undefined;
+  }
+  return chain;
+}
+
 // ── The picker ───────────────────────────────────────────────────────────────
 
-const ALL_AREAS: LocationArea[] = ['ln2', 'cold', 'warehouse'];
+/** Default: the storage branches. 'production' is opt-in — a production floor is
+ *  only ever valid as a kit's production location, never as a storage
+ *  source, return or output. */
+const ALL_AREAS: LocationArea[] = ['storage'];
 
 export function LocationTreePicker({
   value,
@@ -158,9 +271,7 @@ export function LocationTreePicker({
 }: {
   value: string;
   onChange: (id: string) => void;
-  /** Which area groups to show. Default: the three storage areas — 'production'
-   *  is opt-in, since production floors are only valid as a kit's production
-   *  location, never as a storage source/return/output. */
+  /** Which branches to show. Default: storage. See {@link ALL_AREAS}. */
   areas?: ReadonlyArray<LocationArea>;
   /** If given, only these node ids are selectable AND the tree is pruned to the
    *  branches leading to them (e.g. locations holding an item). */
@@ -257,7 +368,9 @@ export function LocationTreePicker({
               n.area &&
               areas.includes(n.area) &&
               canPick(n) &&
-              (n.name.toLowerCase().includes(q) || n.path.toLowerCase().includes(q)),
+              (n.name.toLowerCase().includes(q) ||
+                n.code.toLowerCase().includes(q) ||
+                n.path.toLowerCase().includes(q)),
           )
           .slice(0, 60)
       : [];

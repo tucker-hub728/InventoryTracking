@@ -7,9 +7,11 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
-# All node types accepted on read (includes retired ``cassette_rack`` /
-# ``sub_slot`` / ``flat`` so any legacy rows still serialise).
+# All node types accepted on read (includes retired ``cassette`` /
+# ``cryo_box_rack`` / ``cassette_rack`` / ``sub_slot`` / ``flat`` so any legacy
+# rows still serialise).
 NodeType = Literal[
+    "tank",
     "tank_quadrant",
     "rack",
     "cassette",
@@ -25,11 +27,20 @@ NodeType = Literal[
     "sub_slot",
 ]
 # Only these are creatable via the API (§4.1 — legacy types are retired).
-# ``flat`` is retired. Freezer rooms / locations and warehouse / shelves are
-# seed-managed (created by scripts/seed_locations.py), so the only free-storage
-# leaf the UI creates is a freezer ``sub_location``.
+# ``flat`` is retired. Rooms and the warehouse (with its A–Z shelves) stay
+# seed-managed — the client's building does not gain rooms on a whim.
+#
+# ``room_location`` IS creatable: REQ-2026-07-15-LOC-002 says Cold Storage
+# covers −20 °C, −80 °C and 2–8 °C refrigerators, and LOC-004 leaves the
+# refrigerator list outstanding, so the client adds those groups themselves.
+# LOC-006 restricts that to Super Admin, enforced in the route.
 CreatableNodeType = Literal[
-    "tank_quadrant", "rack", "cassette", "cryo_box_rack", "box", "sub_location"
+    "tank",
+    "tank_quadrant",
+    "rack",
+    "box",
+    "room_location",
+    "sub_location",
 ]
 # Legacy — kept so pre-existing flat rows still read; not creatable.
 FlatCategory = Literal[
@@ -59,13 +70,14 @@ def _trim_nonblank(field: str):
 class NodeCreate(BaseModel):
     """Create one node. The route enforces the strict parent-type rule:
 
-    * ``tank_quadrant`` is the only root (``parent_id`` must be null).
-    * ``rack`` → ``tank_quadrant``; ``cassette`` / ``cryo_box_rack`` → ``rack``;
-      ``box`` → ``cassette`` **or** ``cryo_box_rack``.
+    * ``tank`` and ``room`` are the roots (``parent_id`` must be null); a room
+      is seed-managed, so ``tank`` is the only creatable root.
+    * ``tank_quadrant`` → ``tank`` (at most four); ``rack`` → ``tank_quadrant``;
+      ``box`` → ``rack``.
 
-    A Box requires ``grid_rows`` / ``grid_cols`` (a Box under a Cassette must
-    have ``grid_cols == 1``). Dedication is only valid on a ``tank_quadrant``.
-    ``flat`` is retired and cannot be created.
+    A Box requires ``grid_rows`` / ``grid_cols``. Dedication is only valid on a
+    ``tank_quadrant``. ``flat``, ``cassette`` and ``cryo_box_rack`` are retired
+    and cannot be created.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -83,11 +95,25 @@ class NodeCreate(BaseModel):
 
 class NodeUpdateRequest(BaseModel):
     """Rename a node. Only the user-facing ``name`` is editable here; the
-    ``code`` identity, type, and parentage are immutable."""
+    ``code`` identity and type are immutable. Parentage moves via
+    ``PATCH /location-nodes/{id}/parent``."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+
+
+class NodeMoveRequest(BaseModel):
+    """Re-hang a node under a different parent (REQ-2026-07-22-LOC-004).
+
+    The subtree follows automatically — only this node's ``parent_id`` changes.
+    The new parent must be of the type this node's level hangs under, so a rack
+    can move to another quadrant but never onto a box.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    parent_id: str
 
 
 class ProductionAreaCreate(BaseModel):
