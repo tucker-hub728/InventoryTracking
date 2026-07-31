@@ -18,7 +18,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { toast } from '@/components/ui/sonner';
-import { usePermission } from '@/hooks/use-permission';
+import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import { tiersApi, TIER_TYPE_LABELS, type ApiPrefix, type ApiTier } from '@/lib/api/tiers';
@@ -64,8 +64,17 @@ interface PrefixRef {
  * signed. Tier writes are gated behind {@link TIER_ACTIONS_ENABLED}.
  */
 export function TiersPageClient() {
-  const canWriteTiers = usePermission('inventory', 'sign') && TIER_ACTIONS_ENABLED;
-  const canManagePrefixes = usePermission('inventory', 'sign');
+  // Everyone with inventory:view reaches this page and sees the taxonomy;
+  // Read-Only included (REQ-2026-07-09-ROL-001 — "all edit actions hidden",
+  // view access kept).
+  //
+  // Writing it is admin-or-above. The tiers and their prefixes define how the
+  // whole catalogue behaves — REQ-2026-07-15-ITM-001 calls them "admin-added"
+  // and fixes the category set at three — so operators read but don't edit.
+  // A permission check can't express that: operator also holds inventory:sign.
+  const isAdmin = useAuthStore(selectIsAdminOrAbove);
+  const canWriteTiers = isAdmin && TIER_ACTIONS_ENABLED;
+  const canManagePrefixes = isAdmin;
 
   const [tiers, setTiers] = React.useState<ApiTier[]>([]);
   const [loading, setLoading] = React.useState(true);

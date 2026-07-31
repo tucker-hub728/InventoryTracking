@@ -689,10 +689,22 @@ async def move_node(
 #
 # This deliberately overrides LOC-003's older sentence that "adding freezers,
 # refrigerators, and LN2 tanks remains available to the appropriate admin role":
-# LOC-006 is the later requirement and was signed off on 2026-07-29. LN2 nodes
-# (tank_quadrant … box) are NOT listed here, so they keep the admin-level gate.
+# LOC-006 is the later requirement and was signed off on 2026-07-29.
 SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset(
     {"shelf", "room_location", "sub_location"}
+)
+
+# LN2 structure — the second, looser tier. LOC-003 draws an explicit contrast:
+# shelves are "restricted to the Super Admin role", while freezers, refrigerators
+# and LN2 tanks "remain available to the appropriate ADMIN role". Two thresholds,
+# deliberately.
+#
+# These used to fall through to the bare ``inventory:create`` dependency, which
+# OPERATORS also hold — so an operator could create and rename tanks, looser than
+# the requirement allows. The rationale behind the shelf rule applies just as
+# well here: ad-hoc duplicate tank names split one physical vessel into two.
+ADMIN_NODE_TYPES: frozenset[str] = frozenset(
+    {"tank", "tank_quadrant", "rack", "cassette", "cryo_box_rack", "box"}
 )
 
 
@@ -710,11 +722,33 @@ def _require_super_admin(user, *, what: str = "production areas") -> None:
         )
 
 
+def _require_admin(user, *, what: str) -> None:
+    """Admin-or-above guard. Blocks operators and read-only.
+
+    Checked against the DB role rather than the permission matrix because
+    ``operator`` also holds ``inventory:create`` — the matrix cannot tell an
+    admin from an operator for write purposes, only the role can.
+    """
+    if getattr(user, "role", None) not in ("super_admin", "admin"):
+        raise AuthorizationError(
+            f"Only an admin can manage {what}",
+            code="permission_denied",
+            details={"required_role": "admin"},
+        )
+
+
 def _require_super_admin_for_node_type(user, node_type: str) -> None:
-    """Apply the LOC-003 / LOC-006 role gate to the restricted node types."""
+    """Apply the LOC-003 / LOC-006 role gates to the restricted node types.
+
+    Two tiers: shelves and Cold Storage are Super-Admin-only; LN2 structure is
+    admin-or-above. Everything else stays on the plain ``inventory:create``
+    dependency the route already declares.
+    """
     if node_type in SUPER_ADMIN_NODE_TYPES:
         what = "shelves" if node_type == "shelf" else "Cold Storage locations"
         _require_super_admin(user, what=what)
+    elif node_type in ADMIN_NODE_TYPES:
+        _require_admin(user, what="LN2 storage")
 
 
 @nodes_router.post(

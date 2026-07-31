@@ -36,10 +36,11 @@ from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit.recorder import record_entity_change
 from app.auth import cognito_client
 from app.auth import repository as users_repo
+from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError, ValidationError
 from app.models.identity import User
 from app.security.permissions import RequirePermission
-from app.users.schemas import UserRead, UserUpdate
+from app.users.schemas import USER_UPDATE_ACTION, UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -131,6 +132,7 @@ def _to_read(user: User) -> UserRead:
         created_at=user.created_at,
         can_be_promoted=blocker is None,
         promotion_blocked_reason=blocker[1] if blocker else None,
+        is_seed=user.is_seed,
     )
 
 
@@ -147,7 +149,8 @@ async def list_users(db: DBSession) -> list[UserRead]:
 @router.patch(
     "/{user_id}",
     response_model=UserRead,
-    summary="Edit a user's name, role, and/or active flag",
+    summary="Edit a user's email, name, role, and/or active flag "
+    "(role and email changes are e-signed)",
     dependencies=[Depends(RequirePermission("users", "edit"))],
 )
 async def update_user(
@@ -161,6 +164,9 @@ async def update_user(
         raise NotFoundError(f"User {user_id} not found")
 
     data = payload.model_dump(exclude_unset=True)
+    # Not entity fields — pulled out so they never reach the assignment loop.
+    data.pop("evidence_id", None)
+    data.pop("reason", None)
     before_role = user.role
     before_email = user.email
 
@@ -183,6 +189,35 @@ async def update_user(
     if promoting:
         _assert_can_grant_super_admin(current, user)
 
+    # ── The seeded super admin is permanent (client, 2026-07-31) ─────────
+    # Stronger than the count-based guard below, and independent of it: this one
+    # account is always super_admin, keeps its email forever, and can never be
+    # deactivated — by anyone, including itself. Its *name* stays editable.
+    #
+    # Rationale: the count guard only promises that SOME super admin survives,
+    # which could end up being an account created ad hoc during a support call.
+    # This pins the deployment to a known identity.
+    if user.is_seed:
+        demoting_seed = "role" in data and data["role"] != "super_admin"
+        if demoting_seed:
+            raise ConflictError(
+                "The seeded super admin's role can't be changed",
+                code="seed_admin_immutable",
+                details={"field": "role"},
+            )
+        if email_changed:
+            raise ConflictError(
+                "The seeded super admin's email address can't be changed",
+                code="seed_admin_immutable",
+                details={"field": "email"},
+            )
+        if data.get("is_active") is False:
+            raise ConflictError(
+                "The seeded super admin can't be deactivated",
+                code="seed_admin_immutable",
+                details={"field": "is_active"},
+            )
+
     # Guard the last super_admin against demotion / deactivation so the system
     # can't be locked out. This is target-keyed, not actor-keyed, so it catches
     # self-demotion too (REQ-2026-07-31-ROL-007).
@@ -200,6 +235,41 @@ async def update_user(
                 "Can't demote or deactivate the last super admin",
                 code="last_super_admin",
             )
+
+    # ── Electronic signature (every edit) ───────────────────────────────────
+    # Any change to a member record is signed: role and email decide what a
+    # person may do and how they authenticate, the active flag decides whether
+    # they can work at all, and the display name is what every audit row and
+    # signature is attributed to. None of those should change without an
+    # attributable signature in a Part 11 system.
+    mutating = any(k in data for k in ("email", "full_name", "role", "is_active"))
+    evidence_uuid: uuid.UUID | None = None
+    if mutating:
+        if not payload.evidence_id:
+            raise ValidationError(
+                "Editing a member requires your password signature",
+                code="signature_required",
+                details={"action": USER_UPDATE_ACTION},
+            )
+        try:
+            evidence_uuid = uuid.UUID(payload.evidence_id)
+        except ValueError as exc:
+            raise ValidationError(
+                "evidence_id is not a valid uuid", code="invalid_evidence_id"
+            ) from exc
+        # Consumed in this transaction: single-use, and a replay rolls the whole
+        # edit back rather than applying it twice.
+        await consume_reauth_evidence(
+            db,
+            evidence_id=evidence_uuid,
+            user_id=current.id,
+            expected_action=USER_UPDATE_ACTION,
+            target_table="app.users",
+            target_id=user.id,
+        )
+
+    before_name = user.full_name
+    before_active = _is_active(user)
 
     if "full_name" in data and data["full_name"] is not None:
         user.full_name = data["full_name"].strip()
@@ -233,24 +303,38 @@ async def update_user(
 
     await db.flush()
 
-    # Log the role grant: grantor (actor_user_id), grantee (subject), old and new
-    # role (the diff), and a timestamp (recorded_at) — REQ-2026-07-31-ROL-008.
-    # Granting super_admin is escalated to ``warning`` so it stands out in the
-    # audit viewer next to routine role changes.
+    # Log the change: actor (grantor), subject (grantee), the before/after diff,
+    # and a timestamp — REQ-2026-07-31-ROL-009. Every signed edit is recorded,
+    # not just role grants: a signature with nothing to point at proves nothing.
     #
-    # An email change is audited on the same row: it moves the sign-in identity,
-    # so "who changed it, from what, to what" is exactly as load-bearing as a
-    # role grant when reconstructing who did something later.
+    # Role and email are escalated to ``warning`` so they stand out in the audit
+    # viewer next to a routine rename.
     role_changed = user.role != before_role
-    if role_changed or email_changed:
-        before_state: dict[str, str] = {}
-        after_state: dict[str, str] = {}
-        if role_changed:
-            before_state["role"] = before_role
-            after_state["role"] = user.role
-        if email_changed:
-            before_state["email"] = before_email
-            after_state["email"] = user.email
+    name_changed = user.full_name != before_name
+    active_now_changed = _is_active(user) != before_active
+
+    before_state: dict[str, str] = {}
+    after_state: dict[str, str] = {}
+    if role_changed:
+        before_state["role"] = before_role
+        after_state["role"] = user.role
+    if email_changed:
+        before_state["email"] = before_email
+        after_state["email"] = user.email
+    if name_changed:
+        before_state["full_name"] = before_name
+        after_state["full_name"] = user.full_name
+    if active_now_changed:
+        before_state["is_active"] = str(before_active)
+        after_state["is_active"] = str(_is_active(user))
+
+    if before_state:
+        context: dict[str, str] = {
+            "changed_by": current.email,
+            "changed_for": user.email,
+        }
+        if payload.reason:
+            context["reason"] = payload.reason
         await record_entity_change(
             db,
             actor_user_id=current.id,
@@ -260,8 +344,10 @@ async def update_user(
             subject_label=user.email,
             before=before_state,
             after=after_state,
-            severity="warning" if user.role == "super_admin" or email_changed else None,
-            context={"changed_by": current.email, "changed_for": user.email},
+            severity="warning" if role_changed or email_changed else None,
+            context=context,
+            # Ties the audit row to the e-signature that authorised it.
+            signature_id=evidence_uuid,
         )
 
     await db.refresh(user)

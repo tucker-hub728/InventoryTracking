@@ -63,6 +63,8 @@ export const navSections: readonly NavSection[] = [
       { id: 'receiving', label: 'Receipt Admin', href: '/receiving', icon: Truck, resource: 'inventory' },
       // Tiers are seed-only for now (create / edit / delete hidden behind
       // ``TIER_ACTIONS_ENABLED``).
+      // Visible to everyone with inventory:view, Read-Only included — the page
+      // shows the taxonomy but hides every mutating control.
       { id: 'tiers', label: 'Tiers', href: '/tiers', icon: Tags, resource: 'inventory' },
       // Kitting / back-flush flow, wired to the real backend (Transaction Spec §2-§4).
       {

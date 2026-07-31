@@ -42,7 +42,13 @@ export interface ApiUser {
   can_be_promoted: boolean;
   /** Human-readable reason promotion is unavailable, when `can_be_promoted` is false. */
   promotion_blocked_reason: string | null;
+  /** The permanent seeded super admin — role, email and active flag are locked
+   * server-side. The UI disables those fields rather than failing on submit. */
+  is_seed: boolean;
 }
+
+/** Action verb the e-signature must carry — must match the backend constant. */
+export const USER_UPDATE_ACTION = 'user.update';
 
 export interface UserUpdateInput {
   /** Changing this moves the Cognito sign-in alias too — the member signs in
@@ -51,14 +57,18 @@ export interface UserUpdateInput {
   full_name?: string;
   role?: GrantableRole;
   is_active?: boolean;
+  /** Required when `role` or `email` changes — a fresh single-use reauth
+   * evidence id. Ignored for name/active-only edits. */
+  evidence_id?: string;
+  /** Optional rationale recorded on the audit row alongside the signature. */
+  reason?: string;
 }
 
 export const usersApi = {
   list: (opts?: { signal?: AbortSignal }) => api.get<ApiUser[]>('/users', { signal: opts?.signal }),
 
+  /** Every mutating edit needs `evidence_id` — the backend rejects an unsigned
+   * change with `signature_required`. Mint one via the reauth dialog. */
   update: (id: string, input: UserUpdateInput) =>
     api.patch<ApiUser>(`/users/${id}`, { json: input }),
-
-  setActive: (id: string, isActive: boolean) =>
-    api.patch<ApiUser>(`/users/${id}`, { json: { is_active: isActive } }),
 };

@@ -150,7 +150,12 @@ interface Props {
   node: NodeTree;
   /** Breadcrumb ancestry, root → selected (inclusive). */
   path: NodeTree[];
+  /** Day-to-day stock work: placing, transferring and consuming vials.
+   * Operators hold this. */
   canWrite: boolean;
+  /** Creating or renaming the hierarchy itself — admin or super admin only,
+   * matching the backend guard (REQ-2026-07-15-LOC-003). */
+  canManageStructure: boolean;
   onSelectChild: (id: string) => void;
   onAddChild: (parent: LocationNode) => void;
   onRemoved: () => void;
@@ -161,6 +166,7 @@ export function NodeDetailPanel({
   node,
   path,
   canWrite,
+  canManageStructure,
   onSelectChild,
   onAddChild,
   onChanged,
@@ -540,7 +546,7 @@ export function NodeDetailPanel({
             </div>
           </div>
         </div>
-        {canWrite && (
+        {canManageStructure && (
           <div className="flex shrink-0 items-center gap-2">
             <Button size="sm" variant="ghost" onClick={() => setShowEdit(true)}>
               <Tag size={14} /> Edit
@@ -605,7 +611,7 @@ export function NodeDetailPanel({
             <p className="text-sm font-medium text-text-2">
               {node.children.length} {childUnit(node.node_type, node.children.length)}
             </p>
-            {canWrite && childType.length > 0 && (
+            {canManageStructure && childType.length > 0 && (
               <Button size="sm" variant="secondary" onClick={() => onAddChild(node)}>
                 <Plus size={14} />{' '}
                 {childType.length === 1 ? `Add ${childUnit(node.node_type, 1)}` : 'Add container'}

@@ -35,6 +35,43 @@ PERM_MATRIX: dict[str, dict[str, frozenset[str]]] = {
 }
 
 
+# Roles that count as "an admin role" in the requirements' language. Used where
+# the permission matrix genuinely cannot answer the question: ``operator`` also
+# holds ``inventory:create``/``sign``, so a matrix check can't tell an admin from
+# an operator for write purposes — only the role can.
+ADMIN_ROLES: frozenset[str] = frozenset({"super_admin", "admin"})
+
+
+class RequireRole:
+    """FastAPI dependency — gate a route on the DB role itself.
+
+    Companion to :class:`RequirePermission`, for the cases the matrix can't
+    express. Reference data that defines how the whole catalogue behaves — the
+    item tiers and their prefixes (REQ-2026-07-15-ITM-001), LN2 structure
+    (REQ-2026-07-15-LOC-003) — is admin-maintained, but ``operator`` shares the
+    inventory write bucket, so those routes pair a permission check with this.
+
+    Usage::
+
+        dependencies=[
+            Depends(RequirePermission("inventory", "sign")),
+            Depends(RequireRole(*ADMIN_ROLES)),
+        ]
+    """
+
+    def __init__(self, *roles: str, what: str = "this") -> None:
+        self.roles = frozenset(roles)
+        self.what = what
+
+    async def __call__(self, db_user: CurrentDbUserDep) -> None:  # type: ignore[name-defined]
+        if db_user.role not in self.roles:
+            raise AuthorizationError(
+                f"Only an admin can manage {self.what}",
+                code="permission_denied",
+                details={"required_roles": sorted(self.roles)},
+            )
+
+
 def has_permission(role: str, resource: str, action: str) -> bool:
     """Pure predicate — easy to unit-test, used inside dependencies."""
     bucket = PERM_MATRIX.get(role)
@@ -82,6 +119,7 @@ def _bind_currentdbuser() -> None:
     from app.api.deps import CurrentDbUserDep
 
     RequirePermission.__call__.__annotations__["db_user"] = CurrentDbUserDep
+    RequireRole.__call__.__annotations__["db_user"] = CurrentDbUserDep
 
 
 _bind_currentdbuser()
@@ -90,4 +128,4 @@ _bind_currentdbuser()
 # Convenience type alias for routes that need the DB user themselves
 # (e.g. to stamp ``created_by_user_id``). Imported by routes via
 # ``from app.api.deps import CurrentDbUserDep``.
-__all__ = ["PERM_MATRIX", "RequirePermission", "has_permission"]
+__all__ = ["ADMIN_ROLES", "PERM_MATRIX", "RequirePermission", "RequireRole", "has_permission"]
