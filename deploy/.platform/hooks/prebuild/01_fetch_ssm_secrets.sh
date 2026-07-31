@@ -50,14 +50,14 @@ aws ssm get-parameters-by-path \
 NONSECRET_KEYS="APP_ENV APP_DEBUG AWS_REGION LOG_LEVEL LOG_FORMAT \
 CORS_ALLOW_ORIGINS COGNITO_USER_POOL_ID COGNITO_CLIENT_ID \
 JWT_ACCESS_TOKEN_TTL_MINUTES JWT_ID_TOKEN_TTL_MINUTES JWT_REFRESH_TOKEN_TTL_DAYS \
-S3_REGION S3_SIGNATURES_BUCKET S3_FORCE_PATH_STYLE BACKEND_INTERNAL_URL SUPERADMIN_EMAIL"
+S3_REGION S3_SIGNATURES_BUCKET S3_FORCE_PATH_STYLE BACKEND_INTERNAL_URL"
 for key in ${NONSECRET_KEYS}; do
   val="$("$EB_GET_CONFIG" environment -k "${key}" 2>/dev/null || true)"
   [ -n "${val}" ] && printf '%s=%s\n' "${key}" "${val}" >> "${ENV_FILE}"
 done
-# SUPERADMIN_EMAIL is not an EB property; default it so it is never blank
-# (keep it in lockstep with the Cognito admin user created post-deploy).
-grep -q '^SUPERADMIN_EMAIL=' "${ENV_FILE}" || echo "SUPERADMIN_EMAIL=admin@cellready.local" >> "${ENV_FILE}"
+# No SUPERADMIN_* is materialised here. The bootstrap super admin is created by
+# running scripts/seed_super_admins.py with --email / --password after the
+# deploy; nothing at runtime reads those values.
 
 chmod 600 "${ENV_FILE}"
 echo "[prebuild] wrote $(grep -c '=' "${ENV_FILE}" || echo 0) env vars to .env"

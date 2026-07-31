@@ -86,4 +86,21 @@ export const backend = {
       method: 'POST',
       body: JSON.stringify(input),
     }),
+
+  /** Public — start a self-service reset. Cognito emails a confirmation code.
+   * Always resolves the same way whether or not the address has an account, so
+   * the caller can't use it to discover who is registered. */
+  forgotPassword: (email: string) =>
+    call<{ message: string }>('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  /** Public — finish a reset with the emailed code and a new password. Unlike
+   * ``forgotPassword`` this one reports real errors (bad code, weak password). */
+  resetPassword: (input: { email: string; code: string; password: string }) =>
+    call<{ message: string }>('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 };

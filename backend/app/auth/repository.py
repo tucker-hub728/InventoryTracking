@@ -100,9 +100,18 @@ async def touch_last_active(session: AsyncSession, user_id: uuid.UUID) -> None:
 
 
 async def count_super_admins(session: AsyncSession) -> int:
-    """How many non-deleted ``super_admin`` users exist. Used by lifespan."""
+    """How many **usable** ``super_admin`` users exist — active and not deleted.
+
+    Suspended super admins are deliberately excluded. They can't log in, so
+    counting them would let the lockout guard pass while leaving nobody able to
+    actually administer the system: with one active and one suspended super
+    admin, a naive count of 2 would permit demoting the active one and stranding
+    the install. Used by the lockout guard in ``app.users.routes`` and by the
+    startup check in ``app.core.lifespan``.
+    """
     stmt = select(func.count()).select_from(User).where(
         User.role == "super_admin",
+        User.status == "active",
         User.deleted_at.is_(None),
     )
     return int((await session.execute(stmt)).scalar_one())

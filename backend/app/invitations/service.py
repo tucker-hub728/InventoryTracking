@@ -181,8 +181,22 @@ async def mark_accepted_by_email(session: AsyncSession, *, email: str) -> None:
     invite = await invitations_repo.get_pending_by_email(session, email)
     if invite is None:
         return
+    accepted_at = _now()
     invite.status = "accepted"
-    invite.accepted_at = _now()
+    invite.accepted_at = accepted_at
+
+    # Mirror the acceptance onto the member row. ``users.accepted_invite_at``
+    # existed in the schema from the start but nothing ever wrote it, so it read
+    # NULL for every user — including people who had plainly accepted and been
+    # working in the app for weeks. Populating it here makes the column mean what
+    # its name says, and gives the promotion flow (REQ-2026-07-31-ROL-005) a real
+    # acceptance timestamp to show. Rows created before this fix stay NULL, which
+    # is why the promotion gate keys off ``last_active_at`` instead — see
+    # ``app.users.routes._promotion_blocker``.
+    member = await users_repo.get_by_email(session, email)
+    if member is not None and member.accepted_invite_at is None:
+        member.accepted_invite_at = accepted_at
+
     await session.commit()
     log.info("invitations.accepted", invitation_id=str(invite.id))
 

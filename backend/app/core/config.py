@@ -98,9 +98,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: LogFormat = LogFormat.console
 
-    # ── Bootstrap (super admin seeding) ─────────────────────────────────
-    superadmin_email: str = "admin@cellready.local"
-    superadmin_password: SecretStr = SecretStr("change-me")
+    # NOTE: there are deliberately no ``superadmin_*`` settings here. The
+    # bootstrap account is created by ``scripts/seed_super_admins.py``, which
+    # takes ``--email`` and ``--password`` as required arguments — it reads no
+    # configuration at all. Nothing at runtime needs them either: the startup
+    # check in ``app.core.lifespan`` counts super_admin rows in the database
+    # rather than comparing against a configured address.
 
     # ── AWS / Cognito ───────────────────────────────────────────────────
     # All Cognito fields are optional so the service can boot without auth

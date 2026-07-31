@@ -45,8 +45,9 @@ services:
       # Secrets (from SSM via .env)
       SECRET_KEY: ${SECRET_KEY}
       DATABASE_URL: ${DATABASE_URL}
-      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL}
-      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD}
+      # No SUPERADMIN_* — the bootstrap account is created by running
+      # scripts/seed_super_admins.py with --email / --password after deploy.
+      # Nothing at runtime reads them.
       # CORS — the public CloudFront origin
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS}
       # Cognito (real). Endpoint/JWKS/issuer left unset → derived for real AWS.

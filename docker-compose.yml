@@ -116,8 +116,10 @@ services:
       CORS_ALLOW_ORIGINS: http://localhost:${FRONTEND_HOST_PORT:-3000}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-console}
-      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@cellready.local}
-      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-ChangeMe!Now123}
+      # No SUPERADMIN_* here on purpose. The bootstrap account is created by
+      # scripts/seed_super_admins.py, which takes --email and --password as
+      # required arguments — nothing at runtime reads them, so passing them
+      # through would only leave a stale value waiting to seed the wrong address.
       # Cognito — empty values are fine; auth endpoints will surface a clear
       # error until you've run scripts/seed_cognito.sh and populated .env.
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -130,11 +132,17 @@ services:
       JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES:-60}
       JWT_ID_TOKEN_TTL_MINUTES: ${JWT_ID_TOKEN_TTL_MINUTES:-60}
       JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS:-30}
-      # ── Invitations ────────────────────────────────────────────────────
+      # ── Invitations & password resets ──────────────────────────────────
       # Cognito emails the invitee a temporary password (delivered via Amazon
       # SES when the pool is configured for it in prod). cognito-local can't
       # send mail, so in dev the temp password is logged and shown in the admin
       # UI. The backend sends no email of its own — no SMTP config needed.
+      #
+      # Self-service reset (/forgot-password) works the same way: Cognito mails
+      # a confirmation code in prod, while cognito-local prints it to its own
+      # stdout. To pick it up locally:
+      #     docker logs cellready-cognito --tail 40 | grep -A2 "Confirmation Code"
+      # The code is never returned by the API in any environment.
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:${FRONTEND_HOST_PORT:-3000}}
       INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
       # ── S3 / MinIO ─────────────────────────────────────────────────────
