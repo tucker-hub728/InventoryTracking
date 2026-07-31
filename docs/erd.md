@@ -154,7 +154,7 @@ erDiagram
     }
     ROLES {
         uuid id PK
-        text code UK "super_admin|admin|editor|viewer"
+        text code UK "super_admin|admin|operator|read_only"
         bool is_system
     }
     PERMISSIONS {

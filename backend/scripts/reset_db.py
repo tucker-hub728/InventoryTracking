@@ -54,9 +54,17 @@ from app.core.config import Environment, get_settings
 from app.db.session import dispose_engine, get_engine
 from sqlalchemy import text
 
-# Tables we never truncate: Alembic's bookkeeping. Wiping this would strand the
-# DB at an unknown migration state and force a full re-migrate.
-_PROTECTED_TABLES = {"alembic_version"}
+# Tables we never truncate, in ANY mode. Matched on the bare table name.
+#
+#  * ``alembic_version`` — Alembic's bookkeeping. Wiping it strands the DB at an
+#    unknown migration state and forces a full re-migrate.
+#  * ``roles`` (``app.roles``) — four ``is_system`` lookup rows created AND
+#    populated by the migration, so they are part of the schema contract rather
+#    than data, the same as ``alembic_version``. Emptying them leaves a database
+#    where no user can be created at all: ``app.users.role`` and
+#    ``app.invitations.role`` are both FKs onto ``roles.code``, and no seed
+#    script puts the rows back.
+_PROTECTED_TABLES = {"alembic_version", "roles"}
 
 # ``--keep-reference``: the hand-curated rows that are painful to recreate and
 # that no seed script owns — the people, the approved suppliers, and the item
@@ -69,14 +77,35 @@ _PROTECTED_TABLES = {"alembic_version"}
 #
 # ``meta.item_suppliers`` is deliberately NOT here: it links a supplier to an
 # item, and every item is being wiped, so those rows would dangle.
+# The catalogue taxonomy and the supplier list survive EVERY mode (client
+# decision, 2026-07-31). They are admin-curated reference data — renamed tiers,
+# added prefixes, a cleaned-up supplier list — and losing them on a routine data
+# wipe breaks /inventory/cr ("The Raw Materials tier is missing from the
+# catalogue") and the Tier admin screen.
+#
+# They can't simply join _PROTECTED_TABLES: ``item_tiers`` and ``item_prefixes``
+# carry ``created_by_user_id`` / ``updated_by_user_id`` FKs onto ``app.users``,
+# and ``TRUNCATE app.users CASCADE`` empties every table that references it —
+# schema-level, regardless of whether any row actually points there. So excluding
+# them from the truncate list is not enough; they are snapshotted before the wipe
+# and re-inserted after. ``meta.suppliers`` has no FK to users and would survive
+# on exclusion alone, but it rides the same path for one code route.
+#
+# Ordered parent-first: prefixes carry an FK onto tiers, so tiers restore first.
+_PRESERVED_TABLES: tuple[str, ...] = (
+    "app.item_tiers",
+    "app.item_prefixes",
+    "meta.suppliers",
+)
+
+# Columns dropped to NULL on restore: the users they pointed at are gone. Both
+# are nullable precisely because a system seed has no human author.
+_PRESERVE_NULL_COLUMNS = ("created_by_user_id", "updated_by_user_id")
+
+# ``app.roles`` is deliberately absent — it moved to _PROTECTED_TABLES, so it
+# survives every mode and no longer needs to be listed here to keep users valid.
 _REFERENCE_TABLES = {
     "app.users",
-    # Not a choice: ``app.users.role`` is an FK to ``app.roles.code``, so
-    # truncating roles while keeping users is rejected by Postgres. These are
-    # four ``is_system`` lookup rows (super_admin / admin / operator /
-    # read_only), not data.
-    "app.roles",
-    "meta.suppliers",
     "app.item_tiers",
     "app.item_prefixes",
 }
@@ -182,6 +211,71 @@ async def _set_user_triggers(conn, tables: list[str], *, enabled: bool) -> None:
     for qualified in tables:
         schema, table = qualified.split(".", 1)
         await conn.execute(text(f'ALTER TABLE "{schema}"."{table}" {verb} TRIGGER USER'))
+
+
+async def _snapshot(conn, tables: tuple[str, ...]) -> dict[str, tuple[str, int]]:
+    """Copy the preserved tables into TEMP tables before the wipe.
+
+    Deliberately a pure in-database copy — ``CREATE TEMP TABLE … AS SELECT *``
+    rather than reading rows into Python. Round-tripping through the driver means
+    every column type has to survive being decoded and re-encoded, and JSONB does
+    not: ``meta.suppliers.address`` comes back as a ``dict`` that asyncpg then
+    refuses to send as a bind parameter. Keeping the data inside Postgres sidesteps
+    type marshalling entirely and stays correct if a column is added later.
+
+    ``ON COMMIT DROP`` ties the temp tables to this transaction, so they vanish
+    whether the wipe commits or rolls back.
+    """
+    temps: dict[str, tuple[str, int]] = {}
+    for index, qualified in enumerate(tables):
+        schema, table = qualified.split(".", 1)
+        tmp = f"_preserved_{index}"
+        await conn.execute(
+            text(
+                f'CREATE TEMP TABLE "{tmp}" ON COMMIT DROP AS '
+                f'SELECT * FROM "{schema}"."{table}"'
+            )
+        )
+        # The users these point at are about to be deleted, and the FKs are
+        # RESTRICT — so blank them in the copy. Both columns are nullable
+        # precisely because a system seed has no human author.
+        for col in _PRESERVE_NULL_COLUMNS:
+            present = (
+                await conn.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_schema = :s AND table_name = :t "
+                        "AND column_name = :c"
+                    ),
+                    {"s": schema, "t": table, "c": col},
+                )
+            ).first()
+            if present:
+                await conn.execute(text(f'UPDATE "{tmp}" SET "{col}" = NULL'))
+        count = (
+            await conn.execute(text(f'SELECT count(*) FROM "{tmp}"'))
+        ).scalar_one()
+        temps[qualified] = (tmp, int(count))
+    return temps
+
+
+async def _restore(conn, temps: dict[str, tuple[str, int]]) -> list[str]:
+    """Copy the snapshotted rows back after the wipe.
+
+    Rows keep their original ids, so anything that referenced a tier, prefix or
+    supplier by id still resolves. Insert order follows ``_PRESERVED_TABLES``
+    (parent-first), so the prefix → tier FK is satisfied.
+    """
+    summary: list[str] = []
+    for qualified, (tmp, count) in temps.items():
+        if not count:
+            continue
+        schema, table = qualified.split(".", 1)
+        await conn.execute(
+            text(f'INSERT INTO "{schema}"."{table}" SELECT * FROM "{tmp}"')
+        )
+        summary.append(f"{qualified} ({count})")
+    return summary
 
 
 async def _truncate_all(conn, tables: list[str], *, cascade: bool = True) -> None:
@@ -361,8 +455,16 @@ async def _reset(args: argparse.Namespace) -> int:
                         f"{', '.join(guarded)}"
                     )
                     await _set_user_triggers(conn, guarded, enabled=False)
+                # Snapshot inside the same transaction as the truncate, so a
+                # failure anywhere rolls back to the original rows rather than
+                # leaving the catalogue half-restored.
+                preserved = tuple(t for t in _PRESERVED_TABLES if t in set(tables))
+                snap = await _snapshot(conn, preserved)
                 try:
                     await _truncate_all(conn, tables, cascade=not args.keep_reference)
+                    restored = await _restore(conn, snap)
+                    if restored:
+                        print(f"   …preserved: {', '.join(restored)}")
                 finally:
                     # Re-enabled inside the same transaction, so an exception
                     # above rolls the disable back rather than leaving the

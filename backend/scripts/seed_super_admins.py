@@ -1,11 +1,20 @@
-"""Seed Super Admin users into Cognito + the local ``app.users`` mirror.
+"""Seed THE Super Admin into Cognito + the local ``app.users`` mirror.
+
+Creates exactly one account, the one you name on the command line. This is the
+bootstrap identity and the only super admin that is ever *created*: every other
+member is invited, and any further super admin is made by PROMOTING an existing
+active user through the Users page (REQ-2026-07-31-ROL-005).
+
+CREDENTIALS are passed on the command line — ``--email`` and ``--password`` are
+both REQUIRED. There is no default and no environment fallback, so the account
+you type is the account you get. Note the password lands in your shell history.
 
 A user in this system is a Cognito identity with a local mirror row:
   * Cognito owns the password / MFA (created via admin APIs here).
   * ``app.users`` owns app state and is keyed by the Cognito ``sub``.
 
-So each user is provisioned in TWO places, and this script does both in one
-pass, idempotently:
+So the user is provisioned in TWO places, and this script does both in one pass,
+idempotently:
 
   1. Cognito ``admin_create_user`` (email pre-verified, invite email
      SUPPRESSED) then ``admin_set_user_password(..., Permanent=True)`` so the
@@ -16,27 +25,27 @@ pass, idempotently:
 Re-running is safe: an existing Cognito user is looked up (password re-applied),
 and an existing local row for that ``sub`` is left as-is.
 
-NOTE ON THE THREE EMAILS: ``.dev`` / ``.stage`` / ``.prod`` here are just label
-suffixes on the address — all seed into whatever pool + database the current
-environment points at. This is not a cross-environment seeder; run it once per
-environment against that environment's config.
+Pairs with ``scripts/purge_users.py`` for a clean auth reset:
+    python -m scripts.purge_users --yes
+    python -m scripts.seed_super_admins --yes --email you@example.com --password '...'
 
 Safety:
   * Dry-run by default — prints the plan and exits. Pass ``--yes`` to execute.
   * PRODUCTION requires a second, un-fumbleable confirmation: on top of
     ``--yes`` you must pass ``--confirm-production <pool-id>`` where <pool-id>
     exactly matches the target Cognito user pool.
-  * PRODUCTION also enforces a password policy — any weak password in the list
-    (e.g. the ``unlock`` dev defaults) is refused BEFORE anything is created,
-    so trivially-guessable super-admins can never land in a real pool. Edit
-    ``_USERS`` with strong, unique passwords (or export them from a secret
-    store) before seeding prod.
+  * PRODUCTION also enforces a password policy, checked BEFORE anything is
+    created so a prod pool is never half-seeded. The value that used to ship in
+    ``.env.example`` is rejected outright there.
 
 Usage (from ``backend/``):
-    python -m scripts.seed_super_admins            # dry run — show the plan
-    python -m scripts.seed_super_admins --yes      # create the users (dev/staging)
+    # Dry run — show the plan:
+    python -m scripts.seed_super_admins --email superadmin@cellready.dev --password '...'
+    # Create the user (dev/staging):
+    python -m scripts.seed_super_admins --yes --email superadmin@cellready.dev --password '...'
     # Production also needs the pool id echoed back:
-    python -m scripts.seed_super_admins --yes --confirm-production us-east-1_ABC123
+    python -m scripts.seed_super_admins --yes --email dan@example.com --password '...' \\
+        --confirm-production us-east-1_ABC123
 """
 
 from __future__ import annotations
@@ -52,13 +61,26 @@ from app.core.config import Environment, get_settings
 from app.db.session import dispose_engine, get_sessionmaker
 from botocore.exceptions import ClientError
 
-# ── Users to seed ───────────────────────────────────────────────────────────
-# Edit this list to change who gets seeded. All are role=super_admin.
-_USERS: list[dict[str, str]] = [
-    {"email": "admin@cellready.dev", "password": "HzZcZuIA2kKWjusP_96"},
-    {"email": "admin@cellready.stage", "password": "HzZcZuIA2kKWjusP_96"},
-    {"email": "admin@cellready.prod", "password": "HzZcZuIA2kKWjusP_96"},
-]
+# ── The user to seed ────────────────────────────────────────────────────────
+# ONE super admin. Everyone else is invited, and any further super admin is made
+# by PROMOTING an existing active user (REQ-2026-07-31-ROL-005) — never by
+# adding a row here.
+#
+# Credentials come from --email / --password ONLY. There is no default and no
+# environment fallback, deliberately: a stored value is one nobody re-reads, and
+# the first symptom is a bootstrap account seeded at the wrong address. Making
+# both explicit at the call site means the account you type is the account you
+# get, in every environment.
+#
+# The placeholder that used to ship in .env.example. Kept purely so the
+# production gate can recognise and refuse it — anyone holding the repo knows it.
+_PUBLISHED_PASSWORD = "ChangeMe!Now123"  # noqa: S105 - sentinel to refuse, not a credential
+
+
+def _seed_users(args: argparse.Namespace) -> list[dict[str, str]]:
+    """The single super admin to create, straight from the CLI arguments."""
+    return [{"email": args.email.strip().lower(), "password": args.password}]
+
 
 _ROLE = "super_admin"
 
@@ -183,6 +205,17 @@ async def main() -> int:
         help="Actually create the users. Without this the script only prints the plan.",
     )
     parser.add_argument(
+        "--email",
+        required=True,
+        help="Address of the super admin to create. Required — there is no default.",
+    )
+    parser.add_argument(
+        "--password",
+        required=True,
+        help="Password to set. Required — there is no default and no env fallback. "
+        "Note it will appear in your shell history.",
+    )
+    parser.add_argument(
         "--confirm-production",
         metavar="POOL_ID",
         default=None,
@@ -205,6 +238,8 @@ async def main() -> int:
 
     is_prod = settings.app_env == Environment.production
 
+    users = _seed_users(args)
+
     # ── Production gate: --yes is not enough; the pool id must be echoed back ─
     if is_prod and args.yes:
         if args.confirm_production != pool_id:
@@ -219,12 +254,18 @@ async def main() -> int:
         # Refuse weak passwords BEFORE touching Cognito — don't half-seed.
         weak = [
             (u["email"], reason)
-            for u in _USERS
+            for u in users
             if (reason := _weak_password_reason(u["password"])) is not None
         ]
+        # The old .env.example value is public — anyone with the repo has it.
+        # Never let it reach a real pool, however strong it looks.
+        if any(u["password"] == _PUBLISHED_PASSWORD for u in users):
+            weak.append(
+                (users[0]["email"], "is the published example value — choose a real one")
+            )
         if weak:
             print("!! PRODUCTION !!")
-            print("REFUSING: weak password(s) — edit _USERS with strong values first:")
+            print("REFUSING: unusable password(s) — set SUPERADMIN_PASSWORD first:")
             for email, reason in weak:
                 print(f"  - {email}: {reason}")
             return 1
@@ -235,7 +276,7 @@ async def main() -> int:
     print(f"Cognito pool : {pool_id}  (endpoint: {endpoint})")
     print(f"Role         : {_ROLE}")
     print("Users        :")
-    for u in _USERS:
+    for u in users:
         print(f"  - {u['email']:<28} name={_full_name(u['email'])!r} initials={_initials(u['email'])}")
 
     if not args.yes:
@@ -248,7 +289,7 @@ async def main() -> int:
     exit_code = 0
     try:
         async with sessionmaker() as session:
-            for u in _USERS:
+            for u in users:
                 email = u["email"]
                 full_name = _full_name(email)
                 initials = _initials(email)

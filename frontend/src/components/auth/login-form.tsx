@@ -35,9 +35,8 @@ interface LoginOkBody {
   email?: string;
 }
 
-// Password reset isn't wired up yet — hide the "Forgot?" link for now.
-// Flip to true to re-enable.
-const SHOW_FORGOT_PASSWORD = false;
+// Self-service reset is live (/forgot-password → Cognito emails a code).
+const SHOW_FORGOT_PASSWORD = true;
 
 export function LoginForm() {
   const router = useRouter();

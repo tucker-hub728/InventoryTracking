@@ -47,7 +47,7 @@ def _admin_provision_cognito_user(
     password: str,
     full_name: str = "Pytest User",
     initials: str = "PYT",
-    role: str = "viewer",
+    role: str = "read_only",
 ) -> None:
     """Create + confirm a Cognito user directly via the admin API.
 
@@ -93,7 +93,7 @@ async def _provision_and_login(
     *,
     email: str | None = None,
     password: str | None = None,
-    role: str = "viewer",
+    role: str = "read_only",
     initials: str = "PYT",
     full_name: str = "Pytest User",
 ) -> dict[str, Any]:
@@ -129,7 +129,7 @@ async def test_admin_created_user_can_login_and_me_lazy_provisions(
     """End-to-end: admin creates a Cognito user → user logs in → /me
     lazy-provisions the ``app.users`` row from Cognito attributes.
     """
-    tokens = await _provision_and_login(client, role="viewer")
+    tokens = await _provision_and_login(client, role="read_only")
 
     assert tokens["access_token"]
     assert tokens["refresh_token"]
@@ -147,7 +147,7 @@ async def test_admin_created_user_can_login_and_me_lazy_provisions(
     assert me["full_name"] == "Pytest User"
     # Role comes from the local DB row (seeded from Cognito ``custom:role``
     # on the first /me).
-    assert me["role"] == "viewer"
+    assert me["role"] == "read_only"
     assert me["status"] == "active"
     # The DB id is what inventory / audit rows will FK to.
     assert me["id"]

@@ -479,6 +479,100 @@ def admin_set_user_password(*, email: str, password: str, permanent: bool = True
         raise _translate(exc) from exc
 
 
+def admin_update_email(*, email: str, new_email: str) -> None:
+    """Change a user's email address (and keep it verified).
+
+    ``email`` is the address the identity is currently reachable by; the call
+    addresses the user by it, so pass the OLD address. Both attributes move
+    together: setting ``email`` without ``email_verified`` would drop the user
+    into an unverified state and Cognito would start demanding a confirmation
+    code they never asked for.
+
+    The pool is created with ``--username-attributes email`` (see
+    ``scripts/seed_cognito.sh``), so the address doubles as the sign-in alias:
+    after this call the user signs in with ``new_email``. Their ``sub`` does not
+    change, which is what keeps ``app.users.cognito_sub`` — and every audit row
+    hanging off ``users.id`` — pointing at the same person.
+
+    An address already in use surfaces as :class:`ConflictError` via
+    ``AliasExistsException`` / ``UsernameExistsException``.
+    """
+    _ensure_configured()
+    client = get_cognito_client()
+    try:
+        client.admin_update_user_attributes(
+            UserPoolId=_pool_id(),
+            Username=email,
+            UserAttributes=[
+                {"Name": "email", "Value": new_email},
+                {"Name": "email_verified", "Value": "true"},
+            ],
+        )
+    except ClientError as exc:
+        raise _translate(exc) from exc
+
+
+def forgot_password(*, email: str) -> dict[str, Any]:
+    """Start the self-service reset: Cognito mails the user a confirmation code.
+
+    Returns the ``CodeDeliveryDetails`` (destination / medium) so the caller can
+    tell the user where to look. **The code itself is never returned** — it only
+    reaches the user's inbox.
+
+    Note for local dev: ``cognito-local`` cannot send mail, so it prints the code
+    to its own stdout instead. Read it with
+    ``docker logs cellready-cognito | grep -A2 'Confirmation Code'``.
+    """
+    _ensure_configured()
+    settings = get_settings()
+    client = get_cognito_client()
+    try:
+        result = client.forgot_password(
+            ClientId=str(settings.cognito_client_id),
+            Username=email,
+        )
+    except ClientError as exc:
+        raise _translate(exc) from exc
+    return dict(result.get("CodeDeliveryDetails", {}))
+
+
+def confirm_forgot_password(*, email: str, code: str, new_password: str) -> None:
+    """Finish the self-service reset with the emailed code and a new password.
+
+    A wrong or stale code raises :class:`ValidationError` (``CodeMismatchException``
+    / ``ExpiredCodeException`` are both in the validation set), so the caller can
+    surface a retryable message rather than a dead end.
+    """
+    _ensure_configured()
+    settings = get_settings()
+    client = get_cognito_client()
+    try:
+        client.confirm_forgot_password(
+            ClientId=str(settings.cognito_client_id),
+            Username=email,
+            ConfirmationCode=code,
+            Password=new_password,
+        )
+    except ClientError as exc:
+        err = exc.response.get("Error", {}) if hasattr(exc, "response") else {}
+        code_name = str(err.get("Code", ""))
+        msg = str(err.get("Message", ""))
+        # Same dual-signal handling as ``admin_set_user_password``: real Cognito
+        # sends the typed name, cognito-local sends an HTTP status with the same
+        # human message. A policy failure must read as a fixable 422.
+        if code_name in ("InvalidPasswordException", "InvalidParameterException") or (
+            "password" in msg.lower()
+        ):
+            raise ValidationError(
+                "Password does not meet the security requirements "
+                "(at least 12 characters with uppercase, lowercase, a number "
+                "and a symbol).",
+                code="invalid_password",
+                details={"cognito_message": msg},
+            ) from exc
+        raise _translate(exc) from exc
+
+
 def admin_set_user_enabled(*, email: str, enabled: bool) -> None:
     """Enable or disable a Cognito user (reversible revoke / reactivate).
 

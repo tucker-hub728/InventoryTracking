@@ -25,20 +25,31 @@ from app.auth import cognito_client, provisioning, reauth
 from app.auth import repository as users_repo
 from app.auth.dependencies import CurrentUserDep
 from app.auth.schemas import (
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     MeResponse,
     NewPasswordChallengeResponse,
     ReauthRequest,
     ReauthResponse,
     RefreshRequest,
+    ResetPasswordRequest,
     SetPasswordRequest,
     TokenResponse,
 )
-from app.core.exceptions import AuthenticationError, AuthorizationError, NotFoundError
+from app.core.exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    DomainError,
+    NotFoundError,
+)
+from app.core.logging import get_logger
 from app.core.passwords import validate_password_strength
 from app.invitations import service as invitations_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+log = get_logger(__name__)
 
 # Shown to a deactivated user on login and on any protected request. The code
 # ``account_disabled`` is what the frontend keys off to end the session.
@@ -129,6 +140,67 @@ async def set_password(payload: SetPasswordRequest, db: DBSession) -> TokenRespo
     # lazy-materialised on the first /auth/me via provisioning.
     await invitations_service.mark_accepted_by_email(db, email=payload.email)
     return TokenResponse(**result)
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    summary="Start a self-service password reset — Cognito emails a code",
+)
+async def forgot_password(payload: ForgotPasswordRequest, db: DBSession) -> ForgotPasswordResponse:
+    """Public — the caller is locked out, so there's no session to require.
+
+    **Always returns the same response.** An unknown address, a deactivated
+    account, and a successful send are indistinguishable from the outside; the
+    alternative hands anybody a free "does this person have an account here?"
+    oracle. Real failures are logged server-side instead.
+
+    Deactivated accounts are skipped deliberately: letting a suspended user reset
+    their way back in would route around the deactivation guard on `/auth/login`.
+    """
+    user = await users_repo.get_by_email(db, payload.email)
+    if user is not None and user.status != "active":
+        log.info("auth.forgot_password.skipped_inactive", email=payload.email)
+        return ForgotPasswordResponse()
+
+    try:
+        cognito_client.forgot_password(email=payload.email)
+    except DomainError as exc:
+        # Unknown user, throttling, un-verified address — none of it changes the
+        # answer we give the caller.
+        log.info(
+            "auth.forgot_password.failed",
+            email=payload.email,
+            code=getattr(exc, "code", None),
+        )
+    return ForgotPasswordResponse()
+
+
+@router.post(
+    "/reset-password",
+    response_model=ForgotPasswordResponse,
+    summary="Finish a password reset with the emailed code",
+)
+async def reset_password(payload: ResetPasswordRequest, db: DBSession) -> ForgotPasswordResponse:
+    """Public — completes what ``/auth/forgot-password`` started.
+
+    Unlike that endpoint this one reports real errors: the caller already holds a
+    code, so a wrong-code or weak-password message tells them nothing they
+    couldn't learn by trying again, and staying silent would leave them stuck.
+    """
+    # A deactivated account must not be able to reset into a working login.
+    await _reject_if_deactivated(db, payload.email)
+    # Enforce the policy here too, so a weak password fails with a precise 422
+    # even on cognito-local, which doesn't apply the pool policy.
+    validate_password_strength(payload.password)
+
+    cognito_client.confirm_forgot_password(
+        email=payload.email,
+        code=payload.code,
+        new_password=payload.password,
+    )
+    log.info("auth.reset_password.succeeded", email=payload.email)
+    return ForgotPasswordResponse(message="Your password has been reset. You can sign in now.")
 
 
 @router.post(

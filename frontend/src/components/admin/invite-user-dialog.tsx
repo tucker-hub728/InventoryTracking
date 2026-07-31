@@ -33,11 +33,12 @@ interface Props {
   onInvited: () => void;
 }
 
-// super_admin is a fixed singleton — only admin/operator/read_only can be invited.
+// Super Admin is never selectable at invite time (REQ-2026-07-31-ROL-006) — it is
+// granted afterwards by promoting a user who has accepted and logged in.
 const ROLE_OPTIONS: { value: AssignableRole; label: string; hint: string }[] = [
   { value: 'read_only', label: 'Read-Only', hint: 'View inventory, ledger and audit — no changes' },
   { value: 'operator', label: 'Operator', hint: 'View, create / edit inventory and electronically sign' },
-  { value: 'admin', label: 'Admin', hint: 'All inventory actions plus user management' },
+  { value: 'admin', label: 'Admin', hint: 'All inventory actions; can view the member list but not change it' },
 ];
 
 const EMPTY = { email: '', first_name: '', last_name: '', role: 'read_only' as AssignableRole };

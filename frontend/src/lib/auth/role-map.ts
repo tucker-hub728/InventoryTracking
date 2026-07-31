@@ -1,10 +1,14 @@
 /**
  * Maps a Cognito-issued role string onto the frontend's RBAC bucket.
  *
- * Backend roles (Cognito ``custom:role``) currently use coarse labels —
- * ``super_admin``, ``admin``, ``editor``, ``viewer``. The frontend's
- * permission system has three buckets (``admin``/``editor``/``viewer``).
- * ``super_admin`` collapses to ``admin`` until the v2 RBAC tables ship.
+ * Backend roles (Cognito ``custom:role``) are ``super_admin``, ``admin``,
+ * ``operator``, ``read_only``. The frontend's permission system has three
+ * buckets (``admin``/``editor``/``viewer``), so ``super_admin`` collapses to
+ * ``admin`` until the v2 RBAC tables ship.
+ *
+ * Because the collapse is lossy, anything that must tell a real ``super_admin``
+ * apart from an ``admin`` — member management, shelf and Cold Storage creation,
+ * production areas — reads ``rawRole`` via ``selectIsSuperAdmin`` instead.
  */
 
 import type { RoleId } from '@/types/auth';

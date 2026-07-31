@@ -24,7 +24,8 @@ class InviteCreateRequest(BaseModel):
     email: Email
     first_name: str = Field(min_length=1, max_length=100)
     last_name: str = Field(min_length=1, max_length=100)
-    # super_admin is a fixed singleton — you can only invite admin/editor/viewer.
+    # Super Admin is never selectable at invite time (REQ-2026-07-31-ROL-006);
+    # it is granted afterwards via the promotion path in ``app.users.routes``.
     role: AssignableRole
 
 

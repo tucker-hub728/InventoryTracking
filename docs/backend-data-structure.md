@@ -262,22 +262,36 @@ Constraints:
 - `UNIQUE (lower(email)) WHERE deleted_at IS NULL`
 - `CHECK (password_hash IS NOT NULL OR external_idp IS NOT NULL)` (when SSO added)
 
-The `super_admin` role is bootstrapped at seed time and cannot be revoked
-from itself (a trigger refuses the last `super_admin` user being suspended
-or losing the role).
+The first `super_admin` is bootstrapped at seed time and assigned to a named
+person (REQ-2026-07-31-ROL-007). Every subsequent one is created by **promotion**:
+an existing `super_admin` elevates a user who has accepted their invitation and
+logged in (REQ-2026-07-31-ROL-005). The role is never offered at invite time.
+
+The **last active** `super_admin` cannot be demoted or deactivated, including by
+demoting themselves — enforced today in `app.users.routes`, with the trigger the
+original spec called for deferred to the v2 RBAC migration (the app is currently
+the only writer). "Active" is load-bearing: a suspended `super_admin` can't sign
+in, so it doesn't count toward keeping the install administrable.
+
+Every role change is written to `audit.audit_events` with grantor, grantee, old
+role, new role, and timestamp (REQ-2026-07-31-ROL-009).
 
 ### 5.3 `app.roles`
 
-`id`, `code UNIQUE` (`super_admin`, `admin`, `editor`, `viewer`), `name`,
+`id`, `code UNIQUE` (`super_admin`, `admin`, `operator`, `read_only`), `name`,
 `description`, `is_system BOOL` (system roles can't be deleted or have
 their `code` mutated).
 
+> The client's final role set (SRS Amendment 3, 2026-07-09) is Super Admin,
+> Admin, Operator, Read-Only. `editor` / `viewer` were the pre-2026-07-09 names
+> for `operator` / `read_only`.
+
 | role | scope |
 |--|--|
-| `super_admin` | full access; manages users, roles, settings, audit exports; bypass of standard sign-off requirements forbidden (must still e-sign regulated actions) |
-| `admin` | user management + all inventory actions |
-| `editor` | inventory create/edit/sign; no user management |
-| `viewer` | read-only; can view audit log if granted |
+| `super_admin` | full access; manages users, roles, settings, audit exports; sole grantor of `super_admin`; bypass of standard sign-off requirements forbidden (must still e-sign regulated actions) |
+| `admin` | all inventory actions; **read-only** view of the user directory — inviting, editing, enabling and disabling members are super-admin-only |
+| `operator` | inventory create/edit/sign; no user management |
+| `read_only` | read-only; can view audit log if granted |
 
 ### 5.4 `app.permissions`
 

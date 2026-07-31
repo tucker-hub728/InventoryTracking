@@ -97,6 +97,40 @@ class SetPasswordRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Start a self-service password reset. Public — the user is locked out."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: Email
+
+
+class ForgotPasswordResponse(BaseModel):
+    """Deliberately uninformative.
+
+    Always the same shape whether or not the address belongs to a real, active
+    account, so this endpoint can't be used to enumerate who has one. The
+    ``destination`` Cognito reports is NOT echoed back for the same reason.
+    """
+
+    message: str = (
+        "If that address belongs to an account, a reset code is on its way. "
+        "The code expires shortly."
+    )
+
+
+class ResetPasswordRequest(BaseModel):
+    """Finish a reset with the emailed code and a new password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: Email
+    # Cognito's confirmation codes are 6 digits; keep the bound loose enough
+    # that a format change upstream doesn't turn into a spurious 422 here.
+    code: str = Field(min_length=4, max_length=32)
+    password: str = Field(min_length=1, max_length=256)
+
+
 class ReauthRequest(BaseModel):
     """Payload for ``POST /v1/auth/reauth``.
 

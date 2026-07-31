@@ -130,14 +130,18 @@ export function UsersPageClient() {
     return () => ctrl.abort();
   }, [load]);
 
-  // Super admins are a fixed singleton and managed out-of-band — hide them from
-  // the member tables.
-  const activeUsers = React.useMemo(
-    () => users.filter((u) => u.is_active && u.role !== 'super_admin'),
-    [users],
-  );
-  const inactiveUsers = React.useMemo(
-    () => users.filter((u) => !u.is_active && u.role !== 'super_admin'),
+  // Super admins are listed alongside everyone else: since REQ-2026-07-31-ROL-005
+  // they are made by promotion, so a super admin has to be able to see who holds
+  // the role and demote one who shouldn't. (They used to be filtered out here,
+  // back when the role was a fixed singleton set at seed time — that would have
+  // made a freshly promoted user vanish from the directory.)
+  const activeUsers = React.useMemo(() => users.filter((u) => u.is_active), [users]);
+  const inactiveUsers = React.useMemo(() => users.filter((u) => !u.is_active), [users]);
+
+  // Mirrors the backend's `count_super_admins`: active ones only, since a
+  // suspended super admin can't log in and so can't hold the install open.
+  const activeSuperAdminCount = React.useMemo(
+    () => users.filter((u) => u.is_active && u.role === 'super_admin').length,
     [users],
   );
 
@@ -208,7 +212,15 @@ export function UsersPageClient() {
         </Tabs>
       </div>
 
-      <EditUserDialog open={editOpen} onOpenChange={setEditOpen} user={editUser} onSaved={onSaved} />
+      <EditUserDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        user={editUser}
+        onSaved={onSaved}
+        isLastActiveSuperAdmin={
+          editUser?.role === 'super_admin' && editUser.is_active && activeSuperAdminCount <= 1
+        }
+      />
 
       {canInvite && (
         <InviteUserDialog

@@ -31,7 +31,7 @@ That's it. Anything else listed in the full spec is v2+.
 | `meta` | `locations` | `ltree` tree; covers freezers, racks, LN2 positions later |
 | `meta` | `suppliers` | seeded from workbook (74 rows) |
 | `app` | `settings` | single-row global config |
-| `app` | `roles` | lookup with 4 codes (`super_admin`, `admin`, `editor`, `viewer`) |
+| `app` | `roles` | lookup with 4 codes (`super_admin`, `admin`, `operator`, `read_only`) |
 | `app` | `users` | `role TEXT FK → roles.code` denorm column |
 | `app` | `sessions` | hashed-token auth |
 | `app` | `items` | master tracker fields, prefix `CHECK` |
@@ -74,7 +74,7 @@ How v1 handles it:
 
 1. **`app.roles` is a real lookup table** (with `code TEXT PRIMARY KEY`),
    even though there's nothing else to join to yet. Same shape as the full
-   spec. Seeded with `super_admin`, `admin`, `editor`, `viewer`.
+   spec. Seeded with `super_admin`, `admin`, `operator`, `read_only`.
 2. **`app.users.role` is a `TEXT NOT NULL` column with a FK to
    `app.roles(code)`.** This denormalised column is the source of truth for
    authorisation in v1. The app reads it directly.
@@ -84,12 +84,14 @@ How v1 handles it:
    # app/security/permissions.py
    PERM_MATRIX = {
        "super_admin": {"*": {"*"}},
+       # Member management (invite / edit / enable / disable) is
+       # super-admin-only, so admin holds users:view and nothing more.
        "admin":      {"inventory": {"view","create","edit","delete","sign"},
-                      "users":     {"view","create","edit","delete"},
+                      "users":     {"view"},
                       "audit":     {"view","export"}},
-       "editor":     {"inventory": {"view","create","edit","sign"},
+       "operator":   {"inventory": {"view","create","edit","sign"},
                       "audit":     {"view"}},
-       "viewer":     {"inventory": {"view"},
+       "read_only":  {"inventory": {"view"},
                       "audit":     {"view"}},
    }
    def can(user, resource: str, action: str) -> bool:
@@ -130,7 +132,7 @@ erDiagram
     USERS ||--o{ ITEMS : "updated by"
 
     ROLES {
-        text code PK "super_admin|admin|editor|viewer"
+        text code PK "super_admin|admin|operator|read_only"
         text name
         text description
         bool is_system
@@ -355,10 +357,10 @@ CREATE TABLE app.roles (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO app.roles (code, name, description) VALUES
-  ('super_admin','Super administrator','Full access; bootstrap role'),
-  ('admin',      'Administrator',     'User management + all inventory actions'),
-  ('editor',     'Editor',            'Inventory create/edit/sign'),
-  ('viewer',     'Read-only',         'View only');
+  ('super_admin','Super Admin','Full access; seeded at deployment, then granted by promotion'),
+  ('admin',      'Admin',      'All inventory actions; read-only view of the user directory'),
+  ('operator',   'Operator',   'Inventory create/edit/sign'),
+  ('read_only',  'Read-Only',  'View only');
 ```
 
 Note: PK is `code TEXT`, not `id UUID`, because v1 has no other table
