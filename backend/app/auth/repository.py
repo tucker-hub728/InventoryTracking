@@ -41,11 +41,15 @@ async def create(
     initials: str,
     role: str,
     status: str = "active",
+    is_seed: bool = False,
 ) -> User:
     """Insert a new user row. Caller commits.
 
     Does not check for a pre-existing row — call ``get_by_cognito_sub``
     first if you need upsert semantics (provisioning does).
+
+    ``is_seed`` marks the permanent seeded super admin and is set only by
+    ``scripts/seed_super_admins.py``. A partial unique index allows at most one.
     """
     user = User(
         cognito_sub=cognito_sub,
@@ -54,6 +58,7 @@ async def create(
         initials=initials.upper()[:8],
         role=role,
         status=status,
+        is_seed=is_seed,
     )
     session.add(user)
     await session.flush()  # populate id / created_at without ending tx
@@ -97,6 +102,19 @@ async def touch_last_active(session: AsyncSession, user_id: uuid.UUID) -> None:
         .execution_options(synchronize_session=False)
     )
     await session.execute(stmt)
+
+
+async def seed_admin_exists(session: AsyncSession) -> bool:
+    """Whether a seeded super admin is already marked.
+
+    Guards the seeder against tripping ``uq_users_seed`` when it is run a
+    second time against a different address — the first account keeps the flag.
+    """
+    stmt = select(func.count()).select_from(User).where(
+        User.is_seed.is_(True),
+        User.deleted_at.is_(None),
+    )
+    return int((await session.execute(stmt)).scalar_one()) > 0
 
 
 async def count_super_admins(session: AsyncSession) -> int:

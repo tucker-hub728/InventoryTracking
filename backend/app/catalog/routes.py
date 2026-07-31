@@ -39,7 +39,7 @@ from app.catalog.schemas import (
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.models.inventory import BUILT_TIER_TYPES, BomLine, ItemPrefix, ItemTier
-from app.security.permissions import RequirePermission
+from app.security.permissions import ADMIN_ROLES, RequirePermission, RequireRole
 
 tiers_router = APIRouter(prefix="/item-tiers", tags=["tiers"])
 bom_router = APIRouter(tags=["bom"])
@@ -272,7 +272,10 @@ async def get_tier(
     response_model=TierRead,
     status_code=status.HTTP_201_CREATED,
     summary="Create an item tier (e-signed)",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        Depends(RequireRole(*ADMIN_ROLES, what="item tiers and prefixes")),
+    ],
 )
 async def create_tier(
     db: DBSession, current: CurrentDbUserDep, payload: TierCreate
@@ -325,7 +328,10 @@ async def create_tier(
     "/{tier_id}",
     response_model=TierRead,
     summary="Update an item tier (e-signed). Kind is immutable.",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        Depends(RequireRole(*ADMIN_ROLES, what="item tiers and prefixes")),
+    ],
 )
 async def update_tier(
     db: DBSession,
@@ -387,7 +393,10 @@ async def update_tier(
     "/{tier_id}",
     response_model=TierRead,
     summary="Delete an item tier (e-signed). Blocked if seeded or in use.",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        Depends(RequireRole(*ADMIN_ROLES, what="item tiers and prefixes")),
+    ],
 )
 async def delete_tier(
     db: DBSession,
@@ -473,7 +482,10 @@ async def list_prefixes(
     response_model=PrefixRead,
     status_code=status.HTTP_201_CREATED,
     summary="Add a prefix to a tier (e-signed)",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        Depends(RequireRole(*ADMIN_ROLES, what="item tiers and prefixes")),
+    ],
 )
 async def create_prefix(
     db: DBSession,
@@ -539,7 +551,10 @@ async def create_prefix(
     "/{tier_id}/prefixes/{prefix_id}",
     response_model=PrefixRead,
     summary="Update a prefix (e-signed). The owning tier is immutable.",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        Depends(RequireRole(*ADMIN_ROLES, what="item tiers and prefixes")),
+    ],
 )
 async def update_prefix(
     db: DBSession,
@@ -617,7 +632,10 @@ async def update_prefix(
     "/{tier_id}/prefixes/{prefix_id}",
     response_model=PrefixRead,
     summary="Delete a prefix (e-signed). Blocked if seeded or in use.",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        Depends(RequireRole(*ADMIN_ROLES, what="item tiers and prefixes")),
+    ],
 )
 async def delete_prefix(
     db: DBSession,

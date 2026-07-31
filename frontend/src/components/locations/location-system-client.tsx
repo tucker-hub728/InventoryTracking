@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { usePermission } from '@/hooks/use-permission';
+import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
 import { cn } from '@/lib/utils';
 import {
@@ -39,7 +40,15 @@ export function LocationSystemClient({
   /** Node-id chain from the URL. Only the last one drives selection. */
   initialPath?: string[];
 }) {
+  // Two different questions, deliberately kept apart:
+  //  * canWrite — day-to-day stock work (placing, transferring, consuming
+  //    vials). Operators do this constantly, so it stays on inventory:create.
+  //  * canManageStructure — creating or renaming the LN2 hierarchy itself.
+  //    Admin-or-above only, matching the backend guard (LOC-003: tanks stay
+  //    with "the appropriate admin role"). The matrix can't express this —
+  //    operators also hold inventory:create — so it reads the real role.
   const canWrite = usePermission('inventory', 'create');
+  const canManageStructure = useAuthStore(selectIsAdminOrAbove);
 
   const [tree, setTree] = React.useState<NodeTree[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -199,7 +208,7 @@ export function LocationSystemClient({
           <p className="text-xs font-semibold uppercase tracking-wide text-text-3">
             Storage hierarchy
           </p>
-          {canWrite && (
+          {canManageStructure && (
             <button
               type="button"
               title="Add tank"
@@ -351,6 +360,7 @@ export function LocationSystemClient({
             node={selectedNode}
             path={path}
             canWrite={canWrite}
+            canManageStructure={canManageStructure}
             onSelectChild={select}
             onAddChild={(parent) => setCreateMode({ kind: 'child', parent })}
             onRemoved={() => {

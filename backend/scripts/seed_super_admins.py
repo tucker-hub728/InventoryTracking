@@ -68,7 +68,7 @@ from botocore.exceptions import ClientError
 #
 # Credentials come from --email / --password ONLY. There is no default and no
 # environment fallback, deliberately: a stored value is one nobody re-reads, and
-# the first symptom is a bootstrap account seeded at the wrong address. Making
+# the first symptom is the account being seeded at the wrong address. Making
 # both explicit at the call site means the account you type is the account you
 # get, in every environment.
 #
@@ -185,6 +185,11 @@ async def _upsert_local_user(
     """Insert the ``app.users`` row if it isn't already mirrored. Caller commits."""
     existing = await users_repo.get_by_cognito_sub(session, sub)
     if existing is not None:
+        # Re-running the seeder repairs the flag on an account that predates the
+        # seedadmin01 migration, so an existing deployment gets the lock without
+        # a manual UPDATE.
+        if not existing.is_seed and not await users_repo.seed_admin_exists(session):
+            existing.is_seed = True
         return existing, False
     user = await users_repo.create(
         session,
@@ -193,6 +198,9 @@ async def _upsert_local_user(
         full_name=full_name,
         initials=initials,
         role=_ROLE,
+        # This is the permanent account: always super_admin, immutable email,
+        # cannot be deactivated. At most one row may carry the flag.
+        is_seed=not await users_repo.seed_admin_exists(session),
     )
     return user, True
 

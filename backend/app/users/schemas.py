@@ -40,13 +40,40 @@ class UserRead(BaseModel):
     # UI uses these to enable/disable the Super Admin option and say why.
     can_be_promoted: bool = True
     promotion_blocked_reason: str | None = None
+    # The permanent seeded super admin: role, email and active flag are locked.
+    # Surfaced so the UI disables those fields instead of failing on submit.
+    is_seed: bool = False
+
+
+# Action verb the e-signature must carry. Checked against the reauth event when
+# the evidence is consumed, so a signature minted for another flow can't be
+# replayed here.
+USER_UPDATE_ACTION = "user.update"
 
 
 class UserUpdate(BaseModel):
     """Edit a user's email, name, role, and/or active flag. All optional — only
-    the supplied fields are changed."""
+    the supplied fields are changed.
+
+    **Every** edit requires an electronic signature. Role and email decide what
+    a person may do and how they authenticate; the active flag decides whether
+    they can work at all; and the display name is what every audit row and
+    signature is attributed to. None of those should move without an
+    attributable signature in a Part 11 system.
+    """
 
     model_config = ConfigDict(extra="forbid")
+
+    # Required whenever the patch changes anything. The route rejects a
+    # mutating request without it.
+    evidence_id: str | None = Field(
+        default=None, min_length=1, description="Fresh reauth evidence id"
+    )
+    reason: str = Field(
+        default="",
+        max_length=512,
+        description="Optional reason, recorded on the audit row",
+    )
 
     # Changing this moves the Cognito sign-in alias too — the user signs in with
     # the new address afterwards. Super-admin-only, like every other member edit.

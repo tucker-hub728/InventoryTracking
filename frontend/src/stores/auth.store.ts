@@ -117,3 +117,12 @@ export const selectUser = (s: AuthState) => s.user;
 export const selectIsAuthed = (s: AuthState) => s.user !== null;
 /** True only for the real ``super_admin`` (not the collapsed ``admin`` bucket). */
 export const selectIsSuperAdmin = (s: AuthState) => s.rawRole === 'super_admin';
+
+/** True for ``admin`` and ``super_admin``, false for ``operator`` / ``read_only``.
+ *
+ * Needed wherever the permission matrix can't answer the question: ``operator``
+ * also holds ``inventory:create``, so a matrix check can't tell it from an admin.
+ * Mirrors the backend's ``_require_admin`` guard on LN2 structure
+ * (REQ-2026-07-15-LOC-003 — "the appropriate admin role"). */
+export const selectIsAdminOrAbove = (s: AuthState) =>
+  s.rawRole === 'super_admin' || s.rawRole === 'admin';

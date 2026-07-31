@@ -23,9 +23,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useConfirm } from '@/components/ui/confirm-dialog';
+import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
-import { usersApi, roleLabel, type ApiUser, type GrantableRole, type UserUpdateInput } from '@/lib/api/users';
+import {
+  usersApi,
+  roleLabel,
+  USER_UPDATE_ACTION,
+  type ApiUser,
+  type GrantableRole,
+  type UserUpdateInput,
+} from '@/lib/api/users';
 
 const ROLE_OPTIONS: { value: GrantableRole; label: string }[] = [
   { value: 'admin', label: 'Admin' },
@@ -63,13 +70,15 @@ export function EditUserDialog({
   onSaved,
   isLastActiveSuperAdmin = false,
 }: Props) {
-  const { confirm, confirmDialog } = useConfirm();
   const [firstName, setFirstName] = React.useState('');
   const [lastName, setLastName] = React.useState('');
   const [email, setEmail] = React.useState('');
   const [role, setRole] = React.useState<GrantableRole>('read_only');
   const [active, setActive] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
+  // Held between hitting Save and completing the e-signature.
+  const [signOpen, setSignOpen] = React.useState(false);
+  const [pendingChanges, setPendingChanges] = React.useState<UserUpdateInput | null>(null);
 
   // Seed the form from the selected user each time the dialog opens.
   React.useEffect(() => {
@@ -86,9 +95,14 @@ export function EditUserDialog({
   if (!user) return null;
 
   const isSuperAdmin = user.role === 'super_admin';
-  // The last active super admin is frozen — demoting or deactivating them would
-  // strand the install, and the backend rejects it with `last_super_admin`.
-  const locked = isSuperAdmin && isLastActiveSuperAdmin;
+  // Two independent reasons the role/status fields freeze:
+  //  * the seeded super admin is permanent by client rule — always super_admin,
+  //    email immutable, never deactivated (`seed_admin_immutable`);
+  //  * the last ACTIVE super admin, whoever they are, can't be demoted or
+  //    deactivated without stranding the install (`last_super_admin`).
+  const locked = user.is_seed || (isSuperAdmin && isLastActiveSuperAdmin);
+  // Only the seeded account also freezes its email.
+  const emailLocked = user.is_seed;
   // Promotion is offered only to someone eligible. An existing super admin keeps
   // the option so their current role still renders in the Select.
   const canOfferSuperAdmin = isSuperAdmin || user.can_be_promoted;
@@ -100,48 +114,35 @@ export function EditUserDialog({
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmedEmail);
   const emailChanged = trimmedEmail !== user.email.toLowerCase();
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!nameValid || !emailValid || saving) return;
-
-    const changes: UserUpdateInput = {};
-    if (fullName !== user.full_name) changes.full_name = fullName;
-    if (emailChanged) changes.email = trimmedEmail;
-    if (!locked) {
-      if (role !== user.role) changes.role = role;
-      if (active !== user.is_active) changes.is_active = active;
+  /** The sentence the signer attests to, rendered verbatim in the e-sign dialog.
+   * Built from the actual pending change so the signer sees exactly what they
+   * are authorising, not a generic "you are editing a user". */
+  const signingMeaning = (changes: UserUpdateInput): string => {
+    const parts: string[] = [];
+    if (changes.role === 'super_admin') {
+      parts.push(
+        `promote ${user.email} to Super Admin, granting full access including member management`,
+      );
+    } else if (changes.role) {
+      parts.push(`change ${user.email}'s role to ${roleLabel(changes.role)}`);
     }
-
-    if (Object.keys(changes).length === 0) {
-      onOpenChange(false);
-      return;
-    }
-
-    // Changing the email moves the sign-in address — the member can no longer
-    // sign in with the old one, so make that consequence explicit.
     if (changes.email) {
-      const proceed = await confirm({
-        title: 'Change sign-in email?',
-        description: `${user.email} will become ${changes.email}. They must use the new address to sign in from now on. This is recorded in the audit log.`,
-        confirmLabel: 'Change email',
-      });
-      if (!proceed) return;
+      parts.push(
+        `change their sign-in address from ${user.email} to ${changes.email}, after which the old address no longer works`,
+      );
     }
-
-    // A role change is consequential — confirm it explicitly. Promotion to super
-    // admin gets its own wording, since it hands over full access.
-    if (changes.role) {
-      const toSuperAdmin = changes.role === 'super_admin';
-      const proceed = await confirm({
-        title: toSuperAdmin ? 'Promote to Super Admin?' : 'Change role?',
-        description: toSuperAdmin
-          ? `${user.email} will get full access, including managing members and creating shelves and Cold Storage locations. This is recorded in the audit log.`
-          : `${user.email} will become ${roleLabel(changes.role)}. This changes what they can access.`,
-        confirmLabel: toSuperAdmin ? 'Promote' : 'Change role',
-      });
-      if (!proceed) return;
+    if (changes.full_name) {
+      parts.push(`rename them from "${user.full_name}" to "${changes.full_name}"`);
     }
+    if (changes.is_active === false) {
+      parts.push('deactivate their account, so they can no longer sign in');
+    } else if (changes.is_active === true) {
+      parts.push('reactivate their account, restoring their ability to sign in');
+    }
+    return `I authorise the following: ${parts.join('; and ')}.`;
+  };
 
+  const applyChanges = async (changes: UserUpdateInput) => {
     setSaving(true);
     try {
       const updated = await usersApi.update(user.id, changes);
@@ -155,6 +156,30 @@ export function EditUserDialog({
     }
   };
 
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!nameValid || !emailValid || saving) return;
+
+    const changes: UserUpdateInput = {};
+    if (fullName !== user.full_name) changes.full_name = fullName;
+    if (emailChanged && !emailLocked) changes.email = trimmedEmail;
+    if (!locked) {
+      if (role !== user.role) changes.role = role;
+      if (active !== user.is_active) changes.is_active = active;
+    }
+
+    if (Object.keys(changes).length === 0) {
+      onOpenChange(false);
+      return;
+    }
+
+    // EVERY edit is e-signed — role, email, name and active flag alike. The
+    // backend enforces the same rule and consumes the signature, so there is no
+    // unsigned path to a member record.
+    setPendingChanges(changes);
+    setSignOpen(true);
+  };
+
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
@@ -163,9 +188,11 @@ export function EditUserDialog({
             <DialogHeader>
               <DialogTitle>Edit user</DialogTitle>
               <DialogDescription>
-                {locked
-                  ? 'This is the last active super admin — their role and status are locked so the system can’t be locked out. Only the name can be changed.'
-                  : 'Update the name, role, and active status.'}
+                {user.is_seed
+                  ? 'This is the super admin seeded at deployment. Its role, email and status are permanent — only the name can be changed.'
+                  : locked
+                    ? 'This is the last active super admin — their role and status are locked so the system can’t be locked out. Only the name can be changed.'
+                    : 'Update the name, role, and active status.'}
               </DialogDescription>
             </DialogHeader>
             <DialogBody className="space-y-4">
@@ -200,8 +227,14 @@ export function EditUserDialog({
                   onChange={(e) => setEmail(e.target.value)}
                   aria-invalid={!emailValid}
                   autoComplete="off"
+                  disabled={emailLocked}
+                  readOnly={emailLocked}
                 />
-                {!emailValid ? (
+                {emailLocked ? (
+                  <p className="text-xs text-text-3">
+                    This is the account seeded at deployment — its sign-in address is fixed.
+                  </p>
+                ) : !emailValid ? (
                   <p role="alert" className="text-xs text-danger">
                     Enter a valid email address.
                   </p>
@@ -248,7 +281,7 @@ export function EditUserDialog({
                   </Label>
                   <p className="text-xs text-text-3">
                     {locked
-                      ? 'The last active super admin can’t be deactivated.'
+                      ? user.is_seed ? 'The seeded super admin can’t be deactivated.' : 'The last active super admin can’t be deactivated.'
                       : 'Inactive users can’t sign in or use the app (disabled in Cognito).'}
                   </p>
                 </div>
@@ -271,7 +304,33 @@ export function EditUserDialog({
           </form>
         </DialogContent>
       </Dialog>
-      {confirmDialog}
+
+      {/* Role and email changes are signed, not merely confirmed — the password
+          re-auth is the electronic signature the backend records against the
+          audit row. */}
+      {pendingChanges && (
+        <PasswordReauthDialog
+          open={signOpen}
+          onOpenChange={(next) => {
+            setSignOpen(next);
+            if (!next) setPendingChanges(null);
+          }}
+          action={USER_UPDATE_ACTION}
+          meaning={signingMeaning(pendingChanges)}
+          title={
+            pendingChanges.role === 'super_admin' ? 'Sign to promote' : 'Sign to apply changes'
+          }
+          submitLabel="Sign & save"
+          commentPlaceholder="e.g. approved by the operations lead"
+          onConfirmed={async (evidence) => {
+            const changes = { ...pendingChanges, evidence_id: evidence.evidence_id };
+            if (evidence.comment) changes.reason = evidence.comment;
+            setSignOpen(false);
+            setPendingChanges(null);
+            await applyChanges(changes);
+          }}
+        />
+      )}
     </>
   );
 }

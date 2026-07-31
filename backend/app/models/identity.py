@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -125,6 +126,15 @@ class User(Base):
         Text,
         nullable=False,
         server_default=text("'active'"),
+    )
+    # The super admin seeded at deployment. Permanent by client rule
+    # (2026-07-31): always ``super_admin``, email immutable, cannot be
+    # deactivated — enforced in ``app.users.routes``. At most one row may carry
+    # it (partial unique index ``uq_users_seed``, migration seedadmin01).
+    is_seed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
     )
 
     last_active_at: Mapped[datetime | None] = mapped_column(
