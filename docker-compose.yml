@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-cellready}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cellready_dev_only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required (see .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-cellready_ims}
       # Reasonable dev defaults; tune for prod.
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
@@ -43,37 +43,14 @@ services:
     networks:
       - ims
 
-  # ── MinIO (S3-compatible object store) ────────────────────────────────────
-  # Stand-in for AWS S3 in dev. Speaks the same wire protocol so the same
-  # boto3 client works against both — only ``S3_ENDPOINT_URL`` differs
-  # between environments. Persists to a named volume so the signatures
-  # bucket survives ``docker compose down``.
-  minio:
-    # Quay mirror — Docker Hub kept EOFing on this image during local pulls.
-    image: quay.io/minio/minio:latest
-    container_name: cellready-minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-cellready}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-cellready_dev_only}
-      # Default region — boto3 sends region in every signature; mismatch
-      # against the bucket location causes a 301. Match this to AWS_REGION.
-      MINIO_REGION_NAME: ${AWS_REGION:-us-east-1}
-    ports:
-      # 9000 = S3 API, 9001 = web console (handy for poking at uploads).
-      - "${MINIO_API_HOST_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 5s
-    networks:
-      - ims
+  # NOTE: there is no MinIO service here any more. It existed solely to hold
+  # the hand-drawn e-signature image in dev; that feature was removed on
+  # 2026-08-03 (an electronic signature here is the password
+  # re-authentication), so the object store, its credentials and the
+  # ``cellready-minio-data`` volume all went with it.
+  #
+  # If you are upgrading a machine that ran the old stack, reclaim the space:
+  #     docker volume rm cellready-minio-data
 
   # ── Cognito-local ─────────────────────────────────────────────────────────
   # Drop-in stand-in for AWS Cognito User Pools while developing. State is
@@ -104,15 +81,13 @@ services:
         condition: service_healthy
       cognito:
         condition: service_started
-      minio:
-        condition: service_started
     environment:
       APP_ENV: development
       APP_DEBUG: "true"
       HOST: 0.0.0.0
       PORT: 8000
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required (see .env.example)}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cellready}:${POSTGRES_PASSWORD:-cellready_dev_only}@postgres:5432/${POSTGRES_DB:-cellready_ims}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cellready}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required (see .env.example)}@postgres:5432/${POSTGRES_DB:-cellready_ims}
       CORS_ALLOW_ORIGINS: http://localhost:${FRONTEND_HOST_PORT:-3000}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-console}
@@ -145,18 +120,7 @@ services:
       # The code is never returned by the API in any environment.
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:${FRONTEND_HOST_PORT:-3000}}
       INVITE_TTL_DAYS: ${INVITE_TTL_DAYS:-7}
-      # ── S3 / MinIO ─────────────────────────────────────────────────────
-      # In prod the backend hits real S3 — leave ``S3_ENDPOINT_URL``
-      # unset and rely on IAM role creds + region. In dev we point at
-      # the MinIO container with its root credentials.
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
-      S3_REGION: ${S3_REGION:-${AWS_REGION:-us-east-1}}
-      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-${MINIO_ROOT_USER:-cellready}}
-      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-cellready_dev_only}}
-      S3_SIGNATURES_BUCKET: ${S3_SIGNATURES_BUCKET:-cellready-signatures}
-      # Force path-style addressing — required for MinIO (and harmless
-      # against AWS S3 in regions that still support it).
-      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      # No S3_* here — the backend no longer talks to object storage at all.
     ports:
       - "${BACKEND_HOST_PORT:-8000}:8000"
     volumes:
@@ -216,5 +180,3 @@ networks:
 volumes:
   postgres_data:
     name: cellready-postgres-data
-  minio_data:
-    name: cellready-minio-data

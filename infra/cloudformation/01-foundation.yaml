@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   CellReady IMS — foundation stack. Stateless/long-lived resources that the
-  app and pipeline depend on: ECR repos, S3 buckets (signatures + EB
-  artifacts), and a real Cognito User Pool (replaces cognito-local in prod).
+  app and pipeline depend on: ECR repos, the EB artifacts bucket, and a real
+  Cognito User Pool (replaces cognito-local in prod).
   NOTE: secret SSM parameters are NOT created here — CloudFormation cannot
   create SecureString parameters. They are seeded by scripts/bootstrap_ssm.sh.
 
@@ -31,7 +31,11 @@ Resources:
       RepositoryName: !Sub '${ProjectName}/backend'
       ImageScanningConfiguration:
         ScanOnPush: true
-      ImageTagMutability: MUTABLE
+      # IMMUTABLE so a pushed tag can never be repointed. Deploys tag by
+      # github.sha, so "deployed commit X" must keep meaning the artifact
+      # built from X — a mutable tag lets any ecr:PutImage holder swap the
+      # released image out from under a SHA and defeats rollback provenance.
+      ImageTagMutability: IMMUTABLE
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
@@ -55,7 +59,8 @@ Resources:
       RepositoryName: !Sub '${ProjectName}/frontend'
       ImageScanningConfiguration:
         ScanOnPush: true
-      ImageTagMutability: MUTABLE
+      # See BackendRepo — immutable tags for artifact provenance.
+      ImageTagMutability: IMMUTABLE
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
@@ -73,13 +78,27 @@ Resources:
             ]
           }
 
-  # ── S3: e-signature object store (real S3 replaces MinIO in prod) ────────
-  SignaturesBucket:
+  # NOTE: the e-signature bucket is gone from this template as of 2026-08-03.
+  # It held the hand-drawn signature image, which was removed from the product
+  # (an electronic signature here is the password re-authentication).
+  #
+  # It carried DeletionPolicy: Retain, so removing it from the template ORPHANS
+  # rather than deletes it — the bucket and any objects stay in the account,
+  # unmanaged, which is what we want while Part 11 retention applies. Delete it
+  # by hand once retention has expired.
+  #
+  # DEPLOY ORDER: update 03-beanstalk FIRST (it imports SignaturesBucketArn);
+  # CloudFormation will not remove an Export that something still imports.
+
+  # ── S3: Elastic Beanstalk source bundles (compose + .platform hooks) ─────
+  ArtifactsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Sub '${ProjectName}-signatures-${AWS::AccountId}-${EnvName}'
+      BucketName: !Sub '${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}'
+      # This bucket holds every EB source bundle — the compose file and the
+      # .platform prebuild hook, i.e. the code that runs on the instance.
+      # Versioning makes a tampered or clobbered bundle recoverable and
+      # detectable; without it an overwrite of a key is silent and final.
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
@@ -91,22 +110,41 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-
-  # ── S3: Elastic Beanstalk source bundles (compose + .platform hooks) ─────
-  ArtifactsBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub '${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}'
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
       LifecycleConfiguration:
         Rules:
           - Id: expire-old-bundles
             Status: Enabled
+            # Versioning is on, so expire noncurrent versions too — otherwise
+            # every superseded bundle is retained forever and the rule below
+            # only ever moves the current version to noncurrent.
+            NoncurrentVersionExpirationInDays: 90
             ExpirationInDays: 90
+
+  # ── S3: TLS-only access policy ──────────────────────────────────────────
+  # The artifacts bucket did not deny cleartext requests. It holds the EB
+  # source bundle — the compose file and the .platform prebuild hook, i.e.
+  # the code that runs on the instance — so refuse any request that did not
+  # arrive over TLS rather than relying on callers to opt in.
+  #
+  # (The matching policy for the signatures bucket went with the bucket; if
+  # you retain that bucket manually, attach an equivalent deny to it there.)
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonTlsRequests
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactsBucket.Arn
+              - !Sub '${ArtifactsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
 
   # ── Cognito User Pool (real auth backend for prod) ──────────────────────
   UserPool:
@@ -191,12 +229,9 @@ Outputs:
   FrontendRepoUri:
     Value: !GetAtt FrontendRepo.RepositoryUri
     Export: { Name: !Sub '${ProjectName}-${EnvName}-FrontendRepoUri' }
-  SignaturesBucketName:
-    Value: !Ref SignaturesBucket
-    Export: { Name: !Sub '${ProjectName}-${EnvName}-SignaturesBucket' }
-  SignaturesBucketArn:
-    Value: !GetAtt SignaturesBucket.Arn
-    Export: { Name: !Sub '${ProjectName}-${EnvName}-SignaturesBucketArn' }
+  # SignaturesBucketName / SignaturesBucketArn exports removed 2026-08-03 with
+  # the bucket. Nothing imports them any more (03-beanstalk was updated in the
+  # same change) — see the DEPLOY ORDER note above before rolling this out.
   ArtifactsBucketName:
     Value: !Ref ArtifactsBucket
     Export: { Name: !Sub '${ProjectName}-${EnvName}-ArtifactsBucket' }

@@ -6,6 +6,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.bounds import MAX_QTY
+
 
 class ShipCell(BaseModel):
     """One occupied vial position in an LN2 box — exactly one unit of one lot
@@ -58,7 +60,7 @@ class ShipSourceInput(BaseModel):
 
     node_id: str
     lot_id: str
-    qty: int = Field(gt=0)
+    qty: int = Field(gt=0, le=MAX_QTY)
     cell_allocation_ids: list[str] | None = None
 
 

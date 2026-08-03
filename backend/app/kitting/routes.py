@@ -33,6 +33,7 @@ from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit.recorder import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.search import MAX_SEARCH_LENGTH
 from app.inventory import repository as inv_repo
 from app.locations import repository as loc_repo
 from app.models.inventory import Item, StockMovement
@@ -1062,7 +1063,10 @@ async def list_kits(
     ] = None,
     q: Annotated[
         str | None,
-        Query(description="Search kit number, built item number, or description"),
+        Query(
+            description="Search kit number, built item number, or description",
+            max_length=MAX_SEARCH_LENGTH,
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,

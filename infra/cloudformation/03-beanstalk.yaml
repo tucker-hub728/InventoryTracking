@@ -81,22 +81,51 @@ Resources:
                 Condition:
                   StringEquals:
                     kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
-              # e-signature object storage (boto3 uses the instance role; no static keys).
+              # NOTE: the instance role no longer carries any S3 permissions.
+              # Its only grant was read/write on the e-signature bucket, and
+              # the hand-drawn signature image was removed on 2026-08-03 — the
+              # application does not talk to object storage at all now.
+              #
+              # DEPLOY ORDER MATTERS: this stack's import of
+              # ``…-SignaturesBucketArn`` is removed here, and the matching
+              # Export is removed from 01-foundation. CloudFormation refuses to
+              # delete an Export that is still imported, so update THIS stack
+              # (03) first, then 01. The bucket itself is DeletionPolicy:Retain,
+              # so it survives in the account with its objects intact — delete
+              # it by hand only after the Part 11 retention period.
+              # Cognito operations scoped to this pool — enumerated, not `*`.
+              # `cognito-idp:*` also granted UpdateUserPool, DeleteUserPool and
+              # password-policy changes, so a compromised app process could
+              # weaken the pool itself or mint a super-admin out of band. This
+              # list is exactly what app/auth/cognito_client.py calls; adding a
+              # new admin API means adding it here too.
               - Effect: Allow
                 Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:DeleteObject
-                  - s3:ListBucket
-                Resource:
-                  - Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-SignaturesBucketArn'
-                  - !Sub
-                    - '${Arn}/*'
-                    - Arn:
-                        Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-SignaturesBucketArn'
-              # Cognito admin operations scoped to this pool.
-              - Effect: Allow
-                Action: cognito-idp:*
+                  # User lifecycle (invite, deactivate, delete, promote).
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminUpdateUserAttributes
+                  # ListUsers is NOT used by the running app — only by
+                  # scripts/purge_users.py, which enumerates the pool before
+                  # deleting. Kept because that script is run by hand on the
+                  # instance (docker exec) and would otherwise fail with an
+                  # opaque AccessDenied. Drop this line if you never reset the
+                  # pool from the instance; nothing at runtime calls it.
+                  - cognito-idp:ListUsers
+                  # Sign-in, refresh, and the NEW_PASSWORD_REQUIRED challenge.
+                  # These are Cognito's unauthenticated APIs and do not strictly
+                  # require IAM, but they are listed so the policy reads as a
+                  # complete inventory of what the code calls.
+                  - cognito-idp:InitiateAuth
+                  - cognito-idp:RespondToAuthChallenge
+                  # Self-service forgot-password flow.
+                  - cognito-idp:ForgotPassword
+                  - cognito-idp:ConfirmForgotPassword
+                  - cognito-idp:GetUser
                 Resource:
                   Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-UserPoolArn'
 
@@ -214,13 +243,22 @@ Resources:
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_LEVEL, Value: INFO }
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_FORMAT, Value: json }
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: SSM_PARAM_PREFIX, Value: !Ref SSMParamPrefix }
-        # S3 — leave endpoint/keys unset so boto3 uses the instance role + real S3.
-        - Namespace: 'aws:elasticbeanstalk:application:environment'
-          OptionName: S3_SIGNATURES_BUCKET
-          Value:
-            Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-SignaturesBucket'
-        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: S3_REGION, Value: !Ref 'AWS::Region' }
-        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: S3_FORCE_PATH_STYLE, Value: 'false' }
+        # How many proxies sit in front of the backend, counted from the app
+        # outwards. Decides which X-Forwarded-For entry is written to the Part 11
+        # audit rows; everything further left is caller-supplied and discarded.
+        #
+        # 2 = CloudFront (appends the viewer IP) + the EB nginx hop (appends the
+        # CloudFront edge IP). The BFF passes the chain through without judging it.
+        #
+        # VERIFY THIS AFTER THE FIRST DEPLOY rather than trusting the comment:
+        # sign something, then
+        #   SELECT ip_address FROM audit.reauth_events ORDER BY created_at DESC LIMIT 1;
+        # If it shows a 130.176.*/​64.252.* (CloudFront) or a 172.*/10.* (container)
+        # address instead of the real client, this number is wrong. Too high is as
+        # bad as too low — it just fails in the other direction.
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '2' }
+        # No S3_* environment: object storage was removed on 2026-08-03 with the
+        # hand-drawn e-signature image. The backend ignores any leftovers.
         # Cognito — pool/client ids; issuer + JWKS are derived by the backend.
         - Namespace: 'aws:elasticbeanstalk:application:environment'
           OptionName: COGNITO_USER_POOL_ID

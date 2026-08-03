@@ -13,6 +13,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from app.core.bounds import MAX_QTY_DECIMAL
+
 # The three tiers, fixed by REQ-2026-07-15-ITM-001. Admin-added prefixes live
 # inside one of these and never constitute a fourth tier.
 TierType = Literal["raw_material", "sub_assembly", "finished_good"]
@@ -219,13 +221,13 @@ class BomLineCreate(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
     child_item_id: str = Field(min_length=1)
-    qty_per_unit: Decimal = Field(gt=Decimal("0"))
+    qty_per_unit: Decimal = Field(gt=Decimal("0"), le=MAX_QTY_DECIMAL)
 
 
 class BomLineUpdate(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
-    qty_per_unit: Decimal = Field(gt=Decimal("0"))
+    qty_per_unit: Decimal = Field(gt=Decimal("0"), le=MAX_QTY_DECIMAL)
 
 
 class BomLineDelete(_ESignFields):
@@ -238,7 +240,7 @@ class BomBatchAdd(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     child_item_id: str = Field(min_length=1)
-    qty_per_unit: Decimal = Field(gt=Decimal("0"))
+    qty_per_unit: Decimal = Field(gt=Decimal("0"), le=MAX_QTY_DECIMAL)
 
 
 class BomBatchUpdate(BaseModel):
@@ -247,7 +249,7 @@ class BomBatchUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     line_id: str = Field(min_length=1)
-    qty_per_unit: Decimal = Field(gt=Decimal("0"))
+    qty_per_unit: Decimal = Field(gt=Decimal("0"), le=MAX_QTY_DECIMAL)
 
 
 class BomBatchSave(_ESignFields):

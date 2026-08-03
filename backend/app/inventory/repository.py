@@ -15,6 +15,7 @@ from sqlalchemy import Select, asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.search import like_contains
 from app.models.inventory import (
     BomLine,
     Item,
@@ -181,15 +182,15 @@ def _apply_filters(
             )
         )
     if q:
-        like = f"%{q.lower()}%"
+        like = like_contains(q.lower())
         stmt = stmt.where(
             or_(
                 # The number is derived, so match its parts: the suffix, the
                 # description, or the prefix code (so "PRR" finds all PRR items).
-                func.lower(Item.sku_suffix).like(like),
-                func.lower(Item.description).like(like),
+                func.lower(Item.sku_suffix).like(like, escape="\\"),
+                func.lower(Item.description).like(like, escape="\\"),
                 Item.prefix_id.in_(
-                    select(ItemPrefix.id).where(func.lower(ItemPrefix.code).like(like))
+                    select(ItemPrefix.id).where(func.lower(ItemPrefix.code).like(like, escape="\\"))
                 ),
             )
         )

@@ -12,16 +12,14 @@ export interface UseReauthResult {
    * ``null`` when the attempt failed (the hook stores the error
    * message for rendering); throws only on truly unexpected errors.
    *
-   * ``signatureImageS3Key`` is optional — pass it after a successful
-   * ``uploadSignature`` call to attach the canvas image to the audit
-   * row. Omit it for headless flows.
+   * The password IS the signature (client decision, 2026-08-03) — there
+   * is no drawn image to attach and no upload step before this call.
    */
   reauth: (input: {
     password: string;
     meaning?: string;
     /** Optional rationale recorded on the audit row. */
     comment?: string;
-    signatureImageS3Key?: string;
   }) => Promise<ReauthResponse | null>;
   pending: boolean;
   /** Human-readable error from the last attempt, or null if clean. */
@@ -49,12 +47,10 @@ export function useReauth(action: string): UseReauthResult {
       password,
       meaning,
       comment,
-      signatureImageS3Key,
     }: {
       password: string;
       meaning?: string;
       comment?: string;
-      signatureImageS3Key?: string;
     }) => {
       setPending(true);
       setError(null);
@@ -65,7 +61,6 @@ export function useReauth(action: string): UseReauthResult {
           password,
           meaning,
           comment,
-          signature_image_s3_key: signatureImageS3Key,
         });
       } catch (err) {
         if (err instanceof ApiError) {

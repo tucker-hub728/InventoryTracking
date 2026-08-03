@@ -15,7 +15,14 @@ from enum import Enum
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import AnyHttpUrl, BeforeValidator, Field, PostgresDsn, SecretStr
+from pydantic import (
+    AnyHttpUrl,
+    BeforeValidator,
+    Field,
+    PostgresDsn,
+    SecretStr,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -94,6 +101,22 @@ class Settings(BaseSettings):
     # ── CORS ────────────────────────────────────────────────────────────
     cors_allow_origins: CommaSeparated = Field(default_factory=list)
 
+    # ── Proxy / client-IP trust ─────────────────────────────────────────
+    # How many reverse proxies sit between the internet and this app. The
+    # client IP written to Part 11 audit rows is taken from this many hops
+    # in on ``X-Forwarded-For``; everything further left in the chain was
+    # supplied by the caller and is discarded (see routes/auth.py
+    # ``_client_ip``).
+    #
+    # 0 = trust nothing, use the socket peer. That is the correct default:
+    # trusting a header nobody put there is how a browser gets to choose
+    # the IP recorded against its own e-signature.
+    #
+    # Typical deployed value here is 2 (CloudFront → the Next.js BFF).
+    # Count the hops for YOUR topology before changing it; too high is as
+    # wrong as too low, in the other direction.
+    trusted_proxy_count: int = Field(default=0, ge=0, le=8)
+
     # ── Logging ─────────────────────────────────────────────────────────
     log_level: str = "INFO"
     log_format: LogFormat = LogFormat.console
@@ -127,22 +150,13 @@ class Settings(BaseSettings):
     # unset in prod; set it in local dev to whatever cognito-local emits.
     cognito_issuer: OptionalHttpUrl = None
 
-    # ── S3 / object storage ─────────────────────────────────────────────
-    # In dev these point at the MinIO container. In prod, ``s3_endpoint_url``
-    # is left unset so boto3 hits real AWS S3, and the access key / secret
-    # come from the deploy account's IAM role (the env-var path is a
-    # convenience fallback for non-EC2 hosts).
-    s3_endpoint_url: OptionalHttpUrl = None
-    s3_region: str = "us-east-1"
-    s3_access_key_id: SecretStr | None = None
-    s3_secret_access_key: SecretStr | None = None
-    # Bucket that holds e-signature images. Must be created out-of-band
-    # in prod; the dev lifespan auto-creates it against MinIO.
-    s3_signatures_bucket: str = "cellready-signatures"
-    # Required for MinIO (and accepted by AWS S3). Without this, boto3
-    # tries virtual-hosted-style URLs which only work for real S3
-    # buckets — MinIO 404s on them.
-    s3_force_path_style: bool = True
+    # NOTE: there are deliberately no ``s3_*`` settings here. Object storage
+    # existed for exactly one thing — the hand-drawn e-signature image — and
+    # that was removed on 2026-08-03. An electronic signature in this system
+    # is the password re-authentication plus the audit row it writes; there
+    # is no artefact to store. ``extra="ignore"`` below means a leftover
+    # ``S3_*`` in someone's stale .env is quietly disregarded rather than
+    # failing the boot.
 
     # ── Invitations ─────────────────────────────────────────────────────
     # Public web origin for the app. Optional; kept for building absolute links
@@ -165,6 +179,84 @@ class Settings(BaseSettings):
         # Reject env values that look intentional but mistyped (e.g. "True" for an int)
         validate_default=True,
     )
+
+    # ── Invariants ──────────────────────────────────────────────────────
+
+    @model_validator(mode="after")
+    def _reject_wildcard_cors_with_credentials(self) -> Settings:
+        """Refuse ``CORS_ALLOW_ORIGINS=*``.
+
+        The CORS middleware is mounted with ``allow_credentials=True`` (see
+        app/main.py), and Starlette handles ``allow_origins=["*"]`` with
+        credentials by REFLECTING the caller's Origin and returning
+        ``Access-Control-Allow-Credentials: true``. That is
+        any-origin-with-credentials: every authenticated endpoint becomes
+        readable by any site the user visits.
+
+        Nothing sets ``*`` today — this exists so that setting it later is
+        a startup failure with an explanation, rather than a silent hole
+        that looks like a working config.
+        """
+        if any(o.strip() == "*" for o in self.cors_allow_origins):
+            raise ValueError(
+                "CORS_ALLOW_ORIGINS='*' is refused: the API sends credentials, "
+                "and a wildcard with credentials lets any origin read "
+                "authenticated responses. List the exact origins instead "
+                "(e.g. https://app.example.com,https://staging.example.com)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_production_invariants(self) -> Settings:
+        """Fail fast when a production process is holding dev settings.
+
+        Length alone never proved a secret was secret: the committed dev
+        ``SECRET_KEY`` is 48 characters and sailed through ``min_length=32``.
+        These checks look for the specific values that ship in the repo, so
+        booting prod with an example config stops the process instead of
+        quietly serving traffic with a public key.
+        """
+        if self.app_env != Environment.production:
+            return self
+
+        problems: list[str] = []
+
+        secret = self.secret_key.get_secret_value()
+        # Markers present in the committed .env.example values.
+        dev_markers = ("dev-only", "change-in-prod", "changeme", "change-me", "example")
+        lowered = secret.lower()
+        if any(marker in lowered for marker in dev_markers):
+            problems.append(
+                "SECRET_KEY looks like the committed example value — generate a "
+                "fresh one (python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+            )
+        if len(set(secret)) < 8:
+            problems.append(
+                "SECRET_KEY has too little variety to be randomly generated"
+            )
+
+        if self.app_debug:
+            problems.append("APP_DEBUG must be false in production")
+
+        # Without a pool the app cannot verify a token, so every request
+        # would fail anyway — better to say so at boot.
+        if not self.cognito_user_pool_id or not self.cognito_client_id:
+            problems.append(
+                "COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID are required in production"
+            )
+        # This routes auth at a local emulator; in prod it is always a mistake.
+        if self.cognito_endpoint_url:
+            problems.append(
+                "COGNITO_ENDPOINT_URL must be unset in production "
+                "(it points boto3 at cognito-local instead of real Cognito)"
+            )
+
+        if problems:
+            raise ValueError(
+                "Refusing to start with APP_ENV=production:\n  - "
+                + "\n  - ".join(problems)
+            )
+        return self
 
     # ── Convenience accessors ───────────────────────────────────────────
     @property

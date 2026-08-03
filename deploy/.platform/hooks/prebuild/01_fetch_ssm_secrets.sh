@@ -26,6 +26,12 @@ ENV_FILE="${APP_DIR}/.env"
 
 echo "[prebuild] fetching SSM secrets from ${PREFIX} (region ${REGION})"
 
+# Restrict permissions BEFORE the first write, not after. `chmod 600` at the
+# end still left a window — between the truncate below and the chmod — where
+# decrypted SecureStrings sat in a file created under the ambient umask and
+# readable by group/other. umask 077 makes the file 600 the moment it exists.
+umask 077
+
 # Pull every parameter under the prefix and emit `NAME=value`.
 # --with-decryption returns the plaintext of SecureString params.
 : > "${ENV_FILE}"
@@ -50,7 +56,7 @@ aws ssm get-parameters-by-path \
 NONSECRET_KEYS="APP_ENV APP_DEBUG AWS_REGION LOG_LEVEL LOG_FORMAT \
 CORS_ALLOW_ORIGINS COGNITO_USER_POOL_ID COGNITO_CLIENT_ID \
 JWT_ACCESS_TOKEN_TTL_MINUTES JWT_ID_TOKEN_TTL_MINUTES JWT_REFRESH_TOKEN_TTL_DAYS \
-S3_REGION S3_SIGNATURES_BUCKET S3_FORCE_PATH_STYLE BACKEND_INTERNAL_URL"
+TRUSTED_PROXY_COUNT BACKEND_INTERNAL_URL"
 for key in ${NONSECRET_KEYS}; do
   val="$("$EB_GET_CONFIG" environment -k "${key}" 2>/dev/null || true)"
   [ -n "${val}" ] && printf '%s=%s\n' "${key}" "${val}" >> "${ENV_FILE}"
@@ -59,6 +65,8 @@ done
 # running scripts/seed_super_admins.py with --email / --password after the
 # deploy; nothing at runtime reads those values.
 
+# Belt and braces — umask 077 above already created it 600, but an existing
+# .env from a previous deploy would keep its old (possibly laxer) mode.
 chmod 600 "${ENV_FILE}"
 echo "[prebuild] wrote $(grep -c '=' "${ENV_FILE}" || echo 0) env vars to .env"
 

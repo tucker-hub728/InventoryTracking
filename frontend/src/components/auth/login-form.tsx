@@ -77,7 +77,13 @@ export function LoginForm() {
 
     if (!resp.ok) {
       const body = (await resp.json().catch(() => ({}))) as LoginErrorBody;
+      // The backend now answers EVERY pre-auth failure with the single code
+      // `invalid_credentials` — unknown address, wrong password and disabled
+      // account are deliberately indistinguishable so the endpoint can't be
+      // used to enumerate accounts. `authentication_required` is kept because
+      // the BFF still returns it when there is no session at all.
       const message =
+        body.code === 'invalid_credentials' ||
         body.code === 'authentication_required'
           ? 'Invalid email or password.'
           : (body.message ?? 'Sign-in failed. Please try again.');
@@ -102,8 +108,13 @@ export function LoginForm() {
     setSession(body.user);
     toast.success('Signed in', { description: `Welcome back, ${body.user.fullName}.` });
 
+    // Only a path on THIS origin is an acceptable post-login destination.
+    // `startsWith('/')` alone was not enough: "//evil.com" and "/\evil.com"
+    // both start with a slash but are protocol-relative URLs, so the browser
+    // would navigate off-site carrying the freshly-minted session.
     const next = params.get('next');
-    router.replace(next && next.startsWith('/') ? next : '/inventory');
+    const safeNext = next && /^\/(?![/\\])/.test(next) ? next : '/inventory';
+    router.replace(safeNext);
     // Refresh server components so the new cookies are picked up.
     router.refresh();
   };

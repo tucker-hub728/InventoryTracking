@@ -101,7 +101,6 @@ async def _record_event(
     failure_reason: ReauthFailureReason | None,
     ip_address: str | None,
     user_agent: str | None,
-    signature_image_s3_key: str | None = None,
 ) -> ReauthEvent:
     """Insert an immutable audit row. Caller commits."""
     now = datetime.now(UTC)
@@ -120,10 +119,6 @@ async def _record_event(
         # event isn't usable as evidence — but the CHECK requires
         # ``expires_at > created_at`` so we always set it.
         expires_at=now + REAUTH_TTL,
-        # Image key is only meaningful on success rows — we accept it
-        # on either so audit rows persist what the operator saw even
-        # when the password failed.
-        signature_image_s3_key=signature_image_s3_key,
     )
     db.add(evt)
     await db.flush()
@@ -171,7 +166,6 @@ async def verify_password_and_issue_evidence(
     comment: str | None,
     ip_address: str | None,
     user_agent: str | None,
-    signature_image_s3_key: str | None = None,
 ) -> ReauthEvent:
     """Run the full reauth flow. Caller commits the session.
 
@@ -200,7 +194,6 @@ async def verify_password_and_issue_evidence(
             failure_reason="rate_limited",
             ip_address=ip_address,
             user_agent=user_agent,
-            signature_image_s3_key=signature_image_s3_key,
         )
         await db.commit()
         log.warning(
@@ -231,7 +224,6 @@ async def verify_password_and_issue_evidence(
             failure_reason=reason,
             ip_address=ip_address,
             user_agent=user_agent,
-            signature_image_s3_key=signature_image_s3_key,
         )
         await db.commit()
         log.info(
@@ -258,7 +250,6 @@ async def verify_password_and_issue_evidence(
         failure_reason=None,
         ip_address=ip_address,
         user_agent=user_agent,
-        signature_image_s3_key=signature_image_s3_key,
     )
     await db.commit()
     log.info(

@@ -40,6 +40,15 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Single-AZ for dev; set true for prod.
+  EnableDeletionProtection:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Blocks deleting the instance until explicitly turned off. Defaults to
+      true: this template is the single source for prod, so the safe value
+      has to be the default one. Pass 'false' for a throwaway dev stack you
+      intend to tear down.
   DBName:
     Type: String
     Default: cellready_ims
@@ -88,7 +97,7 @@ Resources:
       DBSubnetGroupName: !Ref DBSubnetGroup
       BackupRetentionPeriod: 7
       AutoMinorVersionUpgrade: true
-      DeletionProtection: false  # dev; enable for prod
+      DeletionProtection: !Ref EnableDeletionProtection
       Tags:
         - Key: Project
           Value: !Ref ProjectName

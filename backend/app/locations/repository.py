@@ -16,6 +16,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
     LocationNode,
@@ -552,8 +553,7 @@ async def search_stored_stock(
     genuinely contains one is matched literally rather than read as a wildcard
     that returns everything in the building.
     """
-    escaped = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    pattern = f"%{escaped}%"
+    pattern = like_contains(query.lower())
     item_number = func.concat(ItemPrefix.code, "-", Item.sku_suffix)
     stmt = (
         select(LotAllocation)

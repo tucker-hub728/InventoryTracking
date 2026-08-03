@@ -9,6 +9,10 @@ on:
   # list above so CI doesn't run twice on main.)
   workflow_call:
 
+# Actions are pinned to commit SHAs, not tags. A tag like @v4 is mutable —
+# the owner (or anyone who compromises the account) can repoint it and every
+# workflow silently runs different code on the next run. The trailing comment
+# records which release each SHA is, so Dependabot can bump them readably.
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -16,8 +20,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
       - run: uv sync --all-extras --dev
@@ -30,8 +34,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm

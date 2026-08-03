@@ -18,6 +18,7 @@ from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.search import MAX_SEARCH_LENGTH
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
     ItemCreate,
@@ -475,7 +476,13 @@ async def delete_supplier(
 )
 async def list_items(
     db: DBSession,
-    q: Annotated[str | None, Query(description="Search description + item_number")] = None,
+    q: Annotated[
+        str | None,
+        Query(
+            description="Search description + item_number",
+            max_length=MAX_SEARCH_LENGTH,
+        ),
+    ] = None,
     supplier_id: Annotated[uuid.UUID | None, Query()] = None,
     tier_id: Annotated[
         uuid.UUID | None, Query(description="Filter by item tier")

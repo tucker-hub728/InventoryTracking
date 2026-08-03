@@ -39,7 +39,10 @@ const PAGE_SIZE = 50;
  * back on every page so the footer stays accurate.
  *
  * Per-row click opens a side-sheet with the field-level diff and (if
- * the originating action was signed) the canvas signature image.
+ * the originating action was signed) the signature details — signer,
+ * timestamp, attested meaning and the optional reason. There is no
+ * signature image: the e-signature is the password re-authentication
+ * (client decision, 2026-08-03).
  */
 export function AuditPageClient() {
   const canView = usePermission('audit', 'view');

@@ -12,8 +12,10 @@
 #                          CI (envsubst) before the bundle is zipped.
 #
 # Intentionally UNSET in prod (so the AWS SDK hits real services via the
-# instance role): COGNITO_ENDPOINT_URL, S3_ENDPOINT_URL, S3_ACCESS_KEY_ID,
-# S3_SECRET_ACCESS_KEY.
+# instance role): COGNITO_ENDPOINT_URL.
+#
+# There is no S3 configuration: object storage was removed on 2026-08-03 along
+# with the hand-drawn e-signature image it existed to hold.
 
 name: cellready-ims
 
@@ -41,6 +43,11 @@ services:
       PORT: 8000
       AWS_REGION: ${AWS_REGION}
       LOG_LEVEL: ${LOG_LEVEL}
+      # Which X-Forwarded-For hop is trustworthy for the Part 11 audit rows.
+      # Set as an EB environment property (see 03-beanstalk.yaml); defaults to
+      # 0 = "trust nothing, use the socket peer" if it is ever missing, which
+      # records a useless-but-honest IP rather than a forgeable one.
+      TRUSTED_PROXY_COUNT: ${TRUSTED_PROXY_COUNT:-0}
       LOG_FORMAT: ${LOG_FORMAT}
       # Secrets (from SSM via .env)
       SECRET_KEY: ${SECRET_KEY}
@@ -57,10 +64,6 @@ services:
       JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES}
       JWT_ID_TOKEN_TTL_MINUTES: ${JWT_ID_TOKEN_TTL_MINUTES}
       JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS}
-      # S3 — real bucket via instance role (endpoint + keys deliberately unset)
-      S3_REGION: ${S3_REGION}
-      S3_SIGNATURES_BUCKET: ${S3_SIGNATURES_BUCKET}
-      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE}
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/v1/health"]
       interval: 15s

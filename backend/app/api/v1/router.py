@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1.routes import auth, health, uploads
+from app.api.v1.routes import auth, health
 from app.audit.routes import audit_router
 from app.catalog.routes import bom_router, tiers_router
 from app.forecast.routes import forecasts_router
@@ -32,7 +32,6 @@ api_router.include_router(health.router)
 api_router.include_router(auth.router)
 api_router.include_router(invitations_router)
 api_router.include_router(users_router)
-api_router.include_router(uploads.router)
 api_router.include_router(items_router)
 api_router.include_router(suppliers_router)
 api_router.include_router(lots_router)

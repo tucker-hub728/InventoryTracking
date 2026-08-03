@@ -13,6 +13,7 @@ from datetime import datetime
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.search import like_contains
 from app.models.audit import AuditEvent, ReauthEvent
 from app.models.identity import User
 
@@ -98,10 +99,10 @@ async def list_audit_events(
         stmt = stmt.where(AuditEvent.occurred_at < occurred_to)
         count_stmt = count_stmt.where(AuditEvent.occurred_at < occurred_to)
     if q:
-        like = f"%{q.lower()}%"
+        like = like_contains(q.lower())
         cond = or_(
-            func.lower(AuditEvent.event_type).like(like),
-            func.lower(AuditEvent.subject_label).like(like),
+            func.lower(AuditEvent.event_type).like(like, escape="\\"),
+            func.lower(AuditEvent.subject_label).like(like, escape="\\"),
         )
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)

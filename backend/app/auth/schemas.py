@@ -158,11 +158,12 @@ class ReauthRequest(BaseModel):
     # Part 11 manifestation; the reason is now optional. A few domain endpoints
     # may still require their own reason (enforced there / in the dialog).
     comment: str | None = Field(default=None, max_length=512)
-    # Optional S3 key returned by ``POST /v1/uploads/signature`` —
-    # the canvas image the operator drew. Stored on the audit row
-    # alongside the textual evidence; never returned by the reauth
-    # response itself (the audit viewer fetches it on demand).
-    signature_image_s3_key: str | None = Field(default=None, max_length=512)
+    # NOTE: no ``signature_image_s3_key``. The hand-drawn canvas image was
+    # removed on 2026-08-03 (client decision). The signature manifestation
+    # is the re-authenticated identity + timestamp + ``meaning`` on the
+    # audit row — which is what 21 CFR Part 11 §11.50 actually asks for.
+    # ``extra="forbid"`` on this model means an old client still sending
+    # the field now gets a clear 422 instead of having it silently dropped.
 
 
 class ReauthResponse(BaseModel):
@@ -171,8 +172,6 @@ class ReauthResponse(BaseModel):
     evidence_id: str
     action: str
     expires_at: datetime
-    # Echoed so the frontend can confirm the image landed on the row.
-    signature_image_s3_key: str | None = None
     # Echoed so the caller can also thread the rationale into the domain
     # record's notes/reason (e.g. the movement ledger), keeping the audit
     # log and the per-domain view in sync.

@@ -12,12 +12,17 @@
  */
 
 import { cookies } from 'next/headers';
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 
 import { backend, BackendError } from '@/lib/auth/backend';
 import { AUTH_COOKIES, clearAuthCookies, setAuthCookies } from '@/lib/auth/cookies';
+import { CSRF_BLOCKED, isCrossSiteMutation } from '@/lib/auth/csrf';
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  if (isCrossSiteMutation(req)) {
+    return NextResponse.json(CSRF_BLOCKED, { status: 403 });
+  }
+
   const rt = cookies().get(AUTH_COOKIES.refresh)?.value;
   if (!rt) {
     return NextResponse.json(

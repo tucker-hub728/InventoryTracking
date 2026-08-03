@@ -15,6 +15,7 @@ from sqlalchemy import Select, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from app.core.search import like_contains
 from app.models.audit import AuditEvent
 from app.models.inventory import BomLine, Item, ItemPrefix, ItemTier, Lot, StockMovement
 from app.models.kitting import Kit, KitLine
@@ -322,15 +323,15 @@ async def list_kits(
         # fields the list used to filter client-side. Join the item + prefix so
         # the full derived number matches (e.g. "AY-SSY001"). One item / prefix
         # per kit, so the join doesn't multiply rows (count stays correct).
-        like = f"%{q.strip().lower()}%"
+        like = like_contains(q.strip().lower())
         base = (
             base.join(Item, Item.id == Kit.item_id)
             .join(ItemPrefix, ItemPrefix.id == Item.prefix_id)
             .where(
                 or_(
-                    func.lower(Kit.kit_number).like(like),
-                    func.lower(Item.description).like(like),
-                    func.lower(func.concat(ItemPrefix.code, "-", Item.sku_suffix)).like(like),
+                    func.lower(Kit.kit_number).like(like, escape="\\"),
+                    func.lower(Item.description).like(like, escape="\\"),
+                    func.lower(func.concat(ItemPrefix.code, "-", Item.sku_suffix)).like(like, escape="\\"),
                 )
             )
         )

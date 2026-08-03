@@ -7,6 +7,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
+from app.core.bounds import MAX_QTY
+
 # All node types accepted on read (includes retired ``cassette`` /
 # ``cryo_box_rack`` / ``cassette_rack`` / ``sub_slot`` / ``flat`` so any legacy
 # rows still serialise).
@@ -235,7 +237,7 @@ class PlaceRequest(BaseModel):
 
     lot_id: str
     node_id: str
-    qty: int = Field(gt=0)
+    qty: int = Field(gt=0, le=MAX_QTY)
     grid_row: int | None = Field(default=None, ge=1, le=400)
     grid_col: int | None = Field(default=None, ge=1, le=400)
     override: bool = False
@@ -315,7 +317,7 @@ class TransferBatchRequest(BaseModel):
     allocation_ids: list[str] = Field(min_length=1, max_length=400)
     to_node_id: str
     to_cells: list[BatchCell] = Field(default_factory=list, max_length=400)
-    qty: int | None = Field(default=None, gt=0)
+    qty: int | None = Field(default=None, gt=0, le=MAX_QTY)
     override: bool = False
     evidence_id: str
     notes: str | None = Field(default=None, max_length=2048)
@@ -353,7 +355,7 @@ class TransferRequest(BaseModel):
 
     allocation_id: str
     to_node_id: str
-    qty: int = Field(gt=0)
+    qty: int = Field(gt=0, le=MAX_QTY)
     to_grid_row: int | None = Field(default=None, ge=1, le=400)
     to_grid_col: int | None = Field(default=None, ge=1, le=400)
     override: bool = False
@@ -376,7 +378,7 @@ class ConsumeRequest(BaseModel):
     allocation_id: str
     # The Flat location that consumed the unit (where it went).
     to_node_id: str
-    qty: int = Field(gt=0)
+    qty: int = Field(gt=0, le=MAX_QTY)
     evidence_id: str
     notes: str | None = Field(default=None, max_length=2048)
 

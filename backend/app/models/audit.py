@@ -157,11 +157,10 @@ class ReauthEvent(Base):
         DateTime(timezone=True),
         nullable=False,
     )
-    # S3 key (e.g. ``signatures/<user_id>/<evidence_id>.png``) pointing
-    # at the canvas-drawn signature image the operator drew at sign
-    # time. Nullable — headless / API-only callers don't supply one,
-    # and the audit module renders a "no image" placeholder when null.
-    signature_image_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NOTE: ``signature_image_s3_key`` was dropped on 2026-08-03 (migration
+    # ``esignimg01``). The hand-drawn canvas image is gone from the product:
+    # an electronic signature here is the password re-authentication, and
+    # this row — actor, timestamp, action, meaning — IS the manifestation.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

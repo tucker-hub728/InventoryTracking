@@ -29,12 +29,6 @@ export interface ReauthRequestBody {
    * request); a few domain flows still require their own reason.
    */
   comment?: string;
-  /**
-   * Optional S3 key returned by ``uploadsApi.signature(...)``. When set,
-   * the canvas-drawn signature image is stored on the audit row and
-   * shown in the audit viewer alongside the typed password attestation.
-   */
-  signature_image_s3_key?: string;
 }
 
 export interface ReauthResponse {
@@ -42,7 +36,6 @@ export interface ReauthResponse {
   action: string;
   /** ISO timestamp; the UI shows a relative countdown if useful. */
   expires_at: string;
-  signature_image_s3_key: string | null;
   /**
    * The rationale the operator entered, echoed back so the caller can
    * mirror it into the domain record's notes/reason (e.g. the movement

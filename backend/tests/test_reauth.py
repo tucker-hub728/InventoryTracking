@@ -185,27 +185,72 @@ async def test_reauth_rejects_bad_action_pattern(client: AsyncClient) -> None:
     assert body["code"] == "request_invalid"
 
 
-async def test_reauth_requires_comment(client: AsyncClient) -> None:
-    """A mandatory rationale: a missing or blank ``comment`` is a 422."""
+async def test_reauth_comment_is_optional(client: AsyncClient) -> None:
+    """The rationale is optional — omitting it still mints evidence.
+
+    This asserted the opposite until 2026-08-03. The mandatory-comment rule
+    was dropped on the client's request back on 2026-06-29 and the backend
+    was relaxed then (see the note on ``ReauthRequest.comment``), but this
+    test was never updated, so it had been failing on every run since.
+
+    What makes the signature a Part 11 signature is the re-authenticated
+    identity, the timestamp and the attested ``meaning`` — not the free-text
+    reason. Individual domain endpoints may still demand their own reason;
+    that is enforced at those endpoints, not here.
+    """
     user = await _bootstrap_user(client)
 
-    # Missing entirely.
+    # Omitted entirely.
     missing = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
         json={"action": "movement.receipt", "password": user["password"]},
     )
-    assert missing.status_code == 422, missing.text
-    assert missing.json()["code"] == "request_invalid"
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["evidence_id"]
+    assert missing.json()["comment"] is None
 
-    # Present but whitespace-only — rejected by the trim validator.
+    # Whitespace-only is normalised rather than rejected.
     blank = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
         json=_body("movement.receipt", user["password"], comment="   "),
     )
-    assert blank.status_code == 422, blank.text
-    assert blank.json()["code"] == "request_invalid"
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["evidence_id"]
+
+
+async def test_reauth_response_carries_no_signature_image(
+    client: AsyncClient,
+) -> None:
+    """The e-signature is the password — there is no image field any more.
+
+    Guard for the 2026-08-03 removal: ``signature_image_s3_key`` is gone from
+    the request schema, the response and the ``audit.reauth_events`` table
+    (migration ``esignimg01``).
+    """
+    user = await _bootstrap_user(client)
+
+    resp = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body("movement.receipt", user["password"], comment="why"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "signature_image_s3_key" not in resp.json()
+
+    # And an old client still sending the field is told plainly, rather than
+    # having it silently ignored (``extra="forbid"`` on ReauthRequest).
+    stale_client = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json={
+            "action": "movement.receipt",
+            "password": user["password"],
+            "signature_image_s3_key": "signatures/whatever.png",
+        },
+    )
+    assert stale_client.status_code == 422, stale_client.text
 
 
 async def test_reauth_isolated_per_user(client: AsyncClient) -> None:

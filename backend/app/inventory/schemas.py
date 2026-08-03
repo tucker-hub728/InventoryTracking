@@ -18,6 +18,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
+from app.core.bounds import MAX_MONEY, MAX_QTY, MAX_QTY_DECIMAL
+
 # ``sku_suffix`` is the tail of the SKU (e.g. ``001``) — the item's number is
 # derived as ``<prefix code>-<suffix>``, so only the suffix is user-supplied.
 # The only backend rule is uniqueness within the prefix (the partial-unique
@@ -159,7 +161,9 @@ class ItemCreate(BaseModel):
     is_consumable: bool = False
     supplier_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
-    reorder_threshold: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    reorder_threshold: Decimal = Field(
+        default=Decimal("0"), ge=Decimal("0"), le=MAX_QTY_DECIMAL
+    )
     near_expiry_threshold_days: int = Field(default=30, ge=0, le=3650)
 
 
@@ -192,7 +196,9 @@ class ItemUpdate(BaseModel):
     prefix_id: str | None = Field(default=None, min_length=1)
     supplier_ids: list[str] | None = Field(default=None, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
-    reorder_threshold: Decimal | None = Field(default=None, ge=Decimal("0"))
+    reorder_threshold: Decimal | None = Field(
+        default=None, ge=Decimal("0"), le=MAX_QTY_DECIMAL
+    )
     near_expiry_threshold_days: int | None = Field(default=None, ge=0, le=3650)
     must_order_flag: bool | None = None
 
@@ -308,13 +314,13 @@ class LotUpdate(BaseModel):
     notes: str | None = Field(default=None, max_length=2048)
     # Price paid — editable post-entry under the same e-signature (e.g.
     # correcting what was keyed at receipt).
-    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
+    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
     # Received quantity for this lot (whole units). Editable post-receipt as a
     # correction, but never below what is already physically placed in
     # locations — the route returns ``qty_below_placed`` and asks the operator
     # to unplace first. Editing it re-syncs the Order line's received /
     # outstanding totals and re-derives the Order status.
-    ordered_qty: int | None = Field(default=None, gt=0)
+    ordered_qty: int | None = Field(default=None, gt=0, le=MAX_QTY)
     # ── E-signature (21 CFR Part 11) ──────────────────────────────────
     # Required on every edit — there is no un-signed lot-update path.
     evidence_id: str = Field(
@@ -509,8 +515,8 @@ class OrderLineInput(BaseModel):
 
     item_id: str
     supplier_id: str
-    ordered_qty: int = Field(gt=0)
-    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"))
+    ordered_qty: int = Field(gt=0, le=MAX_QTY)
+    unit_price: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
 
 
 class OrderCreateRequest(BaseModel):
@@ -612,12 +618,12 @@ class ReceiveEventLineInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
-    qty_received: int = Field(gt=0)
+    qty_received: int = Field(gt=0, le=MAX_QTY)
     lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
     manufacture_date: date | None = None
     expiration_date: date | None = None
     # Optional override of the line's unit price for this lot.
-    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"))
+    unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
     # Destination for the received units (unit-in), placed under the receive's
     # single e-signature.
     placement: ReceivePlacement
