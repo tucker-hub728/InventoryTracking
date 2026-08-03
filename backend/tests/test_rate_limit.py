@@ -45,9 +45,7 @@ def test_keys_are_independent() -> None:
 def test_window_expiry_restores_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Old hits fall out of the sliding window."""
     clock = {"now": 1000.0}
-    monkeypatch.setattr(
-        "app.core.rate_limit.time.monotonic", lambda: clock["now"]
-    )
+    monkeypatch.setattr("app.core.rate_limit.time.monotonic", lambda: clock["now"])
 
     limiter = SlidingWindowLimiter(max_events=2, window_seconds=60)
     limiter.record_failure("k")
@@ -75,9 +73,7 @@ def test_sweep_does_not_grow_unboundedly(monkeypatch: pytest.MonkeyPatch) -> Non
     attacker just varies the source address to add a dict entry per request.
     """
     clock = {"now": 1000.0}
-    monkeypatch.setattr(
-        "app.core.rate_limit.time.monotonic", lambda: clock["now"]
-    )
+    monkeypatch.setattr("app.core.rate_limit.time.monotonic", lambda: clock["now"])
 
     limiter = SlidingWindowLimiter(max_events=5, window_seconds=10)
     for i in range(100):

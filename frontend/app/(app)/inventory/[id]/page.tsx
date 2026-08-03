@@ -1,8 +1,8 @@
 import { redirect } from 'next/navigation';
 
 interface PageProps {
-  params: { id: string };
-  searchParams: Record<string, string | string[] | undefined>;
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
 /**
@@ -10,7 +10,9 @@ interface PageProps {
  * forwarding any query (e.g. ``?action=record`` deep-links) so the shell can act
  * on it.
  */
-export default function InventoryDetailIndexPage({ params, searchParams }: PageProps) {
+export default async function InventoryDetailIndexPage(props: PageProps) {
+  const searchParams = await props.searchParams;
+  const params = await props.params;
   const qs = new URLSearchParams();
   for (const [key, value] of Object.entries(searchParams)) {
     if (typeof value === 'string') qs.set(key, value);

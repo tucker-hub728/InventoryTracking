@@ -66,16 +66,17 @@ RATE_LIMIT_WINDOW = timedelta(minutes=5)
 
 
 ReauthFailureReason = Literal[
-    "wrong_password", "user_disabled", "rate_limited", "cognito_error",
+    "wrong_password",
+    "user_disabled",
+    "rate_limited",
+    "cognito_error",
 ]
 
 
 # ── Internal helpers ────────────────────────────────────────────────────
 
 
-async def _count_recent_failures(
-    db: AsyncSession, *, user_id: uuid.UUID
-) -> int:
+async def _count_recent_failures(db: AsyncSession, *, user_id: uuid.UUID) -> int:
     """Number of failed reauth events for the user inside the sliding window."""
     since = datetime.now(UTC) - RATE_LIMIT_WINDOW
     stmt = (

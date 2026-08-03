@@ -231,9 +231,7 @@ class Settings(BaseSettings):
                 "fresh one (python -c 'import secrets; print(secrets.token_urlsafe(48))')"
             )
         if len(set(secret)) < 8:
-            problems.append(
-                "SECRET_KEY has too little variety to be randomly generated"
-            )
+            problems.append("SECRET_KEY has too little variety to be randomly generated")
 
         if self.app_debug:
             problems.append("APP_DEBUG must be false in production")
@@ -241,9 +239,7 @@ class Settings(BaseSettings):
         # Without a pool the app cannot verify a token, so every request
         # would fail anyway — better to say so at boot.
         if not self.cognito_user_pool_id or not self.cognito_client_id:
-            problems.append(
-                "COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID are required in production"
-            )
+            problems.append("COGNITO_USER_POOL_ID and COGNITO_CLIENT_ID are required in production")
         # This routes auth at a local emulator; in prod it is always a mistake.
         if self.cognito_endpoint_url:
             problems.append(
@@ -253,8 +249,7 @@ class Settings(BaseSettings):
 
         if problems:
             raise ValueError(
-                "Refusing to start with APP_ENV=production:\n  - "
-                + "\n  - ".join(problems)
+                "Refusing to start with APP_ENV=production:\n  - " + "\n  - ".join(problems)
             )
         return self
 

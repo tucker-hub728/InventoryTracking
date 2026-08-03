@@ -9,10 +9,11 @@ export const metadata: Metadata = {
 interface PageProps {
   // Display-only hint carried over from login; the authoritative email + session
   // live in the httpOnly challenge cookie the BFF reads.
-  searchParams: { email?: string };
+  searchParams: Promise<{ email?: string }>;
 }
 
-export default function SetPasswordPage({ searchParams }: PageProps) {
+export default async function SetPasswordPage(props: PageProps) {
+  const searchParams = await props.searchParams;
   return (
     <div className="grid min-h-screen place-items-center bg-bg px-4 py-10">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_50%_30%,var(--accent-soft)_0%,transparent_60%)]" />

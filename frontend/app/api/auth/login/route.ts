@@ -49,14 +49,14 @@ export async function POST(req: NextRequest) {
         challenge: 'NEW_PASSWORD_REQUIRED' as const,
         email: result.email,
       });
-      setChallengeCookie(res, { session: result.session, email: result.email });
+      await setChallengeCookie(res, { session: result.session, email: result.email });
       return res;
     }
 
     const me = await backend.me(result.access_token);
 
     const res = NextResponse.json({ user: toSessionUser(me) });
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: result.access_token,
       refreshToken: result.refresh_token,
       accessMaxAgeSeconds: result.expires_in,

@@ -22,6 +22,6 @@ export async function POST(req: NextRequest) {
   }
 
   const res = new NextResponse(null, { status: 204 });
-  clearAuthCookies(res);
+  await clearAuthCookies(res);
   return res;
 }

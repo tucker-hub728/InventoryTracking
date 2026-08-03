@@ -124,7 +124,7 @@ function passthroughResponseHeaders(upstream: Response): Headers {
 }
 
 async function attemptRefresh(): Promise<BackendTokens | null> {
-  const rt = cookies().get(AUTH_COOKIES.refresh)?.value;
+  const rt = (await cookies()).get(AUTH_COOKIES.refresh)?.value;
   if (!rt) return null;
   try {
     return await backend.refresh(rt);
@@ -152,8 +152,8 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
   const search = req.nextUrl.search ?? '';
   const url = `${serverEnv.BACKEND_INTERNAL_URL.replace(/\/$/, '')}${targetPath}${search}`;
 
-  const at = cookies().get(AUTH_COOKIES.access)?.value;
-  if (!at && !cookies().get(AUTH_COOKIES.refresh)?.value) {
+  const at = (await cookies()).get(AUTH_COOKIES.access)?.value;
+  if (!at && !(await cookies()).get(AUTH_COOKIES.refresh)?.value) {
     // No session at all — short-circuit so we don't waste a backend hop.
     return NextResponse.json(
       { code: 'authentication_required', message: 'Not authenticated.' },
@@ -191,7 +191,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
         { code: 'authentication_required', message: 'Session expired.' },
         { status: 401 },
       );
-      clearAuthCookies(res);
+      await clearAuthCookies(res);
       return res;
     }
     upstream = await fetch(url, {
@@ -210,7 +210,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
     headers: passthroughResponseHeaders(upstream),
   });
   if (refreshed) {
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: refreshed.access_token,
       refreshToken: refreshed.refresh_token,
       accessMaxAgeSeconds: refreshed.expires_in,
@@ -222,7 +222,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
   if (upstream.status === 403 && upstreamBody) {
     try {
       const parsed = JSON.parse(new TextDecoder().decode(upstreamBody)) as { code?: string };
-      if (parsed?.code === 'account_disabled') clearAuthCookies(res);
+      if (parsed?.code === 'account_disabled') await clearAuthCookies(res);
     } catch {
       // Non-JSON 403 — leave the session as-is.
     }
@@ -230,18 +230,18 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
   return res;
 }
 
-export async function GET(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function GET(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function POST(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function POST(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function PATCH(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function PUT(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function PUT(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function DELETE(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }

@@ -10,7 +10,10 @@
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG NODE_VERSION=20.18-alpine
+# 20.19 is the floor, not a preference: Next 16 needs >=20.9, and several of
+# its dev dependencies (eslint-visitor-keys@5) declare ^20.19.0 || ^22.13.0 ||
+# >=24, which warns loudly on 20.18 during `npm ci`.
+ARG NODE_VERSION=20.19-alpine
 
 # ── base ─────────────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION} AS base

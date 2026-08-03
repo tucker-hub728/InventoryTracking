@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(CSRF_BLOCKED, { status: 403 });
   }
 
-  const rt = cookies().get(AUTH_COOKIES.refresh)?.value;
+  const rt = (await cookies()).get(AUTH_COOKIES.refresh)?.value;
   if (!rt) {
     return NextResponse.json(
       { code: 'no_session', message: 'No refresh token on file.' },
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
   try {
     const tokens = await backend.refresh(rt);
     const res = NextResponse.json({ ok: true });
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       accessMaxAgeSeconds: tokens.expires_in,
@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
       },
       { status: 401 },
     );
-    clearAuthCookies(res);
+    await clearAuthCookies(res);
     return res;
   }
 }

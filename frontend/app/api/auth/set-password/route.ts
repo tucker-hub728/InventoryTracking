@@ -69,12 +69,12 @@ export async function POST(req: NextRequest) {
     const me = await backend.me(tokens.access_token);
 
     const res = NextResponse.json({ user: toSessionUser(me) });
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       accessMaxAgeSeconds: tokens.expires_in,
     });
-    clearChallengeCookie(res);
+    await clearChallengeCookie(res);
     return res;
   } catch (err) {
     if (err instanceof BackendError) {

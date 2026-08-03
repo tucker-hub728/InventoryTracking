@@ -64,17 +64,24 @@ interface CookieOpts {
  * worst case is a cookie marked Secure when it needn't be. Contrast VR-011,
  * where a forged header would corrupt the Part 11 audit trail — not trusted.
  */
-function isSecureRequest(): boolean {
+async function isSecureRequest(): Promise<boolean> {
   // Production always sits behind TLS at the edge. Never downgrade.
+  // Checked first so the common case needs no header read at all.
   if (isProd) return true;
 
   try {
+    // `headers()` is async as of Next 15. The codemod left an
+    // `UnsafeUnwrappedHeaders` cast here; that shim is deprecated and warns
+    // at runtime, so the whole cookie-writing chain is genuinely async
+    // instead. Every caller is already an async route handler, so this
+    // costs nothing.
+    const h = await headers();
     // `CloudFront-Forwarded-Proto` records the VIEWER's scheme, which is what
     // we care about; `X-Forwarded-Proto` is the nearest-hop scheme and may be
     // http at the origin even on an https site.
-    const cf = headers().get('cloudfront-forwarded-proto');
+    const cf = h.get('cloudfront-forwarded-proto');
     if (cf) return cf.trim() === 'https';
-    const proto = headers().get('x-forwarded-proto');
+    const proto = h.get('x-forwarded-proto');
     if (proto) return proto.split(',')[0]?.trim() === 'https';
   } catch {
     // headers() throws outside a request scope (unit tests, build-time
@@ -85,24 +92,24 @@ function isSecureRequest(): boolean {
   return false;
 }
 
-function baseOpts(maxAgeSeconds: number): CookieOpts {
+async function baseOpts(maxAgeSeconds: number): Promise<CookieOpts> {
   return {
     httpOnly: true,
-    secure: isSecureRequest(),
+    secure: await isSecureRequest(),
     sameSite: 'lax',
     path: '/',
     maxAge: maxAgeSeconds,
   };
 }
 
-export function setAuthCookies(
+export async function setAuthCookies(
   res: NextResponse,
   tokens: { accessToken: string; refreshToken: string | null; accessMaxAgeSeconds?: number },
-): void {
+): Promise<void> {
   res.cookies.set(
     AUTH_COOKIES.access,
     tokens.accessToken,
-    baseOpts(tokens.accessMaxAgeSeconds ?? serverEnv.ACCESS_TOKEN_TTL_SECONDS),
+    await baseOpts(tokens.accessMaxAgeSeconds ?? serverEnv.ACCESS_TOKEN_TTL_SECONDS),
   );
   // Cognito only returns a refresh token on the initial login — on refresh
   // it omits it and the client keeps reusing the original until expiry.
@@ -110,15 +117,15 @@ export function setAuthCookies(
     res.cookies.set(
       AUTH_COOKIES.refresh,
       tokens.refreshToken,
-      baseOpts(serverEnv.REFRESH_TOKEN_TTL_SECONDS),
+      await baseOpts(serverEnv.REFRESH_TOKEN_TTL_SECONDS),
     );
   }
 }
 
-export function clearAuthCookies(res: NextResponse): void {
+export async function clearAuthCookies(res: NextResponse): Promise<void> {
   // maxAge=0 explicitly invalidates; setting an empty value alone leaves
   // some browsers honouring the previous expiry.
-  const expired = { ...baseOpts(0), maxAge: 0 };
+  const expired = { ...(await baseOpts(0)), maxAge: 0 };
   res.cookies.set(AUTH_COOKIES.access, '', expired);
   res.cookies.set(AUTH_COOKIES.refresh, '', expired);
 }
@@ -126,17 +133,17 @@ export function clearAuthCookies(res: NextResponse): void {
 /** Stash the first-login challenge (session + email) in a short-lived httpOnly
  * cookie so the set-password step can complete it without the challenge token
  * ever touching the browser. */
-export function setChallengeCookie(
+export async function setChallengeCookie(
   res: NextResponse,
   challenge: { session: string; email: string },
-): void {
+): Promise<void> {
   res.cookies.set(
     AUTH_COOKIES.challenge,
     JSON.stringify(challenge),
-    baseOpts(CHALLENGE_MAX_AGE_SECONDS),
+    await baseOpts(CHALLENGE_MAX_AGE_SECONDS),
   );
 }
 
-export function clearChallengeCookie(res: NextResponse): void {
-  res.cookies.set(AUTH_COOKIES.challenge, '', { ...baseOpts(0), maxAge: 0 });
+export async function clearChallengeCookie(res: NextResponse): Promise<void> {
+  res.cookies.set(AUTH_COOKIES.challenge, '', { ...(await baseOpts(0)), maxAge: 0 });
 }
