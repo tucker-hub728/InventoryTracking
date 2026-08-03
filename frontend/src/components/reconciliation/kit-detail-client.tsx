@@ -985,6 +985,8 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         open={reauthOpen}
         onOpenChange={setReauthOpen}
         action="kit.closeout"
+        recordTable="app.kits"
+        recordId={kit.id}
         meaning={`I am closing kit ${kit.kit_number}: ${output.good_qty ?? 0} good this batch, and back-flushing the leftover.`}
         title="Sign this close-out"
         submitLabel="Close kit"
@@ -996,6 +998,8 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         open={produceReauthOpen}
         onOpenChange={setProduceReauthOpen}
         action="kit.produce"
+        recordTable="app.kits"
+        recordId={kit.id}
         meaning={`I am producing ${output.good_qty ?? 0} × ${kit.item_number} for kit ${kit.kit_number}. The kit stays open to produce more.`}
         title="Sign this batch"
         submitLabel="Produce batch"
@@ -1007,6 +1011,8 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         open={cancelReauthOpen}
         onOpenChange={setCancelReauthOpen}
         action="kit.cancel"
+        recordTable="app.kits"
+        recordId={kit.id}
         meaning={
           editableDraft
             ? `I am cancelling draft kit ${kit.kit_number}. No material has moved.`

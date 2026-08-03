@@ -20,6 +20,13 @@ export interface UseReauthResult {
     meaning?: string;
     /** Optional rationale recorded on the audit row. */
     comment?: string;
+    /**
+     * The record being signed for. The backend binds the signature to it and
+     * refuses to spend it elsewhere (VR-006). Omit only where nothing exists
+     * yet to point at.
+     */
+    recordTable?: string;
+    recordId?: string;
   }) => Promise<ReauthResponse | null>;
   pending: boolean;
   /** Human-readable error from the last attempt, or null if clean. */
@@ -47,10 +54,14 @@ export function useReauth(action: string): UseReauthResult {
       password,
       meaning,
       comment,
+      recordTable,
+      recordId,
     }: {
       password: string;
       meaning?: string;
       comment?: string;
+      recordTable?: string;
+      recordId?: string;
     }) => {
       setPending(true);
       setError(null);
@@ -61,6 +72,8 @@ export function useReauth(action: string): UseReauthResult {
           password,
           meaning,
           comment,
+          record_table: recordTable,
+          record_id: recordId,
         });
       } catch (err) {
         if (err instanceof ApiError) {

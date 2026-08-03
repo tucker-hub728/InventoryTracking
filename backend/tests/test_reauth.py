@@ -279,3 +279,70 @@ async def test_reauth_isolated_per_user(client: AsyncClient) -> None:
         json=_body("movement.receipt", user_b["password"]),
     )
     assert ok_b.status_code == 200, ok_b.text
+
+
+async def test_subject_binding_persists_over_http(client: AsyncClient) -> None:
+    """End-to-end HTTP proof that the subject reaches the database (VR-006).
+
+    The unit tests in ``test_esign_subject_binding.py`` call the consume
+    function directly. This one goes through the real endpoint — schema,
+    route, service, ORM — because a break anywhere in that chain shows up as
+    a silently NULL subject rather than an error, which is exactly the
+    failure mode that is hard to notice.
+    """
+    import uuid as _uuid
+
+    from app.db.session import get_sessionmaker
+    from app.models.audit import ReauthEvent as _RE
+    from sqlalchemy import select as _select
+
+    user = await _bootstrap_user(client)
+    lot_id = str(_uuid.uuid4())
+
+    resp = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body(
+            "lot.update",
+            user["password"],
+            record_table="app.lots",
+            record_id=lot_id,
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    evidence_id = resp.json()["evidence_id"]
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        row = (
+            await s.execute(_select(_RE).where(_RE.id == _uuid.UUID(evidence_id)))
+        ).scalar_one()
+        assert row.record_table == "app.lots", "record_table did not persist"
+        assert str(row.record_id) == lot_id, "record_id did not persist"
+
+
+async def test_reauth_without_subject_leaves_it_null(client: AsyncClient) -> None:
+    """Omitting the subject is still allowed (create flows, forecast grid)."""
+    import uuid as _uuid
+
+    from app.db.session import get_sessionmaker
+    from app.models.audit import ReauthEvent as _RE
+    from sqlalchemy import select as _select
+
+    user = await _bootstrap_user(client)
+    resp = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body("tier.create", user["password"]),
+    )
+    assert resp.status_code == 200, resp.text
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        row = (
+            await s.execute(
+                _select(_RE).where(_RE.id == _uuid.UUID(resp.json()["evidence_id"]))
+            )
+        ).scalar_one()
+        assert row.record_table is None
+        assert row.record_id is None

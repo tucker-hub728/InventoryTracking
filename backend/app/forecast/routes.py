@@ -194,6 +194,16 @@ async def save_forecasts(
         db,
         evidence_id=evidence_uuid,
         user_id=current.id,
+        # NO subject binding, deliberately (VR-006). A forecast save commits a
+        # GRID of edited cells spanning many products, customers and months —
+        # there is no single record the operator was signing about, so any id
+        # chosen here would be arbitrary and would make the binding look
+        # stronger than it is. The batch stays action-only; the per-cell detail
+        # is in the audit event written just below.
+        #
+        # Binding this properly needs a multi-subject signature (one signature
+        # covering N records), which the current single-subject model cannot
+        # express. Recorded as the one genuinely open gap.
         expected_action=FORECAST_SAVE_ACTION,
         target_table="app.forecast_entries",
         target_id=batch_id,

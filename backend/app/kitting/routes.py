@@ -2245,6 +2245,10 @@ async def produce_kit(
         expected_action=PRODUCE_ACTION,
         target_table="app.kits",
         target_id=kit.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.kits",
+        record_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -2433,6 +2437,10 @@ async def close_out_kit(
         expected_action=CLOSEOUT_ACTION,
         target_table="app.kits",
         target_id=kit.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.kits",
+        record_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -2565,6 +2573,10 @@ async def cancel_kit(
         expected_action=CANCEL_ACTION,
         target_table="app.kits",
         target_id=kit.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.kits",
+        record_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)

@@ -29,6 +29,13 @@ export interface ReauthRequestBody {
    * request); a few domain flows still require their own reason.
    */
   comment?: string;
+  /**
+   * The record this signature is for (VR-006). Sent as-is to the backend,
+   * which stores it on the evidence row and refuses to spend the signature
+   * on any other record. Both fields travel together or not at all.
+   */
+  record_table?: string;
+  record_id?: string;
 }
 
 export interface ReauthResponse {

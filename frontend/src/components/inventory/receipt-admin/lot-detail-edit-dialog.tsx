@@ -354,6 +354,8 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
         open={showReauth}
         onOpenChange={setShowReauth}
         action="lot.update"
+        recordTable="app.lots"
+        recordId={lotId ?? undefined}
         meaning={meaning}
         commentPlaceholder="e.g. Corrected expiration date from the CoA"
         onConfirmed={submit}

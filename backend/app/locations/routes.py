@@ -1076,6 +1076,9 @@ async def place_lot(
         expected_action="movement.receipt",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # The lot being placed — chosen on screen; the movement row below is the result.
+        record_table="app.lots",
+        record_id=lot_uuid,
     )
     response = _alloc_to_read(alloc)
     await db.commit()
@@ -1166,6 +1169,9 @@ async def place_lot_batch(
         expected_action="movement.receipt",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # The lot being placed — chosen on screen; the movement row below is the result.
+        record_table="app.lots",
+        record_id=lot_uuid,
     )
     await db.commit()
     return allocs
@@ -1245,6 +1251,9 @@ async def transfer_allocation(
         expected_action="movement.transfer",
         target_table="app.stock_movements",
         target_id=out_leg.id,
+        # The allocation the operator selected to move.
+        record_table="app.lot_allocations",
+        record_id=alloc.id,
     )
     response = _alloc_to_read(dest)
     await db.commit()
@@ -1304,6 +1313,9 @@ async def consume_allocation(
         expected_action="movement.dispense",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # The allocation the operator selected to consume.
+        record_table="app.lot_allocations",
+        record_id=alloc.id,
     )
     response = _alloc_to_read(updated)
     await db.commit()
@@ -1382,6 +1394,9 @@ async def consume_batch(
         expected_action="movement.dispense",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # Batch dispense: single-lot batch, so the lot is the subject.
+        record_table="app.lots",
+        record_id=lot_id,
     )
     await db.commit()
     return results
@@ -1506,6 +1521,9 @@ async def transfer_batch(
         expected_action="movement.transfer",
         target_table="app.stock_movements",
         target_id=out_leg.id,
+        # Batch transfer: every source is one lot (enforced above), so the lot is the subject.
+        record_table="app.lots",
+        record_id=lot_id,
     )
     await db.commit()
     return results

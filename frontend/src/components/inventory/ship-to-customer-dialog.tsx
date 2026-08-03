@@ -287,6 +287,8 @@ export function ShipToCustomerDialog({ open, onOpenChange, item, onDone }: Props
         open={showReauth}
         onOpenChange={setShowReauth}
         action="movement.customer_shipment"
+        recordTable="app.items"
+        recordId={item?.uuid}
         meaning={`I am shipping ${total} unit(s) of ${item?.desc ?? 'this finished good'} to ${customerLabel}.`}
         commentPlaceholder="e.g. Shipped against sales order SO-10432"
         onConfirmed={submit}

@@ -316,6 +316,8 @@ export function EditUserDialog({
             if (!next) setPendingChanges(null);
           }}
           action={USER_UPDATE_ACTION}
+          recordTable="app.users"
+          recordId={user?.id}
           meaning={signingMeaning(pendingChanges)}
           title={
             pendingChanges.role === 'super_admin' ? 'Sign to promote' : 'Sign to apply changes'

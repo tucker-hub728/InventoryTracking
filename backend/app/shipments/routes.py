@@ -272,6 +272,9 @@ async def ship_out(
         expected_action=SHIP_ACTION,
         target_table="app.stock_movements",
         target_id=first_movement.id,
+        # The item being shipped; movements are per-source results of this one decision.
+        record_table="app.items",
+        record_id=item_id,
     )
 
     response = ShipmentRead(

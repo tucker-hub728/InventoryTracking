@@ -18,6 +18,8 @@ admin module hasn't written it yet — e.g. the bootstrap super admin from
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Request
 
 from app.api.deps import CurrentDbUserDep, DBSession
@@ -44,6 +46,7 @@ from app.core.exceptions import (
     AuthorizationError,
     DomainError,
     NotFoundError,
+    ValidationError,
 )
 from app.core.logging import get_logger
 from app.core.passwords import validate_password_strength
@@ -81,6 +84,23 @@ async def _reject_if_deactivated(db: DBSession, email: str) -> None:
     user = await users_repo.get_by_email(db, email)
     if user is not None and user.status != "active":
         raise AuthorizationError(_DEACTIVATED_MESSAGE, code="account_disabled")
+
+
+def _parse_record_id(raw: str | None) -> uuid.UUID | None:
+    """Parse the signed-for record id, or None when there isn't one.
+
+    The schema keeps it a string so the 422 for a malformed value names this
+    field rather than surfacing a generic UUID parse error from deeper in the
+    stack.
+    """
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError as exc:
+        raise ValidationError(
+            "record_id must be a UUID", code="invalid_record_id"
+        ) from exc
 
 
 def _client_ip(request: Request) -> str | None:
@@ -412,6 +432,10 @@ async def reauth_endpoint(
         comment=payload.comment,
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
+        record_table=payload.record_table,
+        # Parsed here rather than in the schema so a malformed id is a clean
+        # 422 on this endpoint instead of an opaque failure later.
+        record_id=_parse_record_id(payload.record_id),
     )
     return ReauthResponse(
         evidence_id=str(evt.id),

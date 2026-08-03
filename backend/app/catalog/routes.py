@@ -315,6 +315,11 @@ async def create_tier(
         db,
         evidence_id=evidence_uuid,
         user_id=current.id,
+        # NO subject binding, deliberately (VR-006). A tier is a top-level
+        # record: nothing exists to point at when the operator signs, and
+        # there is no parent to stand in for it (contrast prefix.create,
+        # which binds to its tier, and bom.create, which binds to its item).
+        # Action-only is the honest answer rather than inventing an id.
         expected_action="tier.create",
         target_table="app.item_tiers",
         target_id=cat.id,
@@ -382,6 +387,10 @@ async def update_tier(
         expected_action="tier.update",
         target_table="app.item_tiers",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.item_tiers",
+        record_id=updated.id,
     )
     counts = await cat_repo.tier_item_counts(db, [updated.id])
     result = _tier_to_read(updated, counts.get(updated.id, 0))
@@ -441,6 +450,10 @@ async def delete_tier(
         expected_action="tier.delete",
         target_table="app.item_tiers",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.item_tiers",
+        record_id=updated.id,
     )
     result = _tier_to_read(updated, 0, prefixes=[])
     await db.commit()
@@ -541,6 +554,9 @@ async def create_prefix(
         expected_action="prefix.create",
         target_table="app.item_prefixes",
         target_id=prefix.id,
+        # The prefix does not exist yet; the tier it is being added to does.
+        record_table="app.item_tiers",
+        record_id=tier_id,
     )
     result = _prefix_to_read(prefix, 0)
     await db.commit()
@@ -622,6 +638,10 @@ async def update_prefix(
         expected_action="prefix.update",
         target_table="app.item_prefixes",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.item_prefixes",
+        record_id=updated.id,
     )
     result = await _prefix_read_with_count(db, updated)
     await db.commit()
@@ -687,6 +707,10 @@ async def delete_prefix(
         expected_action="prefix.delete",
         target_table="app.item_prefixes",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.item_prefixes",
+        record_id=updated.id,
     )
     result = _prefix_to_read(updated, 0)
     await db.commit()
@@ -790,6 +814,9 @@ async def add_bom_line(
         expected_action="bom.create",
         target_table="app.bom_lines",
         target_id=line.id,
+        # The BOM line does not exist yet; the parent item whose BOM is open does.
+        record_table="app.items",
+        record_id=item_id,
     )
     result = await _line_read(db, line)
     await db.commit()
@@ -839,6 +866,10 @@ async def update_bom_line(
         expected_action="bom.update",
         target_table="app.bom_lines",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.bom_lines",
+        record_id=updated.id,
     )
     result = await _line_read(db, updated)
     await db.commit()
@@ -885,6 +916,10 @@ async def delete_bom_line(
         expected_action="bom.delete",
         target_table="app.bom_lines",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.bom_lines",
+        record_id=updated.id,
     )
     result = await _line_read(db, updated)
     await db.commit()
@@ -1080,6 +1115,9 @@ async def save_item_bom(
         expected_action=BOM_SAVE_ACTION,
         target_table="app.bom_lines",
         target_id=batch_id,
+        # Batch BOM save: batch_id is generated here, the parent item is the subject.
+        record_table="app.items",
+        record_id=item_id,
     )
 
     lines = await cat_repo.list_bom_lines(db, item_id)

@@ -1173,6 +1173,10 @@ async def update_lot(
         expected_action="lot.update",
         target_table="app.lots",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.lots",
+        record_id=updated.id,
     )
 
     await db.refresh(updated)
@@ -1766,6 +1770,10 @@ async def delete_order(
         expected_action="order.delete",
         target_table="app.receipt_transactions",
         target_id=txn.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.receipt_transactions",
+        record_id=txn.id,
     )
     await record_entity_change(
         db,
@@ -1817,6 +1825,10 @@ async def cancel_order(
         expected_action="order.cancel",
         target_table="app.receipt_transactions",
         target_id=txn.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.receipt_transactions",
+        record_id=txn.id,
     )
     await record_entity_change(
         db,
@@ -2085,6 +2097,10 @@ async def receive_order(
         expected_action="receipt.confirm",
         target_table="app.receipt_transactions",
         target_id=txn.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.receipt_transactions",
+        record_id=txn.id,
     )
 
     # Recompute the Order status from the new fulfilment picture.

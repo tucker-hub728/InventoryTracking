@@ -586,6 +586,8 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
         open={showReauth}
         onOpenChange={setShowReauth}
         action="bom.save"
+        recordTable="app.items"
+        recordId={itemId}
         meaning={meaning}
         commentPlaceholder="e.g. Added per updated build sheet"
         onConfirmed={onConfirmed}
