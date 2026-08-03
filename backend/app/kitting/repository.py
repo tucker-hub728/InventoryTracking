@@ -272,10 +272,24 @@ async def floor_lots_by_item_at_node(
 
 
 async def allocations_for_item_at_node(
-    session: AsyncSession, item_id: uuid.UUID, node_id: uuid.UUID
+    session: AsyncSession,
+    item_id: uuid.UUID,
+    node_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> list[LotAllocation]:
     """Active allocations of an item at a node, FIFO by expiry then age —
-    the consume order for a kit issue."""
+    the consume order for a kit issue.
+
+    ``for_update=True`` locks the allocation rows for the rest of the
+    transaction. Issue paths MUST use it: they sum these quantities, decide
+    whether there is enough, and then draw them down, and without the lock a
+    concurrent issue can empty the same rows in between (VR-004).
+
+    Note ``of=LotAllocation`` — the statement joins ``Lot`` only to filter and
+    order, and locking lots as well would make two kits that merely share an
+    item block each other for no reason.
+    """
     stmt = (
         select(LotAllocation)
         .join(Lot, Lot.id == LotAllocation.lot_id)
@@ -287,6 +301,8 @@ async def allocations_for_item_at_node(
         )
         .order_by(Lot.expiration_date.asc().nullslast(), Lot.created_at.asc())
     )
+    if for_update:
+        stmt = stmt.with_for_update(of=LotAllocation)
     return list((await session.execute(stmt)).scalars().unique().all())
 
 

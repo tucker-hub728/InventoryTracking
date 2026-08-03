@@ -449,7 +449,9 @@ async def _move_to_production(
                 code="invalid_cell",
             )
     else:
-        allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, node_id)
+        allocs = await kit_repo.allocations_for_item_at_node(
+            db, line.item_id, node_id, for_update=True
+        )
         if lot_id is not None:
             # Multi-source: this pick draws one specific lot at the node.
             allocs = [a for a in allocs if a.lot_id == lot_id]
@@ -537,7 +539,7 @@ async def _drain_production(db, *, kit: Kit, line: KitLine, qty: int) -> None:
     if qty <= 0:
         return
     allocs = await kit_repo.allocations_for_item_at_node(
-        db, line.item_id, kit.production_location_node_id
+        db, line.item_id, kit.production_location_node_id, for_update=True
     )
     remaining = qty
     for alloc in allocs:
@@ -589,7 +591,9 @@ async def _return_to_inventory(
     operator to assign one; it does not require discarding the incoming lot.
     """
     prod_node = kit.production_location_node_id
-    allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, prod_node)
+    allocs = await kit_repo.allocations_for_item_at_node(
+        db, line.item_id, prod_node, for_update=True
+    )
     # When the operator picked a specific floor lot to return (client 2026-07-24),
     # drain only that lot's WIP; otherwise drain FIFO across every lot on the floor
     # (close-out back-flush / cancel, unchanged).

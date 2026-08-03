@@ -1185,7 +1185,7 @@ async def transfer_allocation(
 ) -> AllocationRead:
     alloc_uuid = _parse_uuid(payload.allocation_id, field="allocation_id")
     evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
-    alloc = await loc_repo.get_allocation(db, alloc_uuid)
+    alloc = await loc_repo.get_allocation(db, alloc_uuid, for_update=True)
     if alloc is None or not alloc.is_active:
         raise NotFoundError(f"Active allocation {payload.allocation_id} not found")
 
@@ -1265,7 +1265,7 @@ async def consume_allocation(
 ) -> AllocationRead:
     alloc_uuid = _parse_uuid(payload.allocation_id, field="allocation_id")
     evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
-    alloc = await loc_repo.get_allocation(db, alloc_uuid)
+    alloc = await loc_repo.get_allocation(db, alloc_uuid, for_update=True)
     if alloc is None or not alloc.is_active:
         raise NotFoundError(f"Active allocation {payload.allocation_id} not found")
     if payload.qty > alloc.qty:
@@ -1322,7 +1322,7 @@ async def _load_batch_sources(
     allocs: list[LotAllocation] = []
     for raw in allocation_ids:
         au = _parse_uuid(raw, field="allocation_id")
-        a = await loc_repo.get_allocation(db, au)
+        a = await loc_repo.get_allocation(db, au, for_update=True)
         if a is None or not a.is_active:
             raise NotFoundError(f"Active allocation {raw} not found")
         allocs.append(a)

@@ -13,9 +13,10 @@ import re
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ConflictError
 from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
@@ -396,19 +397,34 @@ async def max_occupied_cell(session: AsyncSession, node_id: uuid.UUID) -> tuple[
 # ── Allocations ─────────────────────────────────────────────────────────
 
 
-async def get_allocation(session: AsyncSession, allocation_id: uuid.UUID) -> LotAllocation | None:
-    return (
-        await session.execute(select(LotAllocation).where(LotAllocation.id == allocation_id))
-    ).scalar_one_or_none()
+async def get_allocation(
+    session: AsyncSession, allocation_id: uuid.UUID, *, for_update: bool = False
+) -> LotAllocation | None:
+    """Fetch one allocation.
+
+    Pass ``for_update=True`` when the caller is about to CHANGE the quantity.
+    It takes a row lock so a concurrent mutation of the same allocation waits
+    here rather than racing between the availability check and the write
+    (VR-004). Read-only callers — list views, reports — leave it False so the
+    UI never blocks on an operator's in-flight transaction.
+    """
+    stmt = select(LotAllocation).where(LotAllocation.id == allocation_id)
+    if for_update:
+        stmt = stmt.with_for_update(of=LotAllocation)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def active_allocations_at_node(
-    session: AsyncSession, node_id: uuid.UUID
+    session: AsyncSession, node_id: uuid.UUID, *, for_update: bool = False
 ) -> list[LotAllocation]:
+    """Active allocations at a node. See :func:`get_allocation` for
+    ``for_update`` — set it whenever the result feeds a quantity change."""
     stmt = select(LotAllocation).where(
         LotAllocation.location_node_id == node_id,
         LotAllocation.is_active.is_(True),
     )
+    if for_update:
+        stmt = stmt.with_for_update(of=LotAllocation)
     return list((await session.execute(stmt)).scalars().unique().all())
 
 
@@ -635,14 +651,26 @@ async def create_or_merge_allocation(
                     )
                     .order_by(LotAllocation.created_at.asc())
                     .limit(1)
+                    # Lock the row we are about to merge into, so two
+                    # concurrent receipts of the same lot at the same shelf
+                    # queue instead of both reading the same starting value.
+                    .with_for_update(of=LotAllocation)
                 )
             )
             .scalars()
             .first()
         )
         if existing is not None:
-            existing.qty = existing.qty + qty
+            # Add in SQL, not Python. A lost update here would DESTROY stock
+            # (two receipts of 10 landing as +10 instead of +20) — the mirror
+            # image of the reduce_allocation bug, and just as invisible.
             await session.flush()
+            await session.execute(
+                update(LotAllocation)
+                .where(LotAllocation.id == existing.id)
+                .values(qty=LotAllocation.qty + qty)
+            )
+            await session.refresh(existing)
             return existing
     return await create_allocation(
         session,
@@ -663,12 +691,63 @@ async def reduce_allocation(
 
     The 0-qty deactivated row is kept (CHECK is ``qty >= 0``) so the split
     history survives; the append-only movement log records the operation.
+
+    **Concurrency (VR-004).** This used to be a read-modify-write in Python
+    (``allocation.qty = allocation.qty - qty``), which loses updates. Two
+    requests issuing 3 from a box of 5 both read 5, both computed 2, and both
+    wrote 2 — six units left a box that held five, and the ``qty >= 0`` CHECK
+    saw nothing wrong because 2 is a perfectly legal value.
+
+    The subtraction now happens *in the database* under a guard:
+
+        UPDATE ... SET qty = qty - :qty WHERE id = :id AND qty >= :qty
+
+    Postgres serialises concurrent UPDATEs of the same row, so the second one
+    re-evaluates ``qty >= :qty`` against the value the first one committed.
+    If it no longer holds, zero rows match and we raise instead of silently
+    corrupting the balance. This is the guarantee; the ``FOR UPDATE`` on the
+    availability reads is a courtesy that turns most conflicts into a short
+    wait rather than an error the operator sees.
     """
-    allocation.qty = allocation.qty - qty
-    if allocation.qty <= 0:
-        allocation.qty = Decimal("0")
-        allocation.is_active = False
+    if qty <= 0:
+        # Nothing to do, and a non-positive guard would make the WHERE clause
+        # meaningless (every row satisfies ``qty >= 0``).
+        return allocation
+
+    # Flush pending ORM state first so the Core UPDATE below doesn't race a
+    # dirty in-session copy of this same row.
     await session.flush()
+
+    stmt = (
+        update(LotAllocation)
+        .where(LotAllocation.id == allocation.id, LotAllocation.qty >= qty)
+        .values(qty=LotAllocation.qty - qty)
+        .returning(LotAllocation.qty)
+    )
+    new_qty = (await session.execute(stmt)).scalar_one_or_none()
+
+    if new_qty is None:
+        # Either the row vanished or someone else drew it down below ``qty``
+        # between our availability check and here. Both are the same story to
+        # the caller: re-read and try again.
+        raise ConflictError(
+            "Stock at this location changed while you were working. "
+            "Refresh and try again.",
+            code="stock_conflict",
+            details={"allocation_id": str(allocation.id), "requested": str(qty)},
+        )
+
+    if new_qty <= 0:
+        # Empty now — retire the row but keep it for the split history.
+        await session.execute(
+            update(LotAllocation)
+            .where(LotAllocation.id == allocation.id)
+            .values(qty=Decimal("0"), is_active=False)
+        )
+
+    # The ORM copy is stale after a Core UPDATE; re-sync it so callers that
+    # read ``allocation.qty`` afterwards (ledger rows, responses) see truth.
+    await session.refresh(allocation)
     return allocation
 
 
