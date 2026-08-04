@@ -185,27 +185,72 @@ async def test_reauth_rejects_bad_action_pattern(client: AsyncClient) -> None:
     assert body["code"] == "request_invalid"
 
 
-async def test_reauth_requires_comment(client: AsyncClient) -> None:
-    """A mandatory rationale: a missing or blank ``comment`` is a 422."""
+async def test_reauth_comment_is_optional(client: AsyncClient) -> None:
+    """The rationale is optional — omitting it still mints evidence.
+
+    This asserted the opposite until 2026-08-03. The mandatory-comment rule
+    was dropped on the client's request back on 2026-06-29 and the backend
+    was relaxed then (see the note on ``ReauthRequest.comment``), but this
+    test was never updated, so it had been failing on every run since.
+
+    What makes the signature a Part 11 signature is the re-authenticated
+    identity, the timestamp and the attested ``meaning`` — not the free-text
+    reason. Individual domain endpoints may still demand their own reason;
+    that is enforced at those endpoints, not here.
+    """
     user = await _bootstrap_user(client)
 
-    # Missing entirely.
+    # Omitted entirely.
     missing = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
         json={"action": "movement.receipt", "password": user["password"]},
     )
-    assert missing.status_code == 422, missing.text
-    assert missing.json()["code"] == "request_invalid"
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["evidence_id"]
+    assert missing.json()["comment"] is None
 
-    # Present but whitespace-only — rejected by the trim validator.
+    # Whitespace-only is normalised rather than rejected.
     blank = await client.post(
         "/v1/auth/reauth",
         headers=_auth_headers(user["access_token"]),
         json=_body("movement.receipt", user["password"], comment="   "),
     )
-    assert blank.status_code == 422, blank.text
-    assert blank.json()["code"] == "request_invalid"
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["evidence_id"]
+
+
+async def test_reauth_response_carries_no_signature_image(
+    client: AsyncClient,
+) -> None:
+    """The e-signature is the password — there is no image field any more.
+
+    Guard for the 2026-08-03 removal: ``signature_image_s3_key`` is gone from
+    the request schema, the response and the ``audit.reauth_events`` table
+    (migration ``esignimg01``).
+    """
+    user = await _bootstrap_user(client)
+
+    resp = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body("movement.receipt", user["password"], comment="why"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "signature_image_s3_key" not in resp.json()
+
+    # And an old client still sending the field is told plainly, rather than
+    # having it silently ignored (``extra="forbid"`` on ReauthRequest).
+    stale_client = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json={
+            "action": "movement.receipt",
+            "password": user["password"],
+            "signature_image_s3_key": "signatures/whatever.png",
+        },
+    )
+    assert stale_client.status_code == 422, stale_client.text
 
 
 async def test_reauth_isolated_per_user(client: AsyncClient) -> None:
@@ -234,3 +279,70 @@ async def test_reauth_isolated_per_user(client: AsyncClient) -> None:
         json=_body("movement.receipt", user_b["password"]),
     )
     assert ok_b.status_code == 200, ok_b.text
+
+
+async def test_subject_binding_persists_over_http(client: AsyncClient) -> None:
+    """End-to-end HTTP proof that the subject reaches the database (VR-006).
+
+    The unit tests in ``test_esign_subject_binding.py`` call the consume
+    function directly. This one goes through the real endpoint — schema,
+    route, service, ORM — because a break anywhere in that chain shows up as
+    a silently NULL subject rather than an error, which is exactly the
+    failure mode that is hard to notice.
+    """
+    import uuid as _uuid
+
+    from app.db.session import get_sessionmaker
+    from app.models.audit import ReauthEvent as _RE
+    from sqlalchemy import select as _select
+
+    user = await _bootstrap_user(client)
+    lot_id = str(_uuid.uuid4())
+
+    resp = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body(
+            "lot.update",
+            user["password"],
+            record_table="app.lots",
+            record_id=lot_id,
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    evidence_id = resp.json()["evidence_id"]
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        row = (
+            await s.execute(_select(_RE).where(_RE.id == _uuid.UUID(evidence_id)))
+        ).scalar_one()
+        assert row.record_table == "app.lots", "record_table did not persist"
+        assert str(row.record_id) == lot_id, "record_id did not persist"
+
+
+async def test_reauth_without_subject_leaves_it_null(client: AsyncClient) -> None:
+    """Omitting the subject is still allowed (create flows, forecast grid)."""
+    import uuid as _uuid
+
+    from app.db.session import get_sessionmaker
+    from app.models.audit import ReauthEvent as _RE
+    from sqlalchemy import select as _select
+
+    user = await _bootstrap_user(client)
+    resp = await client.post(
+        "/v1/auth/reauth",
+        headers=_auth_headers(user["access_token"]),
+        json=_body("tier.create", user["password"]),
+    )
+    assert resp.status_code == 200, resp.text
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        row = (
+            await s.execute(
+                _select(_RE).where(_RE.id == _uuid.UUID(resp.json()["evidence_id"]))
+            )
+        ).scalar_one()
+        assert row.record_table is None
+        assert row.record_id is None

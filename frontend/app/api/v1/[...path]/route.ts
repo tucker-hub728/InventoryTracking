@@ -28,14 +28,42 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { serverEnv } from '@/env';
 import { AUTH_COOKIES, clearAuthCookies, setAuthCookies } from '@/lib/auth/cookies';
+import { CSRF_BLOCKED, isCrossSiteMutation } from '@/lib/auth/csrf';
 import { backend, BackendError } from '@/lib/auth/backend';
 import type { BackendTokens } from '@/lib/auth/types';
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
-function joinPath(parts: string[]): string {
+/**
+ * Build the upstream path from the catch-all segments.
+ *
+ * `encodeURIComponent` does NOT encode dots, so a `..` segment used to
+ * survive into the URL string handed to `fetch`, which then normalised it
+ * away — letting a caller climb out of the `/v1` prefix and address other
+ * endpoints on the fixed backend host. Reject the traversal segments
+ * outright instead of relying on the encoder to neutralise them.
+ *
+ * Returns null when the path is not acceptable; the caller turns that into
+ * a 400 rather than forwarding anything upstream.
+ */
+function joinPath(parts: string[]): string | null {
+  if (parts.length === 0) return null;
+  for (const p of parts) {
+    if (p === '.' || p === '..') return null;
+    // Encoded traversal ("%2e%2e") and injected separators. Decoding first
+    // catches the encoded forms; the raw check catches literal separators.
+    let decoded = p;
+    try {
+      decoded = decodeURIComponent(p);
+    } catch {
+      return null; // malformed percent-encoding
+    }
+    if (decoded === '.' || decoded === '..') return null;
+    if (/[/\\]/.test(decoded) || decoded.includes('\0')) return null;
+  }
   return `/${parts.map((p) => encodeURIComponent(p)).join('/')}`;
 }
+
 
 /** Headers forwarded *to* the backend. Stripped of hop-by-hop + Next.js noise. */
 function forwardableHeaders(req: NextRequest, accessToken: string): Headers {
@@ -54,21 +82,30 @@ function forwardableHeaders(req: NextRequest, accessToken: string): Headers {
   const ua = req.headers.get('user-agent');
   if (ua) h.set('user-agent', ua);
 
-  // ``X-Forwarded-For`` — append the original client IP if Vercel / a
-  // load balancer already set one; otherwise start a new chain from
-  // ``req.ip`` (Next.js exposes the socket peer here in production
-  // deployments; falls back to undefined in pure-Node dev).
-  const existingXff = req.headers.get('x-forwarded-for');
-  const clientIp =
-    (req as { ip?: string }).ip ??
-    req.headers.get('x-real-ip') ??
-    null;
-  const xff = existingXff
-    ? existingXff
-    : clientIp
-      ? clientIp
-      : null;
-  if (xff) h.set('x-forwarded-for', xff);
+  // ``X-Forwarded-For`` — feeds the client IP on Part 11 audit rows.
+  //
+  // This proxy deliberately makes NO trust decision. It passes the chain
+  // along and appends its own view of the peer; the backend decides which
+  // entry is trustworthy using ``TRUSTED_PROXY_COUNT`` (see
+  // ``_client_ip`` in api/v1/routes/auth.py). One component owning that
+  // decision is the point — the old code picked the LEFTMOST entry, which
+  // is whatever the caller sent, so a browser could choose the IP written
+  // against its own signature.
+  //
+  // Why not just forward `req.ip`: Next.js only populates it on platforms
+  // that inject it (Vercel). Self-hosted behind CloudFront + Elastic
+  // Beanstalk it is undefined, so relying on it alone would silently
+  // record nothing — and "no IP" on a regulated audit row is a real loss,
+  // even if it beats a forged one.
+  //
+  // Safe by default: with TRUSTED_PROXY_COUNT unset (0), the backend
+  // ignores this header entirely and uses its own socket peer. A forged
+  // chain is only ever consulted once an operator has explicitly declared
+  // how many hops are real.
+  const inboundXff = req.headers.get('x-forwarded-for');
+  const peerIp = (req as { ip?: string }).ip ?? null;
+  const chain = [inboundXff, peerIp].filter(Boolean).join(', ');
+  if (chain) h.set('x-forwarded-for', chain);
 
   h.set('authorization', `Bearer ${accessToken}`);
   return h;
@@ -87,7 +124,7 @@ function passthroughResponseHeaders(upstream: Response): Headers {
 }
 
 async function attemptRefresh(): Promise<BackendTokens | null> {
-  const rt = cookies().get(AUTH_COOKIES.refresh)?.value;
+  const rt = (await cookies()).get(AUTH_COOKIES.refresh)?.value;
   if (!rt) return null;
   try {
     return await backend.refresh(rt);
@@ -99,12 +136,24 @@ async function attemptRefresh(): Promise<BackendTokens | null> {
 
 async function proxy(req: NextRequest, params: { path: string[] }): Promise<NextResponse> {
   const method = req.method as Method;
+
+  // CSRF defence in depth — reject before doing any work or touching cookies.
+  if (isCrossSiteMutation(req)) {
+    return NextResponse.json(CSRF_BLOCKED, { status: 403 });
+  }
+
   const targetPath = joinPath(params.path);
+  if (targetPath === null) {
+    return NextResponse.json(
+      { code: 'invalid_path', message: 'Invalid request path.' },
+      { status: 400 },
+    );
+  }
   const search = req.nextUrl.search ?? '';
   const url = `${serverEnv.BACKEND_INTERNAL_URL.replace(/\/$/, '')}${targetPath}${search}`;
 
-  const at = cookies().get(AUTH_COOKIES.access)?.value;
-  if (!at && !cookies().get(AUTH_COOKIES.refresh)?.value) {
+  const at = (await cookies()).get(AUTH_COOKIES.access)?.value;
+  if (!at && !(await cookies()).get(AUTH_COOKIES.refresh)?.value) {
     // No session at all — short-circuit so we don't waste a backend hop.
     return NextResponse.json(
       { code: 'authentication_required', message: 'Not authenticated.' },
@@ -142,7 +191,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
         { code: 'authentication_required', message: 'Session expired.' },
         { status: 401 },
       );
-      clearAuthCookies(res);
+      await clearAuthCookies(res);
       return res;
     }
     upstream = await fetch(url, {
@@ -161,7 +210,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
     headers: passthroughResponseHeaders(upstream),
   });
   if (refreshed) {
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: refreshed.access_token,
       refreshToken: refreshed.refresh_token,
       accessMaxAgeSeconds: refreshed.expires_in,
@@ -173,7 +222,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
   if (upstream.status === 403 && upstreamBody) {
     try {
       const parsed = JSON.parse(new TextDecoder().decode(upstreamBody)) as { code?: string };
-      if (parsed?.code === 'account_disabled') clearAuthCookies(res);
+      if (parsed?.code === 'account_disabled') await clearAuthCookies(res);
     } catch {
       // Non-JSON 403 — leave the session as-is.
     }
@@ -181,18 +230,18 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Next
   return res;
 }
 
-export async function GET(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function GET(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function POST(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function POST(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function PATCH(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function PUT(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function PUT(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }
-export async function DELETE(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return proxy(req, ctx.params);
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  return proxy(req, (await ctx.params));
 }

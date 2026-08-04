@@ -140,7 +140,9 @@ async def _consume_source(
     deactivates it (incl. box cells)."""
     allocs = [
         a
-        for a in await kit_repo.allocations_for_item_at_node(db, item_id, node_uuid)
+        for a in await kit_repo.allocations_for_item_at_node(
+            db, item_id, node_uuid, for_update=True
+        )
         if a.lot_id == lot_uuid
     ]
     available = sum(int(a.qty) for a in allocs)
@@ -270,6 +272,9 @@ async def ship_out(
         expected_action=SHIP_ACTION,
         target_table="app.stock_movements",
         target_id=first_movement.id,
+        # The item being shipped; movements are per-source results of this one decision.
+        record_table="app.items",
+        record_id=item_id,
     )
 
     response = ShipmentRead(

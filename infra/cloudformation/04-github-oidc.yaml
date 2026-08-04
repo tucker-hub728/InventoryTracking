@@ -23,15 +23,34 @@ Parameters:
     Type: CommaDelimitedList
     Default: "main,dev"
     Description: >-
-      Branches whose workflow runs may assume the deploy role. Keep this
-      tight — anyone able to push to these branches can deploy.
+      EXACTLY TWO branches whose workflow runs may assume this role. Keep this
+      tight — anyone able to push to these branches can deploy to the
+      environment this role targets.
+      The trust policy indexes element 0 and element 1, so two values are
+      required. For an environment that should trust only ONE branch, repeat it
+      (e.g. "production,production") — duplicate conditions are harmless.
+      Do NOT leave the default on a production role: it would let any push to
+      `dev` deploy to production.
+  ExistingOIDCProviderArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN of a GitHub OIDC provider that already exists in this account. Leave
+      BLANK for the first environment (this stack creates one); set it for every
+      environment after that.
+      An IAM OIDC provider is keyed by its URL and is unique per ACCOUNT, so a
+      second stack that tried to create one fails with EntityAlreadyExists.
+      Find the existing ARN with:
+        aws iam list-open-id-connect-providers
+
+Conditions:
+  # Only the first environment in an account creates the shared OIDC provider.
+  CreateOIDCProvider: !Equals [ !Ref ExistingOIDCProviderArn, '' ]
 
 Resources:
-  # The account may already have a GitHub OIDC provider. If so, DELETE this
-  # resource and instead pass the existing provider ARN where DeployRole
-  # references it (an OIDC provider URL is unique per account).
   GitHubOIDCProvider:
     Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDCProvider
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
@@ -60,7 +79,12 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !Ref GitHubOIDCProvider
+              # The provider this stack created, or the one already in the
+              # account — see ExistingOIDCProviderArn.
+              Federated: !If
+                - CreateOIDCProvider
+                - !Ref GitHubOIDCProvider
+                - !Ref ExistingOIDCProviderArn
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
@@ -91,6 +115,10 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:BatchGetImage
                   - ecr:GetDownloadUrlForLayer
+                  # Lets the workflow ask "was this commit already built?" so it
+                  # can promote an existing image instead of rebuilding and
+                  # failing on the immutable tag. Read-only.
+                  - ecr:DescribeImages
                 Resource:
                   - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}/backend'
                   - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}/frontend'
@@ -147,4 +175,10 @@ Outputs:
     Description: Set this as the GitHub repo variable DEPLOY_ROLE_ARN.
     Value: !GetAtt DeployRole.Arn
   OIDCProviderArn:
-    Value: !Ref GitHubOIDCProvider
+    Description: >-
+      Pass this as ExistingOIDCProviderArn when deploying this template for a
+      SECOND environment in the same account.
+    Value: !If
+      - CreateOIDCProvider
+      - !Ref GitHubOIDCProvider
+      - !Ref ExistingOIDCProviderArn

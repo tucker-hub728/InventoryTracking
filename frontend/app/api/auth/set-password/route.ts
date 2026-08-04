@@ -20,6 +20,7 @@ import {
   clearChallengeCookie,
   setAuthCookies,
 } from '@/lib/auth/cookies';
+import { CSRF_BLOCKED, isCrossSiteMutation } from '@/lib/auth/csrf';
 import { toSessionUser } from '@/lib/auth/session';
 
 const bodySchema = z.object({
@@ -32,6 +33,11 @@ const challengeSchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  // Defence in depth alongside SameSite=Lax — see lib/auth/csrf.ts.
+  if (isCrossSiteMutation(req)) {
+    return NextResponse.json(CSRF_BLOCKED, { status: 403 });
+  }
+
   const json: unknown = await req.json().catch(() => ({}));
   const parsed = bodySchema.safeParse(json);
   if (!parsed.success) {
@@ -63,12 +69,12 @@ export async function POST(req: NextRequest) {
     const me = await backend.me(tokens.access_token);
 
     const res = NextResponse.json({ user: toSessionUser(me) });
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       accessMaxAgeSeconds: tokens.expires_in,
     });
-    clearChallengeCookie(res);
+    await clearChallengeCookie(res);
     return res;
   } catch (err) {
     if (err instanceof BackendError) {

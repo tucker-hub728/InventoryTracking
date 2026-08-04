@@ -4,33 +4,40 @@
       Minus-20 Freezers                         room_location
         (units added by Super Admin)            sub_location
       Minus-80 Freezers                         room_location
-        T90019A · C · E · F · G · H             sub_location  the equipment units
+        (units added by Super Admin)            sub_location
 
 LOC-002 renames the old "Freezers" category to **Cold Storage** and says it
 holds minus-twenty freezers, minus-eighty freezers, and two-to-eight
 refrigerators. This script seeds it as a room whose level-2 locations are those
-unit-type groups, and whose leaves are the equipment units themselves.
+unit-type groups. The leaves — the equipment units — are not seeded.
 
-Where the units come from, and why the −20 group starts empty
-------------------------------------------------------------
-The client's equipment list ("Freezer List.xlsx") assigns every unit to a
-DEPARTMENT, not to a temperature category:
+Why both groups start empty
+---------------------------
+This script seeds the GROUPS only; every unit is added by a Super Admin on the
+Cold Storage page (client, 2026-08-04). Cold Storage is already the one room
+allowed to create a location, and the client would rather type the units they
+actually own than inherit a list. LOC-006 is satisfied either way: governance
+here is by role, not by field constraint.
+
+That was always true of the −20 group. The client's equipment list ("Freezer
+List.xlsx") assigns every unit to a DEPARTMENT, not to a temperature category:
 
     Materials Management   −80: T90019A, C, E, F, G, H   −20: T90020B, C, D
     Analytical Lab         −80: T90019D                  −20: T90020A
     Sterility Lab          −80: T90019I, T90019J
     PD                     −80: T90019B                  −20: T90020E
 
-The −20 units all have a department room of their own — Materials Management
+Every −20 unit has a department room of its own — Materials Management
 (``seed_materials_management.py``) and Analytical Lab
 (``seed_analytical_lab.py``) — so seeding them here too would put one physical
-freezer in two places. The six Materials Management −80 units are different:
-LOC-005 gives that room exactly two locations (Warehouse One and Minus-20
-Freezers), so those units have no home there and land here instead.
+freezer in two places. The six Materials Management −80 units were seeded here
+until 2026-08-04, on the grounds that LOC-005 fixes that room at two locations
+(Warehouse One and Minus-20 Freezers) and so leaves them homeless. They are now
+typed in by hand like every other unit.
 
-So ``MINUS_20_UNITS`` is deliberately empty. The group still exists, because
-LOC-002 names it, and a Super Admin adds units to it on the Cold Storage page
-(LOC-006: governance is by role, not by field constraint).
+Nothing is DELETED by that change. These scripts only ever create, so a database
+that already ran the old seed keeps its six −80 units; only a fresh database
+(production) starts with both groups empty.
 
 Still outstanding
 -----------------
@@ -44,7 +51,7 @@ Still outstanding
 
 Rules honoured: no structure inside a unit; unit names are free text following
 the client's T-number convention and are never parsed, validated, decomposed or
-enumerated; the suffixes below are current usage, not a permitted set (LOC-006).
+enumerated; the suffixes above are current usage, not a permitted set (LOC-006).
 
 Usage (from backend/):
     uv run python -m scripts.seed_cold_storage         # dry run
@@ -60,20 +67,13 @@ from scripts._location_seed import Node, cli, seed_tree
 ROOM_CODE = "CS"
 ROOM_NAME = "Cold Storage"
 
-# Empty by design — see the module docstring. Every −20 °C unit the client has
-# named belongs to a department room. Super Admin adds units here on the page.
+# Both empty by design — see the module docstring. Cold Storage is seeded as
+# groups only; a Super Admin adds the equipment units on the page. The tuples
+# stay rather than collapsing to a bare `[]` so the shape of the room is still
+# readable here, and so seeding a unit list again is a one-line change. The
+# client's actual numbers are in the docstring.
 MINUS_20_UNITS: tuple[str, ...] = ()
-
-# The six −80 °C units from the client's equipment list that LOC-005 leaves
-# without a home in the Materials Management room.
-MINUS_80_UNITS: tuple[str, ...] = (
-    "T90019A",
-    "T90019C",
-    "T90019E",
-    "T90019F",
-    "T90019G",
-    "T90019H",
-)
+MINUS_80_UNITS: tuple[str, ...] = ()
 
 # LOC-004: pending the client's refrigerator list.
 # FRIDGE_UNITS: tuple[str, ...] = ()

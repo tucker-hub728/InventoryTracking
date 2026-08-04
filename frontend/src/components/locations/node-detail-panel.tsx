@@ -489,6 +489,34 @@ export function NodeDetailPanel({
       : pending?.kind === 'place' || pending?.kind === 'place-batch'
         ? 'movement.receipt'
         : 'movement.dispense';
+
+  // and must match exactly what the corresponding backend handler asserts:
+  //
+  //   place / place-batch  -> the LOT being placed (app.lots)
+  //   consume (single)     -> the ALLOCATION selected (app.lot_allocations)
+  //   *-batch on allocs    -> the LOT, because the backend resolves the batch
+  //                           to a single lot (a batch is single-lot by rule)
+  //                           and binds to that, not to the individual rows
+  //
+  // A mismatch here is refused at consumption rather than silently accepted,
+  // so getting this wrong shows up immediately as "signature was made for a
+  // different record" rather than as a quietly mis-attributed audit row.
+  // A batch selection is single-lot by rule, and ``batchLotId`` already
+  // tracks it. Fall back to reading it off the first selected allocation so
+  // the binding still resolves if the state was cleared.
+  const batchSubjectLotId =
+    pending?.kind === 'transfer-batch' || pending?.kind === 'consume-batch'
+      ? (batchLotId ?? allocations.find((a) => a.id === pending.allocationIds[0])?.lot_id)
+      : undefined;
+  const reauthSubject: { recordTable?: string; recordId?: string } =
+    pending?.kind === 'place' || pending?.kind === 'place-batch'
+      ? { recordTable: 'app.lots', recordId: pending.lotId }
+      : pending?.kind === 'consume'
+        ? { recordTable: 'app.lot_allocations', recordId: pending.allocationId }
+        : batchSubjectLotId
+          ? { recordTable: 'app.lots', recordId: batchSubjectLotId }
+          : {};
+
   const attestation =
     pending?.kind === 'place'
       ? `I attest this placement (unit-in) of ${pending.qty} unit(s) is accurate.`
@@ -870,6 +898,7 @@ export function NodeDetailPanel({
           if (!o) setPending(null);
         }}
         action={reauthAction}
+        {...reauthSubject}
         meaning={attestation}
         commentPlaceholder={
           pending?.kind === 'transfer-batch'

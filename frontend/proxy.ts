@@ -1,5 +1,5 @@
 /**
- * Edge middleware — coarse gate for app-shell routes.
+ * Proxy (formerly "middleware") — coarse gate for app-shell routes.
  *
  * We only check for *presence* of cookies here, not validity. Validating
  * tokens at the edge would require pulling in the JWKS client (heavy, and
@@ -12,7 +12,10 @@
  *   - Authed visitor on /login → /inventory
  *
  * The matcher excludes API routes, static assets, and the public auth
- * entry-points so this middleware adds zero overhead to those paths.
+ * entry-points so this adds zero overhead to those paths.
+ *
+ * Renamed from middleware.ts for Next 16, which deprecated that convention.
+ * Same contract: default matcher config, one exported handler.
  */
 
 import { NextResponse, type NextRequest } from 'next/server';
@@ -28,7 +31,7 @@ function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.has(pathname);
 }
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
 
   // The refresh cookie is our "is there a session at all" signal. It outlives

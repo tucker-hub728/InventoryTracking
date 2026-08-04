@@ -88,13 +88,18 @@ _ROLE = "super_admin"
 def _weak_password_reason(password: str) -> str | None:
     """Return why ``password`` is too weak for prod, or None if it passes.
 
-    Mirrors AWS Cognito's default password policy (>=8 chars with upper, lower,
+    Mirrors the production pool policy from
+    ``infra/cloudformation/01-foundation.yaml`` (>=12 chars with upper, lower,
     digit, and symbol) so we fail fast here with a clear message instead of
     getting an opaque InvalidPasswordException mid-run — or, worse, succeeding
     against a laxly-configured pool and leaving a guessable super-admin.
+
+    Kept at 12, not Cognito's own 8-character default: a shorter password would
+    pass this check and then be rejected by the real pool, which is a confusing
+    place to discover it.
     """
     checks = (
-        (len(password) >= 8, "at least 8 characters"),
+        (len(password) >= 12, "at least 12 characters"),
         (any(c.islower() for c in password), "a lowercase letter"),
         (any(c.isupper() for c in password), "an uppercase letter"),
         (any(c.isdigit() for c in password), "a digit"),
@@ -273,7 +278,7 @@ async def main() -> int:
             )
         if weak:
             print("!! PRODUCTION !!")
-            print("REFUSING: unusable password(s) — set SUPERADMIN_PASSWORD first:")
+            print("REFUSING: --password does not meet the production policy:")
             for email, reason in weak:
                 print(f"  - {email}: {reason}")
             return 1

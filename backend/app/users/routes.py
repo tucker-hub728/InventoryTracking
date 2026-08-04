@@ -266,6 +266,10 @@ async def update_user(
             expected_action=USER_UPDATE_ACTION,
             target_table="app.users",
             target_id=user.id,
+            # Subject == target here: the record already existed when the
+            # operator signed, so the signature binds directly to it.
+            record_table="app.users",
+            record_id=user.id,
         )
 
     before_name = user.full_name

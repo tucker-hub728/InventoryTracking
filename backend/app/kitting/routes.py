@@ -33,6 +33,7 @@ from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit.recorder import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.search import MAX_SEARCH_LENGTH
 from app.inventory import repository as inv_repo
 from app.locations import repository as loc_repo
 from app.models.inventory import Item, StockMovement
@@ -448,7 +449,9 @@ async def _move_to_production(
                 code="invalid_cell",
             )
     else:
-        allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, node_id)
+        allocs = await kit_repo.allocations_for_item_at_node(
+            db, line.item_id, node_id, for_update=True
+        )
         if lot_id is not None:
             # Multi-source: this pick draws one specific lot at the node.
             allocs = [a for a in allocs if a.lot_id == lot_id]
@@ -536,7 +539,7 @@ async def _drain_production(db, *, kit: Kit, line: KitLine, qty: int) -> None:
     if qty <= 0:
         return
     allocs = await kit_repo.allocations_for_item_at_node(
-        db, line.item_id, kit.production_location_node_id
+        db, line.item_id, kit.production_location_node_id, for_update=True
     )
     remaining = qty
     for alloc in allocs:
@@ -588,7 +591,9 @@ async def _return_to_inventory(
     operator to assign one; it does not require discarding the incoming lot.
     """
     prod_node = kit.production_location_node_id
-    allocs = await kit_repo.allocations_for_item_at_node(db, line.item_id, prod_node)
+    allocs = await kit_repo.allocations_for_item_at_node(
+        db, line.item_id, prod_node, for_update=True
+    )
     # When the operator picked a specific floor lot to return (client 2026-07-24),
     # drain only that lot's WIP; otherwise drain FIFO across every lot on the floor
     # (close-out back-flush / cancel, unchanged).
@@ -1062,7 +1067,10 @@ async def list_kits(
     ] = None,
     q: Annotated[
         str | None,
-        Query(description="Search kit number, built item number, or description"),
+        Query(
+            description="Search kit number, built item number, or description",
+            max_length=MAX_SEARCH_LENGTH,
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -2237,6 +2245,10 @@ async def produce_kit(
         expected_action=PRODUCE_ACTION,
         target_table="app.kits",
         target_id=kit.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.kits",
+        record_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -2425,6 +2437,10 @@ async def close_out_kit(
         expected_action=CLOSEOUT_ACTION,
         target_table="app.kits",
         target_id=kit.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.kits",
+        record_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)
@@ -2557,6 +2573,10 @@ async def cancel_kit(
         expected_action=CANCEL_ACTION,
         target_table="app.kits",
         target_id=kit.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.kits",
+        record_id=kit.id,
     )
     refreshed = await _require_kit(db, kit.id)
     response = await _kit_read(db, refreshed)

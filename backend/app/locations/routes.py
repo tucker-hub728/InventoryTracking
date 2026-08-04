@@ -1076,6 +1076,9 @@ async def place_lot(
         expected_action="movement.receipt",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # The lot being placed — chosen on screen; the movement row below is the result.
+        record_table="app.lots",
+        record_id=lot_uuid,
     )
     response = _alloc_to_read(alloc)
     await db.commit()
@@ -1166,6 +1169,9 @@ async def place_lot_batch(
         expected_action="movement.receipt",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # The lot being placed — chosen on screen; the movement row below is the result.
+        record_table="app.lots",
+        record_id=lot_uuid,
     )
     await db.commit()
     return allocs
@@ -1185,7 +1191,7 @@ async def transfer_allocation(
 ) -> AllocationRead:
     alloc_uuid = _parse_uuid(payload.allocation_id, field="allocation_id")
     evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
-    alloc = await loc_repo.get_allocation(db, alloc_uuid)
+    alloc = await loc_repo.get_allocation(db, alloc_uuid, for_update=True)
     if alloc is None or not alloc.is_active:
         raise NotFoundError(f"Active allocation {payload.allocation_id} not found")
 
@@ -1245,6 +1251,9 @@ async def transfer_allocation(
         expected_action="movement.transfer",
         target_table="app.stock_movements",
         target_id=out_leg.id,
+        # The allocation the operator selected to move.
+        record_table="app.lot_allocations",
+        record_id=alloc.id,
     )
     response = _alloc_to_read(dest)
     await db.commit()
@@ -1265,7 +1274,7 @@ async def consume_allocation(
 ) -> AllocationRead:
     alloc_uuid = _parse_uuid(payload.allocation_id, field="allocation_id")
     evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
-    alloc = await loc_repo.get_allocation(db, alloc_uuid)
+    alloc = await loc_repo.get_allocation(db, alloc_uuid, for_update=True)
     if alloc is None or not alloc.is_active:
         raise NotFoundError(f"Active allocation {payload.allocation_id} not found")
     if payload.qty > alloc.qty:
@@ -1304,6 +1313,9 @@ async def consume_allocation(
         expected_action="movement.dispense",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # The allocation the operator selected to consume.
+        record_table="app.lot_allocations",
+        record_id=alloc.id,
     )
     response = _alloc_to_read(updated)
     await db.commit()
@@ -1322,7 +1334,7 @@ async def _load_batch_sources(
     allocs: list[LotAllocation] = []
     for raw in allocation_ids:
         au = _parse_uuid(raw, field="allocation_id")
-        a = await loc_repo.get_allocation(db, au)
+        a = await loc_repo.get_allocation(db, au, for_update=True)
         if a is None or not a.is_active:
             raise NotFoundError(f"Active allocation {raw} not found")
         allocs.append(a)
@@ -1382,6 +1394,9 @@ async def consume_batch(
         expected_action="movement.dispense",
         target_table="app.stock_movements",
         target_id=movement.id,
+        # Batch dispense: single-lot batch, so the lot is the subject.
+        record_table="app.lots",
+        record_id=lot_id,
     )
     await db.commit()
     return results
@@ -1506,6 +1521,9 @@ async def transfer_batch(
         expected_action="movement.transfer",
         target_table="app.stock_movements",
         target_id=out_leg.id,
+        # Batch transfer: every source is one lot (enforced above), so the lot is the subject.
+        record_table="app.lots",
+        record_id=lot_id,
     )
     await db.commit()
     return results

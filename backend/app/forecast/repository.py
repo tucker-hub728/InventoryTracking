@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.forecast import ForecastEntry
-from app.models.inventory import Item
+from app.models.inventory import Item, ItemPrefix
 from app.models.products import Customer
 
 
@@ -23,14 +23,32 @@ async def list_forecast_entries(
     year: int,
     product_id: uuid.UUID | None = None,
     customer_id: uuid.UUID | None = None,
+    limit: int = 5000,
+    offset: int = 0,
 ) -> list[ForecastEntry]:
     """Live forecast cells for a year. Only entries on live products (and a
     live customer, or none) are returned; ordered Unassigned-first, then by
     SKU and month.
+
+    Bounded: this had no LIMIT and fetched every cell for the year, which
+    grows as products × customers × 12 months. The ORDER BY now lives in
+    SQL rather than a post-fetch ``rows.sort()`` — that is what makes the
+    bound safe, because limiting an unordered fetch would return an
+    arbitrary subset rather than the first page.
+
+    The SQL ordering reproduces the previous Python key exactly:
+      1. customer name, with NULL (Unassigned) coalesced to '' so it sorts
+         first, as it did when the key used ``if e.customer else ""``
+      2. the DERIVED item number — ``item_number`` is a Python property
+         (``prefix.code + '-' + sku_suffix``) with no column behind it, so
+         it is rebuilt here with concat over the joined prefix
+      3. month
     """
+    item_number = func.lower(func.concat(ItemPrefix.code, "-", Item.sku_suffix))
     stmt = (
         select(ForecastEntry)
         .join(Item, Item.id == ForecastEntry.product_id)
+        .join(ItemPrefix, ItemPrefix.id == Item.prefix_id)
         .outerjoin(Customer, Customer.id == ForecastEntry.customer_id)
         .where(
             ForecastEntry.forecast_year == year,
@@ -46,16 +64,16 @@ async def list_forecast_entries(
     if customer_id is not None:
         stmt = stmt.where(ForecastEntry.customer_id == customer_id)
 
-    rows = list((await session.execute(stmt)).scalars().unique().all())
-    # Unassigned (no customer) sorts first, then by customer name, item #, month.
-    rows.sort(
-        key=lambda e: (
-            e.customer.name.lower() if e.customer else "",
-            e.product.item_number.lower() if e.product else "",
-            e.forecast_month,
+    stmt = (
+        stmt.order_by(
+            func.lower(func.coalesce(Customer.name, "")),
+            item_number,
+            ForecastEntry.forecast_month,
         )
+        .limit(limit)
+        .offset(offset)
     )
-    return rows
+    return list((await session.execute(stmt)).scalars().unique().all())
 
 
 async def get_entry(

@@ -24,6 +24,21 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   /** Stable, machine-readable verb the backend will check against. */
   action: string;
+  /**
+   * The record being signed for — e.g. `'app.lots'` and the lot's id.
+   *
+   * The backend binds the signature to this and refuses to spend it on
+   * anything else, so a ticket minted on one record cannot be used to
+   * authorise a change to another (VR-006). Pass what the operator is
+   * actually looking at.
+   *
+   * Omit ONLY where no record exists yet — creating a top-level tier, or the
+   * forecast grid save, which spans many records at once. Every other caller
+   * should supply it; leaving it out silently weakens the signature to
+   * "some record of this type".
+   */
+  recordTable?: string;
+  recordId?: string;
   /** Sentence the user is attesting to — rendered verbatim. */
   meaning: string;
   /** Called with the fresh evidence id when the password verifies. */
@@ -59,6 +74,8 @@ export function PasswordReauthDialog({
   open,
   onOpenChange,
   action,
+  recordTable,
+  recordId,
   meaning,
   onConfirmed,
   title = 'Confirm your password',
@@ -90,6 +107,8 @@ export function PasswordReauthDialog({
       password,
       meaning,
       comment: comment.trim() || undefined,
+      recordTable,
+      recordId,
     });
     if (evidence) {
       onConfirmed(evidence);

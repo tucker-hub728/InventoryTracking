@@ -12,13 +12,18 @@
  */
 
 import { cookies } from 'next/headers';
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 
 import { backend, BackendError } from '@/lib/auth/backend';
 import { AUTH_COOKIES, clearAuthCookies, setAuthCookies } from '@/lib/auth/cookies';
+import { CSRF_BLOCKED, isCrossSiteMutation } from '@/lib/auth/csrf';
 
-export async function POST() {
-  const rt = cookies().get(AUTH_COOKIES.refresh)?.value;
+export async function POST(req: NextRequest) {
+  if (isCrossSiteMutation(req)) {
+    return NextResponse.json(CSRF_BLOCKED, { status: 403 });
+  }
+
+  const rt = (await cookies()).get(AUTH_COOKIES.refresh)?.value;
   if (!rt) {
     return NextResponse.json(
       { code: 'no_session', message: 'No refresh token on file.' },
@@ -29,7 +34,7 @@ export async function POST() {
   try {
     const tokens = await backend.refresh(rt);
     const res = NextResponse.json({ ok: true });
-    setAuthCookies(res, {
+    await setAuthCookies(res, {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       accessMaxAgeSeconds: tokens.expires_in,
@@ -46,7 +51,7 @@ export async function POST() {
       },
       { status: 401 },
     );
-    clearAuthCookies(res);
+    await clearAuthCookies(res);
     return res;
   }
 }

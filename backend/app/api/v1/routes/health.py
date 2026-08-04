@@ -20,7 +20,6 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from app import __version__
 from app.api.deps import DBSession
 from app.core.config import get_settings
 
@@ -28,10 +27,22 @@ router = APIRouter(tags=["health"])
 
 
 class HealthResponse(BaseModel):
+    """Public liveness payload.
+
+    Deliberately minimal. This endpoint is unauthenticated (the container
+    healthcheck and the load balancer both hit it), and it used to return
+    the exact build version and the environment name to anyone who asked —
+    which is a free lookup of "which published CVEs apply to this host"
+    for someone deciding whether to bother attacking it.
+
+    A liveness probe only needs to answer "am I up": the healthchecks in
+    docker-compose.yml and deploy/docker-compose.yml assert on the HTTP
+    status, not the body. Version and environment are still available to
+    operators through the deploy metadata and structured logs.
+    """
+
     status: Literal["ok"]
     service: str
-    version: str
-    env: str
 
 
 class ReadinessResponse(BaseModel):
@@ -47,12 +58,7 @@ class ReadinessResponse(BaseModel):
 )
 async def health() -> HealthResponse:
     s = get_settings()
-    return HealthResponse(
-        status="ok",
-        service=s.app_name,
-        version=__version__,
-        env=s.app_env.value,
-    )
+    return HealthResponse(status="ok", service=s.app_name)
 
 
 @router.get(

@@ -43,7 +43,7 @@ export interface ReadSessionResult {
  * the outgoing response via ``setAuthCookies``.
  */
 export async function readSession(): Promise<ReadSessionResult> {
-  const jar = cookies();
+  const jar = await cookies();
   const at = jar.get(AUTH_COOKIES.access)?.value;
   const rt = jar.get(AUTH_COOKIES.refresh)?.value;
 
@@ -70,13 +70,17 @@ export async function readSession(): Promise<ReadSessionResult> {
   return { user: toSessionUser(me), refreshedTokens: fresh };
 }
 
-/** Convenience: persist a silently-refreshed token pair on the outgoing response. */
-export function applyRefreshedCookies(
+/** Convenience: persist a silently-refreshed token pair on the outgoing response.
+ *
+ * Async since Next 15 — writing the cookie needs the request's `headers()` to
+ * decide the `Secure` flag, and that is a promise now. Callers must await it,
+ * or the response can be returned before the Set-Cookie is attached. */
+export async function applyRefreshedCookies(
   res: NextResponse,
   tokens: BackendTokens | undefined,
-): void {
+): Promise<void> {
   if (!tokens) return;
-  setAuthCookies(res, {
+  await setAuthCookies(res, {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token, // null on refresh; setAuthCookies skips it
     accessMaxAgeSeconds: tokens.expires_in,

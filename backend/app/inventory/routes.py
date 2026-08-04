@@ -18,6 +18,7 @@ from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.search import MAX_SEARCH_LENGTH
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
     ItemCreate,
@@ -475,7 +476,13 @@ async def delete_supplier(
 )
 async def list_items(
     db: DBSession,
-    q: Annotated[str | None, Query(description="Search description + item_number")] = None,
+    q: Annotated[
+        str | None,
+        Query(
+            description="Search description + item_number",
+            max_length=MAX_SEARCH_LENGTH,
+        ),
+    ] = None,
     supplier_id: Annotated[uuid.UUID | None, Query()] = None,
     tier_id: Annotated[
         uuid.UUID | None, Query(description="Filter by item tier")
@@ -1166,6 +1173,10 @@ async def update_lot(
         expected_action="lot.update",
         target_table="app.lots",
         target_id=updated.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.lots",
+        record_id=updated.id,
     )
 
     await db.refresh(updated)
@@ -1759,6 +1770,10 @@ async def delete_order(
         expected_action="order.delete",
         target_table="app.receipt_transactions",
         target_id=txn.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.receipt_transactions",
+        record_id=txn.id,
     )
     await record_entity_change(
         db,
@@ -1810,6 +1825,10 @@ async def cancel_order(
         expected_action="order.cancel",
         target_table="app.receipt_transactions",
         target_id=txn.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.receipt_transactions",
+        record_id=txn.id,
     )
     await record_entity_change(
         db,
@@ -2078,6 +2097,10 @@ async def receive_order(
         expected_action="receipt.confirm",
         target_table="app.receipt_transactions",
         target_id=txn.id,
+        # Subject == target here: the record already existed when the
+        # operator signed, so the signature binds directly to it.
+        record_table="app.receipt_transactions",
+        record_id=txn.id,
     )
 
     # Recompute the Order status from the new fulfilment picture.

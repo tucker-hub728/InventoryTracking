@@ -66,16 +66,17 @@ RATE_LIMIT_WINDOW = timedelta(minutes=5)
 
 
 ReauthFailureReason = Literal[
-    "wrong_password", "user_disabled", "rate_limited", "cognito_error",
+    "wrong_password",
+    "user_disabled",
+    "rate_limited",
+    "cognito_error",
 ]
 
 
 # ── Internal helpers ────────────────────────────────────────────────────
 
 
-async def _count_recent_failures(
-    db: AsyncSession, *, user_id: uuid.UUID
-) -> int:
+async def _count_recent_failures(db: AsyncSession, *, user_id: uuid.UUID) -> int:
     """Number of failed reauth events for the user inside the sliding window."""
     since = datetime.now(UTC) - RATE_LIMIT_WINDOW
     stmt = (
@@ -101,7 +102,8 @@ async def _record_event(
     failure_reason: ReauthFailureReason | None,
     ip_address: str | None,
     user_agent: str | None,
-    signature_image_s3_key: str | None = None,
+    record_table: str | None = None,
+    record_id: uuid.UUID | None = None,
 ) -> ReauthEvent:
     """Insert an immutable audit row. Caller commits."""
     now = datetime.now(UTC)
@@ -120,10 +122,10 @@ async def _record_event(
         # event isn't usable as evidence — but the CHECK requires
         # ``expires_at > created_at`` so we always set it.
         expires_at=now + REAUTH_TTL,
-        # Image key is only meaningful on success rows — we accept it
-        # on either so audit rows persist what the operator saw even
-        # when the password failed.
-        signature_image_s3_key=signature_image_s3_key,
+        # Recorded on failure rows too: "they tried to sign for X and got the
+        # password wrong" is exactly the forensic detail an investigation wants.
+        record_table=record_table,
+        record_id=record_id,
     )
     db.add(evt)
     await db.flush()
@@ -171,7 +173,8 @@ async def verify_password_and_issue_evidence(
     comment: str | None,
     ip_address: str | None,
     user_agent: str | None,
-    signature_image_s3_key: str | None = None,
+    record_table: str | None = None,
+    record_id: uuid.UUID | None = None,
 ) -> ReauthEvent:
     """Run the full reauth flow. Caller commits the session.
 
@@ -200,7 +203,8 @@ async def verify_password_and_issue_evidence(
             failure_reason="rate_limited",
             ip_address=ip_address,
             user_agent=user_agent,
-            signature_image_s3_key=signature_image_s3_key,
+            record_table=record_table,
+            record_id=record_id,
         )
         await db.commit()
         log.warning(
@@ -231,7 +235,8 @@ async def verify_password_and_issue_evidence(
             failure_reason=reason,
             ip_address=ip_address,
             user_agent=user_agent,
-            signature_image_s3_key=signature_image_s3_key,
+            record_table=record_table,
+            record_id=record_id,
         )
         await db.commit()
         log.info(
@@ -258,7 +263,8 @@ async def verify_password_and_issue_evidence(
         failure_reason=None,
         ip_address=ip_address,
         user_agent=user_agent,
-        signature_image_s3_key=signature_image_s3_key,
+        record_table=record_table,
+        record_id=record_id,
     )
     await db.commit()
     log.info(
@@ -293,6 +299,8 @@ async def consume_reauth_evidence(
     expected_action: str,
     target_table: str,
     target_id: uuid.UUID,
+    record_table: str | None = None,
+    record_id: uuid.UUID | None = None,
 ) -> ReauthEvent:
     """Atomically validate ``evidence_id`` and mark it consumed.
 
@@ -304,6 +312,15 @@ async def consume_reauth_evidence(
 
     The caller does NOT commit here — the wrapping route handler
     commits the whole receipt/movement/consumption tx together.
+
+    **target vs subject.** ``target_*`` is the row this write PRODUCED and is
+    recorded on the consumption for the audit trail. ``subject_*`` is the row
+    the operator was signing ABOUT, and is the one asserted against the
+    evidence (VR-006). They are frequently different: receiving stock targets
+    a brand-new ``stock_movements`` row while the subject is the lot that was
+    on screen. Callers should pass the subject they showed the operator; when
+    it is genuinely absent (creating a record that does not exist yet) leave
+    it None and the check falls back to the action match.
     """
 
     evt = (
@@ -346,6 +363,32 @@ async def consume_reauth_evidence(
             "Re-authentication evidence has expired; re-enter your password",
             code="reauth_evidence_expired",
         )
+
+    # ── Subject binding (VR-006) ────────────────────────────────────────
+    # The signature must belong to the record it is being spent on. Without
+    # this, a ticket minted while looking at Lot A would satisfy a write to
+    # Lot B for the whole 120-second TTL — and the audit trail would record
+    # the operator's name and attestation against a record they never opened,
+    # indistinguishable from a legitimate signature.
+    #
+    # Compared only when the evidence carries a subject. Evidence issued
+    # before ``esignbind01``, and the create flows that genuinely have no
+    # record to point at, both leave it NULL and fall back to the action
+    # check above. That keeps the rollout safe; it does not weaken anything
+    # that WAS bound, because a bound ticket is always checked.
+    if evt.record_table is not None and evt.record_id is not None:
+        if (evt.record_table, evt.record_id) != (record_table, record_id):
+            log.warning(
+                "auth.reauth.record_mismatch",
+                evidence_id=str(evidence_id),
+                signed_for=f"{evt.record_table}:{evt.record_id}",
+                used_on=f"{record_table}:{record_id}",
+            )
+            raise ReauthEvidenceInvalid(
+                "This signature was made for a different record. "
+                "Re-enter your password for the record you are changing.",
+                code="reauth_evidence_record_mismatch",
+            )
 
     # Insert the consumption row. PK = reauth_event_id, so a concurrent
     # consumption of the same evidence raises IntegrityError on flush.

@@ -1,0 +1,55 @@
+version: 2
+
+# Pinning actions to commit SHAs (VR-034) removes the "free" upgrades a
+# floating @v4 tag gave us, so something has to actively propose bumps —
+# otherwise pinned means frozen, and frozen means unpatched. Dependabot
+# rewrites the SHA and the trailing `# v4` comment together.
+#
+# This is also the control that catches the next VR-003 (a CVE in a pinned
+# dependency) without waiting for the next manual audit.
+updates:
+  # ── GitHub Actions (SHA-pinned in ci.yml / deploy.yml) ──────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+
+  # ── Python backend (uv / pyproject) ────────────────────────────────────
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: backend
+    groups:
+      # One PR for routine patch/minor noise; majors still come separately
+      # so they get a real review.
+      backend-minor-patch:
+        update-types: [minor, patch]
+
+  # ── Next.js frontend (npm) ─────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: frontend
+    groups:
+      frontend-minor-patch:
+        update-types: [minor, patch]
+
+  # ── Container base images ──────────────────────────────────────────────
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: docker

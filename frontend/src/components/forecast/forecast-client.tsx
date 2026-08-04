@@ -457,6 +457,7 @@ export function ForecastClient() {
         open={signing}
         onOpenChange={setSigning}
         action="forecast.save"
+        // a GRID of edited cells across many products, customers and months —
         meaning="I attest these forecast figures are accurate."
         title="Sign to save forecast"
         submitLabel="Sign & save"

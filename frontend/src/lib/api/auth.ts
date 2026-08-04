@@ -30,11 +30,12 @@ export interface ReauthRequestBody {
    */
   comment?: string;
   /**
-   * Optional S3 key returned by ``uploadsApi.signature(...)``. When set,
-   * the canvas-drawn signature image is stored on the audit row and
-   * shown in the audit viewer alongside the typed password attestation.
+   * The record this signature is for (VR-006). Sent as-is to the backend,
+   * which stores it on the evidence row and refuses to spend the signature
+   * on any other record. Both fields travel together or not at all.
    */
-  signature_image_s3_key?: string;
+  record_table?: string;
+  record_id?: string;
 }
 
 export interface ReauthResponse {
@@ -42,7 +43,6 @@ export interface ReauthResponse {
   action: string;
   /** ISO timestamp; the UI shows a relative countdown if useful. */
   expires_at: string;
-  signature_image_s3_key: string | null;
   /**
    * The rationale the operator entered, echoed back so the caller can
    * mirror it into the domain record's notes/reason (e.g. the movement

@@ -165,7 +165,36 @@ async def test_login_with_wrong_password_is_401(client: AsyncClient) -> None:
     body = resp.json()
     # Domain code is stable; only the human message changes between Cognito
     # versions, so we assert on the code.
-    assert body["code"] == "authentication_required"
+    assert body["code"] == "invalid_credentials"
+
+
+async def test_login_failures_are_indistinguishable(client: AsyncClient) -> None:
+    """Regression guard for VR-008 (account enumeration).
+
+    A known address with a wrong password and a completely unknown address
+    must produce byte-identical responses. Previously the unknown address
+    raised ``UserNotFoundException`` -> ``NotFoundError`` -> **404** while the
+    known one gave 401, so anyone could sort an email list into "has an
+    account here" / "doesn't" without ever authenticating.
+    """
+    tokens = await _provision_and_login(client)
+
+    known_bad_password = await client.post(
+        "/v1/auth/login",
+        json={"email": tokens["email"], "password": "DefinitelyWrong!1"},
+    )
+    unknown_address = await client.post(
+        "/v1/auth/login",
+        json={
+            "email": "definitely-not-registered-9f3a@cellready.local",
+            "password": "DefinitelyWrong!1",
+        },
+    )
+
+    assert known_bad_password.status_code == unknown_address.status_code == 401
+    assert known_bad_password.json() == unknown_address.json()
+    # And specifically: not the old 404-for-unknown-user behaviour.
+    assert unknown_address.status_code != 404
 
 
 async def test_me_without_authorization_header_is_401(client: AsyncClient) -> None:

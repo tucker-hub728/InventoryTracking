@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 # Loose email format check. We deliberately don't use ``pydantic.EmailStr``
 # because it rejects reserved-use TLDs like ``.local`` and ``.test`` (per
@@ -148,6 +148,24 @@ class ReauthRequest(BaseModel):
     # replayed to satisfy ``supplier.update``.
     action: str = Field(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9_.-]+$")
     password: str = Field(min_length=1, max_length=128)
+    # The record being signed for — "Lot A-100", not "some lot" (VR-006).
+    # Asserted at consumption, so a ticket minted while looking at one record
+    # cannot be spent on another inside its 120-second life.
+    #
+    # Optional because three flows create a record that does not exist yet
+    # (tier, prefix, BOM line); those bind to the action alone. Supplying one
+    # is strictly stronger, and both fields must travel together.
+    record_table: str | None = Field(default=None, max_length=128)
+    record_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _subject_is_all_or_nothing(self) -> ReauthRequest:
+        """Half a subject would bind nothing while looking like it did."""
+        if (self.record_table is None) != (self.record_id is None):
+            raise ValueError(
+                "record_table and record_id must be supplied together"
+            )
+        return self
     # Optional attestation. The frontend dialog renders this verbatim
     # ("I attest the dispense quantity is accurate") so the audit row
     # carries the same text the user saw.
@@ -158,11 +176,12 @@ class ReauthRequest(BaseModel):
     # Part 11 manifestation; the reason is now optional. A few domain endpoints
     # may still require their own reason (enforced there / in the dialog).
     comment: str | None = Field(default=None, max_length=512)
-    # Optional S3 key returned by ``POST /v1/uploads/signature`` —
-    # the canvas image the operator drew. Stored on the audit row
-    # alongside the textual evidence; never returned by the reauth
-    # response itself (the audit viewer fetches it on demand).
-    signature_image_s3_key: str | None = Field(default=None, max_length=512)
+    # NOTE: no ``signature_image_s3_key``. The hand-drawn canvas image was
+    # removed on 2026-08-03 (client decision). The signature manifestation
+    # is the re-authenticated identity + timestamp + ``meaning`` on the
+    # audit row — which is what 21 CFR Part 11 §11.50 actually asks for.
+    # ``extra="forbid"`` on this model means an old client still sending
+    # the field now gets a clear 422 instead of having it silently dropped.
 
 
 class ReauthResponse(BaseModel):
@@ -171,8 +190,6 @@ class ReauthResponse(BaseModel):
     evidence_id: str
     action: str
     expires_at: datetime
-    # Echoed so the frontend can confirm the image landed on the row.
-    signature_image_s3_key: str | None = None
     # Echoed so the caller can also thread the rationale into the domain
     # record's notes/reason (e.g. the movement ledger), keeping the audit
     # log and the per-domain view in sync.

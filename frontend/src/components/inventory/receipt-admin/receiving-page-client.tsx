@@ -781,6 +781,8 @@ function OrderDetailSheet({
         open={reauthAction !== null}
         onOpenChange={(o) => !o && setReauthAction(null)}
         action={reauthAction === 'delete' ? 'order.delete' : 'order.cancel'}
+        recordTable="app.receipt_transactions"
+        recordId={current?.id}
         meaning={
           reauthAction === 'delete'
             ? `I am deleting order ${current?.po_reference ?? ''}.`

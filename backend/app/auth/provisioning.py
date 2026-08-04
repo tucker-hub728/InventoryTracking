@@ -38,9 +38,38 @@ _VALID_ROLES: frozenset[str] = frozenset(
     {"super_admin", "admin", "operator", "read_only"},
 )
 
+# Roles this lazy path is allowed to MINT. Deliberately excludes
+# ``super_admin``.
+#
+# The role seeded here comes from the Cognito ``custom:role`` attribute.
+# If that attribute is ever writable by the user on the app client — a
+# common and easy-to-miss pool misconfiguration — then a self-assertable
+# string was being turned directly into the role that short-circuits every
+# permission check (``PERM_MATRIX["super_admin"] = {"*": {"*"}}``). A new
+# user could set it, hit ``/auth/me`` before any local row existed, and be
+# provisioned as super admin: full vertical privilege escalation from an
+# attribute the holder controls.
+#
+# Super admin is granted by PROMOTION through the Users page
+# (REQ-2026-07-31-ROL-005) or by the bootstrap seeder — both of which are
+# authenticated, audited, server-side decisions. Never by lazy first-login
+# provisioning, regardless of what the token asserts.
+_PROVISIONABLE_ROLES: frozenset[str] = frozenset(
+    {"admin", "operator", "read_only"},
+)
+
 
 def _safe_role(raw: str | None) -> str:
-    return raw if raw in _VALID_ROLES else "read_only"
+    """Clamp a self-assertable Cognito attribute to a safe local role."""
+    if raw in _PROVISIONABLE_ROLES:
+        return raw  # type: ignore[return-value]  # narrowed by the membership test
+    if raw == "super_admin":
+        # Worth a log line: either the pool is misconfigured and someone is
+        # probing it, or a legitimately-promoted super admin lost their local
+        # row and is being re-mirrored. The second case is repaired by
+        # re-promoting them, not by trusting the token.
+        log.warning("auth.provision.super_admin_attribute_refused", raw_role=raw)
+    return "read_only"
 
 
 def _safe_initials(raw: str | None, fallback_email: str) -> str:

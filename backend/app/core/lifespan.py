@@ -77,19 +77,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # carry on so the operator can apply migrations from a running pod.
         log.warning("app.startup.identity_check_failed", error=str(exc))
 
-    # ── Object storage: ensure the signatures bucket is present ─────────
-    # In dev this creates the MinIO bucket idempotently. In prod the
-    # bucket is expected to exist already; an AccessDenied response is
-    # swallowed in ``ensure_signatures_bucket`` (logged, not raised).
-    try:
-        from app.storage import ensure_signatures_bucket
-
-        await ensure_signatures_bucket()
-    except Exception as exc:
-        # Don't refuse to boot just because S3 is briefly unreachable —
-        # signature endpoints will surface their own 5xx if it stays
-        # down. We log loudly so it's visible in startup output.
-        log.warning("app.startup.s3_init_failed", error=str(exc))
+    # NOTE: there is no object-storage bootstrap here any more. The only
+    # thing the app ever put in S3 was the hand-drawn e-signature image,
+    # and that was removed on 2026-08-03 (client decision — an electronic
+    # signature is the password re-authentication, full stop). The whole
+    # storage package, the bucket and the MinIO dev container went with it.
 
     log.info("app.started")
     try:

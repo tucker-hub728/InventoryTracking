@@ -14,6 +14,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.bounds import MAX_QTY
+
 KitStatus = Literal["draft", "issued", "in_production", "closed", "cancelled"]
 
 
@@ -461,7 +463,7 @@ class KitCreateRequest(BaseModel):
         description="Kit / batch name. Must be unique; also names the produced lot.",
     )
     item_id: str = Field(description="The sub-assembly or finished good to build")
-    target_qty: int = Field(gt=0, description="How many to build")
+    target_qty: int = Field(gt=0, le=MAX_QTY, description="How many to build")
     production_location_node_id: str = Field(
         description="Advisory production floor (a real location node)"
     )
@@ -479,7 +481,7 @@ class KitUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kit_number: str | None = Field(default=None, min_length=1, max_length=64)
-    target_qty: int | None = Field(default=None, gt=0)
+    target_qty: int | None = Field(default=None, gt=0, le=MAX_QTY)
 
 
 class KitLineUpdateRequest(BaseModel):
@@ -487,7 +489,7 @@ class KitLineUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    issued_qty: int | None = Field(default=None, ge=0)
+    issued_qty: int | None = Field(default=None, ge=0, le=MAX_QTY)
     source_location_node_id: str | None = None
 
 
@@ -502,7 +504,7 @@ class IssueSourceInput(BaseModel):
 
     node_id: str
     lot_id: str | None = None
-    qty: int = Field(ge=0)
+    qty: int = Field(ge=0, le=MAX_QTY)
     # Box lot only: the exact cells to pull. When present, ``qty`` must equal
     # its length (a cell holds one unit, D2).
     cell_allocation_ids: list[str] = Field(default_factory=list)
@@ -523,7 +525,7 @@ class IssueLineInput(BaseModel):
     # Multi-source: draw the need across one or more (location, lot) picks.
     sources: list[IssueSourceInput] = Field(default_factory=list)
     # ── Legacy single-source (used only when ``sources`` is empty) ──
-    issued_qty: int | None = Field(default=None, ge=0)
+    issued_qty: int | None = Field(default=None, ge=0, le=MAX_QTY)
     source_location_node_id: str | None = None
     # LN2 only: the exact cells to pull. Empty = bulk source, drain FIFO by
     # expiry. When present, ``issued_qty`` must equal its length (D2).
@@ -578,8 +580,8 @@ class ProductionDraftRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    good_qty: int | None = Field(default=None, ge=0)
-    scrap_qty: int | None = Field(default=None, ge=0)
+    good_qty: int | None = Field(default=None, ge=0, le=MAX_QTY)
+    scrap_qty: int | None = Field(default=None, ge=0, le=MAX_QTY)
     output_location_node_id: str | None = None
 
 
@@ -594,7 +596,7 @@ class AdditionalIssueRequest(BaseModel):
     # Multi-source: one or more (location, lot) picks, like the initial issue.
     sources: list[IssueSourceInput] = Field(default_factory=list)
     # ── Legacy single-source (used only when ``sources`` is empty) ──
-    qty: int | None = Field(default=None, gt=0, description="Extra quantity to issue")
+    qty: int | None = Field(default=None, gt=0, le=MAX_QTY, description="Extra quantity to issue")
     # LN2 only: the exact cells to pull; ``qty`` must equal its length.
     cell_allocation_ids: list[str] = Field(default_factory=list)
 
@@ -607,7 +609,7 @@ class ReturnSourceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lot_id: str = Field(description="Which on-floor lot's units to return")
-    qty: int = Field(gt=0, description="How many of this lot to hand back")
+    qty: int = Field(gt=0, le=MAX_QTY, description="How many of this lot to hand back")
     # Multi-destination (client 2026-07-30): this lot's units may land in several
     # places when one box can't hold them all. Wins over the single field below.
     destinations: list[ReturnDestinationInput] = Field(default_factory=list)
@@ -631,7 +633,7 @@ class ReturnExcessRequest(BaseModel):
     # Multi-source: one or more (floor lot, destination) picks.
     sources: list[ReturnSourceInput] = Field(default_factory=list)
     # ── Legacy single (used only when ``sources`` is empty) ──
-    qty: int | None = Field(default=None, gt=0, description="How much to hand back (≤ on-floor qty)")
+    qty: int | None = Field(default=None, gt=0, le=MAX_QTY, description="How much to hand back (≤ on-floor qty)")
     # Multi-destination (client 2026-07-30): split the returned qty across boxes.
     destinations: list[ReturnDestinationInput] = Field(default_factory=list)
     return_location_node_id: str | None = Field(
@@ -649,7 +651,7 @@ class CloseOutLineInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
-    used_qty: int = Field(ge=0, description="Material consumed by the final batch")
+    used_qty: int = Field(ge=0, le=MAX_QTY, description="Material consumed by the final batch")
     # Multi-destination back-flush (client 2026-07-30). Wins when present and must
     # total the leftover; the single field below stays for the one-place case.
     destinations: list[ReturnDestinationInput] = Field(default_factory=list)
@@ -666,7 +668,7 @@ class ProduceLineInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
-    used_qty: int = Field(ge=0, description="Material consumed for THIS batch")
+    used_qty: int = Field(ge=0, le=MAX_QTY, description="Material consumed for THIS batch")
 
 
 class OutputDestinationInput(BaseModel):
@@ -700,7 +702,7 @@ class ProduceRequest(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
     good_qty: int = Field(ge=1, description="Good units produced in THIS batch")
-    scrap_qty: int = Field(ge=0, description="Units scrapped in this batch")
+    scrap_qty: int = Field(ge=0, le=MAX_QTY, description="Units scrapped in this batch")
     # Single-destination (legacy) output: where the whole batch is stocked, with
     # one free cell per good unit for a box. Optional when ``outputs`` is used.
     output_location_node_id: str | None = Field(
@@ -728,8 +730,8 @@ class ProduceRequest(_ESignFields):
 class CloseOutRequest(_ESignFields):
     model_config = ConfigDict(extra="forbid")
 
-    good_qty: int = Field(ge=0, description="Good finished units produced in this final batch")
-    scrap_qty: int = Field(ge=0, description="Units scrapped in this final batch")
+    good_qty: int = Field(ge=0, le=MAX_QTY, description="Good finished units produced in this final batch")
+    scrap_qty: int = Field(ge=0, le=MAX_QTY, description="Units scrapped in this final batch")
     # Single-destination (legacy) output. Optional when ``outputs`` is used, and
     # not required at all when the final batch makes 0 good units.
     output_location_node_id: str | None = Field(

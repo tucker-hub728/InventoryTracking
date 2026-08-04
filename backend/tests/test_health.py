@@ -16,8 +16,18 @@ async def test_health_ok(client: AsyncClient) -> None:
     body = resp.json()
     assert body["status"] == "ok"
     assert body["service"] == "cellready-ims-backend"
-    assert body["env"] == "test"
-    assert "version" in body
+
+
+async def test_health_does_not_disclose_version_or_env(client: AsyncClient) -> None:
+    """The probe is unauthenticated, so it must not fingerprint the build.
+
+    Regression guard for VR-027: `version` and `env` were returned to any
+    anonymous caller, handing over exactly what's needed to match the host
+    against version-specific advisories.
+    """
+    body = (await client.get("/v1/health")).json()
+    assert "version" not in body
+    assert "env" not in body
 
 
 async def test_health_sets_request_id_header(client: AsyncClient) -> None:

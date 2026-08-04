@@ -8,7 +8,7 @@ its own. This script runs all of them against a single session and commits once:
         Minus-20 Freezers → T90020B · T90020C · T90020D
     scripts/seed_cold_storage.py           Cold Storage          LOC-002 / LOC-006
         Minus-20 Freezers (units added by Super Admin)
-        Minus-80 Freezers → T90019A · C · E · F · G · H
+        Minus-80 Freezers (units added by Super Admin)
     scripts/seed_analytical_lab.py         Analytical Lab        07-09-LOC-002
         Minus-20 Freezers → T90020A
         Minus-80 Freezers → T90019D

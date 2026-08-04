@@ -1,0 +1,8 @@
+[
+  { "ParameterKey": "ProjectName", "ParameterValue": "cellready" },
+  { "ParameterKey": "EnvName", "ParameterValue": "prod" },
+  { "ParameterKey": "JwtAccessTtlMinutes", "ParameterValue": "60" },
+  { "ParameterKey": "JwtIdTtlMinutes", "ParameterValue": "60" },
+  { "ParameterKey": "JwtRefreshTtlDays", "ParameterValue": "30" },
+  { "ParameterKey": "CreateEcrRepos", "ParameterValue": "false" }
+]

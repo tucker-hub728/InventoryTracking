@@ -5,7 +5,7 @@ import { InventoryDetailShell } from '@/components/inventory/inventory-detail-sh
 
 interface LayoutProps {
   children: ReactNode;
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
 // The route segment is the item's UUID, which is meaningless as a tab title —
@@ -14,6 +14,12 @@ export function generateMetadata(): Metadata {
   return { title: 'Item · Inventory' };
 }
 
-export default function InventoryDetailLayout({ children, params }: LayoutProps) {
+export default async function InventoryDetailLayout(props: LayoutProps) {
+  const params = await props.params;
+
+  const {
+    children
+  } = props;
+
   return <InventoryDetailShell itemKey={params.id}>{children}</InventoryDetailShell>;
 }

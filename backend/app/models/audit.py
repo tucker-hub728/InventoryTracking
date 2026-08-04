@@ -157,11 +157,22 @@ class ReauthEvent(Base):
         DateTime(timezone=True),
         nullable=False,
     )
-    # S3 key (e.g. ``signatures/<user_id>/<evidence_id>.png``) pointing
-    # at the canvas-drawn signature image the operator drew at sign
-    # time. Nullable — headless / API-only callers don't supply one,
-    # and the audit module renders a "no image" placeholder when null.
-    signature_image_s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NOTE: ``signature_image_s3_key`` was dropped on 2026-08-03 (migration
+    # ``esignimg01``). The hand-drawn canvas image is gone from the product:
+    # an electronic signature here is the password re-authentication, and
+    # this row — actor, timestamp, action, meaning — IS the manifestation.
+
+    # The record the operator was signing ABOUT (migration ``esignbind01``).
+    # Distinct from ``ReauthConsumption.target_*``, which records the row the
+    # write PRODUCED: for a stock movement the target is the new movement row,
+    # which does not exist yet at signing time. The subject is the lot / kit /
+    # item that was on screen, so it is the only thing a signature can be
+    # bound to. Asserted equal at consumption.
+    #
+    # NULL for the three create flows (tier, prefix, BOM line) where no record
+    # exists to point at — action-only binding is the honest answer there.
+    record_table: Mapped[str | None] = mapped_column(Text, nullable=True)
+    record_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -224,6 +224,9 @@ export function TierFormDialog({ open, onOpenChange, tier, onSaved }: Props) {
         open={showReauth}
         onOpenChange={setShowReauth}
         action={isEdit ? 'tier.update' : 'tier.create'}
+        // Editing binds to the tier. Creating one cannot bind: a tier is
+        recordTable={isEdit ? 'app.item_tiers' : undefined}
+        recordId={isEdit ? tier?.id : undefined}
         meaning={
           isEdit
             ? `I am editing the item tier "${name.trim()}".`

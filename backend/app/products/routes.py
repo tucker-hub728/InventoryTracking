@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.search import MAX_SEARCH_LENGTH
 from app.models.products import Customer
 from app.products import repository as products_repo
 from app.products.schemas import CustomerCreate, CustomerRead, CustomerUpdate
@@ -55,9 +56,14 @@ def _customer_to_read(customer: Customer) -> CustomerRead:
 )
 async def list_customers(
     db: DBSession,
-    q: Annotated[str | None, Query(description="Search name/contact/email")] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Search name/contact/email", max_length=MAX_SEARCH_LENGTH),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[CustomerRead]:
-    customers = await products_repo.list_customers(db, q=q)
+    customers = await products_repo.list_customers(db, q=q, limit=limit, offset=offset)
     return [_customer_to_read(c) for c in customers]
 
 

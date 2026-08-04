@@ -19,11 +19,14 @@ export async function GET() {
     const { user, refreshedTokens } = await readSession();
     if (!user) {
       const res = NextResponse.json({ user: null }, { status: 401 });
-      clearAuthCookies(res);
+      await clearAuthCookies(res);
       return res;
     }
     const res = NextResponse.json({ user });
-    applyRefreshedCookies(res, refreshedTokens);
+    // Must be awaited: the Set-Cookie is attached inside, and returning `res`
+    // first would drop a silently-refreshed access token and bounce the user
+    // to /login on their next request.
+    await applyRefreshedCookies(res, refreshedTokens);
     return res;
   } catch {
     const res = NextResponse.json(

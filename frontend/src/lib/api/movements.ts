@@ -115,8 +115,9 @@ export interface ApiMovement {
   /** Mandatory §3 comment. */
   notes: string | null;
 
-  /** FK into ``audit.reauth_events`` — the audit viewer fetches the
-   *  signature image via ``signatureImageUrl(reauth_evidence_id)``. */
+  /** FK into ``audit.reauth_events`` — the signing event behind this
+   *  movement (who re-authenticated, when, and the attested meaning).
+   *  The audit viewer links to it; there is no image to fetch. */
   reauth_evidence_id: string | null;
 
   performed_by_user_id: string;

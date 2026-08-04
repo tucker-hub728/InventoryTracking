@@ -491,6 +491,8 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         open={showReauth}
         onOpenChange={setShowReauth}
         action="receipt.confirm"
+        recordTable="app.receipt_transactions"
+        recordId={order?.id}
         meaning={attestation}
         commentPlaceholder="e.g. Received against PO, lots verified against the packing slip"
         onConfirmed={submit}

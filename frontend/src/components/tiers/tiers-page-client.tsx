@@ -353,6 +353,8 @@ export function TiersPageClient() {
           if (!o) setDeletingTier(null);
         }}
         action="tier.delete"
+        recordTable="app.item_tiers"
+        recordId={deletingTier?.id}
         meaning={deletingTier ? `I am deleting the item tier "${deletingTier.name}".` : ''}
         commentPlaceholder="e.g. No longer used"
         onConfirmed={onDeleteTierConfirmed}
@@ -386,6 +388,8 @@ export function TiersPageClient() {
           if (!o) setDeletingPrefix(null);
         }}
         action="prefix.delete"
+        recordTable="app.item_prefixes"
+        recordId={deletingPrefix?.prefix.id}
         meaning={
           deletingPrefix
             ? `I am deleting the prefix "${deletingPrefix.prefix.code}" from the ${deletingPrefix.tier.name} tier.`

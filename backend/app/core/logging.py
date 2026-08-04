@@ -30,6 +30,67 @@ def _drop_color_message_key(_logger: Any, _name: str, event_dict: EventDict) -> 
     return event_dict
 
 
+# ── Redaction ───────────────────────────────────────────────────────────────
+# Keys whose VALUE must never reach a log sink. Matched case-insensitively on
+# a substring, so ``refresh_token``, ``TOKEN`` and ``id_token`` all hit the
+# ``token`` entry.
+#
+# No password or token is logged anywhere today. This exists so that the
+# first `log.info("...", token=tok)` someone writes in a hurry is neutralised
+# by default rather than discovered in a log aggregator later — the pipeline
+# had no redaction at all, so anything added flowed straight through.
+_SENSITIVE_KEY_PARTS: tuple[str, ...] = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "session",
+    "cookie",
+)
+
+# Keys that are personal data rather than credentials. GDPR-relevant and not
+# needed to debug: the user id or Cognito sub identifies the actor precisely
+# and is already on the line in most cases.
+_PII_KEY_PARTS: tuple[str, ...] = ("email",)
+
+_REDACTED = "[redacted]"
+
+
+def _mask_email(value: object) -> str:
+    """``alice@example.com`` -> ``a***@example.com``.
+
+    Keeps the log useful for correlating "same user, repeated failures"
+    and for spotting the wrong domain, without storing the address.
+    """
+    if not isinstance(value, str) or "@" not in value:
+        return _REDACTED
+    local, _, domain = value.partition("@")
+    head = local[0] if local else ""
+    return f"{head}***@{domain}"
+
+
+def _redact_sensitive(_logger: Any, _name: str, event_dict: EventDict) -> EventDict:
+    """Strip credentials and mask PII before rendering.
+
+    Runs last in the shared chain so it also covers keys contributed by
+    contextvars and by foreign (stdlib) log records.
+    """
+    for key in list(event_dict.keys()):
+        if not isinstance(key, str):
+            continue
+        lowered = key.lower()
+        if any(part in lowered for part in _SENSITIVE_KEY_PARTS):
+            event_dict[key] = _REDACTED
+        elif any(part in lowered for part in _PII_KEY_PARTS):
+            event_dict[key] = _mask_email(event_dict[key])
+    return event_dict
+
+
 def configure_logging(settings: Settings) -> None:
     """Configure structlog + stdlib logging.
 
@@ -44,6 +105,9 @@ def configure_logging(settings: Settings) -> None:
         timestamper,
         _drop_color_message_key,
         structlog.processors.StackInfoRenderer(),
+        # Last: everything above may have ADDED keys, and redaction has to
+        # see the final set.
+        _redact_sensitive,
     ]
 
     if settings.log_format == LogFormat.json:

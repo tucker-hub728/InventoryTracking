@@ -202,6 +202,9 @@ export function PrefixFormDialog({ open, onOpenChange, tierId, tierName, prefix,
         open={showReauth}
         onOpenChange={setShowReauth}
         action={isEdit ? 'prefix.update' : 'prefix.create'}
+        // Edits bind to the prefix; a create binds to the parent tier,
+        recordTable={isEdit ? 'app.item_prefixes' : 'app.item_tiers'}
+        recordId={isEdit ? prefix?.id : tierId}
         meaning={
           isEdit
             ? `I am editing the prefix "${codeUpper}" in the ${tierName} tier.`

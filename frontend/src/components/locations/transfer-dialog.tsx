@@ -221,6 +221,8 @@ export function TransferDialog({
         open={showReauth}
         onOpenChange={setShowReauth}
         action="movement.transfer"
+        recordTable="app.lot_allocations"
+        recordId={allocation?.id}
         meaning={`I am transferring ${qtyNum} unit(s) of ${allocation?.lot_number ?? 'this lot'}.`}
         commentPlaceholder="e.g. Moved to freezer for cold storage"
         onConfirmed={submit}

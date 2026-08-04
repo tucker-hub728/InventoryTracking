@@ -13,25 +13,42 @@ from datetime import UTC, datetime
 from sqlalchemy import Select, asc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.search import like_contains
 from app.models.products import Customer
 
 
 async def list_customers(
-    session: AsyncSession, *, q: str | None = None
+    session: AsyncSession,
+    *,
+    q: str | None = None,
+    limit: int = 500,
+    offset: int = 0,
 ) -> list[Customer]:
+    """Customers, name-ordered, bounded.
+
+    This query had no LIMIT: it loaded and serialised every non-deleted
+    customer on every call, so response time and memory grew with the
+    table and one request could pull the whole set. The bound is applied
+    in SQL rather than after the fetch, so the database never materialises
+    more than a page.
+
+    The response stays a plain array (the frontend types it as
+    ``Customer[]``), so this is bounding, not a contract change — callers
+    that want more page through ``offset``.
+    """
     stmt: Select[tuple[Customer]] = select(Customer).where(
         Customer.deleted_at.is_(None)
     )
     if q:
-        like = f"%{q.lower()}%"
+        like = like_contains(q.lower())
         stmt = stmt.where(
             or_(
-                func.lower(Customer.name).like(like),
-                func.lower(func.coalesce(Customer.contact_person, "")).like(like),
-                func.lower(func.coalesce(Customer.email, "")).like(like),
+                func.lower(Customer.name).like(like, escape="\\"),
+                func.lower(func.coalesce(Customer.contact_person, "")).like(like, escape="\\"),
+                func.lower(func.coalesce(Customer.email, "")).like(like, escape="\\"),
             )
         )
-    stmt = stmt.order_by(asc(func.lower(Customer.name)))
+    stmt = stmt.order_by(asc(func.lower(Customer.name))).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 
 
