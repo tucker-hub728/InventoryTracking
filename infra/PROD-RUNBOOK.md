@@ -256,23 +256,87 @@ git push
 
 ## Bringing dev up to the same code
 
-Only once prod is verified:
+Only once prod is verified. Two separate jobs: **merge the code** (required), then
+**update dev's CloudFormation** (optional cleanup). Pushing code never touches
+CloudFormation, so they are independent.
 
-1. **Check the dev secret key first:**
-   ```bash
-   aws ssm get-parameter --name /cellready/dev/SECRET_KEY --with-decryption \
-     --query Parameter.Value --output text --region us-east-2
-   ```
-   If it contains `dev-only`, `change-in-prod`, `changeme`, `change-me` or `example`, the
-   dev backend **will refuse to start** on the new code. Rotate it with
-   `aws ssm put-parameter --name /cellready/dev/SECRET_KEY --type SecureString --overwrite
-   --value "$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"` first.
-2. **Confirm the four `DEV_*` variables exist** (step 4). The new workflow reads only the
+### Part 1 — merge the code
+
+Dev runs `APP_ENV=production`, so every production invariant in `core/config.py` applies to
+it. Verified 2026-08-04 — all pass, no action needed:
+
+| Check | Dev |
+|---|---|
+| `/cellready/dev/SECRET_KEY` | 64 chars, 45 distinct, no `dev-only` / `changeme` / `example` marker |
+| `APP_DEBUG` | `false` |
+| `COGNITO_USER_POOL_ID` / `CLIENT_ID` | both set |
+| `COGNITO_ENDPOINT_URL` | unset (must be — it points boto3 at cognito-local) |
+| `SSM_PARAM_PREFIX` | `/cellready/dev/` — set, so the fail-closed prebuild hook passes |
+| `esignimg01` (drops a column) | 0 of 35 reauth rows carry a signature key — nothing orphaned |
+
+> Re-check the secret key if it is ever rotated:
+> ```powershell
+> aws ssm get-parameter --name /cellready/dev/SECRET_KEY --with-decryption `
+>   --query Parameter.Value --output text --region us-east-2
+> ```
+> Run it from **PowerShell, not Git Bash** — Git Bash rewrites a leading `/` into a Windows
+> path, so the lookup fails in a way that is easy to mistake for a pass.
+
+1. **Confirm the four `DEV_*` variables exist** (step 4). The new workflow reads only the
    prefixed names — without them the first post-merge dev deploy stops with
-   `Missing repository variable(s)`.
-3. Merge into `main`. Dev deploys on the new workflow and catches up.
-4. Once that deploy is green, delete the four old unprefixed variables
+   `Missing repository variable(s)`. Nothing is built; add them and re-run.
+2. Merge into `main`. Dev deploys on the new workflow and applies the two pending
+   migrations (`esignimg01`, `esignbind01`).
+3. Once that deploy is green, delete the four old unprefixed variables
    (`EB_APP`, `EB_ENV`, `ARTIFACTS_BUCKET`, `DEPLOY_ROLE_ARN`) — nothing reads them now.
+   Dependabot also starts working here; its config reaches `main` with this merge.
+
+### Part 2 — update dev's CloudFormation (optional)
+
+The merge alone leaves `TRUSTED_PROXY_COUNT` unset on dev, so it defaults to `0` and the
+audit trail records CloudFront's IP instead of the client's. Honest, but useless. This also
+clears out the dead signatures bucket and its `S3_*` environment properties.
+
+> ⚠️ **`CreateEcrRepos` must be `true` for dev.** `cellready-dev-foundation` OWNS
+> `cellready/backend` and `cellready/frontend`, and **production pulls its images from
+> them**. Setting `false` removes them from the stack, which deletes the repositories and
+> prod's live images with them. `prod-foundation.json` is the file that sets `false`,
+> because prod reuses what dev owns.
+
+**Order matters — 03 before 01.** `01` exports `SignaturesBucketArn` and the old `03`
+imports it; CloudFormation will not remove an Export while something still imports it.
+
+```powershell
+cd infra/cloudformation
+
+# 1) Beanstalk first — drops the import, adds TRUSTED_PROXY_COUNT=2.
+aws cloudformation deploy --region us-east-2 `
+  --stack-name cellready-dev-beanstalk --template-file 03-beanstalk.yaml `
+  --parameter-overrides file://params/dev-beanstalk.json `
+  --capabilities CAPABILITY_NAMED_IAM
+
+# 2) Foundation second — removes the now-unimported bucket and its exports.
+aws cloudformation deploy --region us-east-2 `
+  --stack-name cellready-dev-foundation --template-file 01-foundation.yaml `
+  --parameter-overrides file://params/dev-foundation.json
+```
+
+The signatures bucket is `DeletionPolicy: Retain` and empty, so it is left behind in S3
+rather than deleted. Remove it by hand if you want it gone.
+
+**Do not touch `02-database` or `04-github-oidc` for dev.** The database stack's
+`EngineVersion` parameter reads `16.8` while the instance has auto-upgraded to `16.13`, and
+`16.8` can no longer be created — an update would fail. The OIDC stack already trusts
+`main`, which is the branch dev now deploys from.
+
+Verify afterwards:
+
+```powershell
+aws elasticbeanstalk describe-configuration-settings `
+  --application-name cellready-dev --environment-name cellready-dev --region us-east-2 `
+  --query "ConfigurationSettings[0].OptionSettings[?OptionName=='TRUSTED_PROXY_COUNT'].Value" `
+  --output text
+```
 
 ## Tearing prod down
 
