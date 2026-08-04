@@ -282,7 +282,7 @@ export function EditUserDialog({
                   <p className="text-xs text-text-3">
                     {locked
                       ? user.is_seed ? 'The seeded super admin can’t be deactivated.' : 'The last active super admin can’t be deactivated.'
-                      : 'Inactive users can’t sign in or use the app (disabled in Cognito).'}
+                      : 'Inactive users can’t sign in or use the app.'}
                   </p>
                 </div>
                 <Switch
