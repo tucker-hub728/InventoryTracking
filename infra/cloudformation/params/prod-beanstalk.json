@@ -7,5 +7,13 @@
   { "ParameterKey": "SolutionStackName", "ParameterValue": "64bit Amazon Linux 2023 v4.13.1 running Docker" },
   { "ParameterKey": "CNAMEPrefix", "ParameterValue": "cellready-prod-9k2m" },
   { "ParameterKey": "CloudFrontPrefixListId", "ParameterValue": "pl-b6a144df" },
-  { "ParameterKey": "SSMParamPrefix", "ParameterValue": "" }
+  { "ParameterKey": "SSMParamPrefix", "ParameterValue": "" },
+
+  { "ParameterKey": "LBCNAMEPrefix", "ParameterValue": "cellready-prod-lb-4x7q" },
+  { "ParameterKey": "MinInstances", "ParameterValue": "2" },
+  { "ParameterKey": "MaxInstances", "ParameterValue": "3" },
+  { "ParameterKey": "LBTestCIDR", "ParameterValue": "135.196.135.171/32" },
+
+  { "ParameterKey": "CreateSingleInstanceEnv", "ParameterValue": "true" },
+  { "ParameterKey": "OriginEnvironment", "ParameterValue": "loadbalanced" }
 ]

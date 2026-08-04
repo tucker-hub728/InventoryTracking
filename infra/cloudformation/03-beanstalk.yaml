@@ -1,10 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  CellReady IMS — Elastic Beanstalk (Docker-Compose platform, SingleInstance)
-  + CloudFront for free HTTPS, IAM instance/service roles, security groups,
-  and the :5432 ingress from the EB instance SG to the RDS SG. The env is
-  created with the EB sample app; the first real deploy is done by GitHub
-  Actions (CI owns app versions, this stack owns infrastructure).
+  CellReady IMS — Elastic Beanstalk (Docker-Compose platform, SingleInstance or
+  LoadBalanced) + CloudFront for free HTTPS, IAM instance/service roles,
+  security groups, and the :5432 ingress from the EB instance SG to the RDS SG.
+  The env is created with the EB sample app; the first real deploy is done by
+  GitHub Actions (CI owns app versions, this stack owns infrastructure).
+  CloudFront's origin is the EB CNAME, not an instance address, so it follows
+  the environment from a single instance to a load balancer with no change.
 
 Parameters:
   ProjectName:
@@ -57,9 +59,86 @@ Parameters:
       come up healthy and green, silently pointed at the development database.
       Deriving it removes the failure mode rather than documenting it.
 
+  # ── Blue/green: single-instance → load-balanced ─────────────────────────
+  # An Elastic Beanstalk environment CANNOT be converted from SingleInstance to
+  # LoadBalanced in place. LoadBalancerType is create-only, and EB rejects the
+  # update at apply time with "LoadBalancer type option cannot be changed" — a
+  # CloudFormation change set does NOT catch this, because it validates the
+  # template rather than the service's own rules. (Learned the hard way against
+  # production on 2026-08-04; the stack rolled back cleanly, but it rolled back.)
+  #
+  # So the template can hold BOTH environments at once, and the move is staged:
+  #
+  #   1. Set LBCNAMEPrefix          → the load-balanced environment is created
+  #                                   alongside the old one, which keeps serving
+  #   2. Deploy + verify it on its own EB URL — CloudFront is not involved yet
+  #   3. Set OriginEnvironment=loadbalanced → CloudFront repoints (no downtime)
+  #   4. Set CreateSingleInstanceEnv=false  → the old environment is deleted
+  #
+  # Every step before 4 is reversible by putting the parameter back.
+  CreateSingleInstanceEnv:
+    Type: String
+    Default: 'true'
+    AllowedValues: [ 'true', 'false' ]
+    Description: >-
+      Create the original SingleInstance environment. Set to false ONLY after
+      the load-balanced one is serving traffic and verified — this deletes it.
+  LBCNAMEPrefix:
+    Type: String
+    Default: ''
+    Description: >-
+      Globally-unique CNAME prefix for the LOAD-BALANCED environment. Blank
+      means "do not create it", which is what dev wants. Must differ from
+      CNAMEPrefix: two environments cannot share a CNAME, which is exactly why
+      the switch is done by repointing CloudFront rather than by swapping names.
+  LBTestCIDR:
+    Type: String
+    Default: ''
+    Description: >-
+      Temporary: one CIDR (e.g. 203.0.113.4/32) allowed to reach the ALB
+      directly, so the new environment can be verified on its own URL BEFORE
+      CloudFront points at it. Without this the ALB accepts CloudFront only, and
+      the whole point of blue/green — checking before cutting over — is
+      impossible. Blank it again once the migration is done; leaving it set
+      means a route into production that bypasses CloudFront entirely.
+  OriginEnvironment:
+    Type: String
+    Default: single
+    AllowedValues: [ single, loadbalanced ]
+    Description: >-
+      Which environment CloudFront sends traffic to. Flip to 'loadbalanced'
+      only once the new environment is verified on its own URL. Flipping back
+      is the rollback, and it is fast because it changes nothing but an origin.
+  MinInstances:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: >-
+      Ignored unless EnvironmentTypeParam=LoadBalanced. Must be at least 2 for a
+      rolling deploy to mean anything — at 1 there is no second server to serve
+      traffic while the first is replaced, so it degrades to an outage.
+  MaxInstances:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    Description: >-
+      Ignored unless EnvironmentTypeParam=LoadBalanced. Set it at least one
+      ABOVE MinInstances: RollingWithAdditionalBatch launches a spare batch
+      before it starts replacing anything — that is how it holds full capacity
+      — and it cannot do that if the autoscaling group is already at its
+      ceiling. The spare is terminated when the deploy finishes, so the extra
+      instance is billed for minutes per release, not continuously.
+
 Conditions:
   # Blank SSMParamPrefix means "derive it" — see the parameter description.
   DeriveSsmPrefix: !Equals [ !Ref SSMParamPrefix, '' ]
+  # Blank LBCNAMEPrefix = no load-balanced environment (dev's normal state).
+  HasLBEnv: !Not [ !Equals [ !Ref LBCNAMEPrefix, '' ] ]
+  HasSingleEnv: !Equals [ !Ref CreateSingleInstanceEnv, 'true' ]
+  OriginIsLB: !Equals [ !Ref OriginEnvironment, 'loadbalanced' ]
+  HasLBTestCIDR: !And
+    - !Not [ !Equals [ !Ref LBTestCIDR, '' ] ]
+    - !Condition HasLBEnv
 
 Resources:
   # ── IAM: EC2 instance role (least privilege) ────────────────────────────
@@ -183,7 +262,46 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
         - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
 
-  # ── Networking: EB instance SG (only CloudFront may reach :80) ───────────
+  # ── Networking: load balancer SG (LoadBalanced only) ────────────────────
+  # When there is an ALB it becomes the thing CloudFront talks to, and it is
+  # the ONLY thing allowed to talk to the instances (see below). Without this
+  # split the instances would still accept connections straight from any
+  # CloudFront distribution in the world — including someone else's, pointed at
+  # this origin — which is the hole the prefix list only partially closes.
+  ALBSecurityGroup:
+    Condition: HasLBEnv
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${EnvName} ALB - :80 from CloudFront only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+          Description: HTTP from CloudFront edge only
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${EnvName}-alb'
+
+  # Temporary verification door — see the LBTestCIDR parameter. A separate
+  # resource rather than an inline rule so that blanking the parameter removes
+  # it cleanly, without touching the group itself.
+  ALBTestIngress:
+    Condition: HasLBTestCIDR
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: !Ref LBTestCIDR
+      Description: TEMPORARY - direct access for pre-cutover verification
+
+  # ── Networking: SingleInstance EB instance SG ───────────────────────────
+  # CloudFront reaches this instance directly. Untouched by the blue/green
+  # migration: the load-balanced environment gets its own group below, so this
+  # one never has to change and the old environment keeps working throughout.
   EBInstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -199,6 +317,41 @@ Resources:
         - Key: Name
           Value: !Sub '${ProjectName}-${EnvName}-eb'
 
+  # ── Networking: load-balanced EB instance SG ────────────────────────────
+  # Deliberately NOT the CloudFront prefix list. Once an ALB is in front, the
+  # instances should be reachable from the ALB and nothing else — the prefix
+  # list would still admit any CloudFront distribution in the world, including
+  # one someone else points at this origin.
+  EBInstanceSecurityGroupLB:
+    Condition: HasLBEnv
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName}-${EnvName} EB instance (LB) - :80 from the ALB only'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from the load balancer only
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${EnvName}-eb-lb'
+
+  # The load-balanced instances need their own path to RDS. Both ingress rules
+  # coexist during the migration; this one is removed with the environment.
+  DBIngressFromEBLB:
+    Condition: HasLBEnv
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-DBSecurityGroupId'
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref EBInstanceSecurityGroupLB
+      Description: PostgreSQL from EB instances (load-balanced)
+
   # Open RDS :5432 to the EB instances. Lives here (not in 02) so 02 has no
   # dependency on this stack — breaks the SG circular reference.
   DBIngressFromEB:
@@ -212,7 +365,10 @@ Resources:
       SourceSecurityGroupId: !Ref EBInstanceSecurityGroup
       Description: PostgreSQL from EB instances
 
-  # ── CloudFront (free TLS in front of the single instance) ───────────────
+  # ── CloudFront (free TLS in front of the environment) ───────────────────
+  # The origin is an EB CNAME, never an instance address — which is what makes
+  # the blue/green switch a one-parameter change here rather than anything
+  # touching DNS or the environments themselves.
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -222,7 +378,10 @@ Resources:
         HttpVersion: http2
         Origins:
           - Id: eb-origin
-            DomainName: !Sub '${CNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
+            DomainName: !If
+              - OriginIsLB
+              - !Sub '${LBCNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
+              - !Sub '${CNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
             CustomOriginConfig:
               OriginProtocolPolicy: http-only
               HTTPPort: 80
@@ -245,7 +404,10 @@ Resources:
     Properties:
       ApplicationName: !Sub '${ProjectName}-${EnvName}'
 
+  # The ORIGINAL single-instance environment. Deleted at the end of the
+  # blue/green migration by setting CreateSingleInstanceEnv=false.
   Environment:
+    Condition: HasSingleEnv
     Type: AWS::ElasticBeanstalk::Environment
     Properties:
       ApplicationName: !Ref Application
@@ -255,7 +417,6 @@ Resources:
       Tier: { Name: WebServer, Type: Standard }
       # No VersionLabel → EB launches its sample app; CI deploys the real one.
       OptionSettings:
-        # Single instance, no load balancer.
         - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: EnvironmentType, Value: SingleInstance }
         - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: ServiceRole, Value: !GetAtt EBServiceRole.Arn }
         # Instance config.
@@ -290,14 +451,14 @@ Resources:
         # audit rows; everything further left is caller-supplied and discarded.
         #
         # 2 = CloudFront (appends the viewer IP) + the EB nginx hop (appends the
-        # CloudFront edge IP). The BFF passes the chain through without judging it.
+        # CloudFront edge IP). The LOAD-BALANCED environment below uses 3,
+        # because the ALB inserts itself between them.
         #
-        # VERIFY THIS AFTER THE FIRST DEPLOY rather than trusting the comment:
-        # sign something, then
+        # VERIFY IT rather than trusting the arithmetic: sign something, then
         #   SELECT ip_address FROM audit.reauth_events ORDER BY created_at DESC LIMIT 1;
-        # If it shows a 130.176.*/​64.252.* (CloudFront) or a 172.*/10.* (container)
-        # address instead of the real client, this number is wrong. Too high is as
-        # bad as too low — it just fails in the other direction.
+        # If it shows a 130.176.*/​64.252.* (CloudFront), a 10.*/172.* (the ALB
+        # or the container) or a blank instead of the real client, this number is
+        # wrong. Too high is as bad as too low — it just fails the other way.
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '2' }
         # No S3_* environment: object storage was removed on 2026-08-03 with the
         # hand-drawn e-signature image. The backend ignores any leftovers.
@@ -321,14 +482,130 @@ Resources:
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_ID_TOKEN_TTL_MINUTES, Value: '60' }
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_REFRESH_TOKEN_TTL_DAYS, Value: '30' }
 
+  # ── The LOAD-BALANCED environment (blue/green target) ───────────────────
+  # Created alongside the one above, not converted from it — see the parameter
+  # comments: EB will not change LoadBalancerType on a live environment.
+  #
+  # The application settings below MUST stay identical to the single-instance
+  # environment's, apart from TRUSTED_PROXY_COUNT. CloudFormation has no way to
+  # share an OptionSettings list between two resources, so this is a genuine
+  # copy and it can genuinely drift. It is temporary: once the migration ends,
+  # the environment above is deleted and this becomes the only one.
+  EnvironmentLB:
+    Condition: HasLBEnv
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      EnvironmentName: !Sub '${ProjectName}-${EnvName}-lb'
+      CNAMEPrefix: !Ref LBCNAMEPrefix
+      SolutionStackName: !Ref SolutionStackName
+      Tier: { Name: WebServer, Type: Standard }
+      OptionSettings:
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: EnvironmentType, Value: LoadBalanced }
+        # Create-only. This is the setting that makes an in-place conversion
+        # impossible and this whole second environment necessary.
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: LoadBalancerType, Value: application }
+        - { Namespace: 'aws:elasticbeanstalk:environment', OptionName: ServiceRole, Value: !GetAtt EBServiceRole.Arn }
+        - { Namespace: 'aws:autoscaling:asg', OptionName: MinSize, Value: !Ref MinInstances }
+        - { Namespace: 'aws:autoscaling:asg', OptionName: MaxSize, Value: !Ref MaxInstances }
+        # RollingWithAdditionalBatch launches a SPARE batch first, so full
+        # capacity is served throughout. Plain Rolling takes a server out before
+        # replacing it, which on two instances halves capacity mid-deploy.
+        - { Namespace: 'aws:elasticbeanstalk:command', OptionName: DeploymentPolicy, Value: RollingWithAdditionalBatch }
+        - { Namespace: 'aws:elasticbeanstalk:command', OptionName: BatchSizeType, Value: Fixed }
+        - { Namespace: 'aws:elasticbeanstalk:command', OptionName: BatchSize, Value: '1' }
+        # Hand EB the SG defined above rather than letting it manage its own, so
+        # the instance SG can name it as the only permitted source.
+        - { Namespace: 'aws:elbv2:loadbalancer', OptionName: SecurityGroups, Value: !Ref ALBSecurityGroup }
+        - { Namespace: 'aws:elbv2:loadbalancer', OptionName: ManagedSecurityGroup, Value: !Ref ALBSecurityGroup }
+        # Target-group health check. /api/health is a SHALLOW liveness check on
+        # the frontend (frontend/app/api/health/route.ts) — deliberately not a
+        # database check, so one slow query cannot drain every target at once.
+        # Do NOT point this at '/': it redirects to /login, and a 302 fails the
+        # default 200 matcher, so every instance would be marked unhealthy.
+        - { Namespace: 'aws:elasticbeanstalk:environment:process:default', OptionName: HealthCheckPath, Value: /api/health }
+        - { Namespace: 'aws:elasticbeanstalk:environment:process:default', OptionName: MatcherHTTPCode, Value: '200' }
+        - { Namespace: 'aws:elasticbeanstalk:environment:process:default', OptionName: Port, Value: '80' }
+        - { Namespace: 'aws:elasticbeanstalk:environment:process:default', OptionName: Protocol, Value: HTTP }
+        # Instance config — note the LB-specific security group.
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: IamInstanceProfile, Value: !Ref EBInstanceProfile }
+        - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: SecurityGroups, Value: !Ref EBInstanceSecurityGroupLB }
+        - { Namespace: 'aws:ec2:instances', OptionName: InstanceTypes, Value: !Ref InstanceType }
+        # Networking. Instances keep public IPs: there is no NAT gateway, and
+        # they need outbound access for ECR pulls, SSM and Parameter Store.
+        - { Namespace: 'aws:ec2:vpc', OptionName: VPCId, Value: !Ref VpcId }
+        - { Namespace: 'aws:ec2:vpc', OptionName: Subnets, Value: !Join [',', !Ref EBSubnetIds] }
+        - { Namespace: 'aws:ec2:vpc', OptionName: ELBSubnets, Value: !Join [',', !Ref EBSubnetIds] }
+        - { Namespace: 'aws:ec2:vpc', OptionName: AssociatePublicIpAddress, Value: 'true' }
+        # Health + logs.
+        - { Namespace: 'aws:elasticbeanstalk:healthreporting:system', OptionName: SystemType, Value: enhanced }
+        - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: StreamLogs, Value: 'true' }
+        - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: DeleteOnTerminate, Value: 'true' }
+        - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: RetentionInDays, Value: '7' }
+        # ── Application env — MUST MATCH the environment above ─────────────
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: APP_ENV, Value: production }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: APP_DEBUG, Value: 'false' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: AWS_REGION, Value: !Ref 'AWS::Region' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_LEVEL, Value: INFO }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_FORMAT, Value: json }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: SSM_PARAM_PREFIX
+          Value: !If
+            - DeriveSsmPrefix
+            - !Sub '/${ProjectName}/${EnvName}/'
+            - !Ref SSMParamPrefix
+        # 3, NOT 2 — the ALB adds a hop between CloudFront and nginx, so the
+        # trustworthy X-Forwarded-For entry moves one further left. Leaving this
+        # at 2 attributes every signature to a CloudFront edge address instead
+        # of the person who signed it: an audit trail that looks perfectly
+        # healthy and attests to the wrong thing. Verify it after cutover.
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '3' }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: COGNITO_USER_POOL_ID
+          Value:
+            Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-UserPoolId'
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: COGNITO_CLIENT_ID
+          Value:
+            Fn::ImportValue: !Sub '${ProjectName}-${EnvName}-UserPoolClientId'
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: BACKEND_INTERNAL_URL, Value: 'http://backend:8000/v1' }
+        # Still the CloudFront domain: the public URL does not change when the
+        # origin behind it does, which is the entire point of the switch.
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: CORS_ALLOW_ORIGINS
+          Value: !Sub 'https://${Distribution.DomainName}'
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_ACCESS_TOKEN_TTL_MINUTES, Value: '60' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_ID_TOKEN_TTL_MINUTES, Value: '60' }
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: JWT_REFRESH_TOKEN_TTL_DAYS, Value: '30' }
+
 Outputs:
   EnvironmentName:
+    Condition: HasSingleEnv
+    Description: The single-instance environment (deleted at the end of the migration).
     Value: !Ref Environment
   EnvironmentURL:
-    Description: Origin URL CloudFront points at (HTTP, locked to CloudFront).
+    Condition: HasSingleEnv
+    Description: Single-instance origin URL (HTTP, locked to CloudFront).
     Value: !Sub 'http://${CNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
+  LBEnvironmentName:
+    Condition: HasLBEnv
+    Description: >-
+      The load-balanced environment. Set PROD_EB_ENV to this in the GitHub
+      repository variables once it is serving traffic, or CI keeps deploying to
+      the old one.
+    Value: !Ref EnvironmentLB
+  LBEnvironmentURL:
+    Condition: HasLBEnv
+    Description: >-
+      Load-balanced origin URL. VERIFY THE NEW ENVIRONMENT HERE before flipping
+      OriginEnvironment — this URL reaches it directly, so nothing a user sees
+      is affected while you test.
+    Value: !Sub 'http://${LBCNAMEPrefix}.${AWS::Region}.elasticbeanstalk.com'
+  ActiveOrigin:
+    Description: Which environment CloudFront is currently sending traffic to.
+    Value: !If [ OriginIsLB, 'loadbalanced', 'single' ]
   AppURL:
-    Description: The public HTTPS URL users hit.
+    Description: The public HTTPS URL users hit. Unchanged by the migration.
     Value: !Sub 'https://${Distribution.DomainName}'
   CloudFrontDistributionId:
     Value: !Ref Distribution
