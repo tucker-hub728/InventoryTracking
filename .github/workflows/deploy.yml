@@ -215,18 +215,50 @@ jobs:
             --environment-name "${EB_ENV}" \
             --version-label "${IMAGE_TAG}"
 
+          # Ready/Red must PERSIST before we call it a failure.
+          #
+          # This used to exit 1 on the first Ready+Red sample, which was right
+          # for AllAtOnce — there, Ready means every instance is finished. On a
+          # load-balanced environment with RollingWithAdditionalBatch it is not:
+          # EB raises the Auto Scaling minimum to fit the spare batch, and when
+          # it terminates that spare afterwards there is a window where the
+          # minimum still reads 3 while only 2 instances are online. EB reports
+          # that honestly as Red ("2 instances online is below Auto Scaling
+          # group minimum size 3") for roughly half a minute, and the
+          # environment reaches Ready BEFORE the health rollup settles.
+          #
+          # A single sample in that window failed a deploy that had in fact
+          # succeeded (2026-08-04, production). A genuinely broken deploy stays
+          # Red indefinitely, so waiting costs two minutes in the bad case and
+          # removes a false alarm in the good one.
+          RED_TOLERANCE=8          # × 15s = 2 minutes of sustained Red
           echo "Waiting for environment to return to Ready/Green..."
-          for i in $(seq 1 60); do
+          red_streak=0
+          for i in $(seq 1 80); do
             read -r status health < <(aws elasticbeanstalk describe-environments \
               --environment-names "${EB_ENV}" \
               --query 'Environments[0].[Status,Health]' --output text)
             echo "  [$i] Status=${status} Health=${health}"
+
             if [[ "${status}" == "Ready" && "${health}" == "Green" ]]; then
               echo "Deploy succeeded."; exit 0
             fi
+
             if [[ "${status}" == "Ready" && "${health}" == "Red" ]]; then
-              echo "Environment is Ready but Red — deploy failed."; exit 1
+              red_streak=$((red_streak + 1))
+              if (( red_streak >= RED_TOLERANCE )); then
+                echo "Environment has been Ready/Red for $((red_streak * 15))s — deploy failed."
+                aws elasticbeanstalk describe-events --environment-name "${EB_ENV}" \
+                  --max-items 15 --query 'Events[].[EventDate,Severity,Message]' --output text || true
+                exit 1
+              fi
+            else
+              red_streak=0
             fi
+
             sleep 15
           done
-          echo "Timed out waiting for green."; exit 1
+          echo "Timed out waiting for green."
+          aws elasticbeanstalk describe-events --environment-name "${EB_ENV}" \
+            --max-items 15 --query 'Events[].[EventDate,Severity,Message]' --output text || true
+          exit 1
