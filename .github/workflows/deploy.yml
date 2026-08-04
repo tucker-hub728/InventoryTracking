@@ -188,8 +188,12 @@ jobs:
               -e "s|\${FRONTEND_IMAGE}|${FRONTEND_IMAGE}|g" \
               docker-compose.yml > docker-compose.rendered.yml
           mv docker-compose.rendered.yml docker-compose.yml
-          # Ensure the prebuild hook keeps its executable bit inside the zip.
-          chmod +x .platform/hooks/prebuild/*.sh
+          # Ensure the prebuild hooks keep their executable bit inside the zip.
+          # BOTH trees: hooks/ runs on application deploys, confighooks/ on
+          # configuration deploys (a CloudFormation option change). Missing the
+          # second one is what took dev down on 2026-08-04 — compose came up
+          # with no .env and blank DATABASE_URL / SECRET_KEY.
+          chmod +x .platform/hooks/prebuild/*.sh .platform/confighooks/prebuild/*.sh
           zip -r -y ../bundle.zip docker-compose.yml .platform
           cd ..
 

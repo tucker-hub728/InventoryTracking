@@ -2,3 +2,4 @@
 # instances, CI runners) regardless of the authoring OS.
 *.sh text eol=lf
 deploy/.platform/hooks/** text eol=lf
+deploy/.platform/confighooks/** text eol=lf
