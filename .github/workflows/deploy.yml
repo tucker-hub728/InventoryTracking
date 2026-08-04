@@ -1,20 +1,43 @@
-name: Deploy (dev)
+name: Deploy
 
 # Builds backend + frontend images, pushes to ECR, bundles the prod compose +
 # .platform hooks, and rolls the Elastic Beanstalk environment to the new
 # version. Auth via GitHub OIDC — no long-lived AWS keys.
 #
-# Required repo VARIABLES (Settings → Secrets and variables → Actions → Variables):
-#   AWS_REGION, AWS_ACCOUNT_ID, DEPLOY_ROLE_ARN, PROJECT, EB_APP, EB_ENV, ARTIFACTS_BUCKET
-# (PROJECT defaults to "cellready"; EB_APP/EB_ENV are "cellready-dev".)
+# ── TWO ENVIRONMENTS ────────────────────────────────────────────────────────
+#   branch `main`       → cellready-dev
+#   branch `production` → cellready-prod
+#
+# Selection is by PREFIXED REPOSITORY VARIABLES rather than GitHub Environments,
+# because Environments are not available on this repo's plan/permissions. The
+# `resolve` job below turns the branch into a prefix (DEV_ or PROD_) and reads
+# the matching variables.
+#
+# Repository variables required (Settings → Secrets and variables → Actions):
+#
+#   Shared by both environments — one value each:
+#     AWS_REGION, AWS_ACCOUNT_ID, PROJECT
+#
+#   Per environment — eight in total:
+#     DEV_EB_APP           PROD_EB_APP
+#     DEV_EB_ENV           PROD_EB_ENV
+#     DEV_ARTIFACTS_BUCKET PROD_ARTIFACTS_BUCKET
+#     DEV_DEPLOY_ROLE_ARN  PROD_DEPLOY_ROLE_ARN
+#
+# MIGRATION NOTE: the original unprefixed EB_APP / EB_ENV / ARTIFACTS_BUCKET /
+# DEPLOY_ROLE_ARN are NOT read by this workflow any more. Add the DEV_* copies
+# BEFORE merging this to `main`, or the first dev deploy after the merge will
+# fail with an empty environment name. Delete the unprefixed ones only after
+# that merge has landed and deployed cleanly.
 
 on:
   push:
-    branches: [main]
+    branches: [main, production]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-dev
+  # Per-branch, so a dev deploy and a prod deploy never queue behind each other.
+  group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -22,18 +45,82 @@ permissions:
   contents: read
 
 jobs:
-  # Gate: run the full backend + frontend lint/type/test/build suite first.
-  # If any check fails, the deploy job below is SKIPPED (needs: ci).
+  # Gate: run the lint suite first. If it fails, the deploy job is SKIPPED.
+  # NOTE: this is lint only — ruff + eslint. It does NOT run the backend test
+  # suite or the frontend build.
   ci:
     uses: ./.github/workflows/ci.yml
 
+  # Turn the branch into a concrete set of targets, and FAIL LOUDLY if the
+  # variables for that environment are missing. Without this check an unset
+  # variable becomes an empty string and the deploy fails much later with an
+  # unhelpful AWS error — or worse, addresses the wrong environment.
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.pick.outputs.env_name }}
+      eb_app: ${{ steps.pick.outputs.eb_app }}
+      eb_env: ${{ steps.pick.outputs.eb_env }}
+      bucket: ${{ steps.pick.outputs.bucket }}
+      role_arn: ${{ steps.pick.outputs.role_arn }}
+    steps:
+      - id: pick
+        env:
+          # Both sets are passed in; the script below picks one. Referencing
+          # vars.* here rather than inside the `if` keeps the expression simple.
+          DEV_EB_APP: ${{ vars.DEV_EB_APP }}
+          DEV_EB_ENV: ${{ vars.DEV_EB_ENV }}
+          DEV_ARTIFACTS_BUCKET: ${{ vars.DEV_ARTIFACTS_BUCKET }}
+          DEV_DEPLOY_ROLE_ARN: ${{ vars.DEV_DEPLOY_ROLE_ARN }}
+          PROD_EB_APP: ${{ vars.PROD_EB_APP }}
+          PROD_EB_ENV: ${{ vars.PROD_EB_ENV }}
+          PROD_ARTIFACTS_BUCKET: ${{ vars.PROD_ARTIFACTS_BUCKET }}
+          PROD_DEPLOY_ROLE_ARN: ${{ vars.PROD_DEPLOY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_name }}" = "production" ]; then
+            PREFIX=PROD; ENV_NAME=prod
+          else
+            PREFIX=DEV;  ENV_NAME=dev
+          fi
+
+          eb_app="$(eval echo "\$${PREFIX}_EB_APP")"
+          eb_env="$(eval echo "\$${PREFIX}_EB_ENV")"
+          bucket="$(eval echo "\$${PREFIX}_ARTIFACTS_BUCKET")"
+          role_arn="$(eval echo "\$${PREFIX}_DEPLOY_ROLE_ARN")"
+
+          missing=""
+          [ -n "${eb_app}"   ] || missing="${missing} ${PREFIX}_EB_APP"
+          [ -n "${eb_env}"   ] || missing="${missing} ${PREFIX}_EB_ENV"
+          [ -n "${bucket}"   ] || missing="${missing} ${PREFIX}_ARTIFACTS_BUCKET"
+          [ -n "${role_arn}" ] || missing="${missing} ${PREFIX}_DEPLOY_ROLE_ARN"
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing repository variable(s):${missing}"
+            echo "::error::Set them under Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+
+          {
+            echo "env_name=${ENV_NAME}"
+            echo "eb_app=${eb_app}"
+            echo "eb_env=${eb_env}"
+            echo "bucket=${bucket}"
+            echo "role_arn=${role_arn}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice::Deploying branch '${{ github.ref_name }}' to ${ENV_NAME} (${eb_env})."
+
   deploy:
-    needs: ci
+    needs: [ci, resolve]
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       PROJECT: ${{ vars.PROJECT || 'cellready' }}
       IMAGE_TAG: ${{ github.sha }}
+      TARGET_ENV: ${{ needs.resolve.outputs.env_name }}
+      EB_APP: ${{ needs.resolve.outputs.eb_app }}
+      EB_ENV: ${{ needs.resolve.outputs.eb_env }}
+      ARTIFACTS_BUCKET: ${{ needs.resolve.outputs.bucket }}
     steps:
       # SHA-pinned — see the note in ci.yml. Trailing comment = release.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,14 +128,14 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ needs.resolve.outputs.role_arn }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
 
-      - name: Build & push images
+      - name: Build & push images (or promote an existing one)
         run: |
           set -euo pipefail
           REG="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com"
@@ -57,10 +144,40 @@ jobs:
           echo "BACKEND_IMAGE=${BACKEND_IMAGE}"  >> "$GITHUB_ENV"
           echo "FRONTEND_IMAGE=${FRONTEND_IMAGE}" >> "$GITHUB_ENV"
 
-          docker build --target prod -t "${BACKEND_IMAGE}"  ./backend
-          docker build --target prod -t "${FRONTEND_IMAGE}" ./frontend
-          docker push "${BACKEND_IMAGE}"
-          docker push "${FRONTEND_IMAGE}"
+          # ── Image promotion ────────────────────────────────────────────
+          # Both environments share ONE ECR registry and tag by commit SHA, and
+          # the repositories are ImageTagMutability: IMMUTABLE. So if this exact
+          # commit was already built — the other environment deployed it, or
+          # this workflow is being re-run — `docker push` would fail outright
+          # with ImageTagAlreadyExists.
+          #
+          # Reusing it is also the better behaviour: production then runs the
+          # byte-identical artifact that was already exercised elsewhere,
+          # instead of a fresh rebuild that could differ (base image moved,
+          # transitive dependency republished).
+          # Checked PER IMAGE, not both together: a previous run can leave the
+          # backend pushed and the frontend not (the build is two steps and can
+          # fail between them). Treating them as a pair would then rebuild both
+          # and die pushing the one that already exists.
+          exists() {
+            aws ecr describe-images \
+              --repository-name "${PROJECT}/$1" \
+              --image-ids imageTag="${IMAGE_TAG}" \
+              --region "${AWS_REGION}" >/dev/null 2>&1
+          }
+
+          build_or_promote() {
+            local name="$1" ctx="$2" image="$3"
+            if exists "${name}"; then
+              echo "::notice::${name}:${IMAGE_TAG} already in ECR — promoting, not rebuilding."
+            else
+              docker build --target prod -t "${image}" "${ctx}"
+              docker push "${image}"
+            fi
+          }
+
+          build_or_promote backend  ./backend  "${BACKEND_IMAGE}"
+          build_or_promote frontend ./frontend "${FRONTEND_IMAGE}"
 
       - name: Build EB source bundle
         run: |
@@ -80,24 +197,24 @@ jobs:
         run: |
           set -euo pipefail
           KEY="bundle/${IMAGE_TAG}.zip"
-          aws s3 cp bundle.zip "s3://${{ vars.ARTIFACTS_BUCKET }}/${KEY}"
+          aws s3 cp bundle.zip "s3://${ARTIFACTS_BUCKET}/${KEY}"
           aws elasticbeanstalk create-application-version \
-            --application-name "${{ vars.EB_APP }}" \
+            --application-name "${EB_APP}" \
             --version-label "${IMAGE_TAG}" \
-            --source-bundle "S3Bucket=${{ vars.ARTIFACTS_BUCKET }},S3Key=${KEY}" \
+            --source-bundle "S3Bucket=${ARTIFACTS_BUCKET},S3Key=${KEY}" \
             --auto-create-application
 
       - name: Deploy & wait for green
         run: |
           set -euo pipefail
           aws elasticbeanstalk update-environment \
-            --environment-name "${{ vars.EB_ENV }}" \
+            --environment-name "${EB_ENV}" \
             --version-label "${IMAGE_TAG}"
 
           echo "Waiting for environment to return to Ready/Green..."
           for i in $(seq 1 60); do
             read -r status health < <(aws elasticbeanstalk describe-environments \
-              --environment-names "${{ vars.EB_ENV }}" \
+              --environment-names "${EB_ENV}" \
               --query 'Environments[0].[Status,Health]' --output text)
             echo "  [$i] Status=${status} Health=${health}"
             if [[ "${status}" == "Ready" && "${health}" == "Green" ]]; then

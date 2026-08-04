@@ -22,11 +22,30 @@ Parameters:
   JwtRefreshTtlDays:
     Type: Number
     Default: 30
+  CreateEcrRepos:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether this stack owns the two ECR repositories. Set 'true' for the FIRST
+      environment in an account and 'false' for every one after it.
+      The repositories are deliberately named without the environment
+      (cellready/backend), so every environment shares one registry and images are
+      distinguished by their commit-SHA tag. That is what lets a build tested in
+      dev be promoted to prod as the identical artifact instead of rebuilt. But an
+      ECR repository name is unique per account+region, so a second stack that
+      tried to create them would fail with RepositoryAlreadyExists and roll back.
+      Set 'false' and this stack reuses whatever is already there.
+
+Conditions:
+  # Only the first environment in an account creates the shared registries.
+  ManageEcr: !Equals [ !Ref CreateEcrRepos, 'true' ]
 
 Resources:
   # ── Container registries ────────────────────────────────────────────────
   BackendRepo:
     Type: AWS::ECR::Repository
+    Condition: ManageEcr
     Properties:
       RepositoryName: !Sub '${ProjectName}/backend'
       ImageScanningConfiguration:
@@ -55,6 +74,7 @@ Resources:
 
   FrontendRepo:
     Type: AWS::ECR::Repository
+    Condition: ManageEcr
     Properties:
       RepositoryName: !Sub '${ProjectName}/frontend'
       ImageScanningConfiguration:
@@ -223,10 +243,16 @@ Resources:
       RefreshTokenValidity: !Ref JwtRefreshTtlDays
 
 Outputs:
+  # Conditional along with the repositories themselves — an Output referencing a
+  # resource that was not created is a template error, not an empty string.
+  # Nothing imports these (deploy.yml composes the registry URL from account +
+  # region), so a stack with CreateEcrRepos=false simply omits them.
   BackendRepoUri:
+    Condition: ManageEcr
     Value: !GetAtt BackendRepo.RepositoryUri
     Export: { Name: !Sub '${ProjectName}-${EnvName}-BackendRepoUri' }
   FrontendRepoUri:
+    Condition: ManageEcr
     Value: !GetAtt FrontendRepo.RepositoryUri
     Export: { Name: !Sub '${ProjectName}-${EnvName}-FrontendRepoUri' }
   # SignaturesBucketName / SignaturesBucketArn exports removed 2026-08-03 with

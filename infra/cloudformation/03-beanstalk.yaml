@@ -45,8 +45,21 @@ Parameters:
       --query 'PrefixLists[0].PrefixListId'
   SSMParamPrefix:
     Type: String
-    Default: /cellready/dev/
-    Description: SSM path the prebuild hook reads secrets from (trailing slash).
+    Default: ''
+    Description: >-
+      SSM path the prebuild hook reads secrets from (trailing slash). Leave BLANK
+      to derive it as /<ProjectName>/<EnvName>/ — which is what scripts/bootstrap_ssm.sh
+      writes to, so the two always agree.
+      This used to default to the literal '/cellready/dev/'. That is a dangerous
+      default for any second environment: a prod stack that simply omitted the
+      parameter would grant its instance role read access to the DEV parameters and
+      the boot hook would fetch DEV's DATABASE_URL and SECRET_KEY. Production would
+      come up healthy and green, silently pointed at the development database.
+      Deriving it removes the failure mode rather than documenting it.
+
+Conditions:
+  # Blank SSMParamPrefix means "derive it" — see the parameter description.
+  DeriveSsmPrefix: !Equals [ !Ref SSMParamPrefix, '' ]
 
 Resources:
   # ── IAM: EC2 instance role (least privilege) ────────────────────────────
@@ -73,7 +86,13 @@ Resources:
                   - ssm:GetParameter
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
-                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SSMParamPrefix}*'
+                # Scoped to THIS environment's prefix only. With the derived
+                # default, a prod instance can read /cellready/prod/* and nothing
+                # else — it physically cannot reach dev's secrets.
+                Resource: !If
+                  - DeriveSsmPrefix
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${EnvName}/*'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SSMParamPrefix}*'
               # Decrypt SecureString params (default aws/ssm key).
               - Effect: Allow
                 Action: kms:Decrypt
@@ -242,7 +261,14 @@ Resources:
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: AWS_REGION, Value: !Ref 'AWS::Region' }
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_LEVEL, Value: INFO }
         - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: LOG_FORMAT, Value: json }
-        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: SSM_PARAM_PREFIX, Value: !Ref SSMParamPrefix }
+        # Read by the prebuild hook via `get-config`, never by the app. The hook
+        # now REFUSES to boot if this is missing rather than guessing a default.
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: SSM_PARAM_PREFIX
+          Value: !If
+            - DeriveSsmPrefix
+            - !Sub '/${ProjectName}/${EnvName}/'
+            - !Ref SSMParamPrefix
         # How many proxies sit in front of the backend, counted from the app
         # outwards. Decides which X-Forwarded-For entry is written to the Part 11
         # audit rows; everything further left is caller-supplied and discarded.

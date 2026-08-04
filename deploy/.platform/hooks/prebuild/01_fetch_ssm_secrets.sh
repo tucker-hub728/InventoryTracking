@@ -19,7 +19,27 @@ EB_GET_CONFIG=/opt/elasticbeanstalk/bin/get-config
 REGION="$("$EB_GET_CONFIG" environment -k AWS_REGION 2>/dev/null || true)"
 PREFIX="$("$EB_GET_CONFIG" environment -k SSM_PARAM_PREFIX 2>/dev/null || true)"
 REGION="${REGION:-us-east-2}"
-PREFIX="${PREFIX:-/cellready/dev/}"
+
+# NO DEFAULT for the prefix — fail closed.
+#
+# This used to fall back to '/cellready/dev/'. With more than one environment
+# that default is actively dangerous: a production instance whose
+# SSM_PARAM_PREFIX was missing or misspelled would silently fetch DEV's
+# DATABASE_URL and SECRET_KEY, come up healthy, pass its health check, and serve
+# traffic against the development database. Nothing would look wrong.
+#
+# A deploy that stops here with a clear message is strictly better than one that
+# succeeds against the wrong data. The value is set by CloudFormation
+# (03-beanstalk.yaml, option SSM_PARAM_PREFIX), so an empty value means the
+# environment was built wrong and needs fixing, not defaulting.
+if [ -z "${PREFIX}" ]; then
+  echo "[prebuild] FATAL: SSM_PARAM_PREFIX is not set on this environment." >&2
+  echo "[prebuild] Refusing to guess — a wrong prefix would load another" >&2
+  echo "[prebuild] environment's database credentials." >&2
+  echo "[prebuild] Fix: set the SSM_PARAM_PREFIX environment property (the" >&2
+  echo "[prebuild] beanstalk stack sets it to /<project>/<env>/), then redeploy." >&2
+  exit 1
+fi
 
 APP_DIR="$(pwd)"   # /var/app/staging during prebuild
 ENV_FILE="${APP_DIR}/.env"
