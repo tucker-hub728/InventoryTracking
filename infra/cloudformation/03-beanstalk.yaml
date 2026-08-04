@@ -75,6 +75,22 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        # Session Manager: keyless shell access to the instance.
+        #
+        # Needed for the jobs that can only run next to the database — seeding
+        # reference data, creating the first super admin, inspecting a failed
+        # migration. The database is private and its security group admits only
+        # this instance, so there is no route to it from a laptop.
+        #
+        # Deliberately Session Manager rather than SSH: no key pair to
+        # distribute or rotate, no port 22 open in the security group, and
+        # every session is logged in CloudTrail against a real IAM identity —
+        # which is the access record a Part 11 audit will ask for.
+        #
+        # NOTE: this was attached BY HAND to the dev instance role and was
+        # missing from this template, so dev worked and prod did not. Declaring
+        # it here removes that drift; dev picks it up on its next stack update.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: app-runtime
           PolicyDocument:
