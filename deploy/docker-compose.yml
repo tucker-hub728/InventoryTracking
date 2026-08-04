@@ -29,6 +29,20 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       SECRET_KEY: ${SECRET_KEY}
       APP_ENV: ${APP_ENV}
+      # Cognito is not used by a migration — alembic only touches the database.
+      # It is passed anyway because `alembic/env.py` builds the same Settings
+      # object the app does, and the production invariants added in
+      # 2026-08-03 (core/config.py) require these whenever APP_ENV=production.
+      # Without them the migrate container aborts before running a single
+      # migration, and the backend never starts because it waits on
+      # `service_completed_successfully`.
+      #
+      # The alternative — exempting migrations from the check — would mean the
+      # one container that runs unattended on every deploy validates less than
+      # the one a human is watching. Passing two values it ignores is cheaper
+      # than that asymmetry.
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID}
 
   backend:
     image: ${BACKEND_IMAGE}
