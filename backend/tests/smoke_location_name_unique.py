@@ -199,9 +199,7 @@ def main() -> int:
     sa_password = os.environ.get("SMOKE_SA_PASSWORD")
     sa_token = None
     if sa_email and sa_password:
-        s, b = _req(
-            "POST", "/auth/login", json_body={"email": sa_email, "password": sa_password}
-        )
+        s, b = _req("POST", "/auth/login", json_body={"email": sa_email, "password": sa_password})
         if s == 200:
             sa_token = b["access_token"]
         else:

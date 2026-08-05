@@ -79,7 +79,9 @@ def _login() -> str:
 
 
 def _sign(token: str, action: str = TRANSFER_ACTION) -> str:
-    s, b = _req("POST", "/auth/reauth", token=token, json_body={"action": action, "password": PASSWORD})
+    s, b = _req(
+        "POST", "/auth/reauth", token=token, json_body={"action": action, "password": PASSWORD}
+    )
     assert s == 200, b
     return b["evidence_id"]
 
@@ -193,7 +195,11 @@ def main() -> int:
         len(b) == len({p["lot_id"] for p in picks}),
         b,
     )
-    check("every destination allocation is at the target node", all(a["location_node_id"] == dest["id"] for a in b), b)
+    check(
+        "every destination allocation is at the target node",
+        all(a["location_node_id"] == dest["id"] for a in b),
+        b,
+    )
 
     after_rows = _stock(token, item["id"])
     after = {(r["lot_id"], r["node_id"]): r["qty"] for r in after_rows}
@@ -238,10 +244,18 @@ def main() -> int:
     one = [_leg(probe, 1, dest["id"])]
 
     s, b = _transfer(token, sources=[_leg(probe, 1, probe["node_id"])])
-    check("source == destination rejected", s == 422 and b.get("code") == "transfer_same_location", (s, b))
+    check(
+        "source == destination rejected",
+        s == 422 and b.get("code") == "transfer_same_location",
+        (s, b),
+    )
 
     s, b = _transfer(token, sources=[_leg(probe, 1, dest["id"], [{"grid_row": 1, "grid_col": 1}])])
-    check("cells on a flat destination rejected", s == 422 and b.get("code") == "cells_not_allowed", (s, b))
+    check(
+        "cells on a flat destination rejected",
+        s == 422 and b.get("code") == "cells_not_allowed",
+        (s, b),
+    )
 
     s, b = _transfer(token, sources=[_leg(probe, 10_000, dest["id"])])
     check(
@@ -251,13 +265,7 @@ def main() -> int:
     )
 
     other = next(
-        (
-            r
-            for it2, rows2 in stocked
-            if it2["id"] != item["id"]
-            for r in rows2
-            if not r["is_grid"]
-        ),
+        (r for it2, rows2 in stocked if it2["id"] != item["id"] for r in rows2 if not r["is_grid"]),
         None,
     )
     if other is None:
@@ -322,7 +330,9 @@ def main() -> int:
         (
             r
             for r in _stock(token, item["id"])
-            if not r["is_grid"] and r["qty"] >= 2 and r["node_id"] not in {w["id"] for w in warehouse[:2]}
+            if not r["is_grid"]
+            and r["qty"] >= 2
+            and r["node_id"] not in {w["id"] for w in warehouse[:2]}
         ),
         None,
     )
@@ -370,9 +380,7 @@ def main() -> int:
     if box is None or fat is None:
         print("  (skip) need an LN2 box and a bulk source holding 2+ units")
     else:
-        s, b = _transfer(
-            token, sources=[_leg(fat, 2, box["id"], [{"grid_row": 1, "grid_col": 1}])]
-        )
+        s, b = _transfer(token, sources=[_leg(fat, 2, box["id"], [{"grid_row": 1, "grid_col": 1}])])
         check(
             "1 cell for 2 units rejected",
             s == 422 and b.get("code") == "dest_count_mismatch",
