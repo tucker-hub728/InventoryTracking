@@ -12,6 +12,7 @@ import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timel
 import { LedgerExpiryToolbar, LedgerTable, useLedgerExpiryControls } from './ledger-table';
 import { ForecastImpactTab } from './forecast-impact-tab';
 import { ItemBomTab } from './item-bom-tab';
+import { ItemStockLocationsTab } from './item-stock-locations-tab';
 import { ItemWhereUsedTab } from './item-where-used-tab';
 import { ItemBomTreeTab } from './item-bom-tree-tab';
 import { useInventoryDetail } from './inventory-detail-context';
@@ -93,6 +94,21 @@ export function ItemLedgerPanel() {
 export function ItemProductsPanel() {
   const { item } = useInventoryDetail();
   return <ItemWhereUsedTab itemId={item.uuid} />;
+}
+
+/** "Stock by location" tab — where the item physically is, with a per-row
+ *  Transfer action (INV-007 / TRX-001). Shown for every tier: a built item
+ *  holds real stock too, once a kit close-out has placed its output. */
+export function ItemStockPanel() {
+  const { item, refresh, canSign } = useInventoryDetail();
+  return (
+    <ItemStockLocationsTab
+      item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+      nearExpiryThresholdDays={item.nearExpiryThresholdDays}
+      canSign={canSign}
+      onChanged={refresh}
+    />
+  );
 }
 
 /** Product "BOM" tab — the direct bill-of-materials editor (built items only).

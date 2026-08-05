@@ -815,6 +815,28 @@ MovementType = Literal[
     "transfer_in",
 ]
 
+# Ledger order: newest first, with a deterministic tie-break.
+#
+# Both legs of a transfer are written in ONE transaction and share
+# ``performed_at`` to the microsecond, so ordering on the timestamp alone left
+# their relative position to whatever the planner happened to return. It came
+# back out-above-in, which reads bottom-up (oldest first) as "transferred in,
+# then transferred out" — backwards, since a transfer must leave the source
+# before it arrives at the destination.
+#
+# ``paired_movement_id`` is set ONLY on the second leg (the ``transfer_in``
+# links back at the ``transfer_out`` inserted before it), so it is exactly the
+# "this happened second" marker: descending puts it above its partner in a
+# newest-first list, and the pair then reads out → in from the bottom up.
+#
+# The id tie-break is arbitrary but stable, which OFFSET pagination needs — an
+# order that isn't total can skip or repeat rows across page boundaries.
+_LEDGER_ORDER = (
+    desc(StockMovement.performed_at),
+    desc(StockMovement.paired_movement_id.isnot(None)),
+    desc(StockMovement.id),
+)
+
 
 async def list_movements(
     session: AsyncSession,
@@ -855,7 +877,7 @@ async def list_movements(
     total = int((await session.execute(count_stmt)).scalar_one())
 
     base = (
-        base.order_by(desc(StockMovement.performed_at))
+        base.order_by(*_LEDGER_ORDER)
         .limit(limit)
         .offset(offset)
     )

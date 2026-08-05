@@ -48,7 +48,9 @@ from app.inventory.schemas import (
     SupplierRead,
     SupplierUpdate,
 )
+from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
+from app.locations.schemas import ItemStockLocationCell, ItemStockLocationRead
 from app.models.inventory import (
     BUILT_TIER_TYPES,
     Item,
@@ -943,6 +945,79 @@ async def list_item_lots(
         raise NotFoundError(f"Item {item_id} not found")
     rows, _ = await inv_repo.list_lots(db, item_id=item_id, status=status_filter)
     return [_lot_to_read(r) for r in rows]
+
+
+@items_router.get(
+    "/{item_id}/stock-locations",
+    response_model=list[ItemStockLocationRead],
+    summary="Where one item is stocked — a row per lot × storage location",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def item_stock_locations(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+) -> list[ItemStockLocationRead]:
+    """The item drill-down's "Stock by location" tab and the transfer dialog's
+    source picker (REQ-2026-07-01-INV-007 / REQ-2026-07-15-TRX-001).
+
+    The same shape as ``/v1/shipments/sources/{item_id}``, but for **every**
+    tier: a raw material is transferable though never shippable. WIP held by an
+    open kit on a production floor is excluded upstream — it is not available
+    stock, and the kit's Return step is how it comes back.
+    """
+    if (await inv_repo.get_item(db, item_id)) is None:
+        raise NotFoundError(f"Item {item_id} not found")
+
+    rows = (await kit_repo.item_stock_by_node_lot(db, {item_id})).get(item_id, [])
+    node_labels = await loc_repo.node_label_map(db) if rows else {}
+
+    # LN2 boxes: pull the occupied cells + grid geometry so the dialog can draw
+    # the box and the operator taps the exact vials (same as kitting Issue).
+    cells_by_node = (await kit_repo.item_cells_by_node(db, {item_id})).get(item_id, {})
+    grid_meta = {
+        n.id: (int(n.grid_rows), int(n.grid_cols))
+        for n in (await kit_repo.grid_nodes(db, set(cells_by_node))).values()
+        if n.grid_rows and n.grid_cols
+    }
+
+    def _label(node_id: uuid.UUID) -> str:
+        name, path = node_labels.get(node_id, ("", ""))
+        return path or name
+
+    def _cells(
+        node_id: uuid.UUID, lot_id: uuid.UUID, exp: object
+    ) -> list[ItemStockLocationCell]:
+        return [
+            ItemStockLocationCell(
+                allocation_id=str(a.id),
+                grid_row=int(a.grid_row),
+                grid_col=int(a.grid_col),
+                lot_id=str(a.lot_id),
+                lot_number=getattr(getattr(a, "lot", None), "lot_number", None),
+                expiration_date=exp,
+            )
+            for a in cells_by_node.get(node_id, [])
+            if a.lot_id == lot_id
+        ]
+
+    out: list[ItemStockLocationRead] = []
+    for (lot_id, lot_number, exp, node_id, qty) in rows:
+        dims = grid_meta.get(node_id)
+        out.append(
+            ItemStockLocationRead(
+                lot_id=str(lot_id),
+                lot_number=lot_number,
+                expiration_date=exp,
+                node_id=str(node_id),
+                location=_label(node_id),
+                qty=qty,
+                is_grid=dims is not None,
+                grid_rows=dims[0] if dims else None,
+                grid_cols=dims[1] if dims else None,
+                cells=_cells(node_id, lot_id, exp) if dims else [],
+            )
+        )
+    return out
 
 
 @items_router.post(

@@ -14,6 +14,7 @@ so it only writes an allocation + an audit-trail entry.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Annotated
 
@@ -29,9 +30,11 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.inventory import repository as inv_repo
+from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import (
     AllocationRead,
+    BatchCell,
     ConsumeBatchRequest,
     ConsumeRequest,
     DedicationUpdateRequest,
@@ -47,6 +50,7 @@ from app.locations.schemas import (
     PlaceRequest,
     ProductionAreaCreate,
     TransferBatchRequest,
+    TransferMultiRequest,
     TransferRequest,
 )
 from app.models.inventory import StockMovement
@@ -1524,6 +1528,265 @@ async def transfer_batch(
         # Batch transfer: every source is one lot (enforced above), so the lot is the subject.
         record_table="app.lots",
         record_id=lot_id,
+    )
+    await db.commit()
+    return results
+
+
+@dataclass(slots=True)
+class _TransferLeg:
+    """One resolved leg of a multi-source transfer: which units move, and where
+    to. Built during the validation pass so the write pass can run straight
+    through without re-parsing or re-fetching anything."""
+
+    line_no: int
+    lot_id: uuid.UUID
+    from_node_id: uuid.UUID
+    qty: int
+    #: Exact source vials for an LN2 box; None drains the lot FIFO.
+    source_cells: list[str] | None
+    to_node: LocationNode
+    #: Exact destination cells for a box; empty for a flat destination.
+    to_cells: list[BatchCell]
+
+
+async def _draw_transfer_source(
+    db: DBSession,
+    *,
+    item_id: uuid.UUID,
+    lot_uuid: uuid.UUID,
+    node_uuid: uuid.UUID,
+    qty: int,
+    cell_allocation_ids: list[str] | None,
+    line_no: int,
+) -> None:
+    """Draw ``qty`` of one lot at one node — the exact vials for an LN2 box,
+    else FIFO across that lot's allocations there. Reducing an allocation to
+    zero deactivates it (incl. box cells), which is what frees the source cell.
+
+    Mirrors the shipment source drain; the difference is only in the error
+    codes, which name a transfer so the dialog can phrase its message.
+    """
+    allocs = [
+        a
+        for a in await kit_repo.allocations_for_item_at_node(
+            db, item_id, node_uuid, for_update=True
+        )
+        if a.lot_id == lot_uuid
+    ]
+    available = sum(int(a.qty) for a in allocs)
+    if available == 0:
+        raise NotFoundError(
+            f"Source {line_no}: that lot is no longer stored at that location",
+            code="no_stock_at_location",
+        )
+
+    if cell_allocation_ids:
+        wanted = [_parse_uuid(c, field="cell_allocation_ids") for c in cell_allocation_ids]
+        if qty != len(set(wanted)):
+            raise ValidationError(
+                f"Source {line_no}: {len(set(wanted))} vials selected but qty is {qty} — "
+                f"for a box the quantity is the number of vials.",
+                code="cell_count_mismatch",
+            )
+        chosen = await kit_repo.allocations_by_ids(db, wanted)
+        found = {a.id for a in chosen}
+        if [str(w) for w in wanted if w not in found] or any(
+            a.lot_id != lot_uuid or a.location_node_id != node_uuid for a in chosen
+        ):
+            raise ValidationError(
+                f"Source {line_no}: one or more selected vials are no longer available.",
+                code="invalid_cell",
+            )
+        for alloc in chosen:
+            await loc_repo.reduce_allocation(db, allocation=alloc, qty=int(alloc.qty))
+        return
+
+    if qty > available:
+        raise ValidationError(
+            f"Source {line_no}: requested {qty} exceeds the {available} available for "
+            f"this lot here",
+            code="transfer_exceeds_available",
+        )
+    remaining = qty
+    for alloc in allocs:
+        if remaining <= 0:
+            break
+        take = min(remaining, int(alloc.qty))
+        await loc_repo.reduce_allocation(db, allocation=alloc, qty=take)
+        remaining -= take
+
+
+@alloc_router.post(
+    "/transfer-multi",
+    response_model=list[AllocationRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="Transfer one item's stock from several lots/locations, signed once (TRX-001)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def transfer_multi(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: TransferMultiRequest,
+) -> list[AllocationRead]:
+    """The inventory-workspace transfer (REQ-2026-07-15-TRX-001, refined
+    2026-07-22): started from an item rather than from a location, so it draws
+    from as many (lot × location) sources as the item is spread across — each
+    to its own destination — and the operator signs once. ``/transfer`` and
+    ``/transfer-batch`` still serve the within-location path, where the source
+    allocation is already in hand.
+    """
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+
+    # Resolve + validate every leg up front: all must be the SAME item, so the
+    # one signature covers one item's move and the ledger rows agree.
+    item_id: uuid.UUID | None = None
+    legs: list[_TransferLeg] = []
+    for i, src in enumerate(payload.sources, start=1):
+        lot_uuid = _parse_uuid(src.lot_id, field="lot_id")
+        node_uuid = _parse_uuid(src.node_id, field="node_id")
+        lot = await inv_repo.get_lot(db, lot_uuid)
+        if lot is None:
+            raise NotFoundError(f"Lot {src.lot_id} not found", code="lot_not_found")
+        if item_id is None:
+            item_id = lot.item_id
+        elif lot.item_id != item_id:
+            raise ValidationError(
+                "All sources must be for the same item", code="mixed_items"
+            )
+
+        to_node = await _resolve_storage_node(db, src.to_node_id)
+        # Moving inside one box / shelf is the single-allocation ``/transfer``
+        # path, which can reason about one cell moving to another.
+        if to_node.id == node_uuid:
+            raise ValidationError(
+                f"Source {i}: the destination is the location it is already in",
+                code="transfer_same_location",
+            )
+        if is_grid_node(to_node.node_type):
+            if not src.to_cells:
+                raise ValidationError(
+                    f"Source {i}: a box destination needs target cells",
+                    code="dest_cells_required",
+                )
+            if len(src.to_cells) != src.qty:
+                raise ValidationError(
+                    f"Source {i}: select exactly {src.qty} destination cell(s)",
+                    code="dest_count_mismatch",
+                )
+        elif src.to_cells:
+            raise ValidationError(
+                f"Source {i}: a flat destination takes no cells",
+                code="cells_not_allowed",
+            )
+        legs.append(
+            _TransferLeg(
+                line_no=i,
+                lot_id=lot_uuid,
+                from_node_id=node_uuid,
+                qty=src.qty,
+                source_cells=src.cell_allocation_ids,
+                to_node=to_node,
+                to_cells=list(src.to_cells),
+            )
+        )
+
+    assert item_id is not None  # sources has min_length 1
+
+    # Draw EVERY source before validating a single destination cell: one leg may
+    # be vacating the very cell another is aiming at (shuffling vials between
+    # two boxes), and checking occupancy first would reject that as occupied.
+    # Reducing an allocation to zero deactivates it, so the flush below is what
+    # makes the freed cells visible to the occupancy check.
+    for leg in legs:
+        await _draw_transfer_source(
+            db,
+            item_id=item_id,
+            lot_uuid=leg.lot_id,
+            node_uuid=leg.from_node_id,
+            qty=leg.qty,
+            cell_allocation_ids=leg.source_cells,
+            line_no=leg.line_no,
+        )
+    await db.flush()
+
+    results: list[AllocationRead] = []
+    first_out_leg: StockMovement | None = None
+    # Flat destinations: one allocation per (destination, LOT), not per leg. Two
+    # legs may carry the same lot to the same shelf, and landing that as two
+    # rows would be a split with no meaning — every reader has to sum it back
+    # up. A box is the opposite: one allocation per cell, by design.
+    flat_by_dest_lot: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+    for leg in legs:
+        if leg.to_cells:
+            for cell in leg.to_cells:
+                await _validate_cell_target(
+                    db,
+                    node=leg.to_node,
+                    grid_row=cell.grid_row,
+                    grid_col=cell.grid_col,
+                    qty=Decimal("1"),
+                    override=payload.override,
+                    role=current.role,
+                )
+                dest = await loc_repo.create_allocation(
+                    db,
+                    lot_id=leg.lot_id,
+                    location_node_id=leg.to_node.id,
+                    qty=Decimal("1"),
+                    grid_row=cell.grid_row,
+                    grid_col=cell.grid_col,
+                    created_by_user_id=current.id,
+                    notes=payload.notes,
+                )
+                results.append(_alloc_to_read(dest))
+        else:
+            key = (leg.to_node.id, leg.lot_id)
+            flat_by_dest_lot[key] = flat_by_dest_lot.get(key, 0) + leg.qty
+
+        # A transfer pair carries one lot, one source and one destination, so
+        # the ledger gets a pair per leg — that is what makes each row say where
+        # the material actually came from and went. Still one signature.
+        out_leg, _in_leg = await loc_repo.create_node_transfer_pair(
+            db,
+            item_id=item_id,
+            lot_id=leg.lot_id,
+            from_location_node_id=leg.from_node_id,
+            to_location_node_id=leg.to_node.id,
+            qty=Decimal(leg.qty),
+            performed_by_user_id=current.id,
+            reauth_evidence_id=evidence_uuid,
+            notes=payload.notes,
+        )
+        if first_out_leg is None:
+            first_out_leg = out_leg
+
+    # Distinct lots never merge — an allocation carries exactly one lot.
+    for (dest_node_id, lot_uuid), lot_qty in flat_by_dest_lot.items():
+        dest = await loc_repo.create_allocation(
+            db,
+            lot_id=lot_uuid,
+            location_node_id=dest_node_id,
+            qty=Decimal(lot_qty),
+            created_by_user_id=current.id,
+            notes=payload.notes,
+        )
+        results.append(_alloc_to_read(dest))
+
+    assert first_out_leg is not None
+    # Consumed LAST so a replayed signature rolls the whole transfer back. One
+    # signature authorises the whole move; it targets its first ledger row.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.transfer",
+        target_table="app.stock_movements",
+        target_id=first_out_leg.id,
+        # Several lots may move at once, so the SUBJECT is the item — the record
+        # the operator opened and signed about, not any one lot.
+        record_table="app.items",
+        record_id=item_id,
     )
     await db.commit()
     return results

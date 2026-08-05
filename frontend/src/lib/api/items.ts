@@ -16,10 +16,29 @@
  */
 
 import { api } from './client';
+import type { CellOption } from './kits';
 
 // ── Wire shape ─────────────────────────────────────────────────────────
 
 export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
+
+/** One place an item is stocked: a lot at a storage location with its available
+ *  quantity. For an LN2 box it also carries the grid geometry + this lot's
+ *  occupied vials, so a picker can draw the box and the operator taps exact
+ *  vials. Same shape as a shipment source, but served for every tier. */
+export interface ApiItemStockLocation {
+  lot_id: string;
+  lot_number: string | null;
+  expiration_date: string | null;
+  node_id: string;
+  /** Human location path, e.g. "Warehouse One › Shelf B". */
+  location: string;
+  qty: number;
+  is_grid: boolean;
+  grid_rows: number | null;
+  grid_cols: number | null;
+  cells: CellOption[];
+}
 
 /** One supplier assigned to an item (part of ``ApiItem.suppliers``). */
 export interface ApiItemSupplier {
@@ -184,6 +203,17 @@ export const itemsApi = {
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiItem>(`/items/${id}`, { signal: opts?.signal }),
+
+  /**
+   * Where this item is stocked, a row per (lot × storage location), FIFO
+   * ordered. Feeds the "Stock by location" tab and the transfer dialog's source
+   * picker (INV-007 / TRX-001). WIP on a production floor is excluded — the
+   * kit's Return step is how that comes back, not a transfer.
+   */
+  stockLocations: (id: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiItemStockLocation[]>(`/items/${id}/stock-locations`, {
+      signal: opts?.signal,
+    }),
 
   /**
    * Fetch by the human-readable item number (e.g. ``CM-0001``) — this is

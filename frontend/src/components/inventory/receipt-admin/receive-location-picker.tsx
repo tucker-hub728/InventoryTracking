@@ -110,12 +110,17 @@ export function ReceiveLocationPicker({
   value,
   onChange,
   disabled,
+  reservedCells,
 }: {
   qty: number;
   trees: AreaTrees;
   value: PlacementValue | null;
   onChange: (v: PlacementValue | null) => void;
   disabled?: boolean;
+  /** Cells in THIS box already claimed by a sibling picker in the same form —
+   *  ``"row:col"`` keys. The transfer dialog aims several rows at one box, and
+   *  a claim exists only in the unsaved form until it is signed. */
+  reservedCells?: Set<string>;
 }) {
   const selected = findNode(trees, value?.nodeId ?? '');
 
@@ -154,6 +159,7 @@ export function ReceiveLocationPicker({
           box={selected.node}
           qty={qty}
           value={value?.cells ?? []}
+          reservedCells={reservedCells}
           onChange={(cells) =>
             onChange({ area: selected.area, nodeId: selected.node.id, nodeType: 'box', cells })
           }
@@ -207,11 +213,13 @@ function CellSelector({
   qty,
   value,
   onChange,
+  reservedCells,
 }: {
   box: NodeTree;
   qty: number;
   value: ReceivePlacementCell[];
   onChange: (cells: ReceivePlacementCell[]) => void;
+  reservedCells?: Set<string>;
 }) {
   const [allocs, setAllocs] = React.useState<Allocation[]>([]);
 
@@ -229,6 +237,19 @@ function CellSelector({
   const selectedSet = new Set(value.map((c) => `${c.grid_row}:${c.grid_col}`));
   const complete = value.length === qty;
 
+  // How many cells this box can actually offer: the grid, minus what is stored
+  // in it, minus what a sibling row of the same form has already claimed.
+  const capacity = React.useMemo(() => {
+    const total = (box.grid_rows ?? 0) * (box.grid_cols ?? 0);
+    const taken = allocs.filter(
+      (a) => a.is_active && a.grid_row != null && a.grid_col != null,
+    ).length;
+    return Math.max(0, total - taken - (reservedCells?.size ?? 0));
+  }, [box.grid_rows, box.grid_cols, allocs, reservedCells]);
+  // The operator cannot finish this row here — say so, rather than leaving them
+  // clicking at a grid that will not accept the last unit.
+  const tooSmall = capacity < qty;
+
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs">
@@ -240,12 +261,21 @@ function CellSelector({
           {value.length}/{qty}
         </span>
       </div>
+      {tooSmall && (
+        <p className="rounded-md border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] text-warning">
+          <span className="font-mono">{box.name}</span> has {capacity} free cell
+          {capacity === 1 ? '' : 's'} but this row moves {qty}. Lower this row to{' '}
+          {capacity} and add another move for the remaining {qty - capacity}, or pick a
+          bigger destination.
+        </p>
+      )}
       <div className="overflow-x-auto rounded-md border border-border bg-bg-elev p-2">
         <BoxGrid
           rows={box.grid_rows ?? 1}
           cols={box.grid_cols ?? 1}
           allocations={allocs}
           selectedCells={selectedSet}
+          reservedCells={reservedCells}
           onSelectCell={({ row, col, occupant }) => {
             if (occupant) return;
             const key = `${row}:${col}`;

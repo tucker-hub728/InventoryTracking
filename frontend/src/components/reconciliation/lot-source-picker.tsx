@@ -47,14 +47,24 @@ export const picksTotal = (picks: LotPick[]) =>
 /** No pick pulls more of a lot than physically exists — the only hard rule at
  *  issue under KIT-007 (no recipe gating; a short or zero pick is fine, it's
  *  simply ignored). A row with no lot, or a zero quantity, is not "invalid" —
- *  it just doesn't post. */
+ *  it just doesn't post.
+ *
+ *  Quantities are summed PER (lot × location), not checked row by row: when a
+ *  caller allows one source on several rows (the transfer dialog splits a lot
+ *  across destinations), two rows of 4 and 3 against a lot of 5 are each
+ *  individually fine and together impossible. */
 export function picksValid(lots: KitLineSourceLot[], picks: LotPick[]): boolean {
-  return picks.every((p) => {
-    if (!p.lot_id) return true; // an empty / location-only row is ignored
-    const lot = lots.find((x) => x.lot_id === p.lot_id && x.node_id === p.node_id);
-    if (!lot) return false;
-    return pickQty(p) <= lot.qty; // physical cap only — short/zero is allowed
-  });
+  const drawn = new Map<string, number>();
+  for (const p of picks) {
+    if (!p.lot_id) continue; // an empty / location-only row is ignored
+    const key = pickKey(p.lot_id, p.node_id);
+    drawn.set(key, (drawn.get(key) ?? 0) + pickQty(p));
+  }
+  for (const [key, qty] of drawn) {
+    const lot = lots.find((x) => pickKey(x.lot_id, x.node_id) === key);
+    if (!lot || qty > lot.qty) return false; // physical cap only
+  }
+  return true;
 }
 
 const lotByKey = (lots: KitLineSourceLot[], key: string) =>
@@ -158,6 +168,9 @@ export function LotSourcePicker({
   onChange,
   disabled = false,
   modal = false,
+  renderRowFooter,
+  addLabel = 'Add another lot',
+  allowDuplicateLots = false,
 }: {
   itemNumber: string;
   lots: KitLineSourceLot[];
@@ -168,6 +181,26 @@ export function LotSourcePicker({
   disabled?: boolean;
   /** Pass true when the picker lives inside a Dialog/Sheet (scroll-lock). */
   modal?: boolean;
+  /** Extra content rendered inside each row, below its cell grid. The transfer
+   *  dialog uses it to hang a per-row DESTINATION off each source, since a
+   *  transfer states where every lot goes rather than sharing one target
+   *  (client 2026-08-05). Omitted everywhere else, which leaves the kitting
+   *  Issue and ship-to-customer rows exactly as they were. */
+  renderRowFooter?: (index: number, pick: LotPick) => React.ReactNode;
+  /** Wording of the add button — "lot" reads wrong when each row is a whole
+   *  from-and-to leg rather than just another lot to draw from. */
+  addLabel?: string;
+  /**
+   * Let one lot × location appear on SEVERAL rows. Off by default: for a kit
+   * issue or a shipment two rows of the same lot are just one row with a bigger
+   * number, so offering it only invites a mistake.
+   *
+   * The transfer dialog turns it on, because there each row carries its own
+   * destination — splitting 5 units into 4 here and 1 there is the only way to
+   * empty a shelf into a box that has 4 free cells left. ``picksValid`` sums per
+   * lot, so the split still cannot exceed what is physically there.
+   */
+  allowDuplicateLots?: boolean;
 }) {
   const total = picksTotal(picks);
   const remaining = Math.max(0, needed - total);
@@ -181,13 +214,17 @@ export function LotSourcePicker({
     onChange(rows);
   };
 
-  // Keys used by every OTHER row, so a lot can't be picked twice.
+  // Keys used by every OTHER row, so a lot can't be picked twice — unless the
+  // caller allows a lot to be split across rows, in which case nothing is
+  // excluded and the per-lot cap in ``picksValid`` is what holds the line.
   const usedBy = (skip: number) =>
-    new Set(
-      picks
-        .map((p, j) => (j !== skip && p.lot_id ? pickKey(p.lot_id, p.node_id) : ''))
-        .filter(Boolean),
-    );
+    allowDuplicateLots
+      ? new Set<string>()
+      : new Set(
+          picks
+            .map((p, j) => (j !== skip && p.lot_id ? pickKey(p.lot_id, p.node_id) : ''))
+            .filter(Boolean),
+        );
 
   const fillRow = (i: number, lot: KitLineSourceLot) => {
     // Default the quantity to whatever is still needed (capped at the lot).
@@ -231,8 +268,19 @@ export function LotSourcePicker({
     );
   }
 
-  const allUsed = new Set(picks.filter((p) => p.lot_id).map((p) => pickKey(p.lot_id, p.node_id)));
-  const anyLeft = lots.some((l) => l.qty > 0 && !allUsed.has(pickKey(l.lot_id, l.node_id)));
+  // How much of each lot × location the rows already draw, so both the add
+  // button and the per-row error can reason about a lot split over several rows.
+  const drawnPerLot = new Map<string, number>();
+  for (const p of picks) {
+    if (!p.lot_id) continue;
+    const k = pickKey(p.lot_id, p.node_id);
+    drawnPerLot.set(k, (drawnPerLot.get(k) ?? 0) + pickQty(p));
+  }
+  const allUsed = new Set(drawnPerLot.keys());
+  const anyLeft = allowDuplicateLots
+    ? // A lot can be picked again while any of it is still undrawn.
+      lots.some((l) => l.qty > (drawnPerLot.get(pickKey(l.lot_id, l.node_id)) ?? 0))
+    : lots.some((l) => l.qty > 0 && !allUsed.has(pickKey(l.lot_id, l.node_id)));
   const pct = needed > 0 ? Math.min(100, Math.round((total / needed) * 100)) : total > 0 ? 100 : 0;
 
   return (
@@ -270,7 +318,10 @@ export function LotSourcePicker({
             .map(lotOption);
 
           const taken = pickQty(row);
-          const over = lot ? taken > lot.qty : false;
+          // Measured against the WHOLE draw on this lot, so splitting it over
+          // two rows can't quietly take more than the lot holds.
+          const drawnHere = lot ? (drawnPerLot.get(lotKey) ?? taken) : taken;
+          const over = lot ? drawnHere > lot.qty : false;
           const emptyQty = Boolean(lot) && !lot?.is_grid && taken === 0;
           const rowError = over || emptyQty || (Boolean(lot?.is_grid) && taken === 0);
 
@@ -362,7 +413,9 @@ export function LotSourcePicker({
               {rowError && (
                 <p className="mt-1 pl-6 text-[11px] text-danger">
                   {over
-                    ? `Only ${lot?.qty} available in this lot.`
+                    ? drawnHere > taken
+                      ? `Only ${lot?.qty} available in this lot, and the rows together take ${drawnHere}.`
+                      : `Only ${lot?.qty} available in this lot.`
                     : lot?.is_grid
                       ? 'Pick the vials below.'
                       : 'Enter a quantity.'}
@@ -383,6 +436,10 @@ export function LotSourcePicker({
                   />
                 </div>
               )}
+
+              {renderRowFooter && (
+                <div className="mt-2 pl-6">{renderRowFooter(i, row)}</div>
+              )}
             </div>
           );
         })}
@@ -398,7 +455,7 @@ export function LotSourcePicker({
           onClick={addRow}
           title={anyLeft ? 'Draw the remainder from another lot' : 'No other lots hold this item'}
         >
-          <Plus size={13} /> Add another lot
+          <Plus size={13} /> {addLabel}
         </Button>
         {needed > 0 ? (
           <div className="flex flex-1 items-center gap-2">

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
@@ -328,6 +328,118 @@ class TransferBatchRequest(BaseModel):
         if len(seen) != len(self.to_cells):
             raise ValueError("Destination cells must be distinct")
         return self
+
+
+class TransferSourceInput(BaseModel):
+    """One leg of a transfer: a quantity of ONE lot at ONE storage node, and the
+    ONE destination it moves to.
+
+    The destination lives on the source, not on the request, so a transfer that
+    draws from several places can send each to a different one — 10 vials off
+    Shelf C into a box, 5 off Shelf D onto Shelf F, one signature. The operator
+    states the mapping rather than the system inferring it, which matches the
+    physical act they are signing for (client 2026-08-05).
+
+    For an LN2 box SOURCE, ``cell_allocation_ids`` names the exact vials and
+    ``qty`` must equal their count; for a bulk shelf / freezer lot the quantity
+    drains that lot's allocations there FIFO. For a box DESTINATION,
+    ``to_cells`` lists one free cell per unit (``len == qty``); a flat
+    destination takes no cells.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    lot_id: str
+    qty: int = Field(gt=0, le=MAX_QTY)
+    cell_allocation_ids: list[str] | None = None
+    to_node_id: str
+    to_cells: list[BatchCell] = Field(default_factory=list, max_length=400)
+
+
+class TransferMultiRequest(BaseModel):
+    """Move ONE item's stock from SEVERAL lots / locations, each to its own
+    destination, signed once (REQ-2026-07-15-TRX-001 as refined 2026-07-22).
+
+    This is the inventory-workspace transfer: the operator opens an item, sees
+    where it is stocked, and moves stock without first navigating to a location.
+    ``/transfer`` and ``/transfer-batch`` keep serving the within-location path,
+    which starts from an allocation the operator already has in front of them.
+
+    Every source must resolve to the same item; each carries its own
+    ``to_node_id`` (see :class:`TransferSourceInput`). A source whose
+    destination is its own location is rejected — moving within one box or
+    shelf is the single-allocation ``/transfer`` path.
+
+    Posts one ``transfer_out`` / ``transfer_in`` pair **per source** (a pair
+    carries a single lot, a single source and a single destination), all
+    authorised by the one signature — ``evidence_id`` (action
+    ``movement.transfer``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[TransferSourceInput] = Field(min_length=1, max_length=100)
+    override: bool = False
+    evidence_id: str
+    notes: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _distinct_cells(self) -> TransferMultiRequest:
+        # One lot × location MAY appear on several legs — that is how a shelf
+        # holding 5 units empties into a box with only 4 free cells, the rest
+        # going elsewhere. The draw is sequential and each leg re-reads what is
+        # left, so the total can never exceed what is actually there.
+        #
+        # Two legs sending units to the SAME cell is a different matter: caught
+        # here rather than at the unique index, which would surface as a 500.
+        cells = [(s.to_node_id, c.grid_row, c.grid_col) for s in self.sources for c in s.to_cells]
+        if len(set(cells)) != len(cells):
+            raise ValueError("Destination cells must be distinct")
+        return self
+
+
+class ItemStockLocationCell(BaseModel):
+    """One occupied vial position in an LN2 box — exactly one unit of one lot
+    (``uq_lot_allocations_cell``), so the transfer dialog can draw the box and
+    the operator taps the exact vials to move."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    allocation_id: str
+    grid_row: int
+    grid_col: int
+    lot_id: str
+    lot_number: str | None = None
+    expiration_date: date | None = None
+
+
+class ItemStockLocationRead(BaseModel):
+    """Where one item is stocked, a row per **(lot × storage location)**.
+
+    Powers the item drill-down's "Stock by location" tab (REQ-2026-07-01-INV-007
+    — "drilling into a finished good shall reveal its storage location(s)") and
+    the transfer dialog's source picker (TRX-001). Rows arrive FIFO-ordered
+    (earliest expiry first, then oldest lot). WIP held by an open kit on a
+    production floor is excluded — it is not available stock.
+
+    Unlike ``/shipments/sources/{item_id}`` this serves **every** tier, not only
+    the built ones: a raw material is transferable but never shippable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    lot_number: str | None
+    expiration_date: date | None
+    node_id: str
+    # Human location path, e.g. "Warehouse One › Shelf B".
+    location: str
+    qty: int
+    is_grid: bool = False
+    grid_rows: int | None = None
+    grid_cols: int | None = None
+    cells: list[ItemStockLocationCell] = []
 
 
 class LotAvailabilityRead(BaseModel):

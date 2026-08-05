@@ -1030,5 +1030,15 @@ async def list_node_ledger(
                 StockMovement.to_location_node_id == node_id,
             )
         )
-    stmt = stmt.order_by(StockMovement.performed_at.desc()).limit(limit).offset(offset)
+    # Same ordering as the item ledger — see ``inv_repo._LEDGER_ORDER`` for why
+    # the timestamp alone isn't enough to keep a transfer pair the right way up.
+    stmt = (
+        stmt.order_by(
+            StockMovement.performed_at.desc(),
+            StockMovement.paired_movement_id.isnot(None).desc(),
+            StockMovement.id.desc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    )
     return list((await session.execute(stmt)).scalars().unique().all())

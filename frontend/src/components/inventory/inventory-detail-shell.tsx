@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeft, Loader2, Pencil, Truck } from 'lucide-react';
+import { ArrowLeft, ArrowLeftRight, Loader2, Pencil, Truck } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
+import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
 import { ShipToCustomerDialog } from './ship-to-customer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
@@ -43,9 +44,16 @@ interface DetailTab {
   label: string;
 }
 
+// "Stock by location" sits second on every tier. The Unit Ledger says what
+// MOVED; this says where the item IS right now — which REQ-2026-07-01-INV-007
+// requires of the drill-down, and which the transfer control needs in front of
+// the operator before they choose a source (REQ-2026-07-15-TRX-001).
+const STOCK_TAB: DetailTab = { seg: 'stock', label: 'Stock by location' };
+
 // Raw materials are *received into stock* — they get the ledger and audit.
 const RAW_TABS: readonly DetailTab[] = [
   { seg: 'ledger', label: 'Unit Ledger' },
+  STOCK_TAB,
   { seg: 'audit', label: 'Audit History' },
 ];
 
@@ -55,6 +63,7 @@ const RAW_TABS: readonly DetailTab[] = [
 // permanently empty and is omitted rather than shown blank.
 const RAW_TABS_WITH_USED_IN: readonly DetailTab[] = [
   { seg: 'ledger', label: 'Unit Ledger' },
+  STOCK_TAB,
   { seg: 'products', label: 'Used in' },
   { seg: 'audit', label: 'Audit History' },
 ];
@@ -70,6 +79,7 @@ const RAW_TABS_WITH_USED_IN: readonly DetailTab[] = [
 // events viewable per item, so built items now get the Audit History tab.
 const PRODUCT_TABS: readonly DetailTab[] = [
   { seg: 'ledger', label: 'Unit Ledger' },
+  STOCK_TAB,
   { seg: 'bom', label: 'BOM' },
   { seg: 'structure', label: 'Structure' },
   { seg: 'audit', label: 'Audit History' },
@@ -81,6 +91,7 @@ const PRODUCT_TABS: readonly DetailTab[] = [
 // tab is omitted.
 const PRODUCT_TABS_WITH_USED_IN: readonly DetailTab[] = [
   { seg: 'ledger', label: 'Unit Ledger' },
+  STOCK_TAB,
   { seg: 'bom', label: 'BOM' },
   { seg: 'structure', label: 'Structure' },
   { seg: 'products', label: 'Used in' },
@@ -128,6 +139,7 @@ export function InventoryDetailShell({
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [editing, setEditing] = React.useState(false);
   const [shipping, setShipping] = React.useState(false);
+  const [transferring, setTransferring] = React.useState(false);
 
   const [ledgerRows, setLedgerRows] = React.useState<ApiMovement[]>([]);
   const [ledgerTotal, setLedgerTotal] = React.useState(0);
@@ -330,6 +342,16 @@ export function InventoryDetailShell({
                 <Pencil size={14} /> Edit
               </Button>
             )}
+            {/* The inventory workspace half of REQ-2026-07-15-TRX-001 (refined
+                2026-07-22): transfer without first navigating to a location.
+                Offered on all three tiers (client 2026-08-05) — a finished good
+                moves between freezers before it ever ships. E-signed, so it
+                gates on ``inventory:sign`` like the location-view control. */}
+            {canSign && (
+              <Button onClick={() => setTransferring(true)}>
+                <ArrowLeftRight size={14} /> Transfer
+              </Button>
+            )}
             {/* Ship-to-customer is the terminal transaction for a built item —
                 a finished good, or a sub-assembly sold directly (INV-004 /
                 CUST-001). E-signed, so gate on ``inventory:sign``. */}
@@ -467,6 +489,13 @@ export function InventoryDetailShell({
         open={shipping}
         onOpenChange={setShipping}
         item={{ uuid: item.uuid, id: item.id, desc: item.desc, tierType: item.tierType }}
+        onDone={refresh}
+      />
+
+      <TransferDialog
+        open={transferring}
+        onOpenChange={setTransferring}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
         onDone={refresh}
       />
     </>

@@ -47,6 +47,14 @@ export interface BoxGridProps {
    * Null / undefined means nothing is selected yet, so every unit is fair game.
    */
   batchLotId?: string | null;
+  /**
+   * Empty cells (``"row:col"`` keys) already spoken for by a DIFFERENT part of
+   * the same unsaved form — the transfer dialog aims several rows at one box,
+   * and nothing on the server knows about a claim until it is signed. Rendered
+   * as taken and not clickable, so the clash is visible while choosing instead
+   * of surfacing as a validation error after the fact.
+   */
+  reservedCells?: Set<string>;
   onSelectCell?: (cell: {
     row: number;
     col: number;
@@ -68,6 +76,7 @@ export function BoxGrid({
   selectedCells,
   selectedOccupied,
   batchLotId,
+  reservedCells,
   onSelectCell,
 }: BoxGridProps) {
   const occupied = React.useMemo(() => {
@@ -113,20 +122,27 @@ export function BoxGrid({
                 const isOccSel = !!occ && (selectedOccupied?.has(`${row}:${col}`) ?? false);
                 // Holds a unit, but not one that can join the batch under way.
                 const otherLot = !!occ && !!batchLotId && occ.lot_id !== batchLotId;
+                // Claimed by another row of the same form — empty on the
+                // server, but not available to THIS selection.
+                const reserved =
+                  !occ && !isMulti && (reservedCells?.has(`${row}:${col}`) ?? false);
+                const blocked = otherLot || reserved;
                 const address = `${rowLabel(row)}${col}`;
                 return (
                   <button
                     key={`${row}:${col}`}
                     type="button"
-                    disabled={otherLot}
-                    aria-disabled={otherLot || undefined}
+                    disabled={blocked}
+                    aria-disabled={blocked || undefined}
                     onClick={() => onSelectCell?.({ row, col, occupant: occ })}
                     title={
                       otherLot
                         ? `${address} · ${occ.lot_number ?? 'another lot'} — a batch must be a single lot`
-                        : occ
-                          ? `${address} · ${occ.item_number ?? ''} ${occ.lot_number ?? ''}`.trim()
-                          : `${address} · empty`
+                        : reserved
+                          ? `${address} · already taken by another row of this transfer`
+                          : occ
+                            ? `${address} · ${occ.item_number ?? ''} ${occ.lot_number ?? ''}`.trim()
+                            : `${address} · empty`
                     }
                     className={cn(
                       'flex aspect-square min-h-[2.25rem] items-center justify-center overflow-hidden rounded px-px font-mono text-[10px] leading-none tracking-tight transition-colors',
@@ -135,18 +151,20 @@ export function BoxGrid({
                           // washed-out one, so the token stays readable in both
                           // themes and the cell doesn't read as empty.
                           'cursor-not-allowed border border-accent/20 bg-accent/15 text-accent/60'
-                        : occ
-                          ? 'bg-accent text-white hover:brightness-110'
-                          : isMulti
-                            ? 'border border-accent bg-accent/15 text-accent'
-                            : 'border border-dashed border-border text-text-3 hover:border-accent hover:text-accent',
-                      !otherLot &&
+                        : reserved
+                          ? 'cursor-not-allowed border border-dashed border-accent/30 bg-accent/10 text-accent/50'
+                          : occ
+                            ? 'bg-accent text-white hover:brightness-110'
+                            : isMulti
+                              ? 'border border-accent bg-accent/15 text-accent'
+                              : 'border border-dashed border-border text-text-3 hover:border-accent hover:text-accent',
+                      !blocked &&
                         (isSel || isMulti || isOccSel) &&
                         'ring-2 ring-accent ring-offset-1 ring-offset-bg',
                       isOccSel && 'ring-warning',
                     )}
                   >
-                    {occ ? cellToken(occ) : ''}
+                    {occ ? cellToken(occ) : reserved ? '·' : ''}
                   </button>
                 );
               })}

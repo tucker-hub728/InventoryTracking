@@ -327,6 +327,30 @@ export interface TransferBatchInput {
   notes: string;
 }
 
+/** One leg of a transfer: a quantity of one lot at one storage node, and the one
+ *  destination it moves to. LN2 box sources carry the exact vial allocation ids;
+ *  a box destination carries one cell per unit (``to_cells.length === qty``). */
+export interface TransferSourceInput {
+  node_id: string;
+  lot_id: string;
+  qty: number;
+  cell_allocation_ids?: string[];
+  to_node_id: string;
+  to_cells?: { grid_row: number; grid_col: number }[];
+}
+
+/** Move ONE item's stock from several lots / locations, each to its own
+ *  destination, signed once — the inventory-workspace transfer
+ *  (REQ-2026-07-15-TRX-001 as refined 2026-07-22). The within-location path
+ *  keeps using ``transfer`` / ``transferBatch``, which start from a known
+ *  allocation and therefore have a single source and a single destination. */
+export interface TransferMultiInput {
+  sources: TransferSourceInput[];
+  override?: boolean;
+  evidence_id: string;
+  notes: string;
+}
+
 export interface LotAvailability {
   lot_id: string;
   ordered_qty: number | null;
@@ -414,6 +438,11 @@ export const locationNodesApi = {
 
   transferBatch: (input: TransferBatchInput) =>
     api.post<Allocation[]>('/allocations/transfer-batch', { json: input }),
+
+  /** Multi-source transfer started from an item rather than a location — the
+   *  destination allocations come back. */
+  transferMulti: (input: TransferMultiInput) =>
+    api.post<Allocation[]>('/allocations/transfer-multi', { json: input }),
 
   lotAvailability: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<LotAvailability>(`/allocations/lot-availability/${lotId}`, {
