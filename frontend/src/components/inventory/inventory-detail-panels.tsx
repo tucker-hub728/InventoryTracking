@@ -71,7 +71,11 @@ export function ItemLedgerPanel() {
           totalLots={controls.totalLots}
         />
       </div>
-      <div className="overflow-x-auto">
+      {/* No overflow here on purpose: ``Table`` brings its own scroll container
+          and that is the one sticky anchors to, so a second one around it only
+          made the scrollbars fight. The height lives on the table (see
+          ``containerClassName`` in LedgerTable). */}
+      <div>
         <LedgerTable
           groups={controls.groups}
           nearExpiryThresholdDays={item.nearExpiryThresholdDays}

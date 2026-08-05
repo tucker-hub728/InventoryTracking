@@ -2,9 +2,24 @@ import * as React from 'react';
 
 import { cn } from '@/lib/utils';
 
-const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(
-  ({ className, ...props }, ref) => (
-    <div className="relative w-full overflow-auto">
+interface TableProps extends React.HTMLAttributes<HTMLTableElement> {
+  /**
+   * Classes for the scroll container around the table — this is the element
+   * ``position: sticky`` inside the table anchors to.
+   *
+   * Give it a height (``max-h-[70vh]``) and sticky headers / footers start
+   * working. Without one the container grows to the full table and never
+   * scrolls, so its scrollport never moves and every sticky cell sits still
+   * while the PAGE scrolls past — which is why the sticky column headers here
+   * looked like they did nothing. Wrapping the whole ``<Table>`` in another
+   * scrolling div does not help: the nearest scrollport is still this one.
+   */
+  containerClassName?: string;
+}
+
+const Table = React.forwardRef<HTMLTableElement, TableProps>(
+  ({ className, containerClassName, ...props }, ref) => (
+    <div className={cn('relative w-full overflow-auto', containerClassName)}>
       <table
         ref={ref}
         className={cn('w-full caption-bottom border-separate border-spacing-0 text-sm', className)}

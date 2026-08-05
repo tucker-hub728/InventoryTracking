@@ -455,7 +455,15 @@ export function LedgerTable({
   const sortAria = sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none';
 
   return (
-    <Table>
+    // The height belongs HERE, on the table's own scroll container — that is
+    // what the sticky column headers and the sticky totals row anchor to.
+    //
+    // Sized against what is LEFT of the window rather than a flat ``70vh``:
+    // the pane starts about 330px down (topbar, page header, tab bar, expiry
+    // toolbar), so 70vh ran past the bottom of the window and the pinned totals
+    // row — the whole point of pinning it — was half under the fold. The floor
+    // keeps it usable if the window is short enough for the subtraction to win.
+    <Table containerClassName="max-h-[calc(100vh-330px)] min-h-[240px]">
       <TableHeader>
         <TableRow>
           <TableHead className="w-[120px]">Date</TableHead>
@@ -671,18 +679,30 @@ export function LedgerTable({
           </React.Fragment>
         ))}
 
-        {/* Item grand total — over the currently visible lots. */}
-        <TableRow className="border-t-2 border-accent/40 bg-accent-soft font-bold">
-          <TableCell className="text-[11px] uppercase tracking-wide">
+        {/* Item grand total — over the currently visible lots.
+            Pinned to the foot of the scroll pane: on an item with many lots the
+            totals are the reason you opened the ledger, and they used to sit
+            past the end of a list you had to scroll to reach. ``sticky`` goes
+            on the CELLS, not the row — a sticky <tr> is not honoured
+            everywhere. The background must stay opaque or the rows sliding
+            underneath show through it. */}
+        <TableRow className="border-t-2 border-accent/40 font-bold">
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-[11px] uppercase tracking-wide">
             {filtersActive ? 'Filtered total' : 'Item total'}
           </TableCell>
           {/* Transaction spacer — without it the totals shift a column left. */}
-          <TableCell />
-          <TableCell className="text-right font-mono text-sm text-success">{grandIn}</TableCell>
-          <TableCell className="text-right font-mono text-sm text-danger">{grandOut}</TableCell>
-          <TableCell className="text-right font-mono text-sm">{grandBalance}</TableCell>
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" />
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm text-success">
+            {grandIn}
+          </TableCell>
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm text-danger">
+            {grandOut}
+          </TableCell>
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm">
+            {grandBalance}
+          </TableCell>
           {/* label + spacer + the three totals = 5 cells already rendered. */}
-          <TableCell colSpan={cols - 5} />
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" colSpan={cols - 5} />
         </TableRow>
       </TableBody>
     </Table>
