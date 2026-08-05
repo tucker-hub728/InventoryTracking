@@ -784,8 +784,13 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       <div className="px-6 py-5 sm:px-8">
         {/* Stepper */}
         <Card className="mb-5 p-2 sm:p-3">
-          <nav aria-label="Kit progress">
-            <ol className="flex items-stretch">
+          {/* Four steps, each a 32px disc plus an unwrappable label, come to
+              roughly 540px before padding. Below that the row used to push the
+              whole PAGE sideways — the body scrolled, so the header and every
+              panel below slid out of view together. It scrolls inside its own
+              card now, and the connectors collapse so it rarely needs to. */}
+          <nav aria-label="Kit progress" className="scroll-strip">
+            <ol className="flex min-w-max items-stretch sm:min-w-0">
               {STEPS.map((step, i) => {
                 const isCurrent = i === activeStep;
                 const isDone = i < model.completed;
@@ -837,7 +842,10 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
                     {i < STEPS.length - 1 && (
                       <span
                         className={cn(
-                          'mx-1 h-px flex-1 sm:mx-2',
+                          // Below sm the row is already at its natural width,
+                          // so the connector takes a fixed sliver instead of
+                          // demanding flex space the viewport hasn't got.
+                          'mx-1 h-px w-4 shrink-0 sm:mx-2 sm:w-auto sm:flex-1',
                           i < model.completed ? 'bg-success' : 'bg-border',
                         )}
                         aria-hidden
@@ -907,8 +915,11 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           />
         )}
 
-        {/* Step footer — advance action always here */}
-        <div className="mt-5 flex items-center justify-between gap-3 border-t border-border pt-4">
+        {/* Step footer — advance action always here. Wraps: "Back" plus
+            "Produce another batch" plus "Sign & close kit" is wider than a
+            phone, and a row that refuses to wrap takes the whole page sideways
+            with it rather than stacking. */}
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <Button
             variant="ghost"
             disabled={activeStep === 0}
@@ -916,7 +927,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           >
             <ChevronLeft size={14} /> Back
           </Button>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             {/* Why the primary action is disabled — a COUNT only. Each of these
                 already prints in red under its own field, so listing them here
                 too was pure duplication; this just points at them. The full list

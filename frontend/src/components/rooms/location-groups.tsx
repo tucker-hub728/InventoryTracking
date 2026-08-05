@@ -23,14 +23,52 @@
  */
 
 import * as React from 'react';
-import { Pencil, Plus } from 'lucide-react';
+import { ChevronDown, Pencil, Plus } from 'lucide-react';
 
 import { StorageLeafGrid } from '@/components/rooms/storage-leaf-grid';
+import { BackToTop } from '@/components/shared/back-to-top';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/utils';
 import type { NodeTree } from '@/lib/api/location-nodes';
+
+import { GroupJumpChips, LetterRail, groupAnchorId } from './room-shortcuts';
+
+/** Which groups the operator has folded away, by node id, kept across visits
+ *  (UI-002). Someone who only works the freezers keeps Warehouse One's 26
+ *  shelves collapsed instead of scrolling past them every time. */
+const COLLAPSE_KEY = 'ims:location-groups:collapsed';
+
+function useCollapsedGroups() {
+  const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({});
+
+  // Read after mount, not during render — localStorage doesn't exist on the
+  // server and reading it in the initial render would break hydration.
+  React.useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(COLLAPSE_KEY);
+      if (raw) setCollapsed(JSON.parse(raw) as Record<string, boolean>);
+    } catch {
+      // Corrupt or unavailable storage just means everything starts expanded.
+    }
+  }, []);
+
+  const toggleGroup = React.useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      try {
+        window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(next));
+      } catch {
+        // Not persisting is survivable; the fold still works for this session.
+      }
+      return next;
+    });
+  }, []);
+
+  return { collapsed, toggleGroup };
+}
 
 export function LocationGroups({
   locations,
@@ -76,6 +114,8 @@ export function LocationGroups({
   onAddSubLocation: (location: NodeTree) => void;
   onRename: (node: NodeTree) => void;
 }) {
+  const { collapsed, toggleGroup } = useCollapsedGroups();
+
   if (loading) {
     return (
       <div className="flex flex-col gap-8">
@@ -96,8 +136,14 @@ export function LocationGroups({
   // While searching, a location with no matching unit is dropped entirely — an
   // empty heading under a search reads as "this group is empty", which is a
   // different and wrong statement.
+  //
+  // A hit on the LOCATION ITSELF counts too. Searching "Minus-20" is asking for
+  // that location, and matching only its units meant the group the operator
+  // named was the one thing the search could not find.
   const visible = filterTo
-    ? locations.filter((loc) => loc.children.some((c) => filterTo.has(c.id)))
+    ? locations.filter(
+        (loc) => filterTo.has(loc.id) || loc.children.some((c) => filterTo.has(c.id)),
+      )
     : locations;
 
   const totals = locations.reduce(
@@ -111,6 +157,21 @@ export function LocationGroups({
 
   return (
     <>
+      {/* UI-002 shortcuts. Hidden while a search is narrowing the page — the
+          search has already done the navigating, and a rail indexing results
+          that are no longer alphabetically contiguous misleads. */}
+      {!filterTo && visible.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <GroupJumpChips
+            groups={visible.map((loc) => ({
+              id: loc.id,
+              name: loc.name,
+              count: loc.children.length,
+            }))}
+          />
+        </div>
+      )}
+
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         {hint ? <p className="text-xs text-text-3">{hint}</p> : <span />}
         <div className="flex items-center gap-3">
@@ -142,10 +203,29 @@ export function LocationGroups({
         </div>
       ) : (
         <div className="flex flex-col gap-8">
-          {visible.map((loc) => (
-            <section key={loc.id} className="flex flex-col gap-3">
+          {visible.map((loc) => {
+            // Collapsed while searching would hide the matches, so a search
+            // always expands. Otherwise the operator's own choice stands.
+            const open = Boolean(filterTo) || !collapsed[loc.id];
+            return (
+            <section key={loc.id} id={groupAnchorId(loc.id)} className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border pb-2.5">
-                <h3 className="text-base font-semibold text-text">{loc.name}</h3>
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(loc.id)}
+                  aria-expanded={open}
+                  aria-controls={`${groupAnchorId(loc.id)}-body`}
+                  disabled={Boolean(filterTo)}
+                  className="-ml-1 inline-flex items-center gap-1.5 rounded px-1 py-0.5 text-base font-semibold text-text transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:hover:text-text"
+                  title={open ? `Collapse ${loc.name}` : `Expand ${loc.name}`}
+                >
+                  <ChevronDown
+                    size={16}
+                    aria-hidden
+                    className={cn('transition-transform', !open && '-rotate-90')}
+                  />
+                  {loc.name}
+                </button>
                 <Badge tone="neutral">
                   {loc.children.length} {subLocationNoun}
                   {loc.children.length === 1 ? '' : 's'}
@@ -171,29 +251,40 @@ export function LocationGroups({
                 </div>
               </div>
 
-              <StorageLeafGrid
-                compact
-                leaves={loc.children}
-                filterTo={filterTo}
-                stockAt={stockAt}
-                hideSearch={hideSearch}
-                noun={subLocationNoun}
-                mono
-                selectedId={selectedId}
-                canManage={canManage}
-                emptyTitle={`No ${subLocationNoun}s in ${loc.name} yet`}
-                emptyHint={
-                  canManage
-                    ? `Add one with “Add ${subLocationNoun}” above.`
-                    : `A Super Admin adds ${subLocationNoun}s.`
-                }
-                onOpen={onOpen}
-                onRename={onRename}
-              />
+              {open && (
+                <div id={`${groupAnchorId(loc.id)}-body`} className="flex flex-col gap-3">
+                  <LetterRail leaves={loc.children} />
+                  <StorageLeafGrid
+                    compact
+                    leaves={loc.children}
+                    // When the LOCATION is what matched, its units are all part
+                    // of the answer — narrowing them to the ones whose own name
+                    // also contains the query would show "Minus-20 Freezers"
+                    // with nothing in it.
+                    filterTo={filterTo?.has(loc.id) ? null : filterTo}
+                    stockAt={stockAt}
+                    hideSearch={hideSearch}
+                    noun={subLocationNoun}
+                    mono
+                    selectedId={selectedId}
+                    canManage={canManage}
+                    emptyTitle={`No ${subLocationNoun}s in ${loc.name} yet`}
+                    emptyHint={
+                      canManage
+                        ? `Add one with “Add ${subLocationNoun}” above.`
+                        : `A Super Admin adds ${subLocationNoun}s.`
+                    }
+                    onOpen={onOpen}
+                    onRename={onRename}
+                  />
+                </div>
+              )}
             </section>
-          ))}
+            );
+          })}
         </div>
       )}
+      <BackToTop />
     </>
   );
 }

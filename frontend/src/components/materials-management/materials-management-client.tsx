@@ -220,7 +220,7 @@ export function MaterialsManagementClient({
       {/* No subtitle — the tabs already name the room's two locations. */}
       <PageHeader title="Materials Management" />
 
-      <div className="border-b border-border px-6 sm:px-8">
+      <div className="scroll-strip border-b border-border px-6 sm:px-8">
         <nav
           className="inline-flex items-center justify-start gap-1"
           aria-label="Materials Management sections"

@@ -27,7 +27,9 @@ export function RoomSearch({
   onChange,
   found,
   noun,
-  placeholder = 'Unit, lot, or item…',
+  // Location is listed first: it is the coarsest thing you can look for, and
+  // the box gave no hint it was searchable at all.
+  placeholder = 'Location, unit, lot, or item…',
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -37,9 +39,13 @@ export function RoomSearch({
   placeholder?: string;
 }) {
   return (
-    <div className="mb-4 max-w-sm">
+    // Pinned while the list scrolls (UI-002): on a 26-shelf warehouse the
+    // search is the fastest way to a named target, and scrolling it off screen
+    // means scrolling back up before you can use it.
+    <div className="sticky top-[52px] z-20 -mx-6 mb-4 border-b border-border bg-bg px-6 py-3 sm:-mx-8 sm:px-8">
       <Input
         icon={Search}
+        wrapperClassName="max-w-sm"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -77,7 +83,10 @@ export function RoomSearch({
             </>
           ) : (
             <>
-              {found.matchCount} {found.matchCount === 1 ? noun.replace(/s$/, '') : noun}
+              {/* "match", not the unit noun: a hit can be a location, a unit, a
+                  lot or an item, and calling a matched location "1 unit" was
+                  wrong as soon as locations became searchable. */}
+              {found.matchCount} {found.matchCount === 1 ? 'match' : 'matches'}
               {found.lotNumbers.length > 0 && (
                 <>
                   {' · '}

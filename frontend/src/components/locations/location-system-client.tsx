@@ -201,9 +201,14 @@ export function LocationSystemClient({
   }, [loaded, selectedNode, path]);
 
   return (
-    <div className="flex h-[calc(100vh-52px)] min-h-0">
+    // Two fixed-width columns side by side: a 290px tree that never shrank and
+    // a box grid whose 10×10 of cells is ~400px at its minimum. Below roughly
+    // 700px they no longer fit, and the pair pushed the whole page sideways.
+    // They stack below lg, where the viewport-height lock is also dropped so
+    // the page scrolls normally instead of squeezing both into one screen.
+    <div className="flex min-h-0 flex-col lg:h-[calc(100vh-52px)] lg:flex-row">
       {/* ── Sidebar: storage hierarchy ───────────────────────────────── */}
-      <aside className="flex w-[290px] shrink-0 flex-col border-r border-border bg-surface">
+      <aside className="flex w-full shrink-0 flex-col border-b border-border bg-surface lg:max-h-none lg:w-[290px] lg:border-b-0 lg:border-r">
         <div className="flex items-center justify-between px-4 py-3">
           <p className="text-xs font-semibold uppercase tracking-wide text-text-3">
             Storage hierarchy
@@ -298,7 +303,10 @@ export function LocationSystemClient({
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {/* Stacked (below lg) the tree would otherwise run the full height of
+            its content and push the box grid off the bottom of the page, so it
+            gets a ceiling and scrolls within it. */}
+        <div className="max-h-[45vh] min-h-0 flex-1 overflow-y-auto px-2 pb-3 lg:max-h-none">
           {loading ? (
             <div className="space-y-2 px-2">
               {Array.from({ length: 6 }).map((_, i) => (
@@ -346,7 +354,12 @@ export function LocationSystemClient({
       </aside>
 
       {/* ── Detail panel ─────────────────────────────────────────────── */}
-      <main className="min-w-0 flex-1 overflow-y-auto">
+      {/* ``overflow-x-auto`` is a backstop, not the fix: the panel's own wide
+          children (the unit map, the header) are made to behave individually.
+          It is here so that the next one added scrolls inside this pane instead
+          of pushing the entire page sideways, which takes the header and the
+          hierarchy out of view with it and reads as a broken screen. */}
+      <main className="min-w-0 flex-1 overflow-y-auto overflow-x-auto">
         {loadError && (
           <p
             role="alert"

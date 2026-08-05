@@ -550,15 +550,17 @@ export function NodeDetailPanel({
         ))}
       </nav>
 
-      {/* Header */}
-      <div className="mb-5 flex items-start justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className="flex size-11 items-center justify-center rounded-lg border border-border bg-surface text-text-2">
+      {/* Header. Wraps rather than overflowing: the title, up to three badges
+          and three buttons come to more than a phone is wide, and a header that
+          refuses to wrap drags the whole page sideways with it. */}
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-text-2">
             <Icon size={20} />
           </span>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-text-1 text-xl font-semibold">{node.name}</h2>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-text-1 min-w-0 break-words text-xl font-semibold">{node.name}</h2>
               <Badge tone="neutral">{NODE_TYPE_LABEL[node.node_type]}</Badge>
               {isBox && gridRows > 0 && (
                 <Badge tone="neutral">
@@ -620,7 +622,10 @@ export function NodeDetailPanel({
       </div>
 
       {/* Stat cards */}
-      <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {/* Grid items are ``min-width: auto`` by default, so a long lot number or
+          location path in any of these stat cards would widen the whole page
+          rather than ellipsise. */}
+      <div className="mb-5 grid grid-cols-1 gap-3 [&>*]:min-w-0 sm:grid-cols-3">
         {isFlat ? (
           <Stat label="Occupied" value={`${node.active_allocation_count}`} />
         ) : (
@@ -651,7 +656,7 @@ export function NodeDetailPanel({
               Nothing here yet. Add a {childUnit(node.node_type, 1)} to get started.
             </p>
           ) : (
-            <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 p-4 [&>*]:min-w-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {node.children.map((child) => (
                 <ChildCard key={child.id} child={child} onClick={() => onSelectChild(child.id)} />
               ))}
@@ -662,8 +667,15 @@ export function NodeDetailPanel({
 
       {/* ── Box: unit map + contents ─────────────────────────────────── */}
       {isBox && (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div className="rounded-lg border border-border bg-bg-elev p-4">
+        // ``[&>*]:min-w-0`` is what makes the unit map behave on a narrow
+        // screen. A grid item defaults to ``min-width: auto``, so this card
+        // could not shrink below the intrinsic width of a 10×10 map (~360px of
+        // cells plus padding) — it widened the panel, the panel widened the
+        // page, and the whole layout scrolled sideways instead. BoxGrid already
+        // carries its own ``overflow-x-auto``; it just never got the chance to
+        // use it until its parent was allowed to be narrower than its contents.
+        <div className="grid grid-cols-1 gap-4 [&>*]:min-w-0 lg:grid-cols-2">
+          <div className="min-w-0 rounded-lg border border-border bg-bg-elev p-4">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-sm font-medium text-text-2">
                 Unit map · {gridRows}×{gridCols}

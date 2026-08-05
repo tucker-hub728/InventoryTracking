@@ -235,4 +235,26 @@
   .scrollbar-none::-webkit-scrollbar {
     display: none;
   }
+
+  /*
+   * A horizontal strip that scrolls once it outgrows its container — tab bars,
+   * chip rows (REQ-2026-07-15-UI-002: "shall remain navigable without excessive
+   * scrolling"). Without it a tab bar inside an `overflow-hidden` card simply
+   * clips, and the tabs past the edge cannot be reached at all.
+   *
+   * The page-wide 10px scrollbar is too heavy under a 40px tab row, so these
+   * get a thin one. It still appears only when there is something to scroll,
+   * which is what tells the operator more tabs exist.
+   */
+  .scroll-strip {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+  .scroll-strip::-webkit-scrollbar {
+    height: 4px;
+  }
+  .scroll-strip::-webkit-scrollbar-thumb {
+    border: 0;
+  }
 }

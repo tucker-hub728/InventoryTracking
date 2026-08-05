@@ -28,10 +28,47 @@ import { locationNodesApi, type Allocation, type NodeTree } from '@/lib/api/loca
 
 import { TransferDialog } from './transfer-dialog';
 
+/** One line of a leaf's contents: a lot at this location, and every allocation
+ *  row making it up. */
+interface ContentRow {
+  key: string;
+  allocations: Allocation[];
+  qty: number;
+}
+
 /**
- * A storage leaf's contents (its active allocations) with a per-allocation
- * Transfer action. Shared by the Warehouse (shelves) and Freezer
- * (sub-locations) pages so stock can be moved out of either area.
+ * Group a leaf's allocations the way the operator sees the shelf.
+ *
+ * The API returns raw ``lot_allocations`` rows, and a flat shelf collects a new
+ * one on every placement and every transfer in — so 61 units of one lot showed
+ * up as nine rows of 1, 2, 1, 1, 1, 51, 1, 1, 2. They are the same stock in the
+ * same place; nothing distinguishes them but the order they arrived, which is
+ * the ledger's business, not this panel's. The item's "Stock by location" tab
+ * already sums per (location, lot); this makes the two agree.
+ *
+ * A BOX is the exception: each allocation is one vial at one cell, so the cell
+ * coordinate is real information and the rows stay apart.
+ */
+function toRows(allocs: Allocation[]): ContentRow[] {
+  const rows = new Map<string, ContentRow>();
+  for (const a of allocs) {
+    const isCell = a.grid_row != null && a.grid_col != null;
+    const key = isCell ? a.id : `${a.item_id ?? ''}:${a.lot_id}`;
+    const existing = rows.get(key);
+    if (existing) {
+      existing.allocations.push(a);
+      existing.qty += a.qty;
+    } else {
+      rows.set(key, { key, allocations: [a], qty: a.qty });
+    }
+  }
+  return [...rows.values()];
+}
+
+/**
+ * A storage leaf's contents with a per-lot Transfer action. Shared by the
+ * Warehouse (shelves) and Freezer (sub-locations) pages so stock can be moved
+ * out of either area.
  */
 export function NodeContentsSheet({
   open,
@@ -52,7 +89,9 @@ export function NodeContentsSheet({
 }) {
   const [allocs, setAllocs] = React.useState<Allocation[]>([]);
   const [loading, setLoading] = React.useState(false);
-  const [transferAlloc, setTransferAlloc] = React.useState<Allocation | null>(null);
+  // The allocations behind the row being transferred — a lot's whole holding on
+  // a shelf, or a single vial in a box.
+  const [transferRow, setTransferRow] = React.useState<Allocation[] | null>(null);
 
   const reload = React.useCallback(
     async (signal?: AbortSignal) => {
@@ -77,6 +116,7 @@ export function NodeContentsSheet({
   }, [open, node, reload]);
 
   const onHand = allocs.reduce((sum, a) => sum + a.qty, 0);
+  const rows = React.useMemo(() => toRows(allocs), [allocs]);
 
   return (
     <>
@@ -119,31 +159,34 @@ export function NodeContentsSheet({
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {allocs.map((a) => (
-                          <TableRow key={a.id}>
-                            <TableCell className="font-mono text-text-2">
-                              <ItemLink itemNumber={a.item_number} itemId={a.item_id} />
-                            </TableCell>
-                            <TableCell className="font-mono text-text-2">
-                              <LotLink lotId={a.lot_id} lotNumber={a.lot_number} />
-                              {a.grid_row != null && a.grid_col != null
-                                ? ` (${a.grid_row},${a.grid_col})`
-                                : ''}
-                            </TableCell>
-                            <TableCell className="text-right font-mono">{a.qty}</TableCell>
-                            {canTransfer && (
-                              <TableCell className="text-right">
-                                <Button
-                                  variant="ghost"
-                                  className="h-7 px-2 text-xs"
-                                  onClick={() => setTransferAlloc(a)}
-                                >
-                                  <ArrowLeftRight size={13} /> Transfer
-                                </Button>
+                        {rows.map((row) => {
+                          const a = row.allocations[0]!;
+                          return (
+                            <TableRow key={row.key}>
+                              <TableCell className="font-mono text-text-2">
+                                <ItemLink itemNumber={a.item_number} itemId={a.item_id} />
                               </TableCell>
-                            )}
-                          </TableRow>
-                        ))}
+                              <TableCell className="font-mono text-text-2">
+                                <LotLink lotId={a.lot_id} lotNumber={a.lot_number} />
+                                {a.grid_row != null && a.grid_col != null
+                                  ? ` (${a.grid_row},${a.grid_col})`
+                                  : ''}
+                              </TableCell>
+                              <TableCell className="text-right font-mono">{row.qty}</TableCell>
+                              {canTransfer && (
+                                <TableCell className="text-right">
+                                  <Button
+                                    variant="ghost"
+                                    className="h-7 px-2 text-xs"
+                                    onClick={() => setTransferRow(row.allocations)}
+                                  >
+                                    <ArrowLeftRight size={13} /> Transfer
+                                  </Button>
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   </div>
@@ -155,12 +198,12 @@ export function NodeContentsSheet({
       </Sheet>
 
       <TransferDialog
-        open={Boolean(transferAlloc)}
-        onOpenChange={(o) => !o && setTransferAlloc(null)}
-        allocation={transferAlloc}
+        open={Boolean(transferRow)}
+        onOpenChange={(o) => !o && setTransferRow(null)}
+        allocations={transferRow}
         sourceLabel={node?.name}
         onDone={() => {
-          setTransferAlloc(null);
+          setTransferRow(null);
           void reload();
           onChanged();
         }}

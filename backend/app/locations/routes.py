@@ -468,6 +468,13 @@ async def create_node(
             code="node_code_conflict",
         )
 
+    # …and sibling NAME uniqueness. The code is generated and rarely seen; the
+    # name is what is written on the door, so two siblings sharing one are
+    # indistinguishable to the operator choosing between them.
+    await _require_unique_name(
+        db, node_type=node_type, parent_id=parent_uuid, name=payload.name
+    )
+
     node = await loc_repo.create_node(
         db,
         node_type=node_type,
@@ -549,6 +556,16 @@ async def update_node(
         _require_super_admin(current)
     else:
         _require_super_admin_for_node_type(current, node.node_type)
+    # A rename can collide exactly as a create can — and it is the likelier of
+    # the two, since the operator is usually correcting a name they already
+    # believe belongs to something here.
+    await _require_unique_name(
+        db,
+        node_type=node.node_type,
+        parent_id=node.parent_id,
+        name=payload.name,
+        exclude_id=node.id,
+    )
     before = loc_repo.node_to_audit_snapshot(node)
     updated = await loc_repo.update_node_name(db, node=node, name=payload.name)
     await record_entity_change(
@@ -773,6 +790,10 @@ async def add_production_area(
     node in the ``production`` category; its ``code`` is generated from the name.
     Rename it later via ``PATCH /location-nodes/{id}``."""
     _require_super_admin(current)
+    # Production areas are flat nodes with no parent, so the sibling check runs
+    # against the other roots — which is where a second "Clean Room One" would
+    # land, and two of those are indistinguishable on a kit's destination list.
+    await _require_unique_name(db, node_type="flat", parent_id=None, name=payload.name)
     node = await loc_repo.create_production_area(
         db, name=payload.name, created_by_user_id=current.id
     )
@@ -936,6 +957,59 @@ async def delete_node(
 
 
 # ── Allocation operations (place / transfer / consume) ──────────────────
+
+
+#: Node types whose NAME is a physical identifier rather than a label relative
+#: to a parent: a Cold Storage unit is named for the client's equipment T-number
+#: (REQ-2026-07-15-LOC-006) and a Warehouse shelf for its letter (LOC-005).
+#: One of these names one real object, so it may not appear twice ANYWHERE.
+#:
+#: Everything else is checked among siblings only — each room legitimately has
+#: its own "Minus-20 Freezers" group and each rack its own "Box", and a global
+#: rule would forbid the layout the rooms actually have (client 2026-08-05).
+UNIT_NODE_TYPES = frozenset({"sub_location", "shelf"})
+
+
+async def _require_unique_name(
+    db: DBSession,
+    *,
+    node_type: str,
+    parent_id: uuid.UUID | None,
+    name: str,
+    exclude_id: uuid.UUID | None = None,
+) -> None:
+    """Reject a duplicate location name (REQ-2026-07-15-LOC-003 / LOC-006).
+
+    Enforced on create AND rename — a rename can collide just as easily as a
+    create, and the two together are the only ways a name enters the tree.
+
+    Messages stay short: the operator is looking at the field they just typed.
+    The installation-wide case names where the clash is, because that one is
+    off screen and otherwise unfindable.
+    """
+    if node_type in UNIT_NODE_TYPES:
+        clash = await loc_repo.get_node_by_name_anywhere(
+            db, node_type=node_type, name=name, exclude_id=exclude_id
+        )
+        if clash is not None:
+            where = clash.parent.name if clash.parent is not None else None
+            raise ConflictError(
+                f"'{clash.name}' already exists"
+                + (f" in {where}." if where else " elsewhere."),
+                code="node_name_conflict",
+                details={"existing_id": str(clash.id), "name": clash.name},
+            )
+        return
+
+    clash = await loc_repo.get_sibling_by_name(
+        db, parent_id=parent_id, name=name, exclude_id=exclude_id
+    )
+    if clash is not None:
+        raise ConflictError(
+            f"'{clash.name}' already exists here.",
+            code="node_name_conflict",
+            details={"existing_id": str(clash.id), "name": clash.name},
+        )
 
 
 async def _resolve_storage_node(db: DBSession, node_id: str) -> LocationNode:

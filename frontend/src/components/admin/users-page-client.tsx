@@ -6,7 +6,7 @@ import { Pencil, UserPlus } from 'lucide-react';
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Button } from '@/components/ui/button';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsContent, TabsList, TabsScroller, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table,
   TableBody,
@@ -170,11 +170,13 @@ export function UsersPageClient() {
 
       <div className="flex-1 px-6 py-6 sm:px-8">
         <Tabs defaultValue="members">
-          <TabsList>
-            <TabsTrigger value="members">Active Members</TabsTrigger>
-            <TabsTrigger value="inactive">Inactive Members</TabsTrigger>
-            <TabsTrigger value="invitations">Invitations</TabsTrigger>
-          </TabsList>
+          <TabsScroller>
+            <TabsList>
+              <TabsTrigger value="members">Active Members</TabsTrigger>
+              <TabsTrigger value="inactive">Inactive Members</TabsTrigger>
+              <TabsTrigger value="invitations">Invitations</TabsTrigger>
+            </TabsList>
+          </TabsScroller>
 
           <TabsContent value="members">
             <div className={PANEL}>

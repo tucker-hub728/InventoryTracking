@@ -46,9 +46,14 @@ interface BaseProps {
 }
 
 /** Location-view entry: the operator is already standing in a shelf / box, so
- *  the source allocation is in hand and step ① is a read-only line. */
+ *  the source is in hand and step ① is a read-only quantity.
+ *
+ *  An array, because one lot on a shelf is usually several allocation rows —
+ *  a shelf collects one per placement and per transfer in. The panel shows
+ *  them as the single holding they are, so a transfer has to be able to draw
+ *  across all of them. A box cell is a one-element array. */
 interface AllocationProps extends BaseProps {
-  allocation: Allocation | null;
+  allocations: Allocation[] | null;
   /** Human label for the source location (breadcrumb). */
   sourceLabel?: string;
   item?: never;
@@ -62,7 +67,7 @@ interface ItemProps extends BaseProps {
   item: { uuid: string; id: string; desc: string } | null;
   /** A (lot × location) to pre-select — the "Stock by location" row action. */
   presetSource?: { lot_id: string; node_id: string } | null;
-  allocation?: never;
+  allocations?: never;
   sourceLabel?: never;
 }
 
@@ -102,11 +107,13 @@ function toSourceLot(s: ApiItemStockLocation): KitLineSourceLot {
 export function TransferDialog(props: Props) {
   const { open, onOpenChange, onDone } = props;
   const byItem = props.item !== undefined;
-  const { allocation = null, sourceLabel } = props as AllocationProps;
+  const { allocations = null, sourceLabel } = props as AllocationProps;
   const { item = null, presetSource = null } = props as ItemProps;
 
-  // Allocation mode — a single typed quantity capped by the source allocation.
-  const maxQty = allocation?.qty ?? 0;
+  // Allocation mode — one typed quantity, capped by everything the row holds.
+  // ``allocation`` is the representative row (they all share item + lot + node).
+  const allocation = allocations?.[0] ?? null;
+  const maxQty = (allocations ?? []).reduce((sum, a) => sum + a.qty, 0);
   const [qty, setQty] = React.useState('1');
 
   // Item mode — the multi-lot source picker.
@@ -191,7 +198,7 @@ export function TransferDialog(props: Props) {
 
   React.useEffect(() => {
     if (!open) return;
-    setQty(String(allocation?.qty ?? 1));
+    setQty(String((allocations ?? []).reduce((sum, a) => sum + a.qty, 0) || 1));
     setLots(null);
     setPicks([]);
     setDestinations({});
@@ -199,7 +206,7 @@ export function TransferDialog(props: Props) {
     setShowReauth(false);
     setSubmitting(false);
     setError(null);
-  }, [open, allocation, item, presetSource, setError]);
+  }, [open, allocations, item, presetSource, setError]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -340,21 +347,21 @@ export function TransferDialog(props: Props) {
           evidence_id: evidence.evidence_id,
           notes: evidence.comment ?? '',
         });
-      } else if (!placement) {
+      } else if (!placement || !allocations?.length) {
         return;
-      } else if (placement.nodeType === 'box') {
-        await locationNodesApi.transferBatch({
-          allocation_ids: [allocation!.id],
-          to_node_id: placement.nodeId,
-          to_cells: placement.cells,
-          evidence_id: evidence.evidence_id,
-          notes: evidence.comment ?? '',
-        });
       } else {
-        await locationNodesApi.transfer({
-          allocation_id: allocation!.id,
+        // ``transferBatch`` for both destinations: the row may be several
+        // allocation rows of one lot, and the batch endpoint is the one that
+        // takes them together (it requires a single lot at a single node, which
+        // is exactly what a row is). The single-allocation ``transfer`` can't
+        // express "take 12 from these four rows".
+        const allocation_ids = allocations.map((a) => a.id);
+        await locationNodesApi.transferBatch({
+          allocation_ids,
           to_node_id: placement.nodeId,
-          qty: qtyNum,
+          ...(placement.nodeType === 'box'
+            ? { to_cells: placement.cells }
+            : { qty: qtyNum }),
           evidence_id: evidence.evidence_id,
           notes: evidence.comment ?? '',
         });

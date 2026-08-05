@@ -16,6 +16,7 @@ import {
 import { StatusBadge } from '@/components/shared/status-badge';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
+import { STICKY_CELL, STICKY_HEAD } from '@/components/ui/sticky-column';
 import { useInventoryStore, type SortKey } from '@/stores/inventory.store';
 import { cn, formatNumber } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
@@ -85,14 +86,20 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
     <Table className="min-w-[1080px] table-fixed">
       <TableHeader>
         <TableRow>
-          {COLUMNS.map((c) => {
+          {COLUMNS.map((c, i) => {
             const isActive = c.sortKey !== undefined && sortKey === c.sortKey;
             const Arrow = isActive ? (sortDir === 'asc' ? ArrowUp : ArrowDown) : ChevronsUpDown;
             const sortable = c.sortKey !== undefined;
             return (
               <TableHead
                 key={c.key}
-                className={cn(c.className, c.align === 'right' && 'text-right')}
+                className={cn(
+                  c.className,
+                  c.align === 'right' && 'text-right',
+                  // The item number stays put while the rest scrolls, so a row
+                  // read halfway across still says which item it is (UI-001).
+                  i === 0 && STICKY_HEAD,
+                )}
                 aria-sort={
                   isActive ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'
                 }
@@ -132,7 +139,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
           const detailHref = `/inventory/${item.uuid}/ledger`;
           return (
             <TableRow key={item.id} className="group">
-              <TableCell className="font-mono text-xs">
+              <TableCell className={cn('font-mono text-xs', STICKY_CELL)}>
                 <Link
                   href={detailHref}
                   title={`Open ${item.id}`}

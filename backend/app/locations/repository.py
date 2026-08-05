@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from app.core.exceptions import ConflictError
 from app.core.search import like_contains
@@ -74,6 +75,77 @@ async def get_sibling_by_code(
     else:
         stmt = stmt.where(LocationNode.parent_id == parent_id)
     return (await session.execute(stmt)).scalars().first()
+
+
+async def get_sibling_by_name(
+    session: AsyncSession,
+    *,
+    parent_id: uuid.UUID | None,
+    name: str,
+    exclude_id: uuid.UUID | None = None,
+) -> LocationNode | None:
+    """Find an ACTIVE sibling (same parent) with the same name, case-insensitively.
+
+    The name is what an operator reads off a shelf edge or a freezer door, so two
+    siblings sharing one splits a single physical spot into two records that
+    nobody can tell apart — the failure REQ-2026-07-15-LOC-003 restricts shelf
+    creation to Super Admin to avoid ("duplicate/ad-hoc shelf names that split
+    one physical spot into two and corrupt planning reorder points").
+
+    ``code`` has its own unique constraint, but a code is generated and largely
+    invisible; two "Minus-80 Freezers" with different codes look identical.
+
+    Deactivated nodes are excluded: a retired freezer shouldn't block its
+    replacement from taking the same equipment number. ``exclude_id`` lets a
+    rename ignore the node being renamed.
+    """
+    stmt = select(LocationNode).where(
+        func.lower(LocationNode.name) == name.strip().lower(),
+        LocationNode.is_active.is_(True),
+    )
+    if parent_id is None:
+        stmt = stmt.where(LocationNode.parent_id.is_(None))
+    else:
+        stmt = stmt.where(LocationNode.parent_id == parent_id)
+    if exclude_id is not None:
+        stmt = stmt.where(LocationNode.id != exclude_id)
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def get_node_by_name_anywhere(
+    session: AsyncSession,
+    *,
+    node_type: str,
+    name: str,
+    exclude_id: uuid.UUID | None = None,
+) -> LocationNode | None:
+    """Find an ACTIVE node of this type with this name ANYWHERE in the tree.
+
+    For the node types whose name is a physical identifier rather than a label
+    relative to a parent — a Cold Storage unit carries the client's equipment
+    T-number (REQ-2026-07-15-LOC-006), a Warehouse shelf its letter
+    (LOC-005) — the same name in two places means two records claiming to be
+    one physical object, wherever they are hung. Dev had T90020D on three
+    different freezers.
+
+    Structural names are deliberately NOT checked this way: every room legitimately
+    has its own "Minus-20 Freezers" group, and every rack its own "Box".
+    """
+    stmt = (
+        select(LocationNode)
+        .where(
+            LocationNode.node_type == node_type,
+            func.lower(LocationNode.name) == name.strip().lower(),
+            LocationNode.is_active.is_(True),
+        )
+        # The caller names WHERE the clash is (it is off screen, unlike a
+        # sibling). ``parent`` is lazy, and touching it in the route would raise
+        # MissingGreenlet, so it is loaded here.
+        .options(joinedload(LocationNode.parent))
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(LocationNode.id != exclude_id)
+    return (await session.execute(stmt)).unique().scalars().first()
 
 
 async def create_node(

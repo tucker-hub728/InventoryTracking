@@ -141,6 +141,14 @@ export function InventoryDetailShell({
   const [shipping, setShipping] = React.useState(false);
   const [transferring, setTransferring] = React.useState(false);
 
+  // Land on a tab that has scrolled out of the strip — say Audit History,
+  // reached from a bookmark — and nothing on screen says which one you are on.
+  // Bring it into view instead of leaving the bar parked at the left.
+  const activeTabRef = React.useRef<HTMLAnchorElement>(null);
+  React.useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [pathname]);
+
   const [ledgerRows, setLedgerRows] = React.useState<ApiMovement[]>([]);
   const [ledgerTotal, setLedgerTotal] = React.useState(0);
   const [ledgerLoading, setLedgerLoading] = React.useState(false);
@@ -435,7 +443,11 @@ export function InventoryDetailShell({
           )}
 
           <Card className="min-w-0 overflow-hidden">
-            <div className="border-b border-border px-4">
+            {/* ``scroll-strip`` because the Card clips: six tabs on a
+                sub-assembly outgrow a narrow card, and without a scroll
+                container of its own the last one is unreachable rather than
+                merely off screen. */}
+            <div className="scroll-strip border-b border-border px-4">
               <nav
                 className="inline-flex items-center justify-start gap-1"
                 aria-label="Item sections"
@@ -445,6 +457,7 @@ export function InventoryDetailShell({
                   return (
                     <Link
                       key={t.seg}
+                      ref={active ? activeTabRef : undefined}
                       href={`/inventory/${item.uuid}/${t.seg}`}
                       aria-current={active ? 'page' : undefined}
                       className={cn(

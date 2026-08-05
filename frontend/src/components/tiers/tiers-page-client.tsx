@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Tabs, TabsContent, TabsList, TabsScroller, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table,
   TableBody,
@@ -184,21 +184,23 @@ export function TiersPageClient() {
           </div>
         ) : (
           <Tabs value={activeTierId} onValueChange={setActiveTierId}>
-            <TabsList>
-              {tiers.map((tier) => (
-                <TabsTrigger key={tier.id} value={tier.id}>
-                  <span
-                    aria-hidden
-                    className={cn(
-                      'size-2 shrink-0 rounded-full',
-                      TONE_DOT[(tier.tone as BadgeTone) ?? 'neutral'],
-                    )}
-                  />
-                  {tier.name}
-                  <span className="text-xs text-text-3">{tier.prefixes.length}</span>
-                </TabsTrigger>
-              ))}
-            </TabsList>
+            <TabsScroller>
+              <TabsList>
+                {tiers.map((tier) => (
+                  <TabsTrigger key={tier.id} value={tier.id}>
+                    <span
+                      aria-hidden
+                      className={cn(
+                        'size-2 shrink-0 rounded-full',
+                        TONE_DOT[(tier.tone as BadgeTone) ?? 'neutral'],
+                      )}
+                    />
+                    {tier.name}
+                    <span className="text-xs text-text-3">{tier.prefixes.length}</span>
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </TabsScroller>
 
             {tiers.map((tier) => (
               <TabsContent key={tier.id} value={tier.id}>

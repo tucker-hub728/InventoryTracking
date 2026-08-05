@@ -4,6 +4,7 @@ import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import {
   LogOut,
+  Menu,
   PanelLeftClose,
   PanelLeftOpen,
   Shield,
@@ -15,7 +16,7 @@ import { useAuthStore } from '@/stores/auth.store';
 import { useUIStore } from '@/stores/ui.store';
 import { env } from '@/env';
 
-export function Topbar() {
+export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
   const router = useRouter();
   const sidebarCollapsed = useUIStore((s) => s.sidebar === 'icon');
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
@@ -34,8 +35,23 @@ export function Topbar() {
   }, [clearSession, router]);
 
   return (
-    <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between gap-4 border-b border-border bg-bg-elev px-6 sm:px-8">
+    <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between gap-4 border-b border-border bg-bg-elev px-4 sm:px-6 lg:px-8">
       <div className="flex min-w-0 items-center gap-2">
+        {/* Below lg the nav has no column of its own, so this is the only way
+            to reach it. Above lg the nav is always on screen and this button
+            would do nothing. */}
+        <Button
+          size="icon"
+          variant="default"
+          onClick={onOpenNav}
+          aria-label="Open navigation"
+          className="lg:hidden"
+        >
+          <Menu size={16} />
+        </Button>
+        {/* The collapse preference only has an effect from 1280 up — below that
+            the width is decided for us, so the control is hidden rather than
+            left to look broken. */}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -44,6 +60,7 @@ export function Topbar() {
               onClick={toggleSidebar}
               aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
               aria-pressed={sidebarCollapsed}
+              className="hidden xl:inline-flex"
             >
               {sidebarCollapsed ? (
                 <PanelLeftOpen size={15} />

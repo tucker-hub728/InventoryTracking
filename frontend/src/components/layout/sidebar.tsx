@@ -12,13 +12,87 @@ import { useAuthStore } from '@/stores/auth.store';
 import { useUIStore } from '@/stores/ui.store';
 import { can } from '@/lib/permissions';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { BELOW_XL, useMediaQuery } from '@/hooks/use-media-query';
 
+/**
+ * The primary navigation, in whichever shape the viewport can afford
+ * (REQ-2026-07-15-UI-001):
+ *
+ * * **≥1280** — a 220px column, or a 60px icon rail if that is the operator's
+ *   saved preference.
+ * * **1024–1279** (iPad landscape) — the icon rail, whatever the preference.
+ *   160px of labels beside a table is the difference between the table fitting
+ *   and not.
+ * * **<1024** (iPad portrait, phone) — out of the layout entirely; it opens as
+ *   an overlay drawer from the topbar's menu button. At 768px a fixed 220px
+ *   column left 548px for the content it exists to navigate to; at 390px it
+ *   left 170px, which is not a screen you can work on.
+ *
+ * The operator's own collapse preference is never overwritten by any of this —
+ * it is read back the moment there is room for it again.
+ */
 export function Sidebar() {
+  // Structural, not stylistic: a collapsed row renders a smaller glyph and
+  // wraps its link in a tooltip, which CSS can't express.
+  const forceRail = useMediaQuery(BELOW_XL);
+  const variant = useUIStore((s) => s.sidebar);
+  const collapsed = variant === 'icon' || forceRail;
+
+  return (
+    <aside
+      aria-label="Primary"
+      className={cn(
+        // Hidden below lg — the drawer covers that range.
+        'sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-bg-elev transition-[width] duration-200 lg:flex',
+        collapsed ? 'w-[60px]' : 'w-[220px]',
+      )}
+    >
+      <SidebarContent collapsed={collapsed} />
+    </aside>
+  );
+}
+
+/**
+ * The same navigation as an overlay drawer, for viewports too narrow to give it
+ * a column (<1024px). Always labelled — the reason it is an overlay is that
+ * there is no room beside the content, not that there is no room in it.
+ */
+export function SidebarDrawer({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const pathname = usePathname();
+
+  // Navigating is the whole point of the drawer, so it closes behind you.
+  React.useEffect(() => {
+    onOpenChange(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="left"
+        className="w-[260px] max-w-[85vw] p-0 lg:hidden"
+        aria-label="Primary"
+      >
+        <SheetTitle className="sr-only">Navigation</SheetTitle>
+        <div className="flex h-full flex-col">
+          <SidebarContent collapsed={false} />
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function SidebarContent({ collapsed }: { collapsed: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
-  const variant = useUIStore((s) => s.sidebar);
-  const collapsed = variant === 'icon';
   const user = useAuthStore((s) => s.user);
   const clearSession = useAuthStore((s) => s.clear);
 
@@ -34,13 +108,7 @@ export function Sidebar() {
   }, [clearSession, router]);
 
   return (
-    <aside
-      aria-label="Primary"
-      className={cn(
-        'sticky top-0 flex h-screen shrink-0 flex-col border-r border-border bg-bg-elev transition-[width] duration-200',
-        collapsed ? 'w-[60px]' : 'w-[220px]',
-      )}
-    >
+    <>
       <div
         className={cn(
           'flex items-center gap-2.5 border-b border-border px-5 py-5',
@@ -187,6 +255,6 @@ export function Sidebar() {
           </div>
         </div>
       )}
-    </aside>
+    </>
   );
 }

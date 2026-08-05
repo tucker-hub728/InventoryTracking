@@ -126,7 +126,7 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
 
       <div className="px-6 py-5 sm:px-8">
         <Card className="min-w-0 overflow-hidden">
-          <div className="border-b border-border px-4">
+          <div className="scroll-strip border-b border-border px-4">
             <nav
               className="inline-flex items-center justify-start gap-1"
               aria-label="Floor sections"

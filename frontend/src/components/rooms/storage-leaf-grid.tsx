@@ -28,6 +28,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
+
+import { leafAnchorId } from './room-shortcuts';
 import type { NodeTree } from '@/lib/api/location-nodes';
 
 /** Search appears once a grid is long enough to need it. 26 shelves do; three
@@ -261,9 +263,13 @@ function LeafCard({
     // control, and a button inside a button is invalid markup that browsers
     // resolve unpredictably.
     <div
+      // Scroll target for the A–Z rail (UI-002).
+      id={leafAnchorId(leaf.id)}
       className={cn(
         'relative flex flex-col rounded-lg border border-border bg-bg-elev transition-colors',
         'hover:border-accent focus-within:border-accent',
+        // Keeps a rail jump from landing the card flush under the sticky search.
+        'scroll-mt-32',
         !occupied && 'opacity-90',
         selected && 'border-accent',
       )}
