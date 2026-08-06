@@ -17,10 +17,19 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    AuthorizationError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from app.core.search import MAX_SEARCH_LENGTH
+from app.inventory import archiving
 from app.inventory import repository as inv_repo
 from app.inventory.schemas import (
+    ArchivePolicyRead,
+    ArchivePolicyUpdate,
+    ArchiveSweepResult,
     ItemCreate,
     ItemListResponse,
     ItemRead,
@@ -1478,6 +1487,7 @@ def _order_to_read(
             str(txn.received_by_user_id) if txn.received_by_user_id else None
         ),
         received_at=txn.received_at,
+        archived_at=txn.archived_at,
         created_at=txn.created_at,
         updated_at=txn.updated_at,
         lines=lines_read,
@@ -1620,15 +1630,43 @@ async def _build_order_lines(
 )
 async def list_orders(
     db: DBSession,
+    q: Annotated[
+        str | None,
+        Query(
+            max_length=MAX_SEARCH_LENGTH,
+            description="Search PO reference, item number / description, or lot number",
+        ),
+    ] = None,
     status_filter: Annotated[
-        Literal["open", "partially_received", "received", "cancelled"] | None,
-        Query(alias="status", description="Filter by Order status"),
+        list[Literal["open", "partially_received", "received", "cancelled"]] | None,
+        Query(
+            alias="status",
+            description=(
+                "Filter by Order status. REPEATABLE — ?status=open&"
+                "status=partially_received is the working default (DATA-003), "
+                "which is a set of statuses rather than one"
+            ),
+        ),
+    ] = None,
+    bucket: Annotated[
+        Literal["archived"] | None,
+        Query(description="archived = the retention archive (DATA-001)"),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ReceiptTransactionListResponse:
+    # DATA-003 — "default queries and status filters shall hide non-relevant
+    # records … so working lists stay usable" — is expressed as a repeatable
+    # ``status``: the client ticks the statuses it wants and defaults to open +
+    # partially received. The old ``needs_attention`` bucket said the same thing
+    # in a way the operator could not adjust.
     rows, total = await inv_repo.list_orders(
-        db, status=status_filter, limit=limit, offset=offset
+        db,
+        q=q,
+        statuses=status_filter or None,
+        archived=bucket == "archived",
+        limit=limit,
+        offset=offset,
     )
     return ReceiptTransactionListResponse(
         items=await _orders_read(db, rows),
@@ -2201,6 +2239,164 @@ async def receive_order(
         signature_id=evidence_uuid,
     )
 
+    refreshed = await inv_repo.get_order(db, txn.id)
+    assert refreshed is not None
+    response = await _order_read(db, refreshed)
+    await db.commit()
+    return response
+
+
+# ── Order archiving (REQ-2026-07-15-DATA-001/002/003) ──────────────────────
+#
+# Receipt Admin only grows, and a year in most Orders are finished business
+# nobody queries. Archiving moves them off the working list WITHOUT changing
+# them, so a restore is one column away and an auditor loses nothing.
+#
+# The DATA-002 guarantee — an Order still owed stock is never archived, however
+# old — lives in ``archiving.TERMINAL_STATUSES``, which every statement in that
+# module filters on. See the note there for why that beats a scheduled check.
+
+
+def _require_super_admin(user) -> None:
+    """The retention policy decides what everyone else can see by default, so
+    it is not an ordinary admin control."""
+    if getattr(user, "role", None) != "super_admin":
+        raise AuthorizationError(
+            "Only a super admin can change the archiving policy",
+            code="permission_denied",
+            details={"required_role": "super_admin"},
+        )
+
+
+@receiving_router.get(
+    "/archive/policy",
+    response_model=ArchivePolicyRead,
+    summary="The Order archiving policy and what it would archive right now",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def get_archive_policy(
+    db: DBSession,
+    days: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            le=3650,
+            description=(
+                "Preview a DIFFERENT age without saving it: eligible_now is then "
+                "'how many would archive if you saved this', which is the question "
+                "the operator is actually asking while typing"
+            ),
+        ),
+    ] = None,
+) -> ArchivePolicyRead:
+    saved = await archiving.get_archive_after_days(db)
+    # ``archive_after_days`` always reports what is SAVED — previewing must not
+    # look like the policy already changed.
+    return ArchivePolicyRead(
+        archive_after_days=saved,
+        eligible_now=await archiving.count_eligible(db, days=days if days else saved),
+        archived_total=await archiving.count_archived(db),
+        last_swept_at=await archiving.get_last_swept_at(db),
+    )
+
+
+@receiving_router.put(
+    "/archive/policy",
+    response_model=ArchivePolicyRead,
+    summary="Set how long a finished Order stays on the working list",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def update_archive_policy(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: ArchivePolicyUpdate,
+) -> ArchivePolicyRead:
+    _require_super_admin(current)
+    before = await archiving.get_archive_after_days(db)
+    await archiving.set_archive_after_days(
+        db, days=payload.archive_after_days, user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.app_settings",
+        subject_id=None,
+        subject_label="order archiving policy",
+        before={"archive_after_days": before},
+        after={"archive_after_days": payload.archive_after_days},
+    )
+    days = payload.archive_after_days
+    response = ArchivePolicyRead(
+        archive_after_days=days,
+        eligible_now=await archiving.count_eligible(db, days=days),
+        archived_total=await archiving.count_archived(db),
+        last_swept_at=await archiving.get_last_swept_at(db),
+    )
+    await db.commit()
+    return response
+
+
+@receiving_router.post(
+    "/archive/sweep",
+    response_model=ArchiveSweepResult,
+    summary="Archive every eligible Order now (the daily job on demand)",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def run_archive_sweep(
+    db: DBSession, current: CurrentDbUserDep
+) -> ArchiveSweepResult:
+    _require_super_admin(current)
+    days = await archiving.get_archive_after_days(db)
+    count = await archiving.sweep(db)
+    await archiving.set_last_swept_at(db)
+    if count:
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="updated",
+            subject_table="app.receipt_transactions",
+            subject_id=None,
+            subject_label=f"archived {count} order(s)",
+            before=None,
+            after={"archived": count, "archive_after_days": days},
+        )
+    await db.commit()
+    return ArchiveSweepResult(archived=count, archive_after_days=days)
+
+
+@receiving_router.post(
+    "/transactions/{txn_id}/restore",
+    response_model=ReceiptTransactionRead,
+    summary="Put an archived Order back on the working list",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def restore_order(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    txn_id: Annotated[uuid.UUID, Path()],
+) -> ReceiptTransactionRead:
+    """Restore is audited but NOT e-signed: nothing about the Order changes, so
+    there is no record state for a signature to attest to. The audit answers
+    the question that matters — who put this back, and when."""
+    txn = await inv_repo.get_order(db, txn_id)
+    if txn is None:
+        raise NotFoundError(f"Order {txn_id} not found")
+    if txn.archived_at is None:
+        raise ValidationError("This order is not archived", code="order_not_archived")
+
+    was = txn.archived_at
+    await archiving.restore(db, order=txn)
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.receipt_transactions",
+        subject_id=txn.id,
+        subject_label=txn.po_reference,
+        before={"archived_at": was.isoformat()},
+        after={"archived_at": None},
+    )
     refreshed = await inv_repo.get_order(db, txn.id)
     assert refreshed is not None
     response = await _order_read(db, refreshed)

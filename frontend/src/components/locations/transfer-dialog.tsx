@@ -543,10 +543,18 @@ export function TransferDialog(props: Props) {
         open={showReauth}
         onOpenChange={setShowReauth}
         action="movement.transfer"
-        // The record the operator signed ABOUT: an item-workspace transfer may
-        // move several lots at once, so the subject is the item itself.
-        recordTable={byItem ? 'app.items' : 'app.lot_allocations'}
-        recordId={byItem ? item?.uuid : allocation?.id}
+        // The record the operator signed ABOUT, which must match what the
+        // endpoint binds the signature to or it is rejected as "made for a
+        // different record":
+        //
+        //   item mode      → /transfer-multi → app.items (several lots at once)
+        //   location mode  → /transfer-batch → app.lots  (one lot, N allocations)
+        //
+        // NOT the allocation. A row here is a lot's whole holding on a shelf —
+        // usually several allocation rows — so no single allocation id could
+        // stand for what is being signed.
+        recordTable={byItem ? 'app.items' : 'app.lots'}
+        recordId={byItem ? item?.uuid : allocation?.lot_id}
         meaning={`I am transferring ${moveQty} unit(s) of ${subject}.`}
         commentPlaceholder="e.g. Moved to freezer for cold storage"
         onConfirmed={submit}

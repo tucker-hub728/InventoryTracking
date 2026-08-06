@@ -1127,6 +1127,13 @@ class ReceiptTransaction(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Moved off the working list by the archiving policy (DATA-001). NULL means
+    # active. Nothing else about the Order changes when this is set, so clearing
+    # it restores the Order exactly as it was — it is a shelf, not a shredder.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

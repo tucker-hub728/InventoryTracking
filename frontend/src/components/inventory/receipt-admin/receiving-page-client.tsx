@@ -2,6 +2,8 @@
 
 import * as React from 'react';
 import {
+  Archive,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Pencil,
@@ -20,6 +22,16 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+// Still used by the rows-per-page control at the foot of the table.
 import {
   Select,
   SelectContent,
@@ -50,17 +62,41 @@ import {
   type OrderStatus,
 } from '@/lib/api/receiving';
 
+import { ArchivePanel } from './archive-panel';
 import { ReceiptTransactionsTable } from './receipt-transactions-table';
 import { ReceiptIntakeDialog } from './receipt-intake-dialog';
 import { ReceiveDialog } from './receive-dialog';
 import { OrderEditDialog } from './lot-edit-dialog';
 import { LotDetailEditDialog } from './lot-detail-edit-dialog';
 
-const STATUS_ALL = '__all__';
+const ALL_STATUSES: readonly OrderStatus[] = [
+  'open',
+  'partially_received',
+  'received',
+  'cancelled',
+];
+
+/**
+ * What the list opens on (DATA-003): the orders that still need something from
+ * someone. Ticked boxes rather than a fixed "needs attention" option, so the
+ * operator can widen it without losing the sensible starting point — and can
+ * see WHICH statuses that starting point means.
+ *
+ * "Archived" is deliberately NOT one of these. It is a different axis (an
+ * archived order still has a status), and mixing it in would let you ask for
+ * "archived + open", which DATA-002 guarantees is always empty. The archive
+ * has its own panel.
+ */
+const DEFAULT_STATUSES: readonly OrderStatus[] = ['open', 'partially_received'];
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
-// Search and pagination run client-side over the loaded set; the backend has no
-// text-search param. This caps how many (most-recent) rows that set covers.
-const ORDER_LIMIT = 200;
+
+// Search, filtering and paging all happen SERVER-side. They used to run in the
+// browser over the 200 most-recent orders, which meant a search could only ever
+// find what that slice happened to contain — "no results" and "no results in
+// the newest 200" looked identical, and the 201st order was unreachable however
+// hard you looked. With the archiving policy in play (DATA-001) the list is
+// also expected to grow well past any such cap.
+const SEARCH_DEBOUNCE_MS = 250;
 
 const LIST_PATH = '/receiving';
 const orderPath = (id: string) => `${LIST_PATH}/${id}`;
@@ -84,17 +120,49 @@ export function ReceivingPageClient({
   const canReceive = usePermission('inventory', 'sign');
 
   const [orders, setOrders] = React.useState<Order[]>([]);
+  // Server-reported count for the CURRENT filter + search, which is what the
+  // pager has to page over — not the length of the rows in hand.
+  const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = React.useState<OrderStatus | typeof STATUS_ALL>(
-    STATUS_ALL,
-  );
+  // DATA-003: open on what needs action, not on every order ever completed.
+  const [statuses, setStatuses] = React.useState<OrderStatus[]>([
+    ...DEFAULT_STATUSES,
+  ]);
 
   const [query, setQuery] = React.useState('');
+  // Debounced copy — the query the server is actually asked for, so a keystroke
+  // doesn't become a request.
+  const [searchTerm, setSearchTerm] = React.useState('');
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState<number>(PAGE_SIZE_OPTIONS[0]);
 
+  React.useEffect(() => {
+    const id = setTimeout(() => setSearchTerm(query.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [query]);
+
+  // Any change to what is being asked for restarts at page 1 — page 4 of a
+  // different question is not a meaningful place to be.
+  React.useEffect(() => {
+    setPage(1);
+  }, [statuses, searchTerm, pageSize]);
+
+  // What the trigger reads. Naming one or two statuses beats "2 selected" —
+  // the operator can see what they are looking at without opening the menu.
+  const statusSummary = React.useMemo(() => {
+    if (statuses.length === 0) return 'No status selected';
+    if (statuses.length === ALL_STATUSES.length) return 'All statuses';
+    if (statuses.length <= 2) {
+      return statuses.map((s) => ORDER_STATUS_LABEL[s]).join(', ');
+    }
+    return `${statuses.length} statuses`;
+  }, [statuses]);
+
   const [intakeOpen, setIntakeOpen] = React.useState(false);
+  const [archiveOpen, setArchiveOpen] = React.useState(false);
+  // The order sheet was reached from the archive panel, so it owes a way back.
+  const [cameFromArchive, setCameFromArchive] = React.useState(false);
   const [receiveTarget, setReceiveTarget] = React.useState<Order | null>(null);
   const [detail, setDetail] = React.useState<Order | null>(null);
 
@@ -104,11 +172,19 @@ export function ReceivingPageClient({
       setLoadError(null);
       try {
         const resp = await receivingApi.listOrders({
-          status: statusFilter === STATUS_ALL ? undefined : statusFilter,
-          limit: ORDER_LIMIT,
+          q: searchTerm || undefined,
+          // Every box ticked is the same question as none of them, so send
+          // nothing and let the server skip the filter entirely.
+          status:
+            statuses.length === 0 || statuses.length === ALL_STATUSES.length
+              ? undefined
+              : statuses,
+          limit: pageSize,
+          offset: (page - 1) * pageSize,
           signal,
         });
         setOrders(resp.items);
+        setTotal(resp.total);
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load orders.');
@@ -116,7 +192,7 @@ export function ReceivingPageClient({
         setLoading(false);
       }
     },
-    [statusFilter],
+    [statuses, searchTerm, page, pageSize],
   );
 
   React.useEffect(() => {
@@ -203,32 +279,14 @@ export function ReceivingPageClient({
     return () => window.removeEventListener('popstate', onPop);
   }, [showOrderId]);
 
-  // Client-side search across po_reference, item number/description on lines
-  // and lot numbers across receive events.
-  const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return orders;
-    return orders.filter((o) => {
-      const haystacks: Array<string | null> = [o.po_reference];
-      for (const l of o.lines) {
-        haystacks.push(l.item_number, l.item_description);
-      }
-      for (const ev of o.events) {
-        for (const el of ev.lines) haystacks.push(el.lot_number);
-      }
-      return haystacks.some((s) => s?.toLowerCase().includes(q));
-    });
-  }, [orders, query]);
+  // The server did the searching, filtering and slicing — ``orders`` IS the
+  // page. The count it paginates over is the server's total for the same
+  // question, not the number of rows that happened to arrive.
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const startIdx = (page - 1) * pageSize;
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const safePage = Math.min(page, pageCount);
-  const startIdx = (safePage - 1) * pageSize;
-  const paged = filtered.slice(startIdx, startIdx + pageSize);
-
-  React.useEffect(() => {
-    setPage(1);
-  }, [query, statusFilter, pageSize]);
-
+  // Deleting the last row of the last page leaves you on a page that no longer
+  // exists; step back rather than showing an empty table.
   React.useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
@@ -239,33 +297,63 @@ export function ReceivingPageClient({
         title="Receipt Admin"
         subtitle="Multi-item orders received over time — place an order, then draw it down with dated, e-signed partial or blanket receipts."
         actions={
-          canCreate ? (
-            <Button variant="primary" onClick={() => setIntakeOpen(true)}>
-              <Plus size={14} /> New Order
+          <>
+            {/* Retention lives beside the list it prunes, not in a settings
+                screen — the person who notices the list is unwieldy is the one
+                who should be able to do something about it. */}
+            <Button onClick={() => setArchiveOpen(true)}>
+              <Archive size={14} /> Archive
             </Button>
-          ) : undefined
+            {canCreate && (
+              <Button variant="primary" onClick={() => setIntakeOpen(true)}>
+                <Plus size={14} /> New Order
+              </Button>
+            )}
+          </>
         }
       />
 
       <div className="px-6 py-5 sm:px-8">
         <Card className="p-4">
           <div className="mb-4 flex flex-wrap items-center gap-3">
-            <Select
-              value={statusFilter}
-              onValueChange={(v) => setStatusFilter(v as OrderStatus | typeof STATUS_ALL)}
-            >
-              <SelectTrigger className="w-[200px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={STATUS_ALL}>All statuses</SelectItem>
-                {(['open', 'partially_received', 'received', 'cancelled'] as const).map((s) => (
-                  <SelectItem key={s} value={s}>
+            {/* Tick the statuses you want (DATA-003). Open + partially
+                received are on by default — the orders that still need
+                something from someone. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button className="w-[240px] justify-between font-normal">
+                  <span className="truncate">{statusSummary}</span>
+                  <ChevronDown size={14} className="ml-2 shrink-0 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[240px]">
+                <DropdownMenuLabel>Status</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {ALL_STATUSES.map((s) => (
+                  <DropdownMenuCheckboxItem
+                    key={s}
+                    checked={statuses.includes(s)}
+                    // Radix closes on select by default; a multi-select that
+                    // shuts after one tick makes choosing two a chore.
+                    onSelect={(e) => e.preventDefault()}
+                    onCheckedChange={(on) =>
+                      setStatuses((prev) =>
+                        on ? [...prev, s] : prev.filter((x) => x !== s),
+                      )
+                    }
+                  >
                     {ORDER_STATUS_LABEL[s]}
-                  </SelectItem>
+                  </DropdownMenuCheckboxItem>
                 ))}
-              </SelectContent>
-            </Select>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => setStatuses([...ALL_STATUSES])}>
+                  Select all
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setStatuses([...DEFAULT_STATUSES])}>
+                  Reset to default
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
             <div className="w-full sm:w-[280px]">
               <Input
@@ -322,7 +410,7 @@ export function ReceivingPageClient({
                 ) : undefined
               }
             />
-          ) : filtered.length === 0 ? (
+          ) : orders.length === 0 ? (
             <EmptyState
               icon={Search}
               title="No matching orders"
@@ -331,23 +419,21 @@ export function ReceivingPageClient({
           ) : (
             <>
               <ReceiptTransactionsTable
-                orders={paged}
+                orders={orders}
                 canReceive={canReceive}
                 onView={openDetail}
                 onReceive={setReceiveTarget}
               />
-              {orders.length >= ORDER_LIMIT && (
-                <p className="mt-3 text-xs text-text-3">
-                  Showing the {ORDER_LIMIT} most recent orders — search and paging cover these only.
-                </p>
-              )}
+              {/* The "showing the 200 most recent" caveat that used to live
+                  here is gone: search and paging now run over every Order, so
+                  there is no hidden tail to warn about. */}
               <ReceiptPagination
-                total={filtered.length}
-                page={safePage}
+                total={total}
+                page={page}
                 pageCount={pageCount}
                 pageSize={pageSize}
                 startIdx={startIdx}
-                rowsOnPage={paged.length}
+                rowsOnPage={orders.length}
                 onPage={setPage}
                 onPageSize={setPageSize}
               />
@@ -357,6 +443,22 @@ export function ReceivingPageClient({
       </div>
 
       <ReceiptIntakeDialog open={intakeOpen} onOpenChange={setIntakeOpen} onCreated={upsert} />
+
+      {/* Archiving moves orders between the working list and the shelf, so the
+          list behind the panel has to be re-read when it does. */}
+      <ArchivePanel
+        open={archiveOpen}
+        onOpenChange={setArchiveOpen}
+        onChanged={() => void load()}
+        // Viewing an archived order hands it to the SAME sheet the working list
+        // uses, so it reads exactly as it always has — with a way back, since
+        // the operator was midway through a search when they opened it.
+        onView={(order) => {
+          setArchiveOpen(false);
+          setCameFromArchive(true);
+          openDetail(order);
+        }}
+      />
 
       <ReceiveDialog
         open={receiveTarget !== null}
@@ -381,7 +483,22 @@ export function ReceivingPageClient({
           closeDetail();
           setReceiveTarget(order);
         }}
-        onOpenChange={(o) => !o && closeDetail()}
+        onOpenChange={(o) => {
+          if (o) return;
+          closeDetail();
+          // ✕ / Esc means "done", not "go back" — drop the return trip so the
+          // archive doesn't reappear behind a sheet the operator just dismissed.
+          setCameFromArchive(false);
+        }}
+        onBack={
+          cameFromArchive
+            ? () => {
+                closeDetail();
+                setCameFromArchive(false);
+                setArchiveOpen(true);
+              }
+            : undefined
+        }
       />
     </>
   );
@@ -512,6 +629,7 @@ function OrderDetailSheet({
   onRemoved,
   onReceive,
   onOpenChange,
+  onBack,
 }: {
   order: Order | null;
   canCreate: boolean;
@@ -520,6 +638,10 @@ function OrderDetailSheet({
   onRemoved: (id: string) => void;
   onReceive: (order: Order) => void;
   onOpenChange: (open: boolean) => void;
+  /** Set when this sheet was opened from somewhere that should be returned to
+   *  — the archive panel. Shows a Back control; closing with ✕ still just
+   *  closes, because "go back" and "I'm done" are different intentions. */
+  onBack?: () => void;
 }) {
   // Local copy so an edit can refresh the sheet in place.
   const [current, setCurrent] = React.useState<Order | null>(order);
@@ -581,6 +703,15 @@ function OrderDetailSheet({
           {current && (
             <>
               <SheetHeader>
+                {onBack && (
+                  <button
+                    type="button"
+                    onClick={onBack}
+                    className="-ml-1 mb-1 inline-flex w-fit items-center gap-1 rounded px-1 py-0.5 text-xs text-text-3 transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  >
+                    <ChevronLeft size={13} aria-hidden /> Back to archive
+                  </button>
+                )}
                 <SheetTitle>
                   <span className="font-mono text-sm text-accent">{current.po_reference}</span>{' '}
                   <Badge tone={STATUS_TONE[current.status]} dot className="ml-1 align-middle">

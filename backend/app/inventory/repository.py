@@ -7,6 +7,7 @@ query shape stays consistent and tests can fake one place.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -1053,19 +1054,86 @@ async def get_order(
 async def list_orders(
     session: AsyncSession,
     *,
-    status: str | None = None,
+    q: str | None = None,
+    statuses: Sequence[str] | None = None,
+    archived: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[ReceiptTransaction], int]:
     """Return ``(orders, total)`` newest first, lines + events eager-loaded.
 
-    Soft-deleted Orders are excluded.
+    Soft-deleted Orders are always excluded.
+
+    ``archived`` selects which side of the archiving policy to look at
+    (DATA-001): the default ``False`` is the working list, ``True`` is the
+    archive. There is no "both" — a list that mixes them is the crowded list
+    the requirement exists to fix, and the caller that wants everything can ask
+    twice.
+
+    ``statuses`` takes several at once, because the list's filter is a set of
+    ticked statuses rather than one choice — the working default is open +
+    partially received (DATA-003), which is two of them.
+
+    ``q`` searches the PO reference, the item number / description on any line,
+    and the lot number on any receive event — the same three things the page
+    used to filter for in the browser. It has to be done HERE, because a search
+    applied to the fetched page can only ever find what that page happened to
+    contain, which quietly turns "no results" into "no results in the first 200".
     """
 
     def _apply(stmt):
         stmt = stmt.where(ReceiptTransaction.deleted_at.is_(None))
-        if status is not None:
-            stmt = stmt.where(ReceiptTransaction.status == status)
+        stmt = stmt.where(
+            ReceiptTransaction.archived_at.is_not(None)
+            if archived
+            else ReceiptTransaction.archived_at.is_(None)
+        )
+        if statuses:
+            stmt = stmt.where(ReceiptTransaction.status.in_(statuses))
+        if q:
+            like = like_contains(q.lower())
+            # EXISTS rather than JOIN: an Order with four matching lines must
+            # still be ONE row, and a join would multiply it (and the count).
+            line_match = (
+                select(ReceiptTransactionLine.id)
+                .join(Item, Item.id == ReceiptTransactionLine.item_id)
+                .join(ItemPrefix, ItemPrefix.id == Item.prefix_id, isouter=True)
+                .where(
+                    ReceiptTransactionLine.receipt_transaction_id
+                    == ReceiptTransaction.id,
+                    or_(
+                        # ``item_number`` is a PROPERTY — "<prefix code>-<suffix>"
+                        # — with no column behind it, so the whole number has to
+                        # be rebuilt here. Matching only the pieces made a search
+                        # for "CR-001" (what the operator actually reads off the
+                        # screen) return nothing at all.
+                        func.lower(
+                            func.concat(ItemPrefix.code, "-", Item.sku_suffix)
+                        ).like(like, escape="\\"),
+                        func.lower(Item.sku_suffix).like(like, escape="\\"),
+                        func.lower(Item.description).like(like, escape="\\"),
+                        func.lower(ItemPrefix.code).like(like, escape="\\"),
+                    ),
+                )
+                .exists()
+            )
+            lot_match = (
+                select(ReceiptEventLine.id)
+                .join(ReceiptEvent, ReceiptEvent.id == ReceiptEventLine.receipt_event_id)
+                .join(Lot, Lot.id == ReceiptEventLine.lot_id)
+                .where(
+                    ReceiptEvent.receipt_transaction_id == ReceiptTransaction.id,
+                    func.lower(Lot.lot_number).like(like, escape="\\"),
+                )
+                .exists()
+            )
+            stmt = stmt.where(
+                or_(
+                    func.lower(ReceiptTransaction.po_reference).like(like, escape="\\"),
+                    line_match,
+                    lot_match,
+                )
+            )
         return stmt
 
     count_stmt = _apply(select(func.count()).select_from(ReceiptTransaction))

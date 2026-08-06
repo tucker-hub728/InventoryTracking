@@ -26,7 +26,11 @@ export class ApiError extends Error {
 
 interface RequestOptions {
   /** Query string params; values stringified. ``undefined`` is dropped. */
-  query?: Record<string, string | number | boolean | undefined | null>;
+  /** An array value becomes a repeated parameter (?k=a&k=b). */
+  query?: Record<
+    string,
+    string | number | boolean | undefined | null | readonly (string | number)[]
+  >;
   /** JSON body — will be serialised. Mutually exclusive with rawBody. */
   json?: unknown;
   /** Abort signal for cancellable requests. */
@@ -41,6 +45,16 @@ function buildUrl(path: string, query?: RequestOptions['query']): string {
   if (query) {
     for (const [key, value] of Object.entries(query)) {
       if (value === undefined || value === null || value === '') continue;
+      // An array becomes a REPEATED parameter (?status=a&status=b), which is
+      // what FastAPI parses into a list. ``set`` with the array would stringify
+      // it to "a,b" and arrive as one nonsense value.
+      if (Array.isArray(value)) {
+        for (const v of value) {
+          if (v === undefined || v === null || v === '') continue;
+          url.searchParams.append(key, String(v));
+        }
+        continue;
+      }
       url.searchParams.set(key, String(value));
     }
   }

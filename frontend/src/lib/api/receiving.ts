@@ -82,6 +82,8 @@ export interface Order {
   created_by_user_id: string;
   received_by_user_id: string | null;
   received_at: string | null;
+  /** Set once the retention policy shelved this Order (DATA-001); null = active. */
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
   lines: OrderLine[];
@@ -95,6 +97,22 @@ export interface OrderListResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+/** The Order retention policy and what it would do (DATA-001). */
+export interface ArchivePolicy {
+  /** The SAVED age. Previewing another value never changes this. */
+  archive_after_days: number;
+  /** How many Orders would archive — at the saved age, or at a previewed one. */
+  eligible_now: number;
+  archived_total: number;
+  /** When the daily sweep last ran; null means it never has. */
+  last_swept_at: string | null;
+}
+
+export interface ArchiveSweepResult {
+  archived: number;
+  archive_after_days: number;
 }
 
 // ── Write models ─────────────────────────────────────────────────────────
@@ -159,14 +177,25 @@ export interface ReceiveEventInput {
 
 export const receivingApi = {
   listOrders: (opts?: {
-    status?: OrderStatus;
+    /** Searches PO reference, item number / description, and lot number —
+     *  server-side, so it sees every Order rather than the fetched page. */
+    q?: string;
+    /** Repeatable — the list filter is a SET of ticked statuses, and the
+     *  working default is open + partially received (DATA-003). Omit for
+     *  "any status". */
+    status?: OrderStatus[];
+    /** The retention archive (DATA-001). Not a status: an archived order still
+     *  has one, which is why it is a separate axis and not a filter option. */
+    bucket?: 'archived';
     limit?: number;
     offset?: number;
     signal?: AbortSignal;
   }) =>
     api.get<OrderListResponse>('/receiving/transactions', {
       query: {
+        q: opts?.q,
         status: opts?.status,
+        bucket: opts?.bucket,
         limit: opts?.limit,
         offset: opts?.offset,
       },
@@ -197,4 +226,30 @@ export const receivingApi = {
   /** E-signed dated receive event. ``input.evidence_id`` is consumed once. */
   receive: (id: string, input: ReceiveEventInput) =>
     api.post<Order>(`/receiving/transactions/${id}/receive`, { json: input }),
+
+  // ── Archiving (REQ-2026-07-15-DATA-001/002/003) ────────────────────────
+
+  /** The retention policy. Pass ``days`` to preview a different age WITHOUT
+   *  saving it — ``eligible_now`` then answers "how many would archive if I
+   *  saved this", which is what the operator wants to know while typing. */
+  getArchivePolicy: (opts?: { days?: number; signal?: AbortSignal }) =>
+    api.get<ArchivePolicy>('/receiving/archive/policy', {
+      query: { days: opts?.days },
+      signal: opts?.signal,
+    }),
+
+  /** Super-admin only. */
+  updateArchivePolicy: (archiveAfterDays: number) =>
+    api.put<ArchivePolicy>('/receiving/archive/policy', {
+      json: { archive_after_days: archiveAfterDays },
+    }),
+
+  /** Run the daily sweep now. Super-admin only. */
+  runArchiveSweep: () =>
+    api.post<ArchiveSweepResult>('/receiving/archive/sweep', { json: {} }),
+
+  /** Put an archived Order back on the working list. Audited, not e-signed —
+   *  nothing about the Order changes, only its visibility. */
+  restoreOrder: (id: string) =>
+    api.post<Order>(`/receiving/transactions/${id}/restore`, { json: {} }),
 };

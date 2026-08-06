@@ -519,6 +519,39 @@ class OrderLineInput(BaseModel):
     unit_price: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
 
 
+class ArchivePolicyRead(BaseModel):
+    """The retention policy and what it would do right now (DATA-001).
+
+    ``eligible_now`` is the blast radius: how many Orders the next sweep would
+    archive at the CURRENT setting. Shown beside the field so nobody changes a
+    retention policy blind.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    archive_after_days: int
+    eligible_now: int
+    archived_total: int
+    last_swept_at: datetime | None = None
+
+
+class ArchivePolicyUpdate(BaseModel):
+    """Change the age at which finished Orders are archived."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    archive_after_days: int = Field(ge=1, le=3650)
+
+
+class ArchiveSweepResult(BaseModel):
+    """What a sweep did."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    archived: int
+    archive_after_days: int
+
+
 class OrderCreateRequest(BaseModel):
     """Body for ``POST /v1/receiving/transactions`` — create an Order.
 
@@ -708,6 +741,10 @@ class ReceiptTransactionRead(BaseModel):
     created_by_user_id: str
     received_by_user_id: str | None = None
     received_at: datetime | None = None
+    # Set once the retention policy has shelved this Order (DATA-001). NULL is
+    # an active Order. Exposed so the UI can tell the two apart and say WHEN it
+    # was archived, which is the question an auditor asks first.
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     lines: list[OrderLineRead] = Field(default_factory=list)

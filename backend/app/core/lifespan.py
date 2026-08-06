@@ -83,10 +83,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # signature is the password re-authentication, full stop). The whole
     # storage package, the bucket and the MinIO dev container went with it.
 
+    # The daily Order-archiving sweep (REQ-2026-07-15-DATA-001). A plain
+    # asyncio task: the sweep is one idempotent statement, so two instances
+    # running it together is harmless and it needs no scheduler infrastructure.
+    from app.inventory import archive_job
+
+    archive_job.start(app)
     log.info("app.started")
     try:
         yield
     finally:
         log.info("app.stopping")
+        await archive_job.stop(app)
         await dispose_engine()
         log.info("app.stopped")

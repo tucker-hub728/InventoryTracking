@@ -278,7 +278,14 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
                   step="1"
                   min={1}
                   value={qtyReceived}
-                  disabled={!lot || loading}
+                  // Read-only, like the lot number above it. The quantity is
+                  // what the receive event recorded, and it is the figure the
+                  // placement cap is measured against — editing it here would
+                  // let a lot disagree with the units already sitting in
+                  // locations. Correct it by correcting the receipt.
+                  disabled
+                  readOnly
+                  title="Set at receipt — correct it on the receive event, not here"
                   onChange={(e) => setQtyReceived(e.target.value)}
                 />
               </div>
