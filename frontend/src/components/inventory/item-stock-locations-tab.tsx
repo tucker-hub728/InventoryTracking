@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { LocationLink } from '@/components/locations/location-link';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
+import { LotLink } from '@/components/inventory/lot-link';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItemStockLocation } from '@/lib/api/items';
 import { expiryStatus } from '@/lib/inventory-helpers';
@@ -135,7 +136,10 @@ export function ItemStockLocationsTab({
                         />
                       </td>
                       <td className="px-4 py-2.5 font-mono text-xs text-text-2">
-                        {r.lot_number ?? '—'}
+                        {/* Click through to the lot, as the Unit Ledger and a
+                            location's contents already do — the lot is the
+                            thing you follow when a row looks wrong. */}
+                        <LotLink lotId={r.lot_id} lotNumber={r.lot_number} />
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono tabular-nums">
                         {formatNumber(r.qty)}
