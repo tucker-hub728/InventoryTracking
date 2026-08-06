@@ -161,6 +161,8 @@ export interface ApiKitListItem {
   production_location_node_id: string;
   /** Human path of the production floor (e.g. "Manufacturing Floor"). */
   production_location: string | null;
+  /** Node id of where the output was stocked, so the list can link to it. */
+  output_location_node_id: string | null;
   /** Human path of where the output was stocked — null until close-out. */
   output_location: string | null;
   good_qty: number | null;

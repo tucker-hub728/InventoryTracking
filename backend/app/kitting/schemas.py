@@ -186,7 +186,10 @@ class KitListItem(BaseModel):
     production_location_node_id: str
     # Human path of the production floor (e.g. "Manufacturing Floor").
     production_location: str | None = None
-    # Human path of where the output was stocked — null until close-out.
+    # Where the output was stocked — null until close-out. The id rides along
+    # with the path so the list can link through to the location, as every other
+    # location reference in the app does.
+    output_location_node_id: str | None = None
     output_location: str | None = None
     good_qty: int | None = None
     scrap_qty: int | None = None

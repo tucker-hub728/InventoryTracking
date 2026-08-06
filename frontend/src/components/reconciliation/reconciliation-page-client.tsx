@@ -18,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { LocationLink } from '@/components/locations/location-link';
 import { usePermission } from '@/hooks/use-permission';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
@@ -36,6 +37,16 @@ type Filter = KitStatus | 'all';
 // 'issued' is a transient state (a kit moves straight to In Production once
 // material is issued), so it's omitted from the filter options.
 const FILTERS: Filter[] = ['all', ...KIT_STATUSES.filter((s) => s !== 'issued')];
+
+// One column, but a kit can produce SEVERAL batches (KIT-007 incremental
+// production) and each names its own destination — a single batch can even
+// split across more than one. ``kits.output_location_node_id`` keeps only the
+// most recent, so the old imperative header, "Stock the output to", read as a
+// standing instruction for a value that quietly changes underneath it. The
+// close-out FORM keeps that wording, where it really is an instruction.
+const OUTPUT_COL_LABEL = 'Last output location';
+const OUTPUT_COL_HINT =
+  'Where the most recent batch was stocked. A kit can produce several batches, each to its own location.';
 
 export function ReconciliationPageClient() {
   const canCreate = usePermission('inventory', 'create');
@@ -164,7 +175,9 @@ export function ReconciliationPageClient() {
                     <th className="px-3 py-2 font-medium">Built vs target</th>
                     <th className="px-3 py-2 text-right font-medium">Scrapped</th>
                     <th className="px-3 py-2 font-medium">Production location</th>
-                    <th className="px-3 py-2 font-medium">Stock the output to</th>
+                    <th className="px-3 py-2 font-medium" title={OUTPUT_COL_HINT}>
+                      {OUTPUT_COL_LABEL}
+                    </th>
                     <th className="px-3 py-2 font-medium">Opened</th>
                     <th className="px-3 py-2" />
                   </tr>
@@ -214,7 +227,9 @@ export function ReconciliationPageClient() {
                     <th className="px-3 py-2 font-medium">Built vs target</th>
                     <th className="px-3 py-2 text-right font-medium">Scrapped</th>
                     <th className="px-3 py-2 font-medium">Production location</th>
-                    <th className="px-3 py-2 font-medium">Stock the output to</th>
+                    <th className="px-3 py-2 font-medium" title={OUTPUT_COL_HINT}>
+                      {OUTPUT_COL_LABEL}
+                    </th>
                     <th className="px-3 py-2 font-medium">Opened</th>
                     <th className="px-3 py-2" />
                   </tr>
@@ -252,10 +267,22 @@ export function ReconciliationPageClient() {
                         )}
                       </td>
                       <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
-                        {kit.production_location ?? <span className="text-text-3">—</span>}
+                        {/* ``kitStatus`` so a production floor opens on the tab
+                            that actually holds this kit — a closed kit is not
+                            on the In-production tab. */}
+                        <LocationLink
+                          nodeId={kit.production_location_node_id}
+                          name={kit.production_location}
+                          path={kit.production_location}
+                          kitStatus={kit.status}
+                        />
                       </td>
                       <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
-                        {kit.output_location ?? <span className="text-text-3">—</span>}
+                        <LocationLink
+                          nodeId={kit.output_location_node_id}
+                          name={kit.output_location}
+                          path={kit.output_location}
+                        />
                       </td>
                       <td className="px-3 py-2.5 text-xs text-text-3">
                         {formatDate(kit.created_at)}

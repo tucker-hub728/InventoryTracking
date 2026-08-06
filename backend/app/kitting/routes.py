@@ -1099,6 +1099,9 @@ async def list_kits(
                 status=k.status,  # type: ignore[arg-type]
                 production_location_node_id=str(k.production_location_node_id),
                 production_location=_label(k.production_location_node_id),
+                output_location_node_id=(
+                    str(k.output_location_node_id) if k.output_location_node_id else None
+                ),
                 output_location=_label(k.output_location_node_id),
                 good_qty=k.good_qty,
                 scrap_qty=k.scrap_qty,
