@@ -149,10 +149,14 @@ Resources:
             Version: '2012-10-17'
             Statement:
               # Upload the source bundle (compose + .platform hooks) for each version.
+              # GetObjectAcl/PutObjectAcl: EB reads and rewrites the bundle's ACL
+              # while staging it — see the comment on the next statement.
               - Effect: Allow
                 Action:
                   - s3:PutObject
                   - s3:GetObject
+                  - s3:GetObjectAcl
+                  - s3:PutObjectAcl
                   - s3:ListBucket
                 Resource:
                   - !Sub 'arn:aws:s3:::${ProjectName}-eb-artifacts-${AWS::AccountId}-${EnvName}'
@@ -161,18 +165,29 @@ Resources:
               # (elasticbeanstalk-<region>-<account>). UpdateEnvironment ensures
               # it exists — s3:CreateBucket is a no-op when it already does, but
               # the API call still requires the permission.
+              #
+              # Object actions are Get*/Put*/Delete* deliberately, mirroring what
+              # AdministratorAccess-AWSElasticBeanstalk grants on this bucket.
+              # EB stages the source bundle through here during UpdateEnvironment
+              # and reads its ACL; enumerating GetObject/PutObject alone fails the
+              # deploy with "You do not have permission to perform the
+              # 's3:GetObjectAcl' action" AFTER CreateApplicationVersion has
+              # already succeeded, which makes it look like a bundle problem
+              # rather than a permissions one. Still one bucket rather than the
+              # managed policy's elasticbeanstalk-* across every region.
               - Effect: Allow
                 Action:
                   - s3:CreateBucket
-                  - s3:GetBucketLocation
-                  - s3:GetBucketPolicy
+                  - s3:GetBucket*
                   - s3:PutBucketPolicy
-                  - s3:PutObject
-                  - s3:GetObject
                   - s3:ListBucket
-                Resource:
-                  - !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}'
-                  - !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}/*'
+                Resource: !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}'
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:Put*
+                  - s3:Delete*
+                Resource: !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}/*'
               # Create a new application version and roll the environment to it.
               - Effect: Allow
                 Action:
