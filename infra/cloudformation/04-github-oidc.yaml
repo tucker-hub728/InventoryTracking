@@ -181,7 +181,22 @@ Resources:
                   - s3:GetBucket*
                   - s3:PutBucketPolicy
                   - s3:ListBucket
+                  # These two are in AdministratorAccess-AWSElasticBeanstalk for
+                  # a reason: CreateStorageLocation configures the EB bucket's
+                  # public-access block and ownership controls, as the CALLER.
+                  # Omitting them failed a prod deploy at "Environment update is
+                  # starting" with "Service:AmazonCloudFormation, Message:S3
+                  # error: Access Denied" — which names neither the bucket nor
+                  # the action, so it is worth recording what it meant.
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketOwnershipControls
                 Resource: !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}'
+              # Enumerating buckets. Cannot be resource-scoped — it is inherently
+              # an account-wide list — and is read-only. The managed policy grants
+              # it too; EB calls it while locating its storage location.
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: '*'
               - Effect: Allow
                 Action:
                   - s3:Get*
