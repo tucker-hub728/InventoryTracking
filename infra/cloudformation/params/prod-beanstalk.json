@@ -15,5 +15,9 @@
   { "ParameterKey": "LBTestCIDR", "ParameterValue": "" },
 
   { "ParameterKey": "CreateSingleInstanceEnv", "ParameterValue": "false" },
-  { "ParameterKey": "OriginEnvironment", "ParameterValue": "loadbalanced" }
+  { "ParameterKey": "OriginEnvironment", "ParameterValue": "loadbalanced" },
+
+  { "ParameterKey": "PrivateSubnetCidrs", "ParameterValue": "172.31.48.0/20,172.31.64.0/20" },
+  { "ParameterKey": "PrivateSubnetAZs", "ParameterValue": "us-east-2c,us-east-2a" },
+  { "ParameterKey": "PlaceInstancesInPrivateSubnets", "ParameterValue": "true" }
 ]

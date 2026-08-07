@@ -128,6 +128,58 @@ Parameters:
       — and it cannot do that if the autoscaling group is already at its
       ceiling. The spare is terminated when the deploy finishes, so the extra
       instance is billed for minutes per release, not continuously.
+  PrivateSubnetCidrs:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      EXACTLY TWO unused CIDR blocks inside the VPC, e.g.
+      "172.31.48.0/20,172.31.64.0/20". Set this to BUILD the private network
+      (two private subnets, one NAT gateway, a private route table and a free
+      S3 gateway endpoint). Building it changes nothing about the running
+      environment — instances only move when PlaceInstancesInPrivateSubnets
+      flips. Leave blank to skip the whole thing (dev's normal state).
+      Check what is free with:
+        aws ec2 describe-subnets --filters Name=vpc-id,Values=<vpc> \
+          --query "Subnets[].CidrBlock"
+  PrivateSubnetAZs:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      Availability zones for the two private subnets, in the same order as
+      PrivateSubnetCidrs. MUST match the AZs of the public subnets in
+      EBSubnetIds — an ALB only reaches targets in an AZ it is itself enabled
+      in, so a private subnet in an AZ the ALB does not serve gets no traffic.
+      Required when PrivateSubnetCidrs is set.
+  PlaceInstancesInPrivateSubnets:
+    Type: String
+    Default: 'false'
+    AllowedValues: [ 'true', 'false' ]
+    Description: >-
+      STAGE TWO. 'true' moves the EC2 instances into the private subnets and
+      strips their public IPs; the ALB stays in the public subnets and remains
+      the only way in. Requires PrivateSubnetCidrs, and applies only to a
+      load-balanced environment.
+      A SINGLE-INSTANCE environment must NOT use this: it has no load balancer,
+      so CloudFront reaches the instance's public IP directly and removing that
+      IP makes the environment unreachable. The template blocks the combination
+      rather than trusting the operator to remember.
+
+      EXPECT AN OUTAGE. Measured on 2026-08-07, not predicted: changing Subnets
+      makes EB build a NEW Auto Scaling group ("Requested update requires the
+      creation of a new physical resource"), so the deployment policy does NOT
+      apply. RollingWithAdditionalBatch never runs, no spare is launched first,
+      and the old instances are terminated while the new ones are still
+      booting — the target group had zero healthy targets for several minutes.
+      The run took ~6 min end to end: update started 14:54:58, old instances
+      terminating 14:56:10, new instances added 14:56:43, application up
+      ~14:59, targets healthy shortly after.
+      Treat this as a maintenance window, not a rolling deploy. If that is
+      unacceptable, do it as a blue/green instead — build a second environment
+      on the private subnets and switch OriginEnvironment once it is verified.
+
+      Verify EB accepts the change before applying it (this catches a bad
+      subnet/AZ pairing while it is still cheap):
+        aws elasticbeanstalk validate-configuration-settings ...
 
 Conditions:
   # Blank SSMParamPrefix means "derive it" — see the parameter description.
@@ -139,8 +191,128 @@ Conditions:
   HasLBTestCIDR: !And
     - !Not [ !Equals [ !Ref LBTestCIDR, '' ] ]
     - !Condition HasLBEnv
+  # Stage one: build the private network. Independent of whether anything
+  # uses it yet.
+  CreatePrivateNetwork: !Not [ !Equals [ !Join [ '', !Ref PrivateSubnetCidrs ], '' ] ]
+  # Stage two: actually move the instances. Gated on HasLBEnv as well as the
+  # flag — without a load balancer there is no public entry point left once
+  # the instance loses its public IP, so the combination is silently ignored
+  # rather than allowed to strand a single-instance environment.
+  InstancesArePrivate: !And
+    - !Equals [ !Ref PlaceInstancesInPrivateSubnets, 'true' ]
+    - !Condition CreatePrivateNetwork
+    - !Condition HasLBEnv
 
 Resources:
+  # ── Private network for the EB instances (VR-033) ───────────────────────
+  #
+  # Built only when PrivateSubnetCidrs is set, and used only when
+  # PlaceInstancesInPrivateSubnets is also 'true'. Two stages on purpose: the
+  # network can be created and inspected with zero effect on the running
+  # environment, so the risky step is a separate, small, reversible change.
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivateNetwork
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Select [ 0, !Ref PrivateSubnetCidrs ]
+      AvailabilityZone: !Select [ 0, !Ref PrivateSubnetAZs ]
+      # Explicit: this is what makes the subnet "private". Instances get no
+      # public IP even if something later asks for one by default.
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-private-a' }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivateNetwork
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Select [ 1, !Ref PrivateSubnetCidrs ]
+      AvailabilityZone: !Select [ 1, !Ref PrivateSubnetAZs ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-private-b' }
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    Condition: CreatePrivateNetwork
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-nat' }
+
+  # ONE NAT gateway, deliberately. A second (one per AZ) removes both the
+  # cross-AZ data charge and the shared failure point, and is the textbook
+  # layout — it was weighed and declined at roughly double the cost.
+  #
+  # What losing this AZ costs: instances in the other AZ lose OUTBOUND access
+  # only. Containers already running keep serving traffic through the ALB;
+  # what breaks is anything needing egress — pulling an image on deploy, and
+  # the SSM fetch on instance start. So an AZ failure degrades deploys, not
+  # the live site. Revisit if deploy-during-an-AZ-outage ever matters.
+  #
+  # Lives in a PUBLIC subnet by definition: a NAT gateway reaches the internet
+  # through the internet gateway, so putting it in a private subnet would
+  # leave it with no route out and nothing would work.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: CreatePrivateNetwork
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Select [ 0, !Ref EBSubnetIds ]
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-nat' }
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivateNetwork
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-${EnvName}-private' }
+
+  # The default VPC's main route table sends 0.0.0.0/0 to the internet
+  # gateway. A subnet with no explicit association inherits that — which would
+  # make these subnets public in everything but name. The associations below
+  # are what actually keep them private.
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivateNetwork
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivateNetwork
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivateNetwork
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Free, and it pays for itself immediately: ECR serves image layers from S3,
+  # and those layers are by far the largest thing an instance downloads. A NAT
+  # gateway bills $0.045/GB processed, so without this endpoint every deploy
+  # pays NAT data charges to pull the images. A gateway endpoint is a route
+  # table entry, not an ENI — no hourly cost at all.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreatePrivateNetwork
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
   # ── IAM: EC2 instance role (least privilege) ────────────────────────────
   EBInstanceRole:
     Type: AWS::IAM::Role
@@ -546,12 +718,31 @@ Resources:
         - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: IamInstanceProfile, Value: !Ref EBInstanceProfile }
         - { Namespace: 'aws:autoscaling:launchconfiguration', OptionName: SecurityGroups, Value: !Ref EBInstanceSecurityGroupLB }
         - { Namespace: 'aws:ec2:instances', OptionName: InstanceTypes, Value: !Ref InstanceType }
-        # Networking. Instances keep public IPs: there is no NAT gateway, and
-        # they need outbound access for ECR pulls, SSM and Parameter Store.
+        # Networking.
+        #
+        # Two independent subnet lists, and they are NOT interchangeable:
+        #   Subnets    — where the EC2 instances live
+        #   ELBSubnets — where the load balancer lives
+        # The ALB must stay in the PUBLIC subnets whatever happens below; it is
+        # the only way traffic gets in. Moving it private would take the site
+        # offline just as surely as deleting it.
+        #
+        # With PlaceInstancesInPrivateSubnets='true' the instances move to
+        # subnets with no route to the internet gateway and lose their public
+        # IPs, so they are reachable only from inside the VPC — in practice
+        # only via the ALB. Outbound (ECR pulls, SSM Parameter Store, Cognito)
+        # goes out through the NAT gateway. (VR-033)
         - { Namespace: 'aws:ec2:vpc', OptionName: VPCId, Value: !Ref VpcId }
-        - { Namespace: 'aws:ec2:vpc', OptionName: Subnets, Value: !Join [',', !Ref EBSubnetIds] }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: Subnets
+          Value: !If
+            - InstancesArePrivate
+            - !Join [ ',', [ !Ref PrivateSubnetA, !Ref PrivateSubnetB ] ]
+            - !Join [ ',', !Ref EBSubnetIds ]
         - { Namespace: 'aws:ec2:vpc', OptionName: ELBSubnets, Value: !Join [',', !Ref EBSubnetIds] }
-        - { Namespace: 'aws:ec2:vpc', OptionName: AssociatePublicIpAddress, Value: 'true' }
+        - Namespace: 'aws:ec2:vpc'
+          OptionName: AssociatePublicIpAddress
+          Value: !If [ InstancesArePrivate, 'false', 'true' ]
         # Health + logs.
         - { Namespace: 'aws:elasticbeanstalk:healthreporting:system', OptionName: SystemType, Value: enhanced }
         - { Namespace: 'aws:elasticbeanstalk:cloudwatch:logs', OptionName: StreamLogs, Value: 'true' }
