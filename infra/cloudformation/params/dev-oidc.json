@@ -1,0 +1,8 @@
+[
+  { "ParameterKey": "ProjectName", "ParameterValue": "cellready" },
+  { "ParameterKey": "EnvName", "ParameterValue": "dev" },
+  { "ParameterKey": "GitHubOrg", "ParameterValue": "drolle-bdl-arch" },
+  { "ParameterKey": "GitHubRepo", "ParameterValue": "InventoryTracking" },
+  { "ParameterKey": "AllowedBranches", "ParameterValue": "main,dev" },
+  { "ParameterKey": "ExistingOIDCProviderArn", "ParameterValue": "" }
+]
