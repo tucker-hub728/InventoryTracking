@@ -231,23 +231,44 @@ jobs:
           # succeeded (2026-08-04, production). A genuinely broken deploy stays
           # Red indefinitely, so waiting costs two minutes in the bad case and
           # removes a false alarm in the good one.
-          RED_TOLERANCE=8          # × 15s = 2 minutes of sustained Red
+          # MEASURED, not guessed. On 2026-08-07 the window was:
+          #   12:33:52  update completed successfully
+          #   12:34:44  Info  -> Degraded   (stale instance still counted)
+          #   12:36:44  Degraded -> Ok
+          # Exactly 120s. The previous value of 8 (= 120s) sat precisely on that
+          # boundary and failed a healthy production release by one poll.
+          #
+          # 20 gives five minutes: comfortably past two health-rollup cycles,
+          # and still bounded, because the version check above already fails
+          # a genuinely bad deploy immediately rather than waiting this out.
+          RED_TOLERANCE=20         # × 15s = 5 minutes of sustained Red
           echo "Waiting for environment to return to Ready/Green..."
           red_streak=0
           for i in $(seq 1 80); do
-            read -r status health < <(aws elasticbeanstalk describe-environments \
+            read -r status health version < <(aws elasticbeanstalk describe-environments \
               --environment-names "${EB_ENV}" \
-              --query 'Environments[0].[Status,Health]' --output text)
-            echo "  [$i] Status=${status} Health=${health}"
+              --query 'Environments[0].[Status,Health,VersionLabel]' --output text)
+            echo "  [$i] Status=${status} Health=${health} Version=${version}"
 
             if [[ "${status}" == "Ready" && "${health}" == "Green" ]]; then
               echo "Deploy succeeded."; exit 0
             fi
 
+            # A version that is Ready but NOT the one we asked for is a real
+            # failure, and no amount of waiting fixes it — fail immediately
+            # rather than burning the whole health grace period on it. This is
+            # what distinguishes "EB is still settling" from "EB rolled back".
+            if [[ "${status}" == "Ready" && "${version}" != "${IMAGE_TAG}" ]]; then
+              echo "Environment is Ready but running '${version}', expected '${IMAGE_TAG}' — deploy failed."
+              aws elasticbeanstalk describe-events --environment-name "${EB_ENV}" \
+                --max-items 15 --query 'Events[].[EventDate,Severity,Message]' --output text || true
+              exit 1
+            fi
+
             if [[ "${status}" == "Ready" && "${health}" == "Red" ]]; then
               red_streak=$((red_streak + 1))
               if (( red_streak >= RED_TOLERANCE )); then
-                echo "Environment has been Ready/Red for $((red_streak * 15))s — deploy failed."
+                echo "Environment has been Ready/Red on the CORRECT version for $((red_streak * 15))s — deploy failed."
                 aws elasticbeanstalk describe-events --environment-name "${EB_ENV}" \
                   --max-items 15 --query 'Events[].[EventDate,Severity,Message]' --output text || true
                 exit 1
