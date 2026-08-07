@@ -15,7 +15,7 @@ import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -41,6 +41,11 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+#: Advisory-lock key held for the duration of a migration run. Any constant
+#: works as long as every process uses the same one; this is ``cell`` in ASCII,
+#: which makes it recognisable in ``pg_locks`` when working out who holds it.
+MIGRATION_LOCK_ID = 0x63656C6C
 
 
 def _include_object(obj, name, type_, reflected, compare_to) -> bool:
@@ -80,6 +85,29 @@ def _do_run_migrations(connection: Connection) -> None:
         compare_server_default=True,
     )
     with context.begin_transaction():
+        # Serialise migrations across instances.
+        #
+        # Every instance runs the ``migrate`` container, so a load-balanced
+        # environment starts N of them simultaneously against ONE database.
+        # Without a lock they all read the same ``alembic_version``, all decide
+        # the same revision is pending, and all try to apply it: one wins and
+        # the rest die on "column already exists". Their backends then never
+        # start at all, because docker-compose gates the backend on
+        # ``service_completed_successfully`` — so the deploy comes up at a
+        # fraction of capacity, or none.
+        #
+        # Taken BEFORE ``run_migrations()`` deliberately: alembic reads the
+        # current head inside that call, so a waiter re-reads it only after the
+        # winner has committed, and correctly finds there is nothing to do.
+        # Reading it earlier would leave the waiter acting on a stale plan.
+        #
+        # The ``_xact_`` form releases on commit OR rollback, including when the
+        # process dies mid-migration. A session-level ``pg_advisory_lock`` would
+        # stay held until the connection was reaped, which on a failed deploy
+        # means the retry blocks on a lock nobody owns.
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_LOCK_ID}
+        )
         context.run_migrations()
 
 
