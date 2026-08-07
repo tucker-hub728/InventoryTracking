@@ -12,8 +12,8 @@
   { "ParameterKey": "LBCNAMEPrefix", "ParameterValue": "cellready-prod-lb-4x7q" },
   { "ParameterKey": "MinInstances", "ParameterValue": "2" },
   { "ParameterKey": "MaxInstances", "ParameterValue": "3" },
-  { "ParameterKey": "LBTestCIDR", "ParameterValue": "135.196.135.171/32" },
+  { "ParameterKey": "LBTestCIDR", "ParameterValue": "" },
 
-  { "ParameterKey": "CreateSingleInstanceEnv", "ParameterValue": "true" },
+  { "ParameterKey": "CreateSingleInstanceEnv", "ParameterValue": "false" },
   { "ParameterKey": "OriginEnvironment", "ParameterValue": "loadbalanced" }
 ]
