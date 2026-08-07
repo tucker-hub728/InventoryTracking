@@ -450,16 +450,31 @@ Resources:
         # outwards. Decides which X-Forwarded-For entry is written to the Part 11
         # audit rows; everything further left is caller-supplied and discarded.
         #
-        # 2 = CloudFront (appends the viewer IP) + the EB nginx hop (appends the
-        # CloudFront edge IP). The LOAD-BALANCED environment below uses 3,
-        # because the ALB inserts itself between them.
+        # 1 = CloudFront only. MEASURED on dev 2026-08-07, not reasoned about.
         #
-        # VERIFY IT rather than trusting the arithmetic: sign something, then
+        # This said 2 until then, on the theory that the EB nginx hop appends the
+        # CloudFront edge address. It does not — nginx.conf sets
+        # `X-Forwarded-For $proxy_add_x_forwarded_for`, but on the Docker platform
+        # the backend still receives a single entry. The BFF also contributes
+        # nothing: it forwards the inbound chain plus `req.ip`, and Next.js leaves
+        # `req.ip` undefined off Vercel (see the note in
+        # frontend/app/api/v1/[...path]/route.ts).
+        #
+        # What the wrong value cost, so the next person believes the warning:
+        #   count absent (0) → recorded 172.23.0.3, the container's own address
+        #   count = 2        → recorded NOTHING; the chain is shorter than asked
+        #                      for, and the code refuses to guess
+        #   count = 1        → recorded the real client address
+        #
+        # A blank is the *safe* failure and it is still a failure: an audit row
+        # that attests to nothing about where the signer was.
+        #
+        # VERIFY AFTER ANY CHANGE TO THE PROXY CHAIN — adding a load balancer,
+        # a WAF, or a custom domain all move this number. Sign something, then
         #   SELECT ip_address FROM audit.reauth_events ORDER BY created_at DESC LIMIT 1;
-        # If it shows a 130.176.*/​64.252.* (CloudFront), a 10.*/172.* (the ALB
-        # or the container) or a blank instead of the real client, this number is
-        # wrong. Too high is as bad as too low — it just fails the other way.
-        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '2' }
+        # A 130.176.*/​64.252.* (CloudFront), a 10.*/172.* (load balancer or
+        # container), or a blank all mean this is wrong.
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '1' }
         # No S3_* environment: object storage was removed on 2026-08-03 with the
         # hand-drawn e-signature image. The backend ignores any leftovers.
         # Cognito — pool/client ids; issuer + JWKS are derived by the backend.
@@ -554,12 +569,22 @@ Resources:
             - DeriveSsmPrefix
             - !Sub '/${ProjectName}/${EnvName}/'
             - !Ref SSMParamPrefix
-        # 3, NOT 2 — the ALB adds a hop between CloudFront and nginx, so the
-        # trustworthy X-Forwarded-For entry moves one further left. Leaving this
-        # at 2 attributes every signature to a CloudFront edge address instead
-        # of the person who signed it: an audit trail that looks perfectly
-        # healthy and attests to the wrong thing. Verify it after cutover.
-        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '3' }
+        # 2, not 1 — one MORE than the single-instance environment above, because
+        # the ALB genuinely does append (CloudFront's edge address) where the
+        # nginx hop does not. See the long note on the single-instance
+        # environment for what was measured on 2026-08-07 and why.
+        #
+        # This said 3 until then, derived from the same wrong assumption that
+        # nginx adds an entry. At 3 the chain is shorter than asked for and
+        # `_client_ip` returns None, so production recorded NO ip_address on any
+        # signature between the cutover and this correction.
+        #
+        # STILL UNVERIFIED HERE. The single-instance value was measured; this one
+        # is inferred from it (+1 for the ALB) and must be confirmed the same way:
+        # sign something in production, then
+        #   SELECT ip_address FROM audit.reauth_events ORDER BY created_at DESC LIMIT 1;
+        # If it is blank or shows a 130.176.*/​64.252.*/10.*, this is wrong.
+        - { Namespace: 'aws:elasticbeanstalk:application:environment', OptionName: TRUSTED_PROXY_COUNT, Value: '2' }
         - Namespace: 'aws:elasticbeanstalk:application:environment'
           OptionName: COGNITO_USER_POOL_ID
           Value:
