@@ -42,10 +42,24 @@ Parameters:
       second stack that tried to create one fails with EntityAlreadyExists.
       Find the existing ARN with:
         aws iam list-open-id-connect-providers
+  UseScopedDeployPolicy:
+    Type: String
+    Default: 'false'
+    AllowedValues: [ 'true', 'false' ]
+    Description: >-
+      'false' (default) attaches the AWS-managed AdministratorAccess-AWSElasticBeanstalk
+      policy — broad, but guaranteed to cover every code path EB takes.
+      'true' swaps it for the scoped `eb-runtime` policy below, which grants only
+      the actions this role was MEASURED using (see that policy's comment).
+      Roll this out on dev first and leave prod on 'false' until dev has run
+      several releases clean — the measured set covers observed deploys, not
+      every possible one. Rollback is this parameter back to 'false'.
 
 Conditions:
   # Only the first environment in an account creates the shared OIDC provider.
   CreateOIDCProvider: !Equals [ !Ref ExistingOIDCProviderArn, '' ]
+  ScopedPolicy: !Equals [ !Ref UseScopedDeployPolicy, 'true' ]
+  BroadPolicy: !Equals [ !Ref UseScopedDeployPolicy, 'false' ]
 
 Resources:
   GitHubOIDCProvider:
@@ -72,8 +86,16 @@ Resources:
       # the supported way to avoid enumerating dozens of sub-permissions.
       # ECR push and the CUSTOM artifacts bucket are NOT covered by it, so they
       # remain as the inline policies below.
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk
+      #
+      # It is also far broader than this role needs: it grants iam, rds,
+      # dynamodb, ecs, sns, sqs, cloudtrail, codebuild, codecommit, acm and
+      # cloudwatch, none of which a deploy has ever touched. Set
+      # UseScopedDeployPolicy=true to drop it for the measured `eb-runtime`
+      # policy instead.
+      ManagedPolicyArns: !If
+        - BroadPolicy
+        - [ arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk ]
+        - !Ref 'AWS::NoValue'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -169,6 +191,73 @@ Resources:
                   - cloudformation:DescribeStackResource*
                   - cloudformation:DescribeStacks
                 Resource: '*'
+        # Replaces AdministratorAccess-AWSElasticBeanstalk when
+        # UseScopedDeployPolicy=true. Every action here was observed in IAM
+        # service-last-accessed data (ACTION_LEVEL) for this role — nothing is
+        # granted speculatively:
+        #   aws iam generate-service-last-accessed-details \
+        #     --arn <role-arn> --granularity ACTION_LEVEL
+        # Read-only Describe* calls are widened to Describe* rather than pinned
+        # to the exact names observed: they leak no data this role cannot
+        # already reach, and pinning them makes the policy brittle as EB's
+        # internals change between platform versions.
+        - !If
+          - ScopedPolicy
+          - PolicyName: eb-runtime
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                # EB drives the deploy by updating its OWN internal stack.
+                # Constrained to awseb-* so a compromised workflow cannot
+                # rewrite the cellready-* stacks that define the environment,
+                # the database or this very role.
+                - Effect: Allow
+                  Action:
+                    - cloudformation:UpdateStack
+                    - cloudformation:CancelUpdateStack
+                    - cloudformation:GetTemplate
+                    - cloudformation:ListStackResources
+                    - cloudformation:DescribeStackEvents
+                    - cloudformation:DescribeStackResource
+                    - cloudformation:DescribeStackResources
+                  Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/awseb-*/*'
+                # DescribeStacks is not resource-scopable in the way the calls
+                # above are — EB lists stacks before it locates its own.
+                - Effect: Allow
+                  Action: cloudformation:DescribeStacks
+                  Resource: '*'
+                # Rolling deploys: suspend the ASG's own processes, replace
+                # instances a batch at a time, resume. UpdateAutoScalingGroup is
+                # how RollingWithAdditionalBatch grows past MinSize.
+                - Effect: Allow
+                  Action:
+                    - autoscaling:Describe*
+                    - autoscaling:ResumeProcesses
+                    - autoscaling:SuspendProcesses
+                    - autoscaling:TerminateInstanceInAutoScalingGroup
+                    - autoscaling:UpdateAutoScalingGroup
+                  Resource: '*'
+                # Read-only. No RunInstances, no security-group writes — the
+                # measured data shows five Describe calls and nothing else.
+                - Effect: Allow
+                  Action: ec2:Describe*
+                  Resource: '*'
+                # Load-balanced environments only: instances are pulled from the
+                # target group before replacement and put back after.
+                - Effect: Allow
+                  Action:
+                    - elasticloadbalancing:Describe*
+                    - elasticloadbalancing:RegisterTargets
+                    - elasticloadbalancing:DeregisterTargets
+                  Resource: '*'
+                # EB provisions the environment's log group on first deploy.
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:PutRetentionPolicy
+                    - logs:DescribeLogGroups
+                  Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/elasticbeanstalk/*'
+          - !Ref 'AWS::NoValue'
 
 Outputs:
   DeployRoleArn:

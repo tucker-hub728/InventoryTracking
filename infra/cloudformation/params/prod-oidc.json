@@ -4,5 +4,7 @@
   { "ParameterKey": "GitHubOrg", "ParameterValue": "drolle-bdl-arch" },
   { "ParameterKey": "GitHubRepo", "ParameterValue": "InventoryTracking" },
   { "ParameterKey": "AllowedBranches", "ParameterValue": "production,production" },
-  { "ParameterKey": "ExistingOIDCProviderArn", "ParameterValue": "arn:aws:iam::684707794581:oidc-provider/token.actions.githubusercontent.com" }
+  { "ParameterKey": "ExistingOIDCProviderArn", "ParameterValue": "arn:aws:iam::684707794581:oidc-provider/token.actions.githubusercontent.com" },
+
+  { "ParameterKey": "UseScopedDeployPolicy", "ParameterValue": "false" }
 ]
