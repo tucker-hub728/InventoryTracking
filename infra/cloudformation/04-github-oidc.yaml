@@ -51,9 +51,24 @@ Parameters:
       policy — broad, but guaranteed to cover every code path EB takes.
       'true' swaps it for the scoped `eb-runtime` policy below, which grants only
       the actions this role was MEASURED using (see that policy's comment).
-      Roll this out on dev first and leave prod on 'false' until dev has run
-      several releases clean — the measured set covers observed deploys, not
-      every possible one. Rollback is this parameter back to 'false'.
+
+      STATUS as of 2026-08-07 — 'true' works on DEV, and does NOT work on PROD:
+        dev  (single-instance): several clean releases on the scoped policy.
+        prod (load-balanced):   every deploy dies ~7s into UpdateEnvironment with
+                                "Service:AmazonCloudFormation, Message:S3 error:
+                                Access Denied". The message names neither bucket
+                                nor action. Tried and did NOT fix it: adding
+                                s3:ListAllMyBuckets, s3:PutBucketPublicAccessBlock
+                                and s3:PutBucketOwnershipControls to match the
+                                managed policy's S3 grants exactly.
+      So the missing permission is almost certainly NOT S3 despite the wording,
+      and is something a load-balanced environment needs that a single-instance
+      one never calls. Diagnosing it needs CloudTrail (cloudtrail:LookupEvents)
+      to see the actual denied call — guessing costs a failed prod release each
+      time. Do that before trying again.
+
+      The failure is safe: EB refuses the new version and the environment keeps
+      serving the old one. Rollback is this parameter back to 'false'.
 
 Conditions:
   # Only the first environment in an account creates the shared OIDC provider.
@@ -181,22 +196,7 @@ Resources:
                   - s3:GetBucket*
                   - s3:PutBucketPolicy
                   - s3:ListBucket
-                  # These two are in AdministratorAccess-AWSElasticBeanstalk for
-                  # a reason: CreateStorageLocation configures the EB bucket's
-                  # public-access block and ownership controls, as the CALLER.
-                  # Omitting them failed a prod deploy at "Environment update is
-                  # starting" with "Service:AmazonCloudFormation, Message:S3
-                  # error: Access Denied" — which names neither the bucket nor
-                  # the action, so it is worth recording what it meant.
-                  - s3:PutBucketPublicAccessBlock
-                  - s3:PutBucketOwnershipControls
                 Resource: !Sub 'arn:aws:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}'
-              # Enumerating buckets. Cannot be resource-scoped — it is inherently
-              # an account-wide list — and is read-only. The managed policy grants
-              # it too; EB calls it while locating its storage location.
-              - Effect: Allow
-                Action: s3:ListAllMyBuckets
-                Resource: '*'
               - Effect: Allow
                 Action:
                   - s3:Get*
