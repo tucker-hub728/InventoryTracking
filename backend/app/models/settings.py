@@ -32,6 +32,20 @@ DEFAULT_ORDER_ARCHIVE_AFTER_DAYS = 365
 #: operator finds out the scheduler died.
 ORDER_ARCHIVE_LAST_SWEPT_AT = "order_archive_last_swept_at"
 
+#: How many days BEFORE its expiration date a consumable starts warning.
+#:
+#: The requirements do not settle this: the main SRS (LOC-008) alerts only once
+#: stock "sits past its expiration date", while Transaction Spec §4.2 wants the
+#: item flagged when it "is approaching expiration", and the July 9 amendment
+#: never gives a number. So it is a setting, defaulted to 30 days, and the open
+#: question goes to the client rather than being hard-coded to one reading.
+#:
+#: Distinct from Planning's "expiring within a year" horizon (REQ-2026-07-09-
+#: PLN-003) on purpose — that is a different screen answering a different
+#: question, and sharing one constant would couple them wrongly.
+CONSUMABLE_EXPIRY_WARN_DAYS = "consumable_expiry_warn_days"
+DEFAULT_CONSUMABLE_EXPIRY_WARN_DAYS = 30
+
 
 class AppSetting(Base):
     """One administrator-editable setting."""

@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { PageHeader } from '@/components/shared/page-header';
 import { ItemLink } from '@/components/inventory/item-link';
 import { FLOOR_TABS } from '@/components/production/floor-tabs';
+import { KanbanPanel } from '@/components/production/kanban-panel';
 import { ApiError } from '@/lib/api/client';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import {
@@ -53,7 +54,7 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
   // on a page that doesn't exist in the new section.
   React.useEffect(() => {
     setPage(1);
-  }, [active.section, pageSize]);
+  }, [active.seg, pageSize]);
 
   React.useEffect(() => {
     const ctrl = new AbortController();
@@ -65,6 +66,9 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
   }, [nodeId]);
 
   React.useEffect(() => {
+    // The Kanban tab is a stock view, not a kit section — it fetches its own
+    // data inside <KanbanPanel/>, so skip the kits request entirely.
+    if (active.kind !== 'kits') return;
     const ctrl = new AbortController();
     setData(null);
     setLoadError(null);
@@ -81,7 +85,10 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
         setLoadError(err instanceof ApiError ? err.message : 'Failed to load this floor.');
       });
     return () => ctrl.abort();
-  }, [nodeId, active.section, page, pageSize]);
+    // ``active`` is one of the FLOOR_TABS module constants, so its identity is
+    // stable across renders — depending on the object is safe and covers both
+    // the segment and the section it carries.
+  }, [nodeId, active, page, pageSize]);
 
   const counts: ApiFloorKitCounts = data?.counts ?? {
     in_production: 0,
@@ -97,10 +104,13 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
     if (data && total > 0 && page > pageCount) setPage(pageCount);
   }, [data, total, page, pageCount]);
 
+  // Null on the Kanban tab, which is a stock view rather than a kit section.
+  const section = active.kind === 'kits' ? active.section : null;
+
   const rows =
-    active.section === 'in_production'
+    section === 'in_production'
       ? (data?.active ?? [])
-      : active.section === 'closed'
+      : section === 'closed'
         ? (data?.completed ?? [])
         : (data?.cancelled ?? []);
 
@@ -115,7 +125,7 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
           <span className="flex items-center gap-2 text-xs text-text-3">
             <Factory size={13} className="text-accent" />
             {counts.in_production} building
-            {active.section === 'in_production' && wip > 0 && (
+            {section === 'in_production' && wip > 0 && (
               <> · {wip} unit{wip === 1 ? '' : 's'} of WIP</>
             )}{' '}
             · {counts.closed} closed here
@@ -131,9 +141,17 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
               className="inline-flex items-center justify-start gap-1"
               aria-label="Floor sections"
             >
-              {FLOOR_TABS.map((t) => {
+              {FLOOR_TABS.map((t, i) => {
                 const isActive = t.seg === active.seg;
+                // The kit-state tabs and the Kanban stock view are different
+                // kinds of thing; a rule keeps Kanban from reading as a fourth
+                // kit state (see floor-tabs.ts).
+                const startsNewGroup = i > 0 && t.kind !== FLOOR_TABS[i - 1]!.kind;
                 return (
+                  <React.Fragment key={t.seg}>
+                    {startsNewGroup && (
+                      <span aria-hidden className="mx-1.5 h-4 w-px shrink-0 bg-border" />
+                    )}
                   <Link
                     key={t.seg}
                     href={`/production/${nodeId}/${t.seg}`}
@@ -145,13 +163,16 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
                   >
                     {t.label}
                   </Link>
+                  </React.Fragment>
                 );
               })}
             </nav>
           </div>
 
           <div className="space-y-2 px-4 py-4">
-            {loadError ? (
+            {section === null ? (
+              <KanbanPanel areaId={nodeId} />
+            ) : loadError ? (
               <EmptyState
                 icon={Factory}
                 title="Couldn't load this floor"
@@ -169,25 +190,25 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
               <p className="p-6 text-center text-xs text-text-3">Loading…</p>
             ) : rows.length === 0 ? (
               <EmptyState
-                icon={active.section === 'cancelled' ? XCircle : Factory}
+                icon={section === 'cancelled' ? XCircle : Factory}
                 title={
-                  active.section === 'in_production'
+                  section === 'in_production'
                     ? 'Nothing building here'
-                    : active.section === 'closed'
+                    : section === 'closed'
                       ? 'Nothing closed here yet'
                       : 'No cancelled kits with output'
                 }
                 hint={
-                  active.section === 'in_production'
+                  section === 'in_production'
                     ? 'Material appears here when a kit is issued to this floor.'
-                    : active.section === 'closed'
+                    : section === 'closed'
                       ? 'Closed kits that built on this floor will be listed here.'
                       : 'Kits cancelled after producing units on this floor appear here. Cancelling without producing leaves nothing to account for.'
                 }
               />
-            ) : active.section === 'in_production' ? (
+            ) : section === 'in_production' ? (
               (rows as ApiFloorKit[]).map((kit) => <ActiveKitCard key={kit.id} kit={kit} />)
-            ) : active.section === 'closed' ? (
+            ) : section === 'closed' ? (
               (rows as ApiFloorKitConsumed[]).map((kit) => (
                 <ConsumedKitCard key={kit.id} kit={kit} />
               ))
@@ -198,7 +219,7 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
             )}
           </div>
 
-          {!loadError && total > 0 && (
+          {section !== null && !loadError && total > 0 && (
             <div className="border-t border-border px-4 py-3">
               <NumberedPagination
                 page={page}

@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Building2,
   Contact,
   Factory,
@@ -38,7 +39,15 @@ export interface NavItem {
   disabled?: boolean;
   /** Short hover-text shown when ``disabled`` is true. */
   disabledReason?: string;
+  /** Key of a live count to show as a pill on the right of the row — the
+   *  number of things on that page needing attention. The sidebar owns the
+   *  fetching (see ``useNavCounts``); the config only says which badge a row
+   *  wants, so adding one elsewhere never means touching the renderer. */
+  badge?: NavBadgeKey;
 }
+
+/** Counts the sidebar knows how to fetch and render. */
+export type NavBadgeKey = 'expiringConsumables';
 
 export interface NavSection {
   title: string;
@@ -80,6 +89,21 @@ export const navSections: readonly NavSection[] = [
         href: '/customers',
         icon: Contact,
         resource: 'inventory',
+      },
+      // The cross-Kanban expiration feed (REQ-2026-07-01-LOC-008). Issuing
+      // happens on a consumable's drill-down and the per-room register lives on
+      // each production area's Kanban tab; this answers the one question that
+      // spans rooms — "what needs a physical check?".
+      {
+        id: 'consumables',
+        label: 'Expiring',
+        href: '/consumables',
+        icon: AlertTriangle,
+        resource: 'inventory',
+        // LOC-008 calls the alert a prompt for a physical check, and a prompt
+        // nobody sees isn't one — the count belongs where an operator already
+        // looks rather than only on the page itself.
+        badge: 'expiringConsumables',
       },
       {
         id: 'forecast',

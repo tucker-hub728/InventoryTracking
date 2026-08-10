@@ -58,10 +58,18 @@ const LN2_GROUP_ID = 'grp:ln2';
  * the floor groups kits into three sections, not five, and that split already
  * matches how the ledger phrases the same three states.
  */
+/** The floor tab that lists a room's Kanban stations. Derived, not hard-coded,
+ *  so renaming the segment in one place stays enough. */
+const KANBAN_TAB = FLOOR_TABS.find((t) => t.kind === 'kanban')?.seg ?? 'kanban';
+
 function floorTabFor(status: KitStatus): string {
   const section =
     status === 'closed' ? 'closed' : status === 'cancelled' ? 'cancelled' : 'in_production';
-  return FLOOR_TABS.find((t) => t.section === section)?.seg ?? DEFAULT_FLOOR_TAB;
+  // Only the kit-state tabs are addressable by section; the Kanban tab is a
+  // stock view and no kit ever links to it.
+  return (
+    FLOOR_TABS.find((t) => t.kind === 'kits' && t.section === section)?.seg ?? DEFAULT_FLOOR_TAB
+  );
 }
 
 /** Route for a node, or null when it has no page to open. */
@@ -76,6 +84,16 @@ export function locationHref(
   const root = chain[0];
   // A synthetic group is a heading, not a place — nothing to open.
   if (!node || !root || node.isGroup) return null;
+
+  // A Kanban has no page of its own — it is a station INSIDE a production
+  // area, listed on that area's Kanban tab (LOC-006 / consum01). Checked before
+  // the production branch below, which would otherwise build
+  // `/production/{kanbanId}` and open a floor page for an id that is not a
+  // floor.
+  if (node.nodeType === 'kanban') {
+    const area = chain.filter((n) => !n.isGroup).at(-2);
+    return area ? `/production/${area.id}/${KANBAN_TAB}` : null;
+  }
 
   // A production floor is its own page, whatever else is true of it — opened at
   // the tab that actually contains the kit, when the caller knows which.

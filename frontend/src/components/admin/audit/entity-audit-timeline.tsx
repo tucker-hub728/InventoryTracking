@@ -135,6 +135,12 @@ const MOVEMENT_ICON: Record<MovementType, IconStyle> = {
     tint: 'text-warning',
     pill: 'border-warning/30 bg-warning/5 text-warning',
   },
+  // Leaves the shelf for the floor — same "out" tint as a kit issue.
+  consumable_issue: {
+    Icon: ArrowUpFromLine,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
 };
 
 // Kit audit operations → icon + tint (per-item history for built AY/FG items).

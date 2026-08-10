@@ -99,6 +99,9 @@ export const NODE_ICON: Record<NodeType, LucideIcon> = {
   warehouse: Package,
   shelf: Box,
   flat: Package,
+  // A Kanban renders on the production floor's own tab, not in this LN2 panel,
+  // but the map must cover every NodeType.
+  kanban: Boxes,
   cassette_rack: Container,
   sub_slot: Box,
 };

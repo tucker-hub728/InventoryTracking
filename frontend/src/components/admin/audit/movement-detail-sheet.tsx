@@ -41,6 +41,7 @@ const TYPE_STYLE: Record<MovementType, string> = {
   kit_return: 'border-accent/40 bg-accent/10 text-accent',
   kit_cancel_return: 'border-warning/40 bg-warning/10 text-warning',
   customer_shipment: 'border-warning/40 bg-warning/10 text-warning',
+  consumable_issue: 'border-warning/40 bg-warning/10 text-warning',
 };
 
 /**
