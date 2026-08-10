@@ -35,6 +35,7 @@ import { LocationLink } from '@/components/locations/location-link';
 import type { ApiItemKitConsumption } from '@/lib/api/kits';
 import type { LedgerEntry } from '@/types/inventory';
 import type { BadgeTone } from '@/types/ui';
+import type { MovementType } from '@/lib/api/movements';
 import { expiryStatus } from '@/lib/inventory-helpers';
 import { cn, daysFromNow } from '@/lib/utils';
 
@@ -67,7 +68,13 @@ type SortDir = 'asc' | 'desc' | null;
  * raw material's ledger reads better with it too — and it replaces the
  * "Transfer" badge that used to be crammed into the Location column.
  */
-const TXN_LABEL: Record<string, { label: string; tone: BadgeTone }> = {
+/// Keyed by ``MovementType``, not ``string``. It was ``string`` until a
+/// ``consumable_issue`` row rendered a bare "—" in a real ledger: the three
+/// sibling maps in ``lib/api/movements.ts`` and the audit views are all keyed
+/// by the union and failed to compile when the type was added, while this one
+/// silently fell through to the no-label branch. Typing it makes the next
+/// omission a build error instead of a blank cell.
+const TXN_LABEL: Record<MovementType, { label: string; tone: BadgeTone }> = {
   production_output: { label: 'Made', tone: 'success' },
   kit_issue: { label: 'Kitted', tone: 'danger' },
   kit_additional_issue: { label: 'Kitted +', tone: 'danger' },
@@ -83,10 +90,15 @@ const TXN_LABEL: Record<string, { label: string; tone: BadgeTone }> = {
   transfer_out: { label: 'Transfer out', tone: 'neutral' },
   // Terminal customer shipment (CUST-001) — the finished good leaves inventory.
   customer_shipment: { label: 'Shipped', tone: 'danger' },
+  // Consumable issued to a Kanban (TRX-003). Terminal for quantity like a kit
+  // issue, so it carries the same "stock left" tone.
+  consumable_issue: { label: 'Issued', tone: 'danger' },
 };
 
 function TransactionCell({ entry }: { entry: LedgerEntry }) {
-  const meta = entry.movementType ? TXN_LABEL[entry.movementType] : undefined;
+  const meta = entry.movementType
+    ? TXN_LABEL[entry.movementType as MovementType]
+    : undefined;
   if (!meta) return <span className="text-xs text-text-3">—</span>;
   return (
     <span className="inline-flex items-center gap-1.5">
