@@ -195,9 +195,12 @@ function KanbanStation({
 }) {
   return (
     <div className="overflow-hidden rounded-lg border border-border">
-      <div className="flex items-center justify-between border-b border-border bg-surface-2 px-3 py-2">
+      {/* Name only. The generated code ("KAN-KANBAN-2") is an internal
+          uniqueness key derived from the name, so on screen it just repeated
+          the heading in shoutier form. It still exists on the record and is
+          still searchable in the issue picker. */}
+      <div className="border-b border-border bg-surface-2 px-3 py-2">
         <span className="text-sm font-medium text-text">{station.name}</span>
-        <span className="font-mono text-[11px] text-text-3">{station.code}</span>
       </div>
       {rows.length === 0 ? (
         <p className="px-3 py-4 text-center text-xs text-text-3">{emptyText}</p>
