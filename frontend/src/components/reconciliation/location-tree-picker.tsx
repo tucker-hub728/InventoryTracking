@@ -100,17 +100,28 @@ function convertTree(
  * reads the way the structure diagram does.
  */
 async function buildForest(): Promise<Forest> {
-  const [ln2, rooms, warehouses, production] = await Promise.all([
+  const [ln2, rooms, warehouses, production, kanbans] = await Promise.all([
     locationNodesApi.ln2Tree(),
     locationNodesApi.freezerTree(),
     locationNodesApi.warehouseTree(),
     // Production floors — a kit's production location must be one of these
-    // (Transaction_Spec §2). Root `flat` nodes, so they have no children.
+    // (Transaction_Spec §2). Root `flat` nodes, whose only children are Kanbans.
     locationNodesApi.flat({ category: 'production' }),
+    // Kanban stations hang under a production area (LOC-006, consum01). They
+    // are fetched separately because the flat endpoint returns roots only, and
+    // grafted on below so an area renders as an expandable parent.
+    locationNodesApi.allKanbans(),
   ]);
   const byId = new Map<string, PNode>();
   const parentOf = new Map<string, string | null>();
   const real: PNode[] = [];
+
+  const kanbansByArea = new Map<string, NodeTree[]>();
+  for (const k of kanbans) {
+    if (!k.parent_id) continue;
+    const asTree: NodeTree = { ...k, children: [] };
+    kanbansByArea.set(k.parent_id, [...(kanbansByArea.get(k.parent_id) ?? []), asTree]);
+  }
 
   const warehousesByRoom = new Map<string, NodeTree[]>();
   for (const w of warehouses) {
@@ -178,7 +189,16 @@ async function buildForest(): Promise<Forest> {
       'Production',
       'production',
       production.map((n) =>
-        convertTree({ ...n, children: [] }, [], null, 'production', byId, parentOf, real),
+        convertTree(
+          { ...n, children: [] },
+          [],
+          null,
+          'production',
+          byId,
+          parentOf,
+          real,
+          kanbansByArea.get(n.id) ?? [],
+        ),
       ),
     ),
   ].filter((r) => r.isGroup ? r.children.length > 0 : true);

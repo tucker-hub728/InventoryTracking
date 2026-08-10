@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from app.core.bounds import MAX_QTY
+from app.inventory.schemas import MovementType as InventoryMovementType
 
 # All node types accepted on read (includes retired ``cassette`` /
 # ``cryo_box_rack`` / ``cassette_rack`` / ``sub_slot`` / ``flat`` so any legacy
@@ -27,6 +28,8 @@ NodeType = Literal[
     "flat",
     "cassette_rack",
     "sub_slot",
+    # LOC-006 — a named Kanban station inside a production area (consum01).
+    "kanban",
 ]
 # Only these are creatable via the API (§4.1 — legacy types are retired).
 # ``flat`` is retired. Rooms and the warehouse (with its A–Z shelves) stay
@@ -45,13 +48,15 @@ CreatableNodeType = Literal[
     "sub_location",
 ]
 # Legacy — kept so pre-existing flat rows still read; not creatable.
-FlatCategory = Literal[
-    "kanban", "lab", "qc", "engineering", "materials", "production"
-]
+FlatCategory = Literal["kanban", "lab", "qc", "engineering", "materials", "production"]
 # Ledger movement kinds surfaced for a node's click-through history.
-MovementType = Literal[
-    "receipt", "dispense", "discard", "adjustment", "transfer_out", "transfer_in"
-]
+#
+# Reuses the canonical list rather than keeping a third hand-maintained copy.
+# This used to name only the six original types, but ``list_node_movements``
+# does not filter by type, so a node that had seen a kit issue or a production
+# output already failed to serialise — and a Kanban would have hit the same wall
+# with ``consumable_issue``. Any type the ledger can hold, this can render.
+MovementType = InventoryMovementType
 
 
 def _trim_nonblank(field: str):
@@ -131,6 +136,20 @@ class ProductionAreaCreate(BaseModel):
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
 
 
+class KanbanCreate(BaseModel):
+    """Create one Kanban station inside a production area (LOC-006).
+
+    Free-text name (client 2026-08-10) — "Kanban 1", "Kanban 2", or "Glove
+    station" if that is what the floor calls it. The ``code`` is generated from
+    it, and the parent comes from the path. Super-admin only, for the same
+    reason shelves are (LOC-003): two spellings of one physical bin split the
+    register in half. Rename afterwards uses ``NodeUpdateRequest``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+
+
 class GridUpdateRequest(BaseModel):
     """Resize a Box's grid. Rejected if it would orphan a placed cell."""
 
@@ -152,9 +171,7 @@ class DedicationUpdateRequest(BaseModel):
     @model_validator(mode="after")
     def _exclusive(self) -> DedicationUpdateRequest:
         if self.dedicated_customer_id and self.dedicated_product_id:
-            raise ValueError(
-                "A quadrant may be dedicated to a customer OR a product, not both"
-            )
+            raise ValueError("A quadrant may be dedicated to a customer OR a product, not both")
         return self
 
 

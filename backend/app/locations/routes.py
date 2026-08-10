@@ -39,6 +39,7 @@ from app.locations.schemas import (
     ConsumeRequest,
     DedicationUpdateRequest,
     GridUpdateRequest,
+    KanbanCreate,
     LotAvailabilityRead,
     NodeCreate,
     NodeMovementRead,
@@ -72,9 +73,7 @@ def _parse_uuid(value: str, *, field: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except ValueError as exc:
-        raise ValidationError(
-            f"{field} is not a valid UUID", code=f"invalid_{field}"
-        ) from exc
+        raise ValidationError(f"{field} is not a valid UUID", code=f"invalid_{field}") from exc
 
 
 # ── Serialisers ─────────────────────────────────────────────────────────
@@ -106,12 +105,8 @@ def _node_to_read(
         dedicated_product_id=(
             str(node.dedicated_product_id) if node.dedicated_product_id else None
         ),
-        inherited_customer_id=(
-            str(inherited_customer_id) if inherited_customer_id else None
-        ),
-        inherited_product_id=(
-            str(inherited_product_id) if inherited_product_id else None
-        ),
+        inherited_customer_id=(str(inherited_customer_id) if inherited_customer_id else None),
+        inherited_product_id=(str(inherited_product_id) if inherited_product_id else None),
         can_store=can_store(node.node_type),
         child_count=child_count,
         active_allocation_count=alloc_count,
@@ -147,12 +142,8 @@ def _ledger_to_read(m: StockMovement) -> NodeMovementRead:
         item_id=str(m.item.id) if m.item else None,
         item_number=m.item.item_number if m.item else None,
         movement_type=m.movement_type,  # type: ignore[arg-type]
-        from_location_node_id=(
-            str(m.from_location_node_id) if m.from_location_node_id else None
-        ),
-        to_location_node_id=(
-            str(m.to_location_node_id) if m.to_location_node_id else None
-        ),
+        from_location_node_id=(str(m.from_location_node_id) if m.from_location_node_id else None),
+        to_location_node_id=(str(m.to_location_node_id) if m.to_location_node_id else None),
         qty_delta=m.qty_delta,
         notes=m.notes,
         performed_by_user_id=str(m.performed_by_user_id),
@@ -263,9 +254,7 @@ async def get_warehouse_tree(
 ) -> list[NodeTreeRead]:
     from app.models.locations import WAREHOUSE_LEVELS
 
-    nodes = await loc_repo.list_nodes_by_types(
-        db, WAREHOUSE_LEVELS, active_only=active_only
-    )
+    nodes = await loc_repo.list_nodes_by_types(db, WAREHOUSE_LEVELS, active_only=active_only)
     units = await loc_repo.active_allocation_units_by_node(db)
     return _build_tree(nodes, units)
 
@@ -281,9 +270,7 @@ async def list_flat_locations(
     flat_category: Annotated[str | None, Query()] = None,
     active_only: Annotated[bool, Query()] = True,
 ) -> list[NodeRead]:
-    rows = await loc_repo.list_flat(
-        db, flat_category=flat_category, active_only=active_only
-    )
+    rows = await loc_repo.list_flat(db, flat_category=flat_category, active_only=active_only)
     # Flat occupancy = units held (SUM qty), since one allocation may carry many.
     units = await loc_repo.active_allocation_units_by_node(db)
     return [_node_to_read(n, alloc_count=units.get(n.id, 0)) for n in rows]
@@ -304,9 +291,26 @@ async def list_storage_targets(db: DBSession) -> list[NodeRead]:
     )
     # Attach the full breadcrumb so the UI can disambiguate same-named boxes.
     labels = await loc_repo.node_label_map(db)
-    return [
-        _node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows
-    ]
+    return [_node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows]
+
+
+@nodes_router.get(
+    "/kanbans",
+    response_model=list[NodeRead],
+    summary="Every Kanban station, with its production area in the path",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_all_kanbans(db: DBSession) -> list[NodeRead]:
+    """Every Kanban across every production area (LOC-006).
+
+    Feeds the issue dialog's destination picker as ONE breadcrumbed list
+    ("Clean Room Four › Kanban 1") rather than an area select chained to a
+    Kanban select — the tree is two levels deep and the second box was always
+    a formality. Declared above ``/{node_id}`` or that route swallows it.
+    """
+    rows = await loc_repo.list_nodes_by_types(db, ("kanban",), active_only=True)
+    labels = await loc_repo.node_label_map(db)
+    return [_node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows]
 
 
 @nodes_router.get(
@@ -409,14 +413,11 @@ async def create_node(
         if parent is None:
             raise NotFoundError(f"Parent node {payload.parent_id} not found")
         if not parent.is_active:
-            raise ValidationError(
-                "Parent node is inactive", code="parent_inactive"
-            )
+            raise ValidationError("Parent node is inactive", code="parent_inactive")
         if parent.node_type not in required_parents:
             allowed = " or ".join(f"'{p}'" for p in required_parents)
             raise ValidationError(
-                f"A '{node_type}' must hang under {allowed}, "
-                f"not a '{parent.node_type}'",
+                f"A '{node_type}' must hang under {allowed}, " f"not a '{parent.node_type}'",
                 code="invalid_parent_type",
             )
 
@@ -440,9 +441,7 @@ async def create_node(
     grid_cols: int | None = None
     if is_grid_node(node_type):
         if payload.grid_rows is None or payload.grid_cols is None:
-            raise ValidationError(
-                "A box requires grid_rows and grid_cols", code="grid_required"
-            )
+            raise ValidationError("A box requires grid_rows and grid_cols", code="grid_required")
         grid_rows, grid_cols = payload.grid_rows, payload.grid_cols
     elif payload.grid_rows is not None or payload.grid_cols is not None:
         raise ValidationError(
@@ -459,9 +458,7 @@ async def create_node(
 
     # Sibling code uniqueness (covers the root case the unique index can't).
     if (
-        await loc_repo.get_sibling_by_code(
-            db, parent_id=parent_uuid, code=payload.code
-        )
+        await loc_repo.get_sibling_by_code(db, parent_id=parent_uuid, code=payload.code)
     ) is not None:
         raise ConflictError(
             f"A sibling with code '{payload.code}' already exists here",
@@ -471,9 +468,7 @@ async def create_node(
     # …and sibling NAME uniqueness. The code is generated and rarely seen; the
     # name is what is written on the door, so two siblings sharing one are
     # indistinguishable to the operator choosing between them.
-    await _require_unique_name(
-        db, node_type=node_type, parent_id=parent_uuid, name=payload.name
-    )
+    await _require_unique_name(db, node_type=node_type, parent_id=parent_uuid, name=payload.name)
 
     node = await loc_repo.create_node(
         db,
@@ -640,16 +635,13 @@ async def move_node(
     if new_parent.node_type not in required_parents:
         allowed = " or ".join(f"'{p}'" for p in required_parents)
         raise ValidationError(
-            f"A '{node.node_type}' must hang under {allowed}, "
-            f"not a '{new_parent.node_type}'",
+            f"A '{node.node_type}' must hang under {allowed}, " f"not a '{new_parent.node_type}'",
             code="invalid_parent_type",
         )
 
     # Dropping a node onto its own descendant would orphan the whole branch from
     # every root — it would still exist, but no tree walk could ever reach it.
-    if await loc_repo.is_descendant_of(
-        db, ancestor_id=node.id, candidate_id=new_parent_id
-    ):
+    if await loc_repo.is_descendant_of(db, ancestor_id=node.id, candidate_id=new_parent_id):
         raise ValidationError(
             f"'{new_parent.name}' sits inside '{node.name}' — "
             "a node cannot be moved into its own contents",
@@ -657,9 +649,7 @@ async def move_node(
         )
 
     # The destination's own rules apply exactly as they would on create.
-    clash = await loc_repo.get_sibling_by_code(
-        db, parent_id=new_parent_id, code=node.code
-    )
+    clash = await loc_repo.get_sibling_by_code(db, parent_id=new_parent_id, code=node.code)
     if clash is not None:
         raise ConflictError(
             f"'{new_parent.name}' already contains something coded '{node.code}'",
@@ -711,9 +701,7 @@ async def move_node(
 # This deliberately overrides LOC-003's older sentence that "adding freezers,
 # refrigerators, and LN2 tanks remains available to the appropriate admin role":
 # LOC-006 is the later requirement and was signed off on 2026-07-29.
-SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset(
-    {"shelf", "room_location", "sub_location"}
-)
+SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset({"shelf", "room_location", "sub_location"})
 
 # LN2 structure — the second, looser tier. LOC-003 draws an explicit contrast:
 # shelves are "restricted to the Super Admin role", while freezers, refrigerators
@@ -812,6 +800,75 @@ async def add_production_area(
     return response
 
 
+@nodes_router.get(
+    "/{node_id}/kanbans",
+    response_model=list[NodeRead],
+    summary="The Kanban stations inside a production area",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_kanbans(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> list[NodeRead]:
+    """Feeds the issue dialog's destination picker and the floor's Kanban tab.
+    Returns an empty list for an area with no Kanban yet — the UI turns that
+    into "ask a super admin to add one" rather than an error."""
+    return [_node_to_read(n) for n in await loc_repo.list_kanbans(db, node_id)]
+
+
+@nodes_router.post(
+    "/{node_id}/kanbans",
+    response_model=NodeRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a Kanban station inside a production area — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_kanban(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: KanbanCreate,
+) -> NodeRead:
+    """Add one Kanban to a production area (REQ-2026-07-01-LOC-006, "a Kanban
+    shall be representable as a named location"; client 2026-08-10).
+
+    A room may hold several — "Kanban 1", "Kanban 2" — and a consumable issue
+    always targets one of them rather than the room itself, so two stations in
+    one clean room stay separately countable.
+
+    Super-admin only, on the same rationale as LOC-003's shelf restriction: an
+    operator-created "Kanban1" alongside "Kanban 1" silently splits one physical
+    bin's register in two.
+    """
+    _require_super_admin(current, what="Kanban stations")
+    area = await loc_repo.get_node(db, node_id)
+    if area is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+    # ``flat`` alone would also match a legacy Lab / QC / Materials node, and a
+    # Kanban belongs to a production area specifically.
+    if area.node_type != "flat" or area.flat_category != "production":
+        raise ValidationError(
+            "A Kanban is added inside a production area.",
+            code="parent_not_production_area",
+        )
+    if not area.is_active:
+        raise ValidationError("That production area is inactive", code="node_inactive")
+    await _require_unique_name(db, node_type="kanban", parent_id=area.id, name=payload.name)
+    node = await loc_repo.create_kanban(
+        db, area_node_id=area.id, name=payload.name, created_by_user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="meta.location_nodes",
+        subject_id=node.id,
+        subject_label=f"{node.node_type}:{node.code}",
+        before=None,
+        after=loc_repo.node_to_audit_snapshot(node),
+    )
+    response = _node_to_read(node)
+    await db.commit()
+    return response
+
+
 @nodes_router.put(
     "/{node_id}/grid",
     response_model=NodeRead,
@@ -828,9 +885,7 @@ async def update_node_grid(
     if node is None:
         raise NotFoundError(f"Location node {node_id} not found")
     if not is_grid_node(node.node_type):
-        raise ValidationError(
-            "Only a box has a resizable grid", code="grid_not_allowed"
-        )
+        raise ValidationError("Only a box has a resizable grid", code="grid_not_allowed")
     # The single-column rule for a box under a cassette is gone with the
     # cassette level itself (client 2026-07-29) — a box now hangs off a rack and
     # carries whatever grid it is given.
@@ -924,17 +979,13 @@ async def delete_node(
 
     # Block rules (§4.1) — strict, no cascade.
     if await loc_repo.node_has_children(db, node_id):
-        raise ValidationError(
-            "Cannot delete a node that has child nodes", code="node_has_children"
-        )
+        raise ValidationError("Cannot delete a node that has child nodes", code="node_has_children")
     if await loc_repo.node_has_any_allocations(db, node_id):
         raise ValidationError(
             "Cannot delete a node that holds active lots", code="node_has_active_lots"
         )
     if await loc_repo.node_has_movement_history(db, node_id):
-        raise ValidationError(
-            "Cannot delete a node with ledger history", code="node_has_history"
-        )
+        raise ValidationError("Cannot delete a node with ledger history", code="node_has_history")
 
     before = loc_repo.node_to_audit_snapshot(node)
     updated = await loc_repo.soft_delete_node(db, node=node)
@@ -994,8 +1045,7 @@ async def _require_unique_name(
         if clash is not None:
             where = clash.parent.name if clash.parent is not None else None
             raise ConflictError(
-                f"'{clash.name}' already exists"
-                + (f" in {where}." if where else " elsewhere."),
+                f"'{clash.name}' already exists" + (f" in {where}." if where else " elsewhere."),
                 code="node_name_conflict",
                 details={"existing_id": str(clash.id), "name": clash.name},
             )
@@ -1021,8 +1071,7 @@ async def _resolve_storage_node(db: DBSession, node_id: str) -> LocationNode:
         raise ValidationError("Location node is inactive", code="node_inactive")
     if not can_store(node.node_type):
         raise ValidationError(
-            f"A '{node.node_type}' cannot store lots — only boxes and "
-            "flat locations can",
+            f"A '{node.node_type}' cannot store lots — only boxes and " "flat locations can",
             code="node_not_storable",
         )
     return node
@@ -1275,8 +1324,7 @@ async def transfer_allocation(
 
     to_node = await _resolve_storage_node(db, payload.to_node_id)
     if to_node.id == alloc.location_node_id and (
-        payload.to_grid_row == alloc.grid_row
-        and payload.to_grid_col == alloc.grid_col
+        payload.to_grid_row == alloc.grid_row and payload.to_grid_col == alloc.grid_col
     ):
         raise ValidationError(
             "Source and destination cell are the same",
@@ -1419,9 +1467,7 @@ async def _load_batch_sources(
     if len({a.lot_id for a in allocs}) != 1:
         raise ValidationError("A batch must be a single lot", code="batch_multi_lot")
     if len({a.location_node_id for a in allocs}) != 1:
-        raise ValidationError(
-            "A batch must come from a single location", code="batch_multi_node"
-        )
+        raise ValidationError("A batch must come from a single location", code="batch_multi_node")
     return allocs, allocs[0].lot_id, allocs[0].location_node_id
 
 
@@ -1531,13 +1577,9 @@ async def transfer_batch(
             )
     else:
         if payload.to_cells:
-            raise ValidationError(
-                "A flat destination takes no cells", code="cells_not_allowed"
-            )
+            raise ValidationError("A flat destination takes no cells", code="cells_not_allowed")
         if payload.qty is None:
-            raise ValidationError(
-                "A flat destination needs qty", code="qty_required"
-            )
+            raise ValidationError("A flat destination needs qty", code="qty_required")
         move_qty = Decimal(payload.qty)
 
     if move_qty > available:
@@ -1725,9 +1767,7 @@ async def transfer_multi(
         if item_id is None:
             item_id = lot.item_id
         elif lot.item_id != item_id:
-            raise ValidationError(
-                "All sources must be for the same item", code="mixed_items"
-            )
+            raise ValidationError("All sources must be for the same item", code="mixed_items")
 
         to_node = await _resolve_storage_node(db, src.to_node_id)
         # Moving inside one box / shelf is the single-allocation ``/transfer``

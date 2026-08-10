@@ -32,7 +32,10 @@ export type MovementType =
   | 'kit_cancel_return'
   // Terminal customer shipment (CUST-001 / TRX-005) — the finished good leaves
   // inventory to a customer. Unit-out.
-  | 'customer_shipment';
+  | 'customer_shipment'
+  // Consumable issued to a Kanban (TRX-003, consum01). Unit-out of the shelf,
+  // into the room; terminal for quantity and never back-flushed.
+  | 'consumable_issue';
 
 /** Display labels — keep aligned with the backend ``MovementType`` enum. */
 export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
@@ -50,6 +53,7 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   kit_return: 'Returned',
   kit_cancel_return: 'Cancel return',
   customer_shipment: 'Shipped to customer',
+  consumable_issue: 'Issued to Kanban',
 };
 
 /** Sign of the qty_delta enforced by each type — useful for colouring the row. */
@@ -69,6 +73,8 @@ export const MOVEMENT_TYPE_SIGN: Record<MovementType, 'in' | 'out' | 'signed'> =
   kit_return: 'in',
   kit_cancel_return: 'in',
   customer_shipment: 'out',
+  // Leaves the shelf for good — terminal for quantity (07-09 TRX-001).
+  consumable_issue: 'out',
 };
 
 export interface ApiMovement {

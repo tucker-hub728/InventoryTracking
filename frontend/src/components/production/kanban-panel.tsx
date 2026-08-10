@@ -1,0 +1,377 @@
+'use client';
+
+import * as React from 'react';
+import { AlertTriangle, Boxes, CheckCircle2, Clock, Plus } from 'lucide-react';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import { EmptyState } from '@/components/shared/empty-state';
+import { ItemLink } from '@/components/inventory/item-link';
+import { AcknowledgeDialog } from '@/components/consumables/acknowledge-dialog';
+import { ApiError } from '@/lib/api/client';
+import {
+  consumablesApi,
+  DISPOSITION_LABEL,
+  type IssuedConsumable,
+} from '@/lib/api/consumables';
+import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
+import { invalidateLocationForest } from '@/components/reconciliation/location-tree-picker';
+import { useAuthStore, selectIsSuperAdmin } from '@/stores/auth.store';
+
+/**
+ * The Kanban tab of a production floor (REQ-2026-07-01-LOC-006/008).
+ *
+ * Shows the consumables issued into this room, grouped by Kanban station, with
+ * their expiration flags. It is deliberately NOT a stock list: under the
+ * client's consume-at-issue model (2026-08-10, per 07-09 TRX-001) the quantity
+ * left inventory at issue, so what is tracked here is the EXPIRATION, not a
+ * balance — see docs/modules/consumables.md §5 for the LOC-006 conflict this
+ * resolves and how Option B would change it.
+ */
+export function KanbanPanel({ areaId }: { areaId: string }) {
+  const canManage = useAuthStore(selectIsSuperAdmin);
+
+  const [kanbans, setKanbans] = React.useState<LocationNode[] | null>(null);
+  const [rows, setRows] = React.useState<IssuedConsumable[] | null>(null);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  /** ``open`` = still to be checked; ``all`` also shows closed-out rows. */
+  const [view, setView] = React.useState<'open' | 'all'>('open');
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [ack, setAck] = React.useState<IssuedConsumable | null>(null);
+  const [reloadKey, setReloadKey] = React.useState(0);
+
+  const reload = React.useCallback(() => setReloadKey((k) => k + 1), []);
+
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    setLoadError(null);
+    Promise.all([
+      locationNodesApi.kanbans(areaId, { signal: ctrl.signal }),
+      // Always fetch the closed-out rows too, even when the Open view is
+      // showing: it is one room's worth of records, and having both in hand
+      // makes the filter instant and lets each segment carry its own count.
+      consumablesApi.issued(
+        { kanbanNodeId: undefined, includeCleared: true },
+        { signal: ctrl.signal },
+      ),
+    ])
+      .then(([ks, issued]) => {
+        setKanbans(ks);
+        // Filter client-side to this area's stations: one request serves every
+        // station in the room rather than one per station.
+        const ids = new Set(ks.map((k) => k.id));
+        setRows(issued.filter((r) => ids.has(r.kanban_node_id)));
+      })
+      .catch((err) => {
+        if (ctrl.signal.aborted) return;
+        setLoadError(err instanceof ApiError ? err.message : 'Failed to load this room.');
+      });
+    return () => ctrl.abort();
+  }, [areaId, reloadKey]);
+
+  if (loadError) {
+    return <EmptyState icon={Boxes} title="Couldn't load the Kanban" hint={loadError} />;
+  }
+  if (kanbans === null || rows === null) {
+    return <p className="p-6 text-center text-xs text-text-3">Loading…</p>;
+  }
+
+  const openRows = rows.filter((r) => r.cleared_at === null);
+  const checkedCount = rows.length - openRows.length;
+  const visible = view === 'open' ? openRows : rows;
+  const flagged = openRows.filter((r) => r.flag !== null).length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs text-text-3">
+          <Boxes size={13} className="text-accent" />
+          {kanbans.length} station{kanbans.length === 1 ? '' : 's'}
+          {flagged > 0 && (
+            <>
+              {' · '}
+              <span className="text-warning">
+                {flagged} need{flagged === 1 ? 's' : ''} a check
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {/* A filter that states the VIEW rather than the action. "Hide
+              checked" made you read the label, work out the current state from
+              it, and invert — and it was a bare text link next to a primary
+              button, so it read as fine print. Each segment carries its own
+              count, which is the thing an operator actually wants to know. */}
+          {checkedCount > 0 && (
+            <SegmentedControl
+              aria-label="Filter issued consumables"
+              value={view}
+              onChange={(v) => setView(v as 'open' | 'all')}
+              options={[
+                { value: 'open', label: <SegmentLabel text="Open" count={openRows.length} /> },
+                { value: 'all', label: <SegmentLabel text="All" count={rows.length} /> },
+              ]}
+            />
+          )}
+          {canManage && (
+            <Button variant="primary" onClick={() => setAddOpen(true)}>
+              <Plus size={15} /> Add kanban
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {kanbans.length === 0 ? (
+        <EmptyState
+          icon={Boxes}
+          title="No Kanban in this area yet"
+          hint={
+            canManage
+              ? 'Add one to start issuing consumables here — a consumable is always issued to a Kanban, never to the room itself.'
+              : 'A super admin needs to add a Kanban station before consumables can be issued to this area.'
+          }
+        />
+      ) : (
+        kanbans.map((k) => (
+          <KanbanStation
+            key={k.id}
+            station={k}
+            rows={visible.filter((r) => r.kanban_node_id === k.id)}
+            emptyText={
+              view === 'open' && rows.some((r) => r.kanban_node_id === k.id)
+                ? 'Everything here has been checked.'
+                : 'Nothing issued here yet.'
+            }
+            onAcknowledge={setAck}
+          />
+        ))
+      )}
+
+      <AddKanbanDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        areaId={areaId}
+        existingNames={kanbans.map((k) => k.name)}
+        onCreated={reload}
+      />
+      <AcknowledgeDialog row={ack} onOpenChange={(o) => !o && setAck(null)} onDone={reload} />
+    </div>
+  );
+}
+
+/** Segment caption — label plus its count, the count muted so the word stays
+ *  the thing you read first. */
+function SegmentLabel({ text, count }: { text: string; count: number }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {text}
+      <span className="tabular-nums opacity-60">{count}</span>
+    </span>
+  );
+}
+
+function KanbanStation({
+  station,
+  rows,
+  emptyText,
+  onAcknowledge,
+}: {
+  station: LocationNode;
+  rows: IssuedConsumable[];
+  /** Why this station is empty — "nothing issued" and "all checked" are
+   *  different facts, and the Open filter makes the second one common. */
+  emptyText: string;
+  onAcknowledge: (row: IssuedConsumable) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="flex items-center justify-between border-b border-border bg-surface-2 px-3 py-2">
+        <span className="text-sm font-medium text-text">{station.name}</span>
+        <span className="font-mono text-[11px] text-text-3">{station.code}</span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-3 py-4 text-center text-xs text-text-3">{emptyText}</p>
+      ) : (
+        <ul className="divide-y divide-border">
+          {rows.map((r) => (
+            <RegisterRow key={r.id} row={r} onAcknowledge={onAcknowledge} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** One issued quantity and the state of its expiration check. */
+function RegisterRow({
+  row,
+  onAcknowledge,
+}: {
+  row: IssuedConsumable;
+  onAcknowledge: (row: IssuedConsumable) => void;
+}) {
+  const cleared = row.cleared_at !== null;
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-sm">
+      <ItemLink itemId={row.item_id} itemNumber={row.item_number} />
+      <span className="text-text-3">×{row.qty}</span>
+      {row.lot_number && (
+        <span className="font-mono text-[11px] text-text-3">Lot {row.lot_number}</span>
+      )}
+      <ExpiryBadge row={row} />
+      <span className="ml-auto flex items-center gap-2 text-[11px] text-text-3">
+        <Clock size={12} />
+        {new Date(row.issued_at).toLocaleDateString()}
+        {row.issued_by && <> · {row.issued_by}</>}
+      </span>
+      {cleared ? (
+        <span className="flex items-center gap-1 text-[11px] text-success">
+          <CheckCircle2 size={12} />
+          {row.disposition ? DISPOSITION_LABEL[row.disposition] : 'Checked'}
+          {row.cleared_by && <> · {row.cleared_by}</>}
+        </span>
+      ) : (
+        // Offered on EVERY open row, not only flagged ones (client
+        // 2026-08-10). Nothing in LOC-008 / §4.2 / TRX-006 restricts it to a
+        // raised flag — and §4.2's first clearing condition is "the product was
+        // consumed before its expiration date", which by definition happens
+        // before anything warns. A box used up early otherwise has nowhere to
+        // be recorded and sits in the register looking like it is still there.
+        <button
+          type="button"
+          className="text-[11px] text-accent hover:underline"
+          onClick={() => onAcknowledge(row)}
+        >
+          Acknowledge
+        </button>
+      )}
+    </li>
+  );
+}
+
+function ExpiryBadge({ row }: { row: IssuedConsumable }) {
+  // No date, no flag — REQ-2026-07-08-INV-004 as amended 07-09 makes expiration
+  // optional at receiving, and "expiration flags apply only where a date exists".
+  if (row.expiration_date === null) {
+    return <span className="text-[11px] text-text-3">No expiry</span>;
+  }
+  const d = new Date(row.expiration_date).toLocaleDateString();
+  if (row.flag === 'expired') {
+    return (
+      <Badge tone="danger" className="gap-1">
+        <AlertTriangle size={11} /> Expired {d}
+      </Badge>
+    );
+  }
+  if (row.flag === 'warn') {
+    return (
+      <Badge tone="warning" className="gap-1">
+        <AlertTriangle size={11} /> Expires {d}
+      </Badge>
+    );
+  }
+  return <span className="text-[11px] text-text-3">Expires {d}</span>;
+}
+
+function AddKanbanDialog({
+  open,
+  onOpenChange,
+  areaId,
+  existingNames,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  areaId: string;
+  existingNames: string[];
+  onCreated: () => void;
+}) {
+  const [name, setName] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (open) {
+      setName('');
+      setError(null);
+      setBusy(false);
+    }
+  }, [open]);
+
+  const trimmed = name.trim();
+  const dupe = existingNames.some((n) => n.toLowerCase() === trimmed.toLowerCase());
+  const canSubmit = trimmed.length > 0 && !dupe && !busy;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await locationNodesApi.createKanban(areaId, trimmed);
+      // The issue dialog's destination picker reads the cached location tree.
+      invalidateLocationForest();
+      onCreated();
+      onOpenChange(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to add the Kanban.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add Kanban</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-3">
+          <p className="text-xs text-text-3">
+            A named consumable station inside this area. Consumables are always issued to a
+            Kanban, never to the room itself, so a room with two stations keeps them
+            separately countable.
+          </p>
+          <div className="space-y-1.5">
+            <label htmlFor="new-kanban-name" className="text-xs font-medium text-text-2">
+              Kanban name
+            </label>
+            <Input
+              id="new-kanban-name"
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void submit()}
+              placeholder="e.g. Kanban 2"
+              maxLength={128}
+              aria-label="Kanban name"
+            />
+            {dupe && (
+              <p className="text-xs text-danger">
+                A Kanban with that name already exists in this area.
+              </p>
+            )}
+          </div>
+          {error && <p className="text-xs text-danger">{error}</p>}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit}>
+            {busy ? 'Adding…' : 'Add kanban'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+

@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeft, ArrowLeftRight, Loader2, Pencil, Truck } from 'lucide-react';
+import { ArrowLeft, ArrowLeftRight, Loader2, PackageOpen, Pencil, Truck } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,6 +13,7 @@ import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
+import { IssueToKanbanDialog } from '@/components/inventory/issue-to-kanban-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
 import { ShipToCustomerDialog } from './ship-to-customer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
@@ -140,6 +141,7 @@ export function InventoryDetailShell({
   const [editing, setEditing] = React.useState(false);
   const [shipping, setShipping] = React.useState(false);
   const [transferring, setTransferring] = React.useState(false);
+  const [issuing, setIssuing] = React.useState(false);
 
   // Land on a tab that has scrolled out of the strip — say Audit History,
   // reached from a bookmark — and nothing on screen says which one you are on.
@@ -360,6 +362,16 @@ export function InventoryDetailShell({
                 <ArrowLeftRight size={14} /> Transfer
               </Button>
             )}
+            {/* Issue-to-Kanban is the consumable's terminal transaction
+                (TRX-003 / TX Spec §4): the units leave inventory for a
+                production area and are never back-flushed (07-09 TRX-004).
+                Only offered on a consumable — a non-consumable raw material
+                goes to production on a kit instead. E-signed. */}
+            {item.isConsumable && canSign && (
+              <Button variant="primary" onClick={() => setIssuing(true)}>
+                <PackageOpen size={14} /> Issue to Kanban
+              </Button>
+            )}
             {/* Ship-to-customer is the terminal transaction for a built item —
                 a finished good, or a sub-assembly sold directly (INV-004 /
                 CUST-001). E-signed, so gate on ``inventory:sign``. */}
@@ -508,6 +520,13 @@ export function InventoryDetailShell({
       <TransferDialog
         open={transferring}
         onOpenChange={setTransferring}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+        onDone={refresh}
+      />
+
+      <IssueToKanbanDialog
+        open={issuing}
+        onOpenChange={setIssuing}
         item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
         onDone={refresh}
       />

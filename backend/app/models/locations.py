@@ -89,6 +89,22 @@ FREEZER_LEVELS: tuple[str, ...] = ("room", "room_location", "sub_location")
 # as a peer of the Cold Storage locations.
 WAREHOUSE_LEVELS: tuple[str, ...] = ("warehouse", "shelf")
 
+# Kanban (REQ-2026-07-01-LOC-006, "a Kanban shall be representable as a named
+# location"; client 2026-08-10): a NAMED station inside a production area, so
+# one clean room can hold "Kanban 1" and "Kanban 2" as separate places. Its
+# parent is the ``flat``/``production`` area — see PARENT_OF below.
+#
+# Not a storage node: under the client's consume-at-issue model (Option A) a
+# Kanban holds no lot allocations. It is the ADDRESS a ``consumable_issue``
+# movement and its ``app.consumable_issues`` register row point at, not a
+# balance. Adding it to STORAGE_NODE_TYPES is the whole of the Option B switch
+# if the client ever wants live Kanban on-hand.
+#
+# NB the ``kanban`` entry in FLAT_CATEGORIES below is a DIFFERENT, legacy thing
+# and must stay unused — a ``flat`` node is forced to be a root by
+# ck_location_nodes_root_parentage, so it could never hang under a clean room.
+KANBAN_LEVELS: tuple[str, ...] = ("kanban",)
+
 # Retired but kept in the CHECK enum so any pre-existing rows still validate
 # (retire-not-drop). Not creatable: absent from ``PARENT_OF``.
 #
@@ -106,6 +122,7 @@ NODE_TYPES: tuple[str, ...] = (
     *LN2_LEVELS,
     *FREEZER_LEVELS,
     *WAREHOUSE_LEVELS,
+    *KANBAN_LEVELS,
     *LEGACY_NODE_TYPES,
 )
 
@@ -123,6 +140,12 @@ PARENT_OF: dict[str, tuple[str, ...] | None] = {
     # LOC-005: Warehouse One is a location INSIDE a room, not a root of its own.
     "warehouse": ("room",),
     "shelf": ("warehouse",),
+    # LOC-006: a Kanban hangs under a production area. ``flat`` is retired for
+    # general creation but is still the type a production area carries, and a
+    # Kanban is only ever created through the dedicated super-admin route
+    # (``POST /location-nodes/{id}/kanbans``), which checks the parent really is
+    # a production area — ``flat`` alone would also match a legacy Lab/QC node.
+    "kanban": ("flat",),
 }
 
 # Node types that are roots (parent_id must be NULL). ``flat`` kept for legacy
@@ -147,6 +170,12 @@ GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
 # kept for the DB CHECK + reading pre-existing flat rows. ``production`` was
 # added for kitting (docs/modules/kitting.md §4.1) — the advisory production
 # floors a kit is issued to (Clean Room 1/2, Manufacturing Floor, PD Lab One/Two).
+#
+# ``kanban`` here is DEAD and must stay that way (consum01). A real Kanban is the
+# ``kanban`` NODE TYPE, a child of a production area. Reviving this category
+# would make a Kanban a parent-less root — the root-parentage CHECK forces every
+# ``flat`` node to have no parent — which is exactly the model the client
+# rejected on 2026-08-10 ("always to the kanban", inside the room).
 FLAT_CATEGORIES: tuple[str, ...] = (
     "kanban",
     "lab",
@@ -165,6 +194,12 @@ def can_store(node_type: str) -> bool:
 def is_grid_node(node_type: str) -> bool:
     """True iff a node of this type carries a rows×cols grid (the Box)."""
     return node_type in GRID_NODE_TYPES
+
+
+def is_kanban_node(node_type: str) -> bool:
+    """True iff a node of this type is a Kanban station (LOC-006) — the only
+    legal destination for a consumable issue."""
+    return node_type in KANBAN_LEVELS
 
 
 class LocationNode(Base):
@@ -214,15 +249,13 @@ class LocationNode(Base):
             name="ck_location_nodes_grid_presence",
         ),
         CheckConstraint(
-            "(grid_rows IS NULL OR grid_rows >= 1) "
-            "AND (grid_cols IS NULL OR grid_cols >= 1)",
+            "(grid_rows IS NULL OR grid_rows >= 1) " "AND (grid_cols IS NULL OR grid_cols >= 1)",
             name="ck_location_nodes_grid_positive",
         ),
         # Quadrant dedication: at most one of customer / product, and only on a
         # tank_quadrant. Advisory — placement is never blocked by it.
         CheckConstraint(
-            "NOT (dedicated_customer_id IS NOT NULL "
-            "AND dedicated_product_id IS NOT NULL)",
+            "NOT (dedicated_customer_id IS NOT NULL " "AND dedicated_product_id IS NOT NULL)",
             name="ck_location_nodes_dedication_exclusive",
         ),
         CheckConstraint(
@@ -258,9 +291,7 @@ class LocationNode(Base):
     flat_category: Mapped[str | None] = mapped_column(Text, nullable=True)
     code: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("TRUE")
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Grid dimensions — only a Box carries them (CHECK above). A Box under a
     # Cassette is single-column (grid_cols = 1, enforced in the route).
@@ -301,9 +332,7 @@ class LocationNode(Base):
         onupdate=func.now(),
     )
 
-    parent: Mapped[LocationNode | None] = relationship(
-        remote_side="LocationNode.id", viewonly=True
-    )
+    parent: Mapped[LocationNode | None] = relationship(remote_side="LocationNode.id", viewonly=True)
 
 
 class LotAllocation(Base):
@@ -369,9 +398,7 @@ class LotAllocation(Base):
     # 1-based cell within the parent Box's grid. NULL for flat allocations.
     grid_row: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     grid_col: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("TRUE")
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

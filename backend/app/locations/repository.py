@@ -221,6 +221,57 @@ async def create_production_area(
     )
 
 
+def _slugify_kanban_code(name: str) -> str:
+    """A ``KAN-`` code derived from a Kanban name (e.g. "Kanban 1" →
+    ``KAN-KANBAN-1``). Same shape as :func:`_slugify_area_code`."""
+    slug = re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-") or "KANBAN"
+    return f"KAN-{slug}"[:64]
+
+
+async def create_kanban(
+    session: AsyncSession,
+    *,
+    area_node_id: uuid.UUID,
+    name: str,
+    created_by_user_id: uuid.UUID,
+) -> LocationNode:
+    """Create one Kanban station under a production area (LOC-006).
+
+    The ``code`` is derived from ``name`` and de-duplicated against the area's
+    other Kanbans, so two rooms may each hold a "Kanban 1" while one room may
+    not. Caller has already checked the parent is a production area, and that
+    the caller is a Super Admin. Caller commits."""
+    base = _slugify_kanban_code(name)
+    code = base
+    n = 2
+    while await get_sibling_by_code(session, parent_id=area_node_id, code=code) is not None:
+        suffix = f"-{n}"
+        code = f"{base[: 64 - len(suffix)]}{suffix}"
+        n += 1
+    return await create_node(
+        session,
+        node_type="kanban",
+        code=code,
+        name=name,
+        created_by_user_id=created_by_user_id,
+        parent_id=area_node_id,
+    )
+
+
+async def list_kanbans(session: AsyncSession, area_node_id: uuid.UUID) -> list[LocationNode]:
+    """The active Kanban stations inside one production area, in name order."""
+    stmt = (
+        select(LocationNode)
+        .where(
+            LocationNode.parent_id == area_node_id,
+            LocationNode.node_type == "kanban",
+            LocationNode.is_active.is_(True),
+        )
+        .order_by(LocationNode.name.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def list_roots(
     session: AsyncSession,
     *,
@@ -803,8 +854,7 @@ async def reduce_allocation(
         # between our availability check and here. Both are the same story to
         # the caller: re-read and try again.
         raise ConflictError(
-            "Stock at this location changed while you were working. "
-            "Refresh and try again.",
+            "Stock at this location changed while you were working. " "Refresh and try again.",
             code="stock_conflict",
             details={"allocation_id": str(allocation.id), "requested": str(qty)},
         )
@@ -866,9 +916,7 @@ async def move_node(
     return node
 
 
-async def node_path_text(
-    session: AsyncSession, node_id: uuid.UUID | None
-) -> str | None:
+async def node_path_text(session: AsyncSession, node_id: uuid.UUID | None) -> str | None:
     """Root-to-leaf display address, e.g. ``Tank 2 / Quadrant 1 / Rack 1 / Box 1``.
 
     Walks parents in one recursive query. Used to freeze the address onto a

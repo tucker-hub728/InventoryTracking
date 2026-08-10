@@ -31,6 +31,10 @@ export type NodeType =
   | 'warehouse'
   | 'shelf'
   | 'flat'
+  // A named Kanban station inside a production area (LOC-006, consum01).
+  // Created through its own super-admin route, never the generic create — so
+  // it is absent from `CreatableNodeType` below.
+  | 'kanban'
   // Retired (read-only — old rows only). Cassette / Cryo Box Rack sat between
   // Rack and Box until the client dropped them on 2026-07-29.
   | 'cassette'
@@ -90,6 +94,7 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   warehouse: 'Warehouse',
   shelf: 'Shelf',
   flat: 'Flat location',
+  kanban: 'Kanban',
   cassette_rack: 'Cassette Rack (legacy)',
   sub_slot: 'Sub-slot (legacy)',
 };
@@ -136,6 +141,10 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   warehouse: [],
   shelf: [],
   flat: [],
+  // A Kanban is a leaf: consumables are issued INTO it, nothing hangs below.
+  // It is also absent from CreatableNodeType — it has its own super-admin
+  // route (POST /location-nodes/{area}/kanbans), not the generic create.
+  kanban: [],
   cassette_rack: [],
   sub_slot: [],
 };
@@ -404,6 +413,23 @@ export const locationNodesApi = {
    *  generated server-side from the name; rename later via {@link rename}. */
   createProductionArea: (name: string) =>
     api.post<LocationNode>('/location-nodes/production-areas', { json: { name } }),
+
+  /** The Kanban stations inside a production area (LOC-006). Empty for an area
+   *  that has none — the UI reads that as "a super admin must add one" rather
+   *  than an error, since a consumable issue must target a Kanban. */
+  kanbans: (areaId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<LocationNode[]>(`/location-nodes/${areaId}/kanbans`, { signal: opts?.signal }),
+
+  /** Every Kanban, with `path` carrying its area ("Clean Room Four › Kanban 1").
+   *  One breadcrumbed list for the issue dialog's destination picker. */
+  allKanbans: (opts?: { signal?: AbortSignal }) =>
+    api.get<LocationNode[]>('/location-nodes/kanbans', { signal: opts?.signal }),
+
+  /** Add a Kanban to a production area — SUPER ADMIN only, same governance as
+   *  shelves (LOC-003): two spellings of one physical bin split its register.
+   *  Free-text name; the `KAN-` code is generated server-side. */
+  createKanban: (areaId: string, name: string) =>
+    api.post<LocationNode>(`/location-nodes/${areaId}/kanbans`, { json: { name } }),
 
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 

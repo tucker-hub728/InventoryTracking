@@ -744,6 +744,13 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     # from a storage node with NO destination — stock leaves inventory. Does not
     # cascade to component stock (TRX-006).
     "customer_shipment",
+    # Consumable issue to a Kanban (TRX-003, Transaction Spec §4, consum01).
+    # Unit-OUT from a storage node INTO a Kanban node, so the ledger says which
+    # room the gloves went to. Terminal for QUANTITY purposes — 07-09 TRX-001
+    # ("kitting is terminal only for consumables") — and never reversed by a
+    # back-flush, per 07-09 TRX-004. Expiration keeps being tracked afterwards
+    # through ``app.consumable_issues`` (Transaction Spec §4.3).
+    "consumable_issue",
 )
 
 

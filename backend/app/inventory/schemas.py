@@ -405,6 +405,8 @@ MovementType = Literal[
     "kit_cancel_return",
     # Terminal customer shipment (CUST-001 / TRX-005) — see MOVEMENT_TYPES (ship01).
     "customer_shipment",
+    # Consumable issued to a Kanban (TRX-003) — see MOVEMENT_TYPES (consum01).
+    "consumable_issue",
 ]
 
 
