@@ -374,6 +374,9 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100, kitA
         onOpenChange={(o) => {
           if (!o) setSelectedMovement(null);
         }}
+        // This timeline already fetched the full ledger row to render the
+        // list, so hand it over rather than making the sheet re-fetch it.
+        movementId={selectedMovement?.id ?? null}
         movement={selectedMovement}
       />
     </>

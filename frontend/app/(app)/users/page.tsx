@@ -1,11 +1,10 @@
-import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 
-import { UsersPageClient } from '@/components/admin/users-page-client';
-
-export const metadata: Metadata = {
-  title: 'Users',
-};
-
+/**
+ * ``/users`` has no list of its own any more — each tab is a route. Redirect to
+ * the first one so existing links, the sidebar entry and bookmarks all land
+ * somewhere real instead of on an empty shell.
+ */
 export default function UsersPage() {
-  return <UsersPageClient />;
+  redirect('/users/active');
 }

@@ -58,3 +58,12 @@ class InvitationRead(BaseModel):
     expires_at: datetime
     accepted_at: datetime | None = None
     created_at: datetime
+
+
+class InvitationListResponse(BaseModel):
+    """One page of the invitations tab. ``total`` is post-filter."""
+
+    items: list[InvitationRead]
+    total: int
+    limit: int
+    offset: int

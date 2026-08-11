@@ -54,6 +54,7 @@ from app.inventory.schemas import (
     ReceiveEventRequest,
     ReceivePlacement,
     SupplierCreate,
+    SupplierListResponse,
     SupplierRead,
     SupplierUpdate,
 )
@@ -283,16 +284,49 @@ async def _resolve_item_supplier_ids(
 
 @suppliers_router.get(
     "",
-    response_model=list[SupplierRead],
-    summary="List suppliers",
+    response_model=SupplierListResponse,
+    summary="List suppliers (by name, filtered + paginated)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
 async def list_suppliers(
     db: DBSession,
     active_only: bool = Query(default=True, description="Hide suppliers with is_active=false"),
-) -> list[SupplierRead]:
-    suppliers = await inv_repo.list_suppliers(db, active_only=active_only)
-    return [_supplier_to_read(v) for v in suppliers]
+    is_active: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Explicit active-flag filter — true = the Active tab, "
+                "false = the Deactivated tab. Overrides ``active_only``."
+            )
+        ),
+    ] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Search name + contact email", max_length=MAX_SEARCH_LENGTH),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> SupplierListResponse:
+    suppliers, total = await inv_repo.list_suppliers(
+        db,
+        active_only=active_only,
+        is_active=is_active,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
+    # Unfiltered per-tab counts, so the tab strip can label both tabs while the
+    # user is looking at one of them. Cheap: two COUNTs on a small table.
+    _, active_total = await inv_repo.list_suppliers(db, is_active=True, limit=1)
+    _, inactive_total = await inv_repo.list_suppliers(db, is_active=False, limit=1)
+    return SupplierListResponse(
+        items=[_supplier_to_read(v) for v in suppliers],
+        total=total,
+        limit=limit,
+        offset=offset,
+        active_total=active_total,
+        inactive_total=inactive_total,
+    )
 
 
 @suppliers_router.get(
@@ -1364,6 +1398,31 @@ async def list_movements(
         limit=limit,
         offset=offset,
     )
+
+
+@movements_router.get(
+    "/{movement_id}",
+    response_model=MovementRead,
+    summary="One stock movement by id",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def get_movement(
+    db: DBSession,
+    movement_id: Annotated[uuid.UUID, Path()],
+) -> MovementRead:
+    """Backs the audit viewer's movement detail sheet.
+
+    The timeline lists a movement as a summary row; opening it fetches the full
+    ledger entry here. Previously the viewer kept every fetched movement in a
+    client-side map to avoid this call — which only worked because it was
+    over-fetching the whole ledger, and that is exactly what server-side paging
+    removes.
+    """
+    movement = await inv_repo.get_movement(db, movement_id)
+    if movement is None:
+        raise NotFoundError(f"Movement {movement_id} not found")
+    labels = await loc_repo.node_label_map(db)
+    return _movement_to_read(movement, labels)
 
 
 @items_router.get(

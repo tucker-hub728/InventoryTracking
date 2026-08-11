@@ -60,3 +60,42 @@ class AuditEventListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# Which table a timeline row came from. The viewer opens a different detail
+# sheet for each, so it has to be told rather than inferring it from
+# ``subject_table`` (an audit event *about* a movement would look identical).
+TimelineSource = Literal["audit", "movement"]
+
+
+class TimelineEventRead(BaseModel):
+    """One row of the unified timeline (audit event OR stock movement).
+
+    Summary only — the columns the table actually renders. The field-level
+    diff, the signature details and the full ledger entry are fetched by id
+    when a row is opened, so paging a thousand rows doesn't drag a thousand
+    JSONB blobs across the wire.
+    """
+
+    id: str
+    source: TimelineSource
+    occurred_at: datetime
+    actor_user_id: str | None = None
+    actor_user_email: str | None = None
+    actor_user_name: str | None = None
+    actor_kind: AuditActorKind
+    event_type: str
+    severity: AuditSeverity
+    subject_table: str
+    subject_id: str | None = None
+    subject_label: str | None = None
+    action: str
+
+
+class TimelineListResponse(BaseModel):
+    """Paged merged timeline. ``total`` spans both sources post-filter."""
+
+    items: list[TimelineEventRead]
+    total: int
+    limit: int
+    offset: int

@@ -207,7 +207,9 @@ export function NewItemDialog({
     setSuppliersLoading(true);
     setSuppliersError(null);
     suppliersApi
-      .list({ activeOnly: true, signal: ctrl.signal })
+      // ``listAll``: this is a searchable picker over the whole active supplier
+      // master, so a paged response would hide everything past the first page.
+      .listAll({ activeOnly: true, signal: ctrl.signal })
       .then((rows) => setSuppliers(rows))
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;

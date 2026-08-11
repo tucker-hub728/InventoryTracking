@@ -164,6 +164,12 @@ export const movementsApi = {
       signal: opts?.signal,
     }),
 
+  /** One ledger entry by id — backs the audit viewer's movement detail sheet,
+   *  which now opens from a paged timeline row rather than from a cached copy
+   *  of the whole ledger. */
+  get: (movementId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiMovement>(`/movements/${movementId}`, { signal: opts?.signal }),
+
   /**
    * Per-item ledger. The backend 404s when the item doesn't exist
    * (instead of returning an empty list), so callers can distinguish

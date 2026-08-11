@@ -44,12 +44,32 @@ export interface Invitation {
   created_at: string;
 }
 
+export interface ListInvitationsParams {
+  status?: InviteStatus;
+  /** Free-text over email + first/last name. */
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface InvitationListResponse {
+  items: Invitation[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export const invitationsApi = {
   create: (input: InviteInput) => api.post<InviteResult>('/invitations', { json: input }),
 
-  list: (opts?: { status?: InviteStatus; signal?: AbortSignal }) =>
-    api.get<Invitation[]>('/invitations', {
-      query: opts?.status ? { status: opts.status } : undefined,
+  list: (params: ListInvitationsParams = {}, opts?: { signal?: AbortSignal }) =>
+    api.get<InvitationListResponse>('/invitations', {
+      query: {
+        status: params.status,
+        q: params.q,
+        limit: params.limit,
+        offset: params.offset,
+      },
       signal: opts?.signal,
     }),
 

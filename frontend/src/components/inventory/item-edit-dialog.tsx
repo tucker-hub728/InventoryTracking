@@ -144,7 +144,10 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     const ctrl = new AbortController();
     setSuppliersError(null);
     Promise.all([
-      suppliersApi.list({ activeOnly: false, signal: ctrl.signal }),
+      // ``listAll``, not ``list``: this is a searchable multi-select over the
+      // whole supplier master, and a paged response would quietly drop the
+      // suppliers an item is already assigned to off the end of page one.
+      suppliersApi.listAll({ activeOnly: false, signal: ctrl.signal }),
       itemsApi.get(itemId, { signal: ctrl.signal }),
     ])
       .then(([supplierList, freshItem]) => {

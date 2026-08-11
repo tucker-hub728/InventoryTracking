@@ -44,17 +44,34 @@ export const EMPTY_FILTERS: AuditFilters = {
 
 interface Props {
   value: AuditFilters;
-  onChange: (next: AuditFilters) => void;
+  /** Everything except the search box — those changes commit immediately. */
+  onChange: (patch: Partial<AuditFilters>) => void;
+  /** Search-box draft, kept local so typing doesn't wait on the router. */
+  queryDraft: string;
+  onQueryDraftChange: (next: string) => void;
+  onClear: () => void;
 }
 
 /**
- * Filter bar for the audit viewer. Owns its own search-box debounce
- * downstream (the page client wraps ``q`` via use-debounced-value);
- * everything else triggers an immediate fetch.
+ * Filter bar for the audit viewer. Every control is backed by the URL, so a
+ * filtered view survives a refresh and can be linked to — which is the point
+ * on a screen whose job is answering "what happened to this record".
+ *
+ * The search box is the one control that doesn't write the URL on every
+ * keystroke: it keeps a draft and commits on a debounce (see
+ * ``useUrlSearchBox``). Dropdowns and dates are discrete choices and commit
+ * straight away.
  */
-export function AuditFiltersBar({ value, onChange }: Props) {
+export function AuditFiltersBar({
+  value,
+  onChange,
+  queryDraft,
+  onQueryDraftChange,
+  onClear,
+}: Props) {
   const isDirty =
     value.q !== '' ||
+    queryDraft !== '' ||
     value.subjectTable !== 'all' ||
     value.severity !== 'all' ||
     value.action !== 'all' ||
@@ -73,9 +90,9 @@ export function AuditFiltersBar({ value, onChange }: Props) {
           />
           <Input
             id="audit-q"
-            value={value.q}
-            onChange={(e) => onChange({ ...value, q: e.target.value })}
-            placeholder="event type or subject label"
+            value={queryDraft}
+            onChange={(e) => onQueryDraftChange(e.target.value)}
+            placeholder="event, subject, item, lot…"
             className="pl-9"
           />
         </div>
@@ -86,7 +103,7 @@ export function AuditFiltersBar({ value, onChange }: Props) {
         <Select
           value={value.subjectTable}
           onValueChange={(v) =>
-            onChange({ ...value, subjectTable: v as AuditFilters['subjectTable'] })
+            onChange({ subjectTable: v as AuditFilters['subjectTable'] })
           }
         >
           <SelectTrigger id="audit-subject" className="[&>span]:min-w-0 [&>span]:truncate">
@@ -109,9 +126,7 @@ export function AuditFiltersBar({ value, onChange }: Props) {
         <Label htmlFor="audit-action">Action</Label>
         <Select
           value={value.action}
-          onValueChange={(v) =>
-            onChange({ ...value, action: v as AuditFilters['action'] })
-          }
+          onValueChange={(v) => onChange({ action: v as AuditFilters['action'] })}
         >
           <SelectTrigger id="audit-action" className="[&>span]:min-w-0 [&>span]:truncate">
             <SelectValue placeholder="All" />
@@ -131,9 +146,7 @@ export function AuditFiltersBar({ value, onChange }: Props) {
         <Label htmlFor="audit-severity">Severity</Label>
         <Select
           value={value.severity}
-          onValueChange={(v) =>
-            onChange({ ...value, severity: v as AuditFilters['severity'] })
-          }
+          onValueChange={(v) => onChange({ severity: v as AuditFilters['severity'] })}
         >
           <SelectTrigger
             id="audit-severity"
@@ -158,7 +171,7 @@ export function AuditFiltersBar({ value, onChange }: Props) {
           id="audit-from"
           type="date"
           value={value.from}
-          onChange={(e) => onChange({ ...value, from: e.target.value })}
+          onChange={(e) => onChange({ from: e.target.value })}
         />
       </div>
 
@@ -168,18 +181,13 @@ export function AuditFiltersBar({ value, onChange }: Props) {
           id="audit-to"
           type="date"
           value={value.to}
-          onChange={(e) => onChange({ ...value, to: e.target.value })}
+          onChange={(e) => onChange({ to: e.target.value })}
         />
       </div>
 
       {isDirty && (
         <div className="flex items-end lg:col-span-12">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => onChange(EMPTY_FILTERS)}
-          >
+          <Button type="button" variant="ghost" size="sm" onClick={onClear}>
             <X size={12} /> Clear filters
           </Button>
         </div>

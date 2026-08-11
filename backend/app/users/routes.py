@@ -30,7 +30,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit.recorder import record_entity_change
@@ -38,9 +38,16 @@ from app.auth import cognito_client
 from app.auth import repository as users_repo
 from app.auth.reauth import consume_reauth_evidence
 from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError, ValidationError
+from app.core.search import MAX_SEARCH_LENGTH
 from app.models.identity import User
 from app.security.permissions import RequirePermission
-from app.users.schemas import USER_UPDATE_ACTION, UserRead, UserUpdate
+from app.users.schemas import (
+    USER_UPDATE_ACTION,
+    RoleLiteral,
+    UserListResponse,
+    UserRead,
+    UserUpdate,
+)
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -138,12 +145,40 @@ def _to_read(user: User) -> UserRead:
 
 @router.get(
     "",
-    response_model=list[UserRead],
-    summary="List users",
+    response_model=UserListResponse,
+    summary="List users (newest first, filtered + paginated)",
     dependencies=[Depends(RequirePermission("users", "view"))],
 )
-async def list_users(db: DBSession) -> list[UserRead]:
-    return [_to_read(u) for u in await users_repo.list_users(db)]
+async def list_users(
+    db: DBSession,
+    is_active: Annotated[
+        bool | None,
+        Query(description="true = the Active Members tab, false = Inactive Members"),
+    ] = None,
+    role: Annotated[RoleLiteral | None, Query()] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Search email + full name", max_length=MAX_SEARCH_LENGTH),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> UserListResponse:
+    """One page of the directory.
+
+    Super admins are *not* filtered out: since REQ-2026-07-31-ROL-005 the role
+    is conferred by promotion, so a super admin has to be able to see who holds
+    it in order to demote one who shouldn't.
+    """
+    rows, total = await users_repo.list_users(
+        db, is_active=is_active, role=role, q=q, limit=limit, offset=offset
+    )
+    return UserListResponse(
+        items=[_to_read(u) for u in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+        active_super_admin_count=await users_repo.count_super_admins(db),
+    )
 
 
 @router.patch(

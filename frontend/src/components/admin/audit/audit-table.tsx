@@ -3,20 +3,24 @@
 import * as React from 'react';
 import { ChevronRight } from 'lucide-react';
 
+import {
+  TableRowsSkeleton,
+  type SkeletonColumn,
+} from '@/components/shared/table-rows-skeleton';
 import { cn } from '@/lib/utils';
 import {
   AUDIT_ACTION_LABEL,
   AUDIT_SUBJECT_TABLE_LABEL,
   type ApiAuditAction,
-  type ApiAuditEvent,
   type ApiAuditSeverity,
   type ApiAuditSubjectTable,
+  type ApiTimelineEvent,
 } from '@/lib/api/audit';
 
 interface Props {
-  events: ApiAuditEvent[];
+  events: ApiTimelineEvent[];
   loading: boolean;
-  onSelect: (event: ApiAuditEvent) => void;
+  onSelect: (event: ApiTimelineEvent) => void;
 }
 
 const SEVERITY_DOT: Record<ApiAuditSeverity, string> = {
@@ -45,15 +49,19 @@ function formatTime(iso: string): string {
   }
 }
 
+/** Matches the real cells: Actor and Event are two-line, Severity is a dot +
+ *  word, and the last column is just a chevron. */
+const SKELETON_COLUMNS: readonly SkeletonColumn[] = [
+  { width: 'w-32' },
+  { width: 'w-28', subWidth: 'w-36' },
+  { width: 'w-40', subWidth: 'w-16' },
+  { width: 'w-20', subWidth: 'w-48' },
+  { width: 'w-14' },
+  { width: 'w-4', align: 'right' },
+];
+
 export function AuditTable({ events, loading, onSelect }: Props) {
-  if (loading && events.length === 0) {
-    return (
-      <div className="py-10 text-center text-sm text-text-3" role="status">
-        Loading audit events…
-      </div>
-    );
-  }
-  if (events.length === 0) {
+  if (!loading && events.length === 0) {
     return (
       <div className="py-10 text-center text-sm text-text-3" role="status">
         No events match these filters.
@@ -75,7 +83,17 @@ export function AuditTable({ events, loading, onSelect }: Props) {
           </tr>
         </thead>
         <tbody>
-          {events.map((e) => (
+          {loading && (
+            // Inside the real table so the columns keep their final widths and
+            // the rows don't jump sideways when the page lands.
+            <TableRowsSkeleton
+              columns={SKELETON_COLUMNS}
+              rows={8}
+              cellClassName="border-b border-border/60 px-3 py-2.5 align-middle"
+              label="Loading audit events…"
+            />
+          )}
+          {!loading && events.map((e) => (
             <tr
               key={e.id}
               onClick={() => onSelect(e)}
