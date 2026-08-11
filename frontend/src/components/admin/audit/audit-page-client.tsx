@@ -19,11 +19,12 @@ import {
   type ApiAuditSeverity,
   type ApiAuditSubjectTable,
   type ApiTimelineEvent,
+  type ApiTimelineFacets,
   type ListAuditEventsParams,
 } from '@/lib/api/audit';
 import { ApiError } from '@/lib/api/client';
 
-import { AuditTable } from './audit-table';
+import { AuditTimeline } from './audit-timeline';
 import { AuditFiltersBar, type AuditFilters } from './audit-filters';
 import { AuditDetailSheet } from './audit-detail-sheet';
 import { MovementDetailSheet } from './movement-detail-sheet';
@@ -42,6 +43,7 @@ const DEFAULTS = {
   subject: 'all',
   action: 'all',
   severity: 'all',
+  signed: 'all',
   from: '',
   to: '',
 };
@@ -49,8 +51,7 @@ const DEFAULTS = {
 /** The endpoint's ``limit`` ceiling. Anything larger is a 422, so clamp here. */
 const MAX_PAGE_SIZE = 200;
 
-/** ``YYYY-MM-DD`` — what ``<input type="date">`` produces, and all the
- *  date filters accept. Anything else in the URL is dropped. */
+/** ``YYYY-MM-DD`` — what ``<input type="date">`` produces. */
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 const SUBJECT_VALUES = [
@@ -62,26 +63,21 @@ const SEVERITY_VALUES = [
   'all',
   ...(Object.keys(AUDIT_SEVERITY_LABEL) as ApiAuditSeverity[]),
 ] as const;
+const SIGNED_VALUES = ['all', 'signed', 'unsigned'] as const;
 
 /**
  * Audit viewer.
  *
- * Two things changed here together, because neither works without the other:
+ * Reads as a timeline of sentences rather than a grid of columns: each row
+ * says who did what to which record, with the changed fields and the signer's
+ * reason underneath. The machine-readable event type is still there, demoted
+ * to a caption.
  *
- *   * **The filters and the page live in the URL.** Refreshing, bookmarking or
- *     sending somebody the link reproduces the exact view. On an audit screen
- *     that is not a convenience — "the row I'm asking you about" has to be
- *     addressable.
- *   * **Paging is done by the database.** The page used to fetch 200 audit
- *     events and 200 movements, interleave them in the browser and slice. That
- *     can't answer "page 5 of everything matching this search", and its total
- *     was the sum of two truncated windows. ``GET /v1/audit/timeline`` merges
- *     the two tables server-side with the filters applied, so the count and
- *     every page are honest.
- *
- * Clicking a row opens the detail sheet for whichever table it came from —
- * ``source`` says which, sent by the server rather than guessed from
- * ``subject_table`` (an audit event *about* a movement looks the same).
+ * Filters and the page number live in the URL, so a view can be refreshed,
+ * bookmarked and sent to somebody — on an audit screen "the row I'm asking
+ * about" has to be addressable. Paging and the merge of the two audit-worthy
+ * tables happen in the database (``GET /v1/audit/timeline``), so the total and
+ * every page are honest rather than a slice of two over-fetched windows.
  */
 export function AuditPageClient() {
   const canView = usePermission('audit', 'view');
@@ -98,6 +94,7 @@ export function AuditPageClient() {
       subject: oneOf(raw.subject, SUBJECT_VALUES, 'all'),
       action: oneOf(raw.action, ACTION_VALUES, 'all'),
       severity: oneOf(raw.severity, SEVERITY_VALUES, 'all'),
+      signed: oneOf(raw.signed, SIGNED_VALUES, 'all'),
       page: clampInt(raw.page, 1, 100_000, DEFAULTS.page),
       size: clampInt(raw.size, 1, MAX_PAGE_SIZE, DEFAULTS.size),
     }),
@@ -107,11 +104,16 @@ export function AuditPageClient() {
 
   const [events, setEvents] = React.useState<ApiTimelineEvent[]>([]);
   const [total, setTotal] = React.useState(0);
+  const [facets, setFacets] = React.useState<ApiTimelineFacets | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [reload, setReload] = React.useState(0);
   const [selectedAuditId, setSelectedAuditId] = React.useState<string | null>(null);
   const [selectedMovementId, setSelectedMovementId] = React.useState<string | null>(null);
+  // Row the keyboard cursor is on. Also set on hover so the two never disagree.
+  const [activeId, setActiveId] = React.useState<string | null>(null);
+
+  const searchRef = React.useRef<HTMLInputElement>(null);
 
   const [queryDraft, setQueryDraft] = useUrlSearchBox(urlState.q, (next) =>
     set({ q: next, page: 1 }),
@@ -123,6 +125,7 @@ export function AuditPageClient() {
       subjectTable: urlState.subject as AuditFilters['subjectTable'],
       severity: urlState.severity as AuditFilters['severity'],
       action: urlState.action as AuditFilters['action'],
+      signed: urlState.signed as AuditFilters['signed'],
       from: urlState.from,
       to: urlState.to,
     }),
@@ -137,6 +140,7 @@ export function AuditPageClient() {
         ...(patch.subjectTable !== undefined && { subject: patch.subjectTable }),
         ...(patch.severity !== undefined && { severity: patch.severity }),
         ...(patch.action !== undefined && { action: patch.action }),
+        ...(patch.signed !== undefined && { signed: patch.signed }),
         ...(patch.from !== undefined && { from: patch.from }),
         ...(patch.to !== undefined && { to: patch.to }),
         page: 1,
@@ -172,6 +176,7 @@ export function AuditPageClient() {
     if (urlState.action !== 'all') {
       p.action = urlState.action as NonNullable<ListAuditEventsParams['action']>;
     }
+    if (urlState.signed !== 'all') p.signed = urlState.signed === 'signed';
     if (occurredFrom) p.occurredFrom = occurredFrom;
     if (occurredTo) p.occurredTo = occurredTo;
     return p;
@@ -182,6 +187,7 @@ export function AuditPageClient() {
     urlState.subject,
     urlState.severity,
     urlState.action,
+    urlState.signed,
     occurredFrom,
     occurredTo,
   ]);
@@ -196,6 +202,9 @@ export function AuditPageClient() {
       .then((resp) => {
         setEvents(resp.items);
         setTotal(resp.total);
+        setFacets(resp.facets);
+        // The cursor pointed at a row from the previous result set.
+        setActiveId(resp.items[0]?.id ?? null);
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
@@ -217,10 +226,58 @@ export function AuditPageClient() {
     if (!loading && page > pageCount) set({ page: pageCount });
   }, [loading, page, pageCount, set]);
 
-  const handleSelect = React.useCallback((e: ApiTimelineEvent) => {
+  const openRow = React.useCallback((e: ApiTimelineEvent) => {
     if (e.source === 'movement') setSelectedMovementId(e.id);
     else setSelectedAuditId(e.id);
   }, []);
+
+  const sheetOpen = selectedAuditId !== null || selectedMovementId !== null;
+
+  // ── Keyboard navigation ────────────────────────────────────────────
+  // Auditors scan hundreds of rows; a mouse round-trip per row is the real
+  // cost of this screen. ``/`` focuses search, j/k walk the list, Enter opens.
+  React.useEffect(() => {
+    if (!canView) return;
+    const onKey = (ev: KeyboardEvent) => {
+      const el = ev.target as HTMLElement | null;
+      const typing =
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el?.isContentEditable === true;
+
+      if (ev.key === '/' && !typing) {
+        ev.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+        return;
+      }
+      // Let the field's own Escape (and the sheet's) win before we do anything.
+      if (ev.key === 'Escape' && typing) {
+        searchRef.current?.blur();
+        return;
+      }
+      if (typing || sheetOpen || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+
+      if (ev.key === 'j' || ev.key === 'k' || ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        if (events.length === 0) return;
+        ev.preventDefault();
+        const forward = ev.key === 'j' || ev.key === 'ArrowDown';
+        const at = events.findIndex((e) => e.id === activeId);
+        const next = at === -1 ? 0 : Math.min(events.length - 1, Math.max(0, at + (forward ? 1 : -1)));
+        setActiveId(events[next]?.id ?? null);
+        return;
+      }
+      if (ev.key === 'Enter' && activeId) {
+        const row = events.find((e) => e.id === activeId);
+        if (row) {
+          ev.preventDefault();
+          openRow(row);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [canView, events, activeId, sheetOpen, openRow]);
 
   if (!canView) {
     return (
@@ -242,34 +299,39 @@ export function AuditPageClient() {
     <>
       <PageHeader
         title="Audit log"
-        subtitle={
-          loading && total === 0
-            ? 'Loading…'
-            : `${total.toLocaleString()} ${total === 1 ? 'event' : 'events'} match`
-        }
+        subtitle="Every change to a record and every movement of material, newest first."
       />
 
       <div className="px-6 py-5 sm:px-8">
         <Card className="p-4">
-          <div className="mb-4">
-            <AuditFiltersBar
-              value={filters}
-              onChange={applyFilters}
-              queryDraft={queryDraft}
-              onQueryDraftChange={setQueryDraft}
-              onClear={clearFilters}
-            />
-          </div>
+          <AuditFiltersBar
+            value={filters}
+            onChange={applyFilters}
+            queryDraft={queryDraft}
+            onQueryDraftChange={setQueryDraft}
+            onClear={clearFilters}
+            facets={showSkeleton ? null : facets}
+            total={total}
+            searchRef={searchRef}
+          />
 
-          {loadError ? (
-            <EmptyState
-              title="Couldn't load audit events"
-              hint={loadError}
-              action={<Button onClick={() => setReload((n) => n + 1)}>Retry</Button>}
-            />
-          ) : (
-            <AuditTable events={events} loading={showSkeleton} onSelect={handleSelect} />
-          )}
+          <div className="mt-2">
+            {loadError ? (
+              <EmptyState
+                title="Couldn't load audit events"
+                hint={loadError}
+                action={<Button onClick={() => setReload((n) => n + 1)}>Retry</Button>}
+              />
+            ) : (
+              <AuditTimeline
+                events={events}
+                loading={showSkeleton}
+                onSelect={openRow}
+                activeId={activeId}
+                onActiveChange={setActiveId}
+              />
+            )}
+          </div>
 
           {total > 0 && !loadError && (
             <NumberedPagination
@@ -285,6 +347,13 @@ export function AuditPageClient() {
               noun="event"
             />
           )}
+
+          <p className="mt-3 text-[11px] text-text-3">
+            <kbd className="rounded border border-border px-1">/</kbd> search ·{' '}
+            <kbd className="rounded border border-border px-1">j</kbd>
+            <kbd className="ml-0.5 rounded border border-border px-1">k</kbd> move ·{' '}
+            <kbd className="rounded border border-border px-1">↵</kbd> open
+          </p>
         </Card>
       </div>
 

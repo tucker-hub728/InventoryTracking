@@ -14,6 +14,7 @@
  * acknowledgment" per TRX-006 and moves no stock.
  */
 import { api } from './client';
+import type { CellOption } from './kits';
 
 /** How close to its expiry a row is. `null` = comfortably in date, or no date
  *  at all (07-09: "expiration flags apply only where a date exists"). */
@@ -45,6 +46,14 @@ export interface ConsumableSource {
   /** Human path, e.g. "Warehouse One › Shelf B". */
   location: string;
   qty: number;
+  /** An LN2 box source: the operator taps the exact vials and the quantity
+   *  follows, same as a kit issue. Consumables usually sit on a shelf, but not
+   *  always — CR-004 is stored in Tank 1 (client 2026-08-11). */
+  is_grid: boolean;
+  grid_rows: number | null;
+  grid_cols: number | null;
+  /** This lot's occupied positions in that box. Empty for a bulk source. */
+  cells: CellOption[];
 }
 
 /** One source pick on an issue. Several may be sent at once when the operator
@@ -54,6 +63,10 @@ export interface ConsumableSourceInput {
   node_id: string;
   lot_id: string;
   qty: number;
+  /** Box sources only, and required for them: the exact vials to empty. `qty`
+   *  must equal their count — the backend rejects a box source without them
+   *  rather than draining the lot FIFO. */
+  cell_allocation_ids?: string[];
 }
 
 export interface ConsumableIssueInput {

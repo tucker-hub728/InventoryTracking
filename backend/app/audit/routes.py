@@ -19,6 +19,7 @@ from app.audit.schemas import (
     AuditEventListResponse,
     AuditEventRead,
     TimelineEventRead,
+    TimelineFacets,
     TimelineListResponse,
 )
 from app.core.exceptions import NotFoundError
@@ -62,7 +63,10 @@ def _row_to_read(row: dict) -> AuditEventRead:
         severity=event.severity,  # type: ignore[arg-type]
         subject_table=event.subject_table,
         subject_id=str(event.subject_id) if event.subject_id else None,
-        subject_label=event.subject_label,
+        # Same healing as the list, so opening a row doesn't show it a
+        # different name than the row you clicked. The raw snapshots below it
+        # in the sheet still carry the stored code.
+        subject_label=_display_label(event),
         action=event.action,
         before_state=event.before_state,
         after_state=event.after_state,
@@ -172,7 +176,57 @@ def _movement_to_timeline(movement: StockMovement) -> TimelineEventRead:
         subject_label=_movement_subject_label(movement),
         # The ledger is append-only — a movement is only ever "created".
         action="created",
+        signed=movement.reauth_evidence_id is not None,
+        # A movement is an event, not an edit: there is no prior state of the
+        # row to diff against, so the sentence carries the quantities instead.
+        diff=None,
+        reason=movement.notes,
     )
+
+
+# Tables whose ``subject_label`` was historically stamped with a machine
+# handle rather than the human name. The recorder now writes the name, but
+# rows already in the table keep what they were given — the log is append-only,
+# so the fix has to be at read time for those.
+_LABEL_FROM_NAME_TABLES = frozenset({"meta.location_nodes"})
+
+
+def _display_label(event: AuditEvent) -> str | None:
+    """The subject label as a person would say it.
+
+    Location nodes were recorded as ``kanban:KAN-KANBAN-1`` — a type prefix and
+    an internal code, when the thing is called "Kanban 1". The name is already
+    in the row's own snapshot, so older rows can be shown correctly without
+    rewriting them, which an append-only audit table must never do.
+    """
+    if event.subject_table not in _LABEL_FROM_NAME_TABLES:
+        return event.subject_label
+    for snapshot in (event.after_state, event.before_state):
+        name = (snapshot or {}).get("name")
+        if isinstance(name, str) and name.strip():
+            return name
+    return event.subject_label
+
+
+def _previous_label(event: AuditEvent) -> str | None:
+    """What the subject was called before this event renamed it.
+
+    ``subject_label`` is stamped with the name as it is *after* the write, so a
+    rename shows only the new name and the old one survives nowhere on the row.
+    That makes "what happened to ATCC" unanswerable from the list, even though
+    the diff holds the answer. Pulled from the diff's before-value on whichever
+    field acts as the display name for that table.
+    """
+    diff = event.diff or {}
+    current = _display_label(event)
+    for field in ("name", "full_name", "email", "code", "lot_number", "description"):
+        change = diff.get(field)
+        if isinstance(change, dict) and change.get("before") not in (None, ""):
+            before = str(change["before"])
+            # Compared against the *displayed* label, not the stored one, or a
+            # healed location row would render "Clean Room 1 → Clean Room 1".
+            return before if before != current else None
+    return None
 
 
 def _audit_to_timeline(row: dict) -> TimelineEventRead:
@@ -189,8 +243,14 @@ def _audit_to_timeline(row: dict) -> TimelineEventRead:
         severity=event.severity,  # type: ignore[arg-type]
         subject_table=event.subject_table,
         subject_id=str(event.subject_id) if event.subject_id else None,
-        subject_label=event.subject_label,
+        subject_label=_display_label(event),
         action=event.action,
+        signed=event.signature_id is not None,
+        diff=event.diff,
+        # The signer's own words take precedence over the recorder's note:
+        # "why" is what an auditor reads, and only the signature has it.
+        reason=row.get("signature_comment") or (event.context or {}).get("reason"),
+        previous_label=_previous_label(event),
     )
 
 
@@ -207,6 +267,15 @@ async def list_timeline(
     actor_user_id: Annotated[uuid.UUID | None, Query()] = None,
     severity: Annotated[SeverityFilter | None, Query()] = None,
     action: Annotated[ActionFilter | None, Query()] = None,
+    signed: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "true = only electronically signed writes, false = only "
+                "unsigned ones. Backs the 'Unsigned' triage view."
+            )
+        ),
+    ] = None,
     occurred_from: Annotated[datetime | None, Query()] = None,
     occurred_to: Annotated[datetime | None, Query()] = None,
     q: Annotated[
@@ -235,13 +304,14 @@ async def list_timeline(
     ``GET /v1/audit/events`` remains the audit-events-only surface (per-entity
     history tabs use it); this endpoint is the whole-system view.
     """
-    keys, total = await audit_repo.list_timeline_keys(
+    keys, total, facets = await audit_repo.list_timeline_keys(
         db,
         subject_table=subject_table,
         subject_id=subject_id,
         actor_user_id=actor_user_id,
         severity=severity,
         action=action,
+        signed=signed,
         occurred_from=occurred_from,
         occurred_to=occurred_to,
         q=q,
@@ -268,7 +338,13 @@ async def list_timeline(
             if movement is not None:
                 items.append(_movement_to_timeline(movement))
 
-    return TimelineListResponse(items=items, total=total, limit=limit, offset=offset)
+    return TimelineListResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        facets=TimelineFacets(**facets),
+    )
 
 
 @audit_router.get(

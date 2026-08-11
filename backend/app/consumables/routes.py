@@ -34,6 +34,7 @@ from app.consumables import repository as cons_repo
 from app.core.exceptions import NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.kitting import repository as kit_repo
+from app.kitting.schemas import CellOption
 from app.locations import repository as loc_repo
 from app.models.consumables import ConsumableIssue
 from app.models.locations import is_kanban_node
@@ -124,14 +125,24 @@ async def issue_sources(
 
     Reuses the kitting stock query, which already excludes production floors —
     WIP on a floor is not issuable stock.
+
+    Grid-bearing (LN2 box) sources carry their dimensions and this lot's occupied
+    vials, exactly as the kitting Issue step does. The dialog used to flatten
+    every source to a plain quantity on the assumption that a consumable lives on
+    a shelf; CR-004 stored in Tank 1 (client 2026-08-11) is the counter-example,
+    and a box source has to be picked by position or the emptied cells won't be
+    the ones the operator physically pulled.
     """
     await _require_consumable_item(db, item_id)
     rows = (await kit_repo.item_stock_by_node_lot(db, {item_id})).get(item_id, [])
     node_labels = await loc_repo.node_label_map(db) if rows else {}
+    grids = await kit_repo.grid_nodes(db, {node_id for *_, node_id, _ in rows})
+    cells_by_node = (await kit_repo.item_cells_by_node(db, {item_id})).get(item_id, {})
 
     out: list[ConsumableSourceRead] = []
     for lot_id, lot_number, exp, node_id, qty in rows:
         name, path = node_labels.get(node_id, ("", ""))
+        grid = grids.get(node_id)
         out.append(
             ConsumableSourceRead(
                 lot_id=str(lot_id),
@@ -140,6 +151,25 @@ async def issue_sources(
                 node_id=str(node_id),
                 location=path or name,
                 qty=qty,
+                is_grid=grid is not None,
+                grid_rows=int(grid.grid_rows) if grid and grid.grid_rows else None,
+                grid_cols=int(grid.grid_cols) if grid and grid.grid_cols else None,
+                # This lot's vials only — a box holding two lots offers each row
+                # just its own positions.
+                cells=[
+                    CellOption(
+                        allocation_id=str(a.id),
+                        grid_row=int(a.grid_row),
+                        grid_col=int(a.grid_col),
+                        lot_id=str(a.lot_id),
+                        lot_number=lot_number,
+                        expiration_date=exp,  # type: ignore[arg-type]
+                    )
+                    for a in cells_by_node.get(node_id, [])
+                    if a.lot_id == lot_id
+                ]
+                if grid is not None
+                else [],
             )
         )
     return out
@@ -300,9 +330,39 @@ async def _draw_source(
     node_uuid: uuid.UUID,
     qty: int,
     line_no: int,
+    cell_allocation_ids: list[str],
 ) -> None:
     """Take ``qty`` of one lot at one storage node, FIFO across its allocations.
-    Reducing an allocation to zero deactivates it."""
+    Reducing an allocation to zero deactivates it.
+
+    An LN2 box source names its vials instead: ``cell_allocation_ids`` are
+    emptied exactly, and the quantity is a consequence of that selection. Same
+    rule (and the same failure modes) as a kit issue from a box — see
+    ``_move_component`` in :mod:`app.kitting.routes`.
+    """
+    if cell_allocation_ids:
+        if qty != len(cell_allocation_ids):
+            raise ValidationError(
+                f"Source {line_no}: {len(cell_allocation_ids)} vials selected but "
+                f"{qty} issued — for a box the quantity is the number of vials.",
+                code="cell_count_mismatch",
+            )
+        wanted = [_parse_uuid(c, field="cell_allocation_ids") for c in cell_allocation_ids]
+        picked = await kit_repo.allocations_by_ids(db, wanted)
+        if (
+            len(picked) != len(set(wanted))
+            or any(a.location_node_id != node_uuid for a in picked)
+            or any(a.lot_id != lot_uuid for a in picked)
+        ):
+            raise ValidationError(
+                f"Source {line_no}: one or more selected vials are no longer "
+                f"available at that location.",
+                code="invalid_cell",
+            )
+        for alloc in picked:
+            await loc_repo.reduce_allocation(db, allocation=alloc, qty=int(alloc.qty))
+        return
+
     allocs = [
         a
         for a in await kit_repo.allocations_for_item_at_node(
@@ -310,6 +370,14 @@ async def _draw_source(
         )
         if a.lot_id == lot_uuid
     ]
+    # A box source must name its vials — draining it FIFO would empty positions
+    # the operator never pulled, and the grid on screen would stop matching the
+    # physical tank.
+    if any(a.grid_row is not None for a in allocs):
+        raise ValidationError(
+            f"Source {line_no}: this lot is in a box — select the exact vials to issue.",
+            code="cells_required",
+        )
     available = sum(int(a.qty) for a in allocs)
     if available == 0:
         raise NotFoundError(
@@ -350,7 +418,7 @@ async def issue_to_kanban(
     # so one signature covers one item's issue.
     item_id: uuid.UUID | None = None
     item = None
-    plans: list[tuple[int, uuid.UUID, uuid.UUID, str | None, int, object]] = []
+    plans: list[tuple[int, uuid.UUID, uuid.UUID, str | None, int, object, list[str]]] = []
     for i, src in enumerate(payload.sources, start=1):
         lot_uuid = _parse_uuid(src.lot_id, field="lot_id")
         node_uuid = _parse_uuid(src.node_id, field="node_id")
@@ -362,13 +430,23 @@ async def issue_to_kanban(
             item = await _require_consumable_item(db, item_id)
         elif lot.item_id != item_id:
             raise ValidationError("All sources must be for the same consumable", code="mixed_items")
-        plans.append((i, lot_uuid, node_uuid, lot.lot_number, src.qty, lot.expiration_date))
+        plans.append(
+            (
+                i,
+                lot_uuid,
+                node_uuid,
+                lot.lot_number,
+                src.qty,
+                lot.expiration_date,
+                list(src.cell_allocation_ids),
+            )
+        )
 
     assert item_id is not None and item is not None  # sources has min_length 1
 
     lines: list[IssueResultLine] = []
     first_movement = None
-    for line_no, lot_uuid, node_uuid, lot_number, qty, expiration in plans:
+    for line_no, lot_uuid, node_uuid, lot_number, qty, expiration, cell_ids in plans:
         await _draw_source(
             db,
             item_id=item_id,
@@ -376,6 +454,7 @@ async def issue_to_kanban(
             node_uuid=node_uuid,
             qty=qty,
             line_no=line_no,
+            cell_allocation_ids=cell_ids,
         )
         movement = await cons_repo.create_issue_movement(
             db,

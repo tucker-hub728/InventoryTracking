@@ -86,6 +86,8 @@ export interface ListAuditEventsParams {
   eventType?: string;
   severity?: ApiAuditSeverity;
   action?: ApiAuditAction;
+  /** true = signed writes only, false = unsigned only. */
+  signed?: boolean;
   /** ISO timestamp — inclusive lower bound. */
   occurredFrom?: string;
   /** ISO timestamp — exclusive upper bound. */
@@ -119,6 +121,21 @@ export interface ApiTimelineEvent {
   subject_id: string | null;
   subject_label: string | null;
   action: string;
+  /** Whether the write carried an electronic signature. */
+  signed: boolean;
+  /** Per-field before/after for what changed. Null on a ledger row. */
+  diff: Record<string, { before: unknown; after: unknown }> | null;
+  /** The operator's own words — signature rationale, or a movement's note. */
+  reason: string | null;
+  /** What the subject was called before this event renamed it. */
+  previous_label: string | null;
+}
+
+/** Counts over the whole filtered set, for the triage strip. */
+export interface ApiTimelineFacets {
+  deletions: number;
+  role_changes: number;
+  unsigned: number;
 }
 
 export interface ApiTimelineListResponse {
@@ -126,6 +143,7 @@ export interface ApiTimelineListResponse {
   total: number;
   limit: number;
   offset: number;
+  facets: ApiTimelineFacets;
 }
 
 export const auditApi = {
@@ -143,6 +161,7 @@ export const auditApi = {
         actor_user_id: params.actorUserId,
         severity: params.severity,
         action: params.action,
+        signed: params.signed,
         occurred_from: params.occurredFrom,
         occurred_to: params.occurredTo,
         q: params.q,

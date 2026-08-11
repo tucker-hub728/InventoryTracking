@@ -18,6 +18,7 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import {
   LotSourcePicker,
+  picksToSources,
   picksTotal,
   picksValid,
   type LotPick,
@@ -46,8 +47,13 @@ interface Props {
 }
 
 /** Map an issuable source onto the shape the (reused) kitting lot picker wants.
- *  A consumable never sits in an LN2 box, so the grid fields are always empty —
- *  gloves live on a shelf, not in a cryo vial position. */
+ *
+ *  The grid fields are carried through rather than blanked. This used to assume
+ *  a consumable always sits on a shelf — gloves, not cryo vials — which flattened
+ *  a box source to a plain number box and hid the very grid kitting shows for the
+ *  same lot. CR-004 stored in Tank 1 (client 2026-08-11) is the case that
+ *  disproves it, so a box source now behaves here exactly as it does on a kit:
+ *  the operator taps the vials and the quantity follows. */
 function toSourceLot(s: ConsumableSource): KitLineSourceLot {
   return {
     lot_id: s.lot_id,
@@ -57,10 +63,10 @@ function toSourceLot(s: ConsumableSource): KitLineSourceLot {
     node_name: s.location,
     path: s.location,
     qty: s.qty,
-    is_grid: false,
-    grid_rows: null,
-    grid_cols: null,
-    cells: [],
+    is_grid: s.is_grid,
+    grid_rows: s.grid_rows,
+    grid_cols: s.grid_cols,
+    cells: s.cells,
   };
 }
 
@@ -123,11 +129,10 @@ export function IssueToKanbanDialog({ open, onOpenChange, item, onDone }: Props)
     setError(null);
     try {
       const result = await consumablesApi.issue({
-        sources: picks.map((p) => ({
-          node_id: p.node_id,
-          lot_id: p.lot_id,
-          qty: p.qty,
-        })),
+        // The picker's own converter: it drops empty rows and, for a box source,
+        // sends the tapped vials with the quantity derived from them. Mapping the
+        // rows by hand here is what silently posted `qty` without the cells.
+        sources: picksToSources(picks),
         kanban_node_id: kanbanSel,
         evidence_id: evidence.evidence_id,
         notes: evidence.comment ?? '',

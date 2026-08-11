@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import desc, func, literal, or_, select, union_all
+from sqlalchemy import and_, desc, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.search import like_contains
@@ -175,6 +175,7 @@ def _movement_keys_stmt(
     *,
     severity: str | None,
     action: str | None,
+    signed: bool | None,
     occurred_from: datetime | None,
     occurred_to: datetime | None,
     q: str | None,
@@ -195,12 +196,20 @@ def _movement_keys_stmt(
         StockMovement.id.label("id"),
         StockMovement.performed_at.label("occurred_at"),
         literal(SOURCE_MOVEMENT).label("source"),
+        # Carried so the facet counts can be one aggregate over this union
+        # rather than three more filtered queries.
+        literal(_MOVEMENT_ACTION).label("action"),
+        StockMovement.reauth_evidence_id.isnot(None).label("signed"),
+        literal(False).label("is_role_change"),
     )
 
     if severity == "warning":
         stmt = stmt.where(StockMovement.movement_type.in_(_WARNING_MOVEMENT_TYPES))
     elif severity == "info":
         stmt = stmt.where(StockMovement.movement_type.not_in(_WARNING_MOVEMENT_TYPES))
+
+    if signed is not None:
+        stmt = stmt.where(StockMovement.reauth_evidence_id.isnot(None) == signed)
 
     if occurred_from is not None:
         stmt = stmt.where(StockMovement.performed_at >= occurred_from)
@@ -245,6 +254,7 @@ def _audit_keys_stmt(
     actor_user_id: uuid.UUID | None,
     severity: str | None,
     action: str | None,
+    signed: bool | None,
     occurred_from: datetime | None,
     occurred_to: datetime | None,
     q: str | None,
@@ -254,6 +264,15 @@ def _audit_keys_stmt(
         AuditEvent.id.label("id"),
         AuditEvent.occurred_at.label("occurred_at"),
         literal(SOURCE_AUDIT).label("source"),
+        AuditEvent.action.label("action"),
+        AuditEvent.signature_id.isnot(None).label("signed"),
+        # "Did this event change somebody's role" — asked of the stored diff
+        # rather than inferred from severity, which a mere email change also
+        # raises to ``warning``.
+        and_(
+            AuditEvent.subject_table == "app.users",
+            func.jsonb_exists(AuditEvent.diff, "role"),
+        ).label("is_role_change"),
     )
     if subject_table is not None:
         stmt = stmt.where(AuditEvent.subject_table == subject_table)
@@ -265,6 +284,12 @@ def _audit_keys_stmt(
         stmt = stmt.where(AuditEvent.severity == severity)
     if action:
         stmt = stmt.where(AuditEvent.action == action)
+    if signed is not None:
+        stmt = stmt.where(
+            AuditEvent.signature_id.isnot(None)
+            if signed
+            else AuditEvent.signature_id.is_(None)
+        )
     if occurred_from is not None:
         stmt = stmt.where(AuditEvent.occurred_at >= occurred_from)
     if occurred_to is not None:
@@ -288,13 +313,14 @@ async def list_timeline_keys(
     actor_user_id: uuid.UUID | None = None,
     severity: str | None = None,
     action: str | None = None,
+    signed: bool | None = None,
     occurred_from: datetime | None = None,
     occurred_to: datetime | None = None,
     q: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> tuple[list[tuple[uuid.UUID, str]], int]:
-    """One page of the merged timeline as ``([(id, source)], total)``.
+) -> tuple[list[tuple[uuid.UUID, str]], int, dict[str, int]]:
+    """One page of the merged timeline as ``([(id, source)], total, facets)``.
 
     ``subject_table`` picks which legs run: ``app.stock_movements`` means the
     ledger only, any other value means audit events only, and ``None`` means
@@ -323,6 +349,7 @@ async def list_timeline_keys(
                 actor_user_id=actor_user_id,
                 severity=severity,
                 action=action,
+                signed=signed,
                 occurred_from=occurred_from,
                 occurred_to=occurred_to,
                 q=q,
@@ -332,6 +359,7 @@ async def list_timeline_keys(
         movement_leg = _movement_keys_stmt(
             severity=severity,
             action=action,
+            signed=signed,
             occurred_from=occurred_from,
             occurred_to=occurred_to,
             q=q,
@@ -340,15 +368,27 @@ async def list_timeline_keys(
             legs.append(movement_leg)
 
     if not legs:
-        return [], 0
+        return [], 0, {"deletions": 0, "role_changes": 0, "unsigned": 0}
 
     merged = (legs[0] if len(legs) == 1 else union_all(*legs)).subquery("timeline")
 
-    total = int(
-        (
-            await session.execute(select(func.count()).select_from(merged))
-        ).scalar_one()
-    )
+    # Total and the three triage counts in ONE pass. Separate COUNT queries
+    # would re-run the union four times for numbers that all come off the same
+    # filtered set.
+    summary = (
+        await session.execute(
+            select(
+                func.count().label("total"),
+                func.count()
+                .filter(merged.c.action == "deleted")
+                .label("deletions"),
+                func.count()
+                .filter(merged.c.is_role_change.is_(True))
+                .label("role_changes"),
+                func.count().filter(merged.c.signed.is_(False)).label("unsigned"),
+            ).select_from(merged)
+        )
+    ).one()
 
     page = (
         select(merged.c.id, merged.c.source)
@@ -357,7 +397,12 @@ async def list_timeline_keys(
         .offset(offset)
     )
     rows = (await session.execute(page)).all()
-    return [(row.id, row.source) for row in rows], total
+    facets = {
+        "deletions": int(summary.deletions),
+        "role_changes": int(summary.role_changes),
+        "unsigned": int(summary.unsigned),
+    }
+    return [(row.id, row.source) for row in rows], int(summary.total), facets
 
 
 async def audit_events_by_ids(
