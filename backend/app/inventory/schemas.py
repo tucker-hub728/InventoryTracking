@@ -84,6 +84,23 @@ class SupplierRead(BaseModel):
         return cls.model_validate(supplier, from_attributes=True)
 
 
+class SupplierListResponse(BaseModel):
+    """One page of suppliers.
+
+    ``total`` is post-filter, so the Active and Deactivated tabs each report
+    their own size. ``active_total`` / ``inactive_total`` are the *unfiltered*
+    counts for both tabs, so the tab strip can show a count on the tab you
+    aren't currently looking at without a second round trip.
+    """
+
+    items: list[SupplierRead]
+    total: int
+    limit: int
+    offset: int
+    active_total: int
+    inactive_total: int
+
+
 class SupplierCreate(BaseModel):
     """Payload for ``POST /v1/suppliers`` — admin master-data write.
 

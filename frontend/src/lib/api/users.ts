@@ -64,8 +64,38 @@ export interface UserUpdateInput {
   reason?: string;
 }
 
+export interface ListUsersParams {
+  /** true = Active Members, false = Inactive Members, omitted = both. */
+  isActive?: boolean;
+  role?: RoleId;
+  /** Free-text over email + full name. */
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface UserListResponse {
+  items: ApiUser[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Directory-wide count backing the "last super admin" guard — NOT the count
+   *  on this page, which would read 1 on any page holding a single one. */
+  active_super_admin_count: number;
+}
+
 export const usersApi = {
-  list: (opts?: { signal?: AbortSignal }) => api.get<ApiUser[]>('/users', { signal: opts?.signal }),
+  list: (params: ListUsersParams = {}, opts?: { signal?: AbortSignal }) =>
+    api.get<UserListResponse>('/users', {
+      query: {
+        is_active: params.isActive,
+        role: params.role,
+        q: params.q,
+        limit: params.limit,
+        offset: params.offset,
+      },
+      signal: opts?.signal,
+    }),
 
   /** Every mutating edit needs `evidence_id` — the backend rejects an unsigned
    * change with `signature_required`. Mint one via the reauth dialog. */

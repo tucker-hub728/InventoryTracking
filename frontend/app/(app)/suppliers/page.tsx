@@ -1,11 +1,6 @@
-import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 
-import { SuppliersPageClient } from '@/components/admin/suppliers/suppliers-page-client';
-
-export const metadata: Metadata = {
-  title: 'Suppliers',
-};
-
+/** Each supplier tab is a route; send the bare path to the first one. */
 export default function SuppliersPage() {
-  return <SuppliersPageClient />;
+  redirect('/suppliers/active');
 }

@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.bounds import MAX_QTY
+from app.kitting.schemas import CellOption
 from app.models.consumables import DISPOSITIONS
 
 #: ``ok`` never reaches the API — a row is returned only once it warns or has
@@ -31,6 +32,15 @@ class ConsumableSourceRead(BaseModel):
     #: Human location path, e.g. "Warehouse One › Shelf B".
     location: str
     qty: int
+    #: Grid-bearing (LN2 box) source: the quantity follows the vials picked, and
+    #: ``cells`` carries this lot's occupied positions so the dialog can draw the
+    #: box. A consumable in a cryo box is unusual but real — CR-004 sits in Tank
+    #: 1 (client 2026-08-11) — so the shape mirrors
+    #: :class:`app.kitting.schemas.KitLineSourceLot` rather than assuming a shelf.
+    is_grid: bool = False
+    grid_rows: int | None = None
+    grid_cols: int | None = None
+    cells: list[CellOption] = Field(default_factory=list)
 
 
 class ConsumableSourceInput(BaseModel):
@@ -46,6 +56,11 @@ class ConsumableSourceInput(BaseModel):
     node_id: str
     lot_id: str
     qty: int = Field(gt=0, le=MAX_QTY)
+    #: LN2 box source only: the exact vial allocations to empty. When given,
+    #: ``qty`` must equal their count — for a box the quantity IS the selection,
+    #: never a number typed beside it. Required for a grid node, since walking
+    #: the lot FIFO would empty positions the operator did not pull.
+    cell_allocation_ids: list[str] = Field(default_factory=list)
 
 
 class ConsumableIssueRequest(BaseModel):

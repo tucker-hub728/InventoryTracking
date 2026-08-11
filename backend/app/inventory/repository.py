@@ -45,12 +45,48 @@ async def list_suppliers(
     session: AsyncSession,
     *,
     active_only: bool = True,
-) -> list[Supplier]:
-    stmt = select(Supplier)
-    if active_only:
-        stmt = stmt.where(Supplier.is_active.is_(True))
-    stmt = stmt.order_by(func.lower(Supplier.name))
-    return list((await session.execute(stmt)).scalars().all())
+    is_active: bool | None = None,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[Supplier], int]:
+    """Return ``(rows, total)`` of suppliers, ordered by name.
+
+    Two ways to filter on the active flag, because two callers want different
+    things. ``active_only=True`` is the picker's "hide the deactivated ones";
+    ``is_active`` is the admin page's Active / Deactivated tab split and can ask
+    for the inactive side, which ``active_only`` has no way to express. When
+    ``is_active`` is given it wins — the caller was explicit.
+
+    ``limit=None`` returns every matching row, which is what the item-edit
+    supplier picker needs (it renders a searchable select over the full list).
+    """
+    conditions = []
+    if is_active is not None:
+        conditions.append(Supplier.is_active.is_(is_active))
+    elif active_only:
+        conditions.append(Supplier.is_active.is_(True))
+    if q:
+        like = like_contains(q.lower())
+        conditions.append(
+            or_(
+                func.lower(Supplier.name).like(like, escape="\\"),
+                func.lower(Supplier.contact_email).like(like, escape="\\"),
+            )
+        )
+
+    total = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(Supplier).where(*conditions)
+            )
+        ).scalar_one()
+    )
+
+    stmt = select(Supplier).where(*conditions).order_by(func.lower(Supplier.name))
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
+    return list((await session.execute(stmt)).scalars().all()), total
 
 
 async def get_supplier(session: AsyncSession, supplier_id: uuid.UUID) -> Supplier | None:
@@ -907,6 +943,25 @@ async def get_movement(
             select(StockMovement).where(StockMovement.id == movement_id)
         )
     ).scalar_one_or_none()
+
+
+async def movements_by_ids(
+    session: AsyncSession, ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, StockMovement]:
+    """Fetch movements by id, keyed for reassembly by the caller.
+
+    Unordered on purpose: the audit timeline hydrates one page of ids that it
+    has already ordered, and re-sorting here would just be thrown away.
+    """
+    if not ids:
+        return {}
+    rows = (
+        (await session.execute(select(StockMovement).where(StockMovement.id.in_(ids))))
+        .scalars()
+        .unique()
+        .all()
+    )
+    return {row.id: row for row in rows}
 
 
 # ── Item suppliers ───────────────────────────────────────────────────────

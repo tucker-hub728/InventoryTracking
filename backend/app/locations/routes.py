@@ -489,7 +489,12 @@ async def create_node(
         action="created",
         subject_table="meta.location_nodes",
         subject_id=node.id,
-        subject_label=f"{node.node_type}:{node.code}",
+        # The name, not ``<type>:<code>``. The audit log is read by people and
+        # "Clean Room 1" is what they call it; the code is an internal handle
+        # that drifts from the name by design. Every recorder call in this
+        # module follows the same rule — the code is still in the snapshot for
+        # anyone who needs it.
+        subject_label=node.name,
         before=None,
         after=loc_repo.node_to_audit_snapshot(node),
     )
@@ -569,7 +574,7 @@ async def update_node(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -681,7 +686,7 @@ async def move_node(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=moved.id,
-        subject_label=f"{moved.node_type}:{moved.code}",
+        subject_label=moved.name,
         before={**before, "path": from_path},
         after={**loc_repo.node_to_audit_snapshot(moved), "path": to_path},
     )
@@ -791,7 +796,7 @@ async def add_production_area(
         action="created",
         subject_table="meta.location_nodes",
         subject_id=node.id,
-        subject_label=f"{node.node_type}:{node.code}",
+        subject_label=node.name,
         before=None,
         after=loc_repo.node_to_audit_snapshot(node),
     )
@@ -860,7 +865,7 @@ async def add_kanban(
         action="created",
         subject_table="meta.location_nodes",
         subject_id=node.id,
-        subject_label=f"{node.node_type}:{node.code}",
+        subject_label=node.name,
         before=None,
         after=loc_repo.node_to_audit_snapshot(node),
     )
@@ -905,7 +910,7 @@ async def update_node_grid(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -948,7 +953,7 @@ async def update_node_dedication(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -995,7 +1000,7 @@ async def delete_node(
         action="deleted",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )

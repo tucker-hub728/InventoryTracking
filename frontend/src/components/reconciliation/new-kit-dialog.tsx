@@ -231,6 +231,10 @@ export function NewKitDialog({
                     // manufacturing location at kitting, so only those are valid
                     // here — a warehouse shelf is not a production floor.
                     areas={['production']}
+                    // A Kanban is a consumables station inside an area, not a
+                    // floor a kit is built on (client 2026-08-11) — hide the
+                    // whole branch so only the production areas are offered.
+                    excludeNodeTypes={['kanban']}
                     modal
                     placeholder="Choose a production floor"
                     emptyText="No production or lab floors are set up."

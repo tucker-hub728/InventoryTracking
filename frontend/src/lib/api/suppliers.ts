@@ -40,12 +40,52 @@ export interface SupplierUpdateInput {
   is_active?: boolean;
 }
 
+export interface ListSuppliersParams {
+  /** Hide deactivated suppliers. Ignored when ``isActive`` is given. */
+  activeOnly?: boolean;
+  /** true = the Active tab, false = the Deactivated tab. */
+  isActive?: boolean;
+  /** Free-text over name + contact email. */
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SupplierListResponse {
+  items: Supplier[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Unfiltered per-tab counts, so the tab strip can label both tabs. */
+  active_total: number;
+  inactive_total: number;
+}
+
 export const suppliersApi = {
-  list: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
-    api.get<Supplier[]>('/suppliers', {
-      query: { active_only: opts?.activeOnly ?? true },
+  list: (params: ListSuppliersParams = {}, opts?: { signal?: AbortSignal }) =>
+    api.get<SupplierListResponse>('/suppliers', {
+      query: {
+        active_only: params.activeOnly ?? true,
+        is_active: params.isActive,
+        q: params.q,
+        limit: params.limit,
+        offset: params.offset,
+      },
       signal: opts?.signal,
     }),
+
+  /**
+   * Every supplier, unpaged — for pickers that render the whole list in a
+   * searchable select and would otherwise silently show only the first page.
+   * 500 is the server's ceiling on ``limit`` for this endpoint.
+   */
+  listAll: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
+    api
+      .get<SupplierListResponse>('/suppliers', {
+        query: { active_only: opts?.activeOnly ?? true, limit: 500 },
+        signal: opts?.signal,
+      })
+      .then((r) => r.items),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<Supplier>(`/suppliers/${id}`, { signal: opts?.signal }),

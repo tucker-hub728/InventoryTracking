@@ -11,9 +11,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.search import like_contains
 from app.models.identity import User
 
 
@@ -78,14 +79,54 @@ async def hard_delete(session: AsyncSession, user: User) -> None:
     await session.flush()
 
 
-async def list_users(session: AsyncSession) -> list[User]:
-    """All non-deleted users, newest first — backs the admin user directory."""
-    stmt = (
-        select(User)
-        .where(User.deleted_at.is_(None))
-        .order_by(User.created_at.desc())
+async def list_users(
+    session: AsyncSession,
+    *,
+    is_active: bool | None = None,
+    role: str | None = None,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[User], int]:
+    """Return ``(rows, total)`` of non-deleted users, newest first.
+
+    Backs the admin user directory, whose Active / Inactive tabs are two
+    filtered slices of the same query rather than two endpoints. ``total`` is
+    the count *after* filtering, so the pager stays honest when a search is on.
+
+    ``limit=None`` returns every matching row — used by callers that genuinely
+    need the whole directory (counting, exports) rather than a page of it.
+    """
+    conditions = [User.deleted_at.is_(None)]
+    if is_active is not None:
+        # ``status`` is the stored truth; "active" is the only status that
+        # counts as active (``suspended`` mirrors a disabled Cognito identity).
+        conditions.append(
+            User.status == "active" if is_active else User.status != "active"
+        )
+    if role is not None:
+        conditions.append(User.role == role)
+    if q:
+        like = like_contains(q.lower())
+        conditions.append(
+            or_(
+                func.lower(User.email).like(like, escape="\\"),
+                func.lower(User.full_name).like(like, escape="\\"),
+            )
+        )
+
+    total = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(User).where(*conditions)
+            )
+        ).scalar_one()
     )
-    return list((await session.execute(stmt)).scalars().all())
+
+    stmt = select(User).where(*conditions).order_by(User.created_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
+    return list((await session.execute(stmt)).scalars().all()), total
 
 
 async def touch_last_active(session: AsyncSession, user_id: uuid.UUID) -> None:

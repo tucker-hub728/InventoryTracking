@@ -45,6 +45,26 @@ class UserRead(BaseModel):
     is_seed: bool = False
 
 
+class UserListResponse(BaseModel):
+    """One page of the user directory.
+
+    ``total`` counts the rows matching the filters, not the whole table, so the
+    Active / Inactive tabs each report their own size and a search narrows the
+    pager with it.
+    """
+
+    items: list[UserRead]
+    total: int
+    limit: int
+    offset: int
+    # Directory-wide, deliberately not page-scoped: it backs the "can't demote
+    # or deactivate the last super admin" guard in the edit dialog, and that
+    # rule is about the whole install. Derived from the page — which is all the
+    # client used to have — would read 1 on any page that happens to contain a
+    # single super admin and wrongly lock the field.
+    active_super_admin_count: int
+
+
 # Action verb the e-signature must carry. Checked against the reauth event when
 # the evidence is consumed, so a signature minted for another flow can't be
 # replayed here.

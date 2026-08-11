@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { Loader2 } from 'lucide-react';
 
 import {
   Sheet,
@@ -10,7 +11,13 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
-import { MOVEMENT_TYPE_LABEL, type ApiMovement, type MovementType } from '@/lib/api/movements';
+import { ApiError } from '@/lib/api/client';
+import {
+  MOVEMENT_TYPE_LABEL,
+  movementsApi,
+  type ApiMovement,
+  type MovementType,
+} from '@/lib/api/movements';
 import { ItemLink } from '@/components/inventory/item-link';
 import { LotLink } from '@/components/inventory/lot-link';
 import { LocationLink } from '@/components/locations/location-link';
@@ -19,9 +26,12 @@ import { cn } from '@/lib/utils';
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Selected ledger row. ``null`` keeps the sheet mounted but empty so
-   *  the close animation still plays. */
-  movement: ApiMovement | null;
+  /** Movement UUID, fetched on open. ``null`` keeps the sheet mounted but
+   *  empty so the close animation still plays. */
+  movementId: string | null;
+  /** Already-loaded row, when the caller has one (the per-item ledger does).
+   *  Skips the fetch; ignored when ``movementId`` is set to something else. */
+  movement?: ApiMovement | null;
 }
 
 /** Per-movement-type pill, matching the timeline icon-tint palette. */
@@ -47,14 +57,44 @@ const TYPE_STYLE: Record<MovementType, string> = {
 /**
  * Side-sheet detail view for a single stock movement. Mirrors the
  * ``AuditDetailSheet`` layout (header strip, KV grid) so the ledger and
- * audit-timeline rows feel like the same product.
+ * audit-timeline rows feel like the same product — including how it loads:
+ * given an id and no row, it fetches on open.
  *
- * No re-fetch — the timeline already holds the joined row, so this is
- * purely a presentational view. If we later need fresh data (e.g. for
- * deep-links), the same shape can be hydrated from
- * ``movementsApi.get(id)``.
+ * That fetch exists because the audit timeline is now paged by the server and
+ * its rows are summaries. Callers that already hold the full row — the
+ * per-item ledger, which fetched it to render the list — pass ``movement`` and
+ * skip the round trip.
  */
-export function MovementDetailSheet({ open, onOpenChange, movement }: Props) {
+export function MovementDetailSheet({ open, onOpenChange, movementId, movement }: Props) {
+  const [fetched, setFetched] = React.useState<ApiMovement | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  // Only fetch what the caller didn't supply.
+  const needsFetch = open && movementId !== null && movement == null;
+
+  React.useEffect(() => {
+    if (!needsFetch || movementId === null) {
+      setFetched(null);
+      setError(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    setLoading(true);
+    setError(null);
+    movementsApi
+      .get(movementId, { signal: ctrl.signal })
+      .then(setFetched)
+      .catch((err) => {
+        if ((err as DOMException)?.name === 'AbortError') return;
+        setError(err instanceof ApiError ? err.message : 'Failed to load movement.');
+      })
+      .finally(() => setLoading(false));
+    return () => ctrl.abort();
+  }, [needsFetch, movementId]);
+
+  const row = movement ?? fetched;
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="w-full max-w-2xl">
@@ -65,7 +105,18 @@ export function MovementDetailSheet({ open, onOpenChange, movement }: Props) {
           </SheetDescription>
         </SheetHeader>
 
-        <SheetBody>{movement ? <MovementBody movement={movement} /> : null}</SheetBody>
+        <SheetBody>
+          {loading && !row ? (
+            <div className="flex items-center gap-2 py-10 text-sm text-text-3" role="status">
+              <Loader2 size={14} className="animate-spin" aria-hidden />
+              Loading movement…
+            </div>
+          ) : error ? (
+            <p className="py-10 text-sm text-danger">{error}</p>
+          ) : row ? (
+            <MovementBody movement={row} />
+          ) : null}
+        </SheetBody>
       </SheetContent>
     </Sheet>
   );

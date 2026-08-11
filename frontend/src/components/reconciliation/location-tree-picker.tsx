@@ -277,6 +277,7 @@ export function LocationTreePicker({
   onChange,
   areas = ALL_AREAS,
   allowedNodeIds,
+  excludeNodeTypes,
   nodeQty,
   // Storage leaves, plus production floors (which are `flat` nodes, so
   // `can_store` is false even though a kit legitimately targets them).
@@ -296,6 +297,10 @@ export function LocationTreePicker({
   /** If given, only these node ids are selectable AND the tree is pruned to the
    *  branches leading to them (e.g. locations holding an item). */
   allowedNodeIds?: ReadonlySet<string> | null;
+  /** Node types to drop from the tree and from search, subtree and all. Use it
+   *  when a branch is real but irrelevant to the flow — a kit is destined for a
+   *  production area, so the Kanbans hanging under one are noise there. */
+  excludeNodeTypes?: ReadonlyArray<string>;
   /** Optional per-node quantity to show next to a pickable node. */
   nodeQty?: Record<string, number>;
   /** Which nodes may be picked. Default: storage leaves. */
@@ -321,10 +326,23 @@ export function LocationTreePicker({
     };
   }, []);
 
+  const excluded = React.useMemo(
+    () => new Set(excludeNodeTypes ?? []),
+    // A new array literal every render is the normal way this prop is passed, so
+    // key the memo on the contents rather than the identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [(excludeNodeTypes ?? []).join(',')],
+  );
+
+  const isHidden = React.useCallback((n: PNode) => excluded.has(n.nodeType), [excluded]);
+
   const canPick = React.useCallback(
     (n: PNode) =>
-      !n.isGroup && selectable(n) && (!allowedNodeIds || allowedNodeIds.has(n.id)),
-    [selectable, allowedNodeIds],
+      !n.isGroup &&
+      !isHidden(n) &&
+      selectable(n) &&
+      (!allowedNodeIds || allowedNodeIds.has(n.id)),
+    [selectable, allowedNodeIds, isHidden],
   );
 
   // When restricted to specific nodes, prune the tree to just the branches
@@ -346,10 +364,14 @@ export function LocationTreePicker({
     () =>
       forest
         ? forest.roots.filter(
-            (r) => r.area && areas.includes(r.area) && (!visibleIds || visibleIds.has(r.id)),
+            (r) =>
+              r.area &&
+              areas.includes(r.area) &&
+              !isHidden(r) &&
+              (!visibleIds || visibleIds.has(r.id)),
           )
         : [],
-    [forest, areas, visibleIds],
+    [forest, areas, visibleIds, isHidden],
   );
 
   const selected = forest?.byId.get(value) ?? null;
@@ -473,6 +495,7 @@ export function LocationTreePicker({
                 value={value}
                 expanded={expanded}
                 canPick={canPick}
+                isHidden={isHidden}
                 visibleIds={visibleIds}
                 nodeQty={nodeQty}
                 onToggle={toggle}
@@ -492,6 +515,7 @@ function TreeRow({
   value,
   expanded,
   canPick,
+  isHidden,
   visibleIds,
   nodeQty,
   onToggle,
@@ -502,14 +526,15 @@ function TreeRow({
   value: string;
   expanded: Set<string>;
   canPick: (n: PNode) => boolean;
+  isHidden: (n: PNode) => boolean;
   visibleIds: Set<string> | null;
   nodeQty?: Record<string, number>;
   onToggle: (id: string) => void;
   onPick: (id: string) => void;
 }) {
-  const children = visibleIds
-    ? node.children.filter((c) => visibleIds.has(c.id))
-    : node.children;
+  const children = node.children.filter(
+    (c) => !isHidden(c) && (!visibleIds || visibleIds.has(c.id)),
+  );
   const hasChildren = children.length > 0;
   const isOpen = expanded.has(node.id);
   const pickable = canPick(node);
@@ -575,6 +600,7 @@ function TreeRow({
             value={value}
             expanded={expanded}
             canPick={canPick}
+            isHidden={isHidden}
             visibleIds={visibleIds}
             nodeQty={nodeQty}
             onToggle={onToggle}
