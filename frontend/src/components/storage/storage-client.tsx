@@ -85,7 +85,12 @@ export function StorageClient() {
       ),
     [room],
   );
-  const missingRoom = loaded && !loadError && !room;
+  // No "the room is missing" state any more. The Storage room is created by the
+  // server the first time a location is, so an absent room means exactly what an
+  // empty room means: no locations yet. It used to render a dead end telling you
+  // to run a seed script — which is a deploy step nobody using the screen can
+  // action, and which hid the one button that would have fixed it.
+  const noLocations = loaded && !loadError && categories.length === 0;
 
   /**
    * Two different things get counted here, and the page used to call both
@@ -116,7 +121,9 @@ export function StorageClient() {
         title="Storage"
         subtitle="Locations built from the standard template — a shelf, a refrigerator and a freezer, each optional."
         actions={
-          isSuperAdmin && room ? (
+          // Not gated on the room existing — creating the first location is what
+          // brings the room into being.
+          isSuperAdmin ? (
             <Button type="button" variant="primary" onClick={() => setCreating(true)}>
               <Plus size={15} />
               <span className="ml-1.5">Create new location</span>
@@ -134,14 +141,26 @@ export function StorageClient() {
               action={<Button onClick={() => void reload()}>Retry</Button>}
             />
           </div>
-        ) : missingRoom ? (
-          // The room's own node is absent, which is a seeding gap rather than a
-          // failure — say which script creates it instead of showing an empty
-          // grid that looks like "no locations".
+        ) : noLocations && !loading ? (
+          // Nothing here yet — whether or not the room row exists, which is the
+          // server's business and not something to explain on screen.
           <div className="rounded-lg border border-border bg-bg-elev">
             <EmptyState
-              title="Storage isn't set up yet"
-              hint="The Storage room hasn't been created yet. Seed it with scripts/seed_storage.py."
+              icon={Boxes}
+              title="No locations yet"
+              hint={
+                isSuperAdmin
+                  ? 'Create one — name it, then choose which of shelf, refrigerator and freezer it uses.'
+                  : 'A Super Admin creates locations here.'
+              }
+              action={
+                isSuperAdmin ? (
+                  <Button variant="primary" onClick={() => setCreating(true)}>
+                    <Plus size={15} />
+                    <span className="ml-1.5">Create new location</span>
+                  </Button>
+                ) : undefined
+              }
             />
           </div>
         ) : (
@@ -179,26 +198,6 @@ export function StorageClient() {
                   <Skeleton key={i} className="h-32 rounded-lg" />
                 ))}
               </div>
-            ) : categories.length === 0 ? (
-              <div className="rounded-lg border border-border bg-bg-elev">
-                <EmptyState
-                  icon={Boxes}
-                  title="No locations yet"
-                  hint={
-                    isSuperAdmin
-                      ? 'Create one — name it, then choose which of shelf, refrigerator and freezer it uses.'
-                      : 'A Super Admin creates locations here.'
-                  }
-                  action={
-                    isSuperAdmin && room ? (
-                      <Button variant="primary" onClick={() => setCreating(true)}>
-                        <Plus size={15} />
-                        <span className="ml-1.5">Create new location</span>
-                      </Button>
-                    ) : undefined
-                  }
-                />
-              </div>
             ) : (
               <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {categories.map((cat) => (
@@ -210,9 +209,8 @@ export function StorageClient() {
         )}
       </div>
 
-      {creating && room && (
+      {creating && (
         <CreateStorageLocationDialog
-          room={room}
           existingNames={categories.map((c) => c.name)}
           onClose={() => setCreating(false)}
           onDone={() => {

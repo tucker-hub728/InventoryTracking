@@ -35,19 +35,17 @@ import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui/sonner';
 import { invalidateLocationForest } from '@/components/reconciliation/location-tree-picker';
 import { ApiError } from '@/lib/api/client';
-import { locationNodesApi, type NodeTree } from '@/lib/api/location-nodes';
+import { locationNodesApi } from '@/lib/api/location-nodes';
 
 import { STORAGE_GROUPS } from './storage-groups';
 
 export function CreateStorageLocationDialog({
-  room,
   existingNames,
   onClose,
   onDone,
 }: {
-  room: NodeTree;
-  /** Names already used in this room — checked client-side so the obvious
-   *  mistake is caught before a round trip. The server checks too. */
+  /** Names already used in Storage — checked client-side so the obvious mistake
+   *  is caught before a round trip. The server checks too. */
   existingNames: string[];
   onClose: () => void;
   onDone: () => void;
@@ -72,7 +70,7 @@ export function CreateStorageLocationDialog({
       return;
     }
     if (taken.has(v.toLowerCase())) {
-      setError(`“${v}” already exists in ${room.name}.`);
+      setError(`“${v}” is already a location in Storage.`);
       return;
     }
     if (chosen.length === 0) {
@@ -82,7 +80,7 @@ export function CreateStorageLocationDialog({
     setBusy(true);
     setError(null);
     try {
-      await locationNodesApi.createStorageCategory(room.id, {
+      await locationNodesApi.createStorageCategory({
         name: v,
         ...Object.fromEntries(STORAGE_GROUPS.map((g) => [g.key, Boolean(enabled[g.key])])),
       });
@@ -96,7 +94,7 @@ export function CreateStorageLocationDialog({
       onDone();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'node_name_conflict') {
-        setError(`“${v}” already exists in ${room.name}.`);
+        setError(`“${v}” is already a location in Storage.`);
       } else {
         setError(err instanceof ApiError ? err.message : 'Failed to create the location.');
       }

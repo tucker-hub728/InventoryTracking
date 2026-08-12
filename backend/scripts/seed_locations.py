@@ -53,16 +53,18 @@ from scripts import (
     seed_cold_storage,
     seed_materials_management,
     seed_production,
-    seed_storage,
 )
 from scripts._location_seed import cli
 
-# (heading, plan) — the order rooms appear in the seed output, which matches the
-# sidebar. Storage leads: it is the template-driven room the other three are
-# being replaced by (LOC-001), and the seed output reading in a different order
-# from the navigation is the kind of small mismatch that costs someone an hour.
+# (heading, plan) — the order rooms appear in the seed output.
+#
+# Storage is deliberately ABSENT. Its room is created by the server the first
+# time a location is added to it, so there is nothing here to seed: the client
+# never names it and cannot have two. It was seeded briefly (2026-08-12) and the
+# step was immediately missed on a deploy, leaving a working screen reporting it
+# "isn't set up yet" — a state only someone with shell access could clear. One
+# mechanism is better than two, and the one that needs no runbook wins.
 AREAS = [
-    ("Storage", seed_storage.plan),
     ("Materials Management", seed_materials_management.plan),
     ("Cold Storage", seed_cold_storage.plan),
     ("Analytical Lab", seed_analytical_lab.plan),

@@ -22,7 +22,7 @@ Verifies:
   * switching a sub-type OFF while it holds units is refused (409)
   * …and succeeds once the unit is gone
   * switching one back ON revives the group AND its units
-  * a category cannot be created outside the Storage room
+  * every location lands in ONE Storage room, created on demand if absent
   * a category with no sub-types at all is refused
   * a non-super-admin is refused (403)
   * duplicate equipment numbers are refused anywhere (409)
@@ -99,20 +99,18 @@ def main() -> int:
     print("==> logged in as super admin")
 
     rooms = _rooms(token)
+    # Deliberately NOT required to exist. The room is created by the server on
+    # the first create, so this test also covers the cold-start path on a
+    # database that has never seen Storage.
     storage = next((r for r in rooms if r.get("code", "").upper() == "STG"), None)
-    if storage is None:
-        print("!! no Storage room — run: uv run python -m scripts.seed_storage --yes")
-        return 1
+    print(f"==> Storage room: {'present' if storage else 'absent — will be created on demand'}")
     other = next((r for r in rooms if r.get("code", "").upper() in ("CS", "MM", "AL")), None)
-    print(f"==> room: {storage['name']} ({storage['code']})")
 
     # Everything this test makes, in CREATION order. Cleanup walks it backwards,
     # which is also the only order that works: ``delete_node`` refuses a node that
     # still has children, so a category cannot go until its groups have, and a
     # group cannot go until its units have.
     created: list[str] = []
-    # Sibling CODE uniqueness ignores ``is_active``, so a code this test used once
-    # is reserved for good — step to the next suffix until the name is free.
     run = {"n": 1}
 
     def make_category(name: str, **switches):
@@ -120,7 +118,7 @@ def main() -> int:
             payload = {"name": f"{name} {run['n']}", **switches}
             s, b = _req(
                 "POST",
-                f"/location-nodes/{storage['id']}/storage-categories",
+                "/location-nodes/storage-categories",
                 token=token,
                 json_body=payload,
             )
@@ -240,22 +238,37 @@ def main() -> int:
     s, b = make_category("Smoke None", shelf=False, refrigerator=False, freezer=False)
     check("nor be created without one", s == 422, (s, b))
 
+    # "A category cannot be created in the wrong room" used to be checked here by
+    # POSTing at the Analytical Lab's id. The route no longer takes a room id at
+    # all — the server resolves the one Storage room — so that case is now
+    # unrepresentable rather than merely rejected, and there is nothing to assert.
+    #
+    # What replaces it is the invariant that made it safe to drop: however many
+    # locations are created, they all land in ONE room, and no second Storage
+    # room appears alongside it.
+    s, all_rooms = _req("GET", "/location-nodes/freezer-tree", token=token)
+    stg_rooms = [r for r in all_rooms if r.get("code", "").upper() == "STG"] if s == 200 else []
+    check("there is exactly one Storage room", len(stg_rooms) == 1, len(stg_rooms))
+    check(
+        "and every location created so far is inside it",
+        len(stg_rooms) == 1
+        and all(
+            cid in [c["id"] for c in stg_rooms[0].get("children", [])]
+            for cid in (cat["id"], partial.get("id"))
+            if cid
+        ),
+        None,
+    )
     if other is not None:
-        s, b = _req(
-            "POST",
-            f"/location-nodes/{other['id']}/storage-categories",
-            token=token,
-            json_body={"name": "Smoke Wrong Room"},
-        )
-        # 422, not 400: ``ValidationError`` is the API's request-shape error and
-        # maps to Unprocessable Entity throughout.
+        # The other rooms are exempt from the template (LOC-002 / LOC-003) and
+        # must not have grown a category as a side effect.
+        s, other_now = _req("GET", f"/location-nodes/{other['id']}/children", token=token)
         check(
-            f"a category cannot be created in {other['name']}",
-            s == 422 and b.get("code") == "parent_not_storage_room",
-            (s, b),
+            f"{other['name']} has no Storage categories",
+            s == 200
+            and not any(n.get("node_type") == "storage_category" for n in other_now),
+            [n.get("node_type") for n in (other_now if s == 200 else [])],
         )
-        if s == 201:
-            created.append(b["id"])
 
     print("\n-- equipment numbers stay unique across the installation")
     fridge = next(g for g in groups if g["code"] == "REF")
@@ -466,7 +479,7 @@ def main() -> int:
     else:
         s, b = _req(
             "POST",
-            f"/location-nodes/{storage['id']}/storage-categories",
+            "/location-nodes/storage-categories",
             token=admin_token,
             json_body={"name": "Smoke Forbidden"},
         )
