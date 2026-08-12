@@ -94,6 +94,9 @@ export const NODE_ICON: Record<NodeType, LucideIcon> = {
   // Freezer / warehouse nodes don't render in this (LN2) panel, but the map
   // must cover every NodeType.
   room: Container,
+  // A Storage location renders on its own page, not in this LN2 panel, but the
+  // map must cover every NodeType.
+  storage_category: Container,
   room_location: Container,
   sub_location: Box,
   warehouse: Package,

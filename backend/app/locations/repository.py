@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Collection
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select, text, update
@@ -21,6 +22,7 @@ from app.core.exceptions import ConflictError
 from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
+    STORAGE_GROUPS,
     LocationNode,
     LotAllocation,
 )
@@ -63,13 +65,20 @@ async def node_label_map(
 async def get_sibling_by_code(
     session: AsyncSession, *, parent_id: uuid.UUID | None, code: str
 ) -> LocationNode | None:
-    """Find a sibling (same parent) with the same code, case-insensitive.
+    """Find an ACTIVE sibling (same parent) with the same code, case-insensitive.
 
-    Mirrors the ``uq_location_nodes_parent_code`` constraint and also
-    covers the root case (parent_id IS NULL), which the unique constraint
-    can't (NULLs are distinct).
+    Mirrors the ``uq_location_nodes_parent_code`` index and also covers the root
+    case (parent_id IS NULL), which the index can't (NULLs are distinct).
+
+    Deactivated nodes are excluded, exactly as :func:`get_sibling_by_name` excludes
+    them: a retired unit must not reserve its equipment number forever. Both halves
+    are needed — for a ``sub_location`` the name IS the code, so filtering only the
+    name check still left the code check refusing the re-add (``loccode01``).
     """
-    stmt = select(LocationNode).where(func.lower(LocationNode.code) == code.lower())
+    stmt = select(LocationNode).where(
+        func.lower(LocationNode.code) == code.lower(),
+        LocationNode.is_active.is_(True),
+    )
     if parent_id is None:
         stmt = stmt.where(LocationNode.parent_id.is_(None))
     else:
@@ -219,6 +228,143 @@ async def create_production_area(
         parent_id=None,
         flat_category="production",
     )
+
+
+def _slugify_storage_code(name: str) -> str:
+    """A ``STG-`` code derived from a Storage category name (e.g. "Materials
+    Management" → ``STG-MATERIALS-MANAGEMENT``). Same shape as
+    :func:`_slugify_area_code`."""
+    slug = re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-") or "LOCATION"
+    return f"STG-{slug}"[:64]
+
+
+async def create_storage_category(
+    session: AsyncSession,
+    *,
+    room_node_id: uuid.UUID,
+    name: str,
+    group_codes: Collection[str],
+    created_by_user_id: uuid.UUID,
+) -> tuple[LocationNode, list[LocationNode]]:
+    """Create one Storage category and its template groups (LOC-001).
+
+    The category is the level the client calls a "location" — the thing you name
+    "Materials Management". ``group_codes`` are the sub-types it uses, given as
+    the stable codes from :data:`STORAGE_GROUPS` (``SHF``/``REF``/``FRZ``); each
+    becomes a ``room_location`` child carrying that sub-type's default name,
+    which the client may rename afterwards.
+
+    An unused sub-type is simply an absent child — there is no flag to keep in
+    step. Both levels are created together so a category can never exist without
+    the groups it was provisioned with. Caller has already checked the parent is
+    the Storage room and that the caller is a Super Admin. Caller commits."""
+    base = _slugify_storage_code(name)
+    code = base
+    n = 2
+    while await get_sibling_by_code(session, parent_id=room_node_id, code=code) is not None:
+        suffix = f"-{n}"
+        code = f"{base[: 64 - len(suffix)]}{suffix}"
+        n += 1
+    category = await create_node(
+        session,
+        node_type="storage_category",
+        code=code,
+        name=name,
+        created_by_user_id=created_by_user_id,
+        parent_id=room_node_id,
+    )
+    wanted = set(group_codes)
+    groups = [
+        await create_node(
+            session,
+            node_type="room_location",
+            code=group_code,
+            name=default_name,
+            created_by_user_id=created_by_user_id,
+            parent_id=category.id,
+        )
+        # Iterate STORAGE_GROUPS, not the caller's set, so the tabs always come
+        # back in the template's order regardless of what order they were asked
+        # for.
+        for _key, group_code, default_name in STORAGE_GROUPS
+        if group_code in wanted
+    ]
+    return category, groups
+
+
+async def get_child_by_code(
+    session: AsyncSession, *, parent_id: uuid.UUID, code: str, active_only: bool = True
+) -> LocationNode | None:
+    """One child of ``parent_id`` with this code. Used to find a category's
+    template group by its stable code rather than its renameable name.
+
+    ``active_only=False`` finds a soft-deleted group, so re-enabling a sub-type
+    revives the node it had — and the units still hanging off it — instead of
+    creating a second one.
+
+    That inactive search is why the ordering is explicit. Since ``loccode01``
+    made ``uq_location_nodes_parent_code`` partial on ``is_active``, a code is
+    only unique among LIVE siblings: switch a sub-type off, switch it on (which
+    creates a fresh node if the old one is gone), and off again, and one parent
+    can hold several inactive ``REF`` rows. Unordered, ``.first()`` would then
+    revive whichever the planner happened to return. Live first, then newest —
+    so a revive brings back the group most recently in use, with its units."""
+    stmt = select(LocationNode).where(
+        LocationNode.parent_id == parent_id,
+        func.lower(LocationNode.code) == code.lower(),
+    )
+    if active_only:
+        stmt = stmt.where(LocationNode.is_active.is_(True))
+    stmt = stmt.order_by(
+        LocationNode.is_active.desc(),
+        LocationNode.created_at.desc(),
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def count_active_children(session: AsyncSession, parent_id: uuid.UUID) -> int:
+    """How many active children a node has — the guard behind "you can't switch
+    off a sub-type that still holds units"."""
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(LocationNode)
+                .where(
+                    LocationNode.parent_id == parent_id,
+                    LocationNode.is_active.is_(True),
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def list_storage_groups(
+    session: AsyncSession, category_id: uuid.UUID
+) -> list[LocationNode]:
+    """A Storage category's active groups, in TEMPLATE order — Shelf,
+    Refrigerator, Freezer.
+
+    Not code order: that would sort ``FRZ`` before ``SHF`` and put the tabs in an
+    order the requirement doesn't name. The template's order is the client's, so
+    it is applied in Python against :data:`STORAGE_GROUPS`. Anything unexpected
+    under a category (there shouldn't be) sorts last rather than vanishing."""
+    stmt = select(LocationNode).where(
+        LocationNode.parent_id == category_id,
+        LocationNode.is_active.is_(True),
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    order = {code: i for i, (_key, code, _name) in enumerate(STORAGE_GROUPS)}
+    return sorted(rows, key=lambda n: (order.get(n.code.upper(), len(order)), n.name))
+
+
+async def set_node_active(
+    session: AsyncSession, *, node: LocationNode, is_active: bool
+) -> LocationNode:
+    """Soft-delete or revive one node. Caller commits."""
+    node.is_active = is_active
+    await session.flush()
+    return node
 
 
 def _slugify_kanban_code(name: str) -> str:
@@ -408,7 +554,24 @@ async def list_flat(
 
 
 async def node_has_children(session: AsyncSession, node_id: uuid.UUID) -> bool:
-    stmt = select(LocationNode.id).where(LocationNode.parent_id == node_id).limit(1)
+    """Does this node still CONTAIN anything? Only active children count.
+
+    Deletion here is soft, so an inactive child is one that has already been
+    deleted — it does not render, does not appear in any tree, and holds no
+    stock. Counting it meant a node could never be removed once it had ever held
+    a child, however long ago and however empty it looks now: delete the last
+    unit off a shelf and the shelf itself was blocked forever, by contents
+    nobody could see. That stranded real rows on dev.
+
+    The rule this guard exists for — never delete something out from under its
+    contents — is unaffected: a live child still blocks, and the separate lot and
+    ledger-history guards are untouched.
+    """
+    stmt = (
+        select(LocationNode.id)
+        .where(LocationNode.parent_id == node_id, LocationNode.is_active.is_(True))
+        .limit(1)
+    )
     return (await session.execute(stmt)).first() is not None
 
 
@@ -563,24 +726,12 @@ async def node_has_any_allocations(session: AsyncSession, node_id: uuid.UUID) ->
     return (await session.execute(stmt)).first() is not None
 
 
-async def node_has_movement_history(session: AsyncSession, node_id: uuid.UUID) -> bool:
-    """True iff the GxP ledger has a movement referencing this node.
-
-    Movement history now lives in ``app.stock_movements`` (the location
-    system no longer keeps a separate log); a node with ledger history can't
-    be deleted, so its name still resolves on historical rows.
-    """
-    stmt = (
-        select(StockMovement.id)
-        .where(
-            or_(
-                StockMovement.from_location_node_id == node_id,
-                StockMovement.to_location_node_id == node_id,
-            )
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).first() is not None
+# ``node_has_movement_history`` lived here and gated deletion on the GxP ledger
+# referencing a node. Removed 2026-08-12: deletion is SOFT, the row is never
+# dropped, and ``node_label_map`` above reads every node regardless of
+# ``is_active`` — so a deleted location still names itself on every historical
+# movement. The guard protected nothing and made it impossible to decommission
+# any location that had ever been used. See ``delete_node`` for the full note.
 
 
 async def get_active_cell_occupant(

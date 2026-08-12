@@ -205,7 +205,17 @@ def main() -> int:
         else:
             print(f"  !! super-admin login failed ({s}) — falling back")
     s, rooms = _req("GET", "/location-nodes/freezer-tree", token=token)
-    groups = [g for r in (rooms if s == 200 else []) for g in r.get("children", [])]
+    # Storage is excluded: it is the one room with FOUR levels (room → category →
+    # group → unit, REQ-2026-08-04-LOC-001), so its room-level children are
+    # CATEGORIES, not groups. A ``sub_location`` posted under one would be
+    # refused for the wrong reason — ``invalid_parent_type``, before the name
+    # rule is ever reached — and this case would silently stop testing anything.
+    groups = [
+        g
+        for r in (rooms if s == 200 else [])
+        if r.get("code", "").upper() != "STG"
+        for g in r.get("children", [])
+    ]
     hosts = [g for g in groups if g.get("children")]
     if sa_token is None:
         print(

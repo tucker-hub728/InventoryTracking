@@ -151,8 +151,13 @@ class ConsumableIssueRead(BaseModel):
 class AcknowledgeRequest(BaseModel):
     """Clear an expiration flag after the physical check (LOC-008, TX Spec §4.2).
 
-    Not e-signed — 07-09 TRX-006 asks for "a simple acknowledgment", and the
-    quantity does not move. It is recorded in the audit trail all the same.
+    **E-signed** (client 2026-08-12): ``evidence_id``, action
+    ``consumable.expiry_check``, comment optional as everywhere else. 07-09
+    TRX-006 calls this "a simple acknowledgment" and no quantity moves, but the
+    disposition it records is a GxP statement about material — that a lot was
+    discarded, or consumed before its date — so it is attributed under Part 11
+    §11.200 like every other such statement. "Simple" is read as *one step, no
+    quantities to reconcile*, which the dialog still is.
 
     ``disposition`` is §4.2's outcome: the product was ``consumed`` before its
     date, or it is still in the room and has been ``reworked`` / ``retested`` /
@@ -162,6 +167,7 @@ class AcknowledgeRequest(BaseModel):
 
     disposition: Disposition
     note: str | None = Field(default=None, max_length=2048)
+    evidence_id: str
 
 
 class ExpiryPolicyRead(BaseModel):

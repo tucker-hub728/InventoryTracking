@@ -6,6 +6,7 @@ import { AlertTriangle, Pencil } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { EmptyState } from '@/components/shared/empty-state';
+import { DeprecationNotice } from '@/components/shared/deprecation-notice';
 import { NodeContentsSheet } from '@/components/locations/node-contents-sheet';
 import { useHierarchySearch } from '@/components/locations/use-hierarchy-search';
 import { RoomSearch } from '@/components/rooms/room-search';
@@ -219,6 +220,9 @@ export function MaterialsManagementClient({
     <>
       {/* No subtitle — the tabs already name the room's two locations. */}
       <PageHeader title="Materials Management" />
+      {/* Being replaced by the Storage template (LOC-001). A signpost only —
+          nothing on this page changes, and the room is still in daily use. */}
+      <DeprecationNotice id="materials-management" />
 
       <div className="scroll-strip border-b border-border px-6 sm:px-8">
         <nav

@@ -58,6 +58,12 @@ export interface RoomConfig {
   /** Optional line under the toolbar describing what the room holds. Omitted
    *  where the units speak for themselves (client 2026-07-30). */
   hint?: string;
+  /** Marks the room as being replaced by the Storage template
+   *  (REQ-2026-08-04-LOC-001), which shows a dismissible notice under the page
+   *  header. Purely a signpost: it changes NOTHING about what the room can do,
+   *  and the client is still using all three rooms daily (2026-08-12). The
+   *  matching sidebar pill is set independently in ``config/nav.ts``. */
+  deprecated?: boolean;
 }
 
 /**
@@ -87,6 +93,7 @@ export const COLD_STORAGE_ROOM: RoomConfig = {
     fieldLabel: 'Equipment number',
     placeholder: 'e.g. T90020E',
   },
+  deprecated: true,
 };
 
 /**
@@ -116,6 +123,7 @@ export const ANALYTICAL_LAB_ROOM: RoomConfig = {
     placeholder: 'e.g. T90019D',
   },
   hint: 'Nothing is modeled inside a unit — placement inside one is controlled by labeling.',
+  deprecated: true,
 };
 
 /** True iff a location in this room may be renamed — renaming follows adding. */

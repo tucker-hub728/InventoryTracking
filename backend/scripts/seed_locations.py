@@ -53,11 +53,16 @@ from scripts import (
     seed_cold_storage,
     seed_materials_management,
     seed_production,
+    seed_storage,
 )
 from scripts._location_seed import cli
 
-# (heading, plan) — the order rooms appear in the seed output.
+# (heading, plan) — the order rooms appear in the seed output, which matches the
+# sidebar. Storage leads: it is the template-driven room the other three are
+# being replaced by (LOC-001), and the seed output reading in a different order
+# from the navigation is the kind of small mismatch that costs someone an hour.
 AREAS = [
+    ("Storage", seed_storage.plan),
     ("Materials Management", seed_materials_management.plan),
     ("Cold Storage", seed_cold_storage.plan),
     ("Analytical Lab", seed_analytical_lab.plan),

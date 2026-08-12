@@ -133,10 +133,18 @@ export function AddNodeDialog({
 
 export function RenameNodeDialog({
   node,
+  title = 'Rename',
+  description,
   onClose,
   onDone,
 }: {
   node: NodeTree;
+  /** Heading, when "Rename" alone is ambiguous. A Storage location's menu can
+   *  open this for the location OR for the open sub-type, so it says which. */
+  title?: string;
+  /** One line on what the rename affects. Worth passing wherever someone might
+   *  hesitate over whether renaming breaks something. */
+  description?: string;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -169,7 +177,8 @@ export function RenameNodeDialog({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Rename</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
+          {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
         <DialogBody className="space-y-3">
           <div className="space-y-1.5">

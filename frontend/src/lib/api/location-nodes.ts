@@ -27,6 +27,12 @@ export type NodeType =
   | 'room'
   | 'room_location'
   | 'sub_location'
+  // Storage (REQ-2026-08-04-LOC-001): the standard template's CATEGORY, the one
+  // level that makes Storage four deep — room → storage_category →
+  // room_location → sub_location. What the client calls a "location"; its groups
+  // and units are the same two types Cold Storage uses. Created through its own
+  // super-admin route, so it is absent from `CreatableNodeType` below.
+  | 'storage_category'
   // Warehouse area: warehouse → shelf (free leaf)
   | 'warehouse'
   | 'shelf'
@@ -89,6 +95,7 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   cassette: 'Cassette (retired)',
   cryo_box_rack: 'Cryo Box Rack (retired)',
   room: 'Room',
+  storage_category: 'Location',
   room_location: 'Location',
   sub_location: 'Sub-location',
   warehouse: 'Warehouse',
@@ -134,6 +141,11 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   // Materials Management — a room holds Cold Storage locations (LOC-002), each
   // holding its equipment units. The warehouse and its shelves are seeded.
   room: ['room_location'],
+  // A Storage category holds the template's groups, which are ``room_location``
+  // nodes exactly as Cold Storage's are — so a group's units are added with the
+  // same generic create the Cold Storage page uses. The CATEGORY itself is not
+  // creatable this way: it comes with its groups, from its own route.
+  storage_category: ['room_location'],
   room_location: ['sub_location'],
   sub_location: [],
   // LOC-005 fixes Warehouse One's contents at Shelf A through Shelf Z — a closed
@@ -255,6 +267,23 @@ export interface NodeCreateInput {
   dedicated_customer_id?: string | null;
   dedicated_product_id?: string | null;
   notes?: string | null;
+}
+
+/**
+ * Which sub-types a Storage location uses (REQ-2026-08-04-LOC-001).
+ *
+ * All three default to on server-side — the requirement provisions a location
+ * with all three and leaving one out is the exception. At least one is required;
+ * a location with no sub-types has nowhere to put anything.
+ */
+export interface StorageGroupsInput {
+  shelf: boolean;
+  refrigerator: boolean;
+  freezer: boolean;
+}
+
+export interface StorageCategoryInput extends Partial<StorageGroupsInput> {
+  name: string;
 }
 
 export interface GridUpdateInput {
@@ -430,6 +459,22 @@ export const locationNodesApi = {
    *  Free-text name; the `KAN-` code is generated server-side. */
   createKanban: (areaId: string, name: string) =>
     api.post<LocationNode>(`/location-nodes/${areaId}/kanbans`, { json: { name } }),
+
+  /** Provision one Storage location from the standard template (LOC-001) —
+   *  SUPER ADMIN only. The category and the sub-types switched on are created
+   *  together, so the response already carries the groups as `children` and the
+   *  page can render its tabs without a second read. The `STG-` code is
+   *  generated server-side; rename later via {@link rename}. */
+  createStorageCategory: (roomId: string, input: StorageCategoryInput) =>
+    api.post<NodeTree>(`/location-nodes/${roomId}/storage-categories`, { json: input }),
+
+  /** Turn a Storage location's sub-types on or off after the fact (LOC-004) —
+   *  SUPER ADMIN only. Switching one ON revives the group and its units if it
+   *  had been switched off; switching one OFF is refused by the server while it
+   *  still holds units (`storage_group_in_use`). Returns the category with its
+   *  remaining groups nested. */
+  updateStorageGroups: (categoryId: string, input: StorageGroupsInput) =>
+    api.patch<NodeTree>(`/location-nodes/${categoryId}/storage-groups`, { json: input }),
 
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 

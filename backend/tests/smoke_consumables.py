@@ -18,6 +18,9 @@ TRX-001/004/006, PRC-003):
   * the warn / expired boundaries land on the right side of the date
   * acknowledging clears the flag, records the disposition, and still reports
     where and when the material was issued (TRX-006)
+  * acknowledging is E-SIGNED (client 2026-08-12): unsigned is rejected, an
+    issue-verb signature cannot be spent on it, and a signature bound to one
+    register row cannot close out another (VR-006)
   * a non-consumable item is rejected (it belongs on a kit)
   * the production area itself is rejected as a destination
   * a consumable issue is not reversible by any back-flush path (TRX-004)
@@ -39,6 +42,7 @@ BASE = "http://localhost:8000/v1"
 EMAIL = os.environ.get("SMOKE_EMAIL", "admin@cellready.local")
 PASSWORD = os.environ.get("SMOKE_PASSWORD", "ChangeMe!Now123")
 ISSUE_ACTION = "movement.consumable_issue"
+ACK_ACTION = "consumable.expiry_check"
 
 # [passed, failed] — a list so ``check`` mutates without a ``global`` statement
 # (same idiom as smoke_kitting.py).
@@ -81,13 +85,21 @@ def _login() -> str:
     return b["access_token"]
 
 
-def _reauth(token: str, action: str) -> str:
-    s, b = _req(
-        "POST",
-        "/auth/reauth",
-        token=token,
-        json_body={"action": action, "password": PASSWORD},
-    )
+def _reauth(
+    token: str,
+    action: str,
+    *,
+    record_table: str | None = None,
+    record_id: str | None = None,
+) -> str:
+    """Mint one signature. ``record_*`` binds it to the row being signed about
+    (VR-006); unbound evidence still passes the action check, which is what the
+    older flows rely on."""
+    body: dict[str, object] = {"action": action, "password": PASSWORD}
+    if record_table and record_id:
+        body["record_table"] = record_table
+        body["record_id"] = record_id
+    s, b = _req("POST", "/auth/reauth", token=token, json_body=body)
     assert s == 200, b
     return b["evidence_id"]
 
@@ -546,14 +558,73 @@ def main() -> int:
         print("  SKIP  item has only one source lot")
 
     # ── 5. Acknowledge ─────────────────────────────────────────────────
-    print("\n[5] Acknowledge (TRX-006 / §4.2)")
+    print("\n[5] Acknowledge (TRX-006 / §4.2, e-signed)")
     target = reg[0]["id"] if reg else None
     if target:
+        # Unsigned no longer gets in (client 2026-08-12) — the disposition is an
+        # attributable statement about material, so it carries a signature.
+        s, unsigned = _req(
+            "POST",
+            f"/consumables/{target}/acknowledge",
+            token=token,
+            json_body={"disposition": "discarded", "note": "unsigned"},
+        )
+        check("unsigned acknowledge rejected", s == 422, (s, unsigned))
+
+        # A signature minted to ISSUE stock must not be spendable on the
+        # statement that the same stock was later discarded.
+        s, wrong_verb = _req(
+            "POST",
+            f"/consumables/{target}/acknowledge",
+            token=token,
+            json_body={
+                "disposition": "discarded",
+                "evidence_id": _reauth(token, ISSUE_ACTION),
+            },
+        )
+        check("issue signature rejected on acknowledge", s in (401, 403), (s, wrong_verb))
+
+        # VR-006: a signature bound to ANOTHER register row cannot close this
+        # one out, even with the right verb.
+        other = next((r["id"] for r in reg if r["id"] != target), None)
+        if other:
+            s, wrong_row = _req(
+                "POST",
+                f"/consumables/{target}/acknowledge",
+                token=token,
+                json_body={
+                    "disposition": "discarded",
+                    "evidence_id": _reauth(
+                        token,
+                        ACK_ACTION,
+                        record_table="app.consumable_issues",
+                        record_id=other,
+                    ),
+                },
+            )
+            check(
+                "signature bound to another row rejected (VR-006)",
+                s in (401, 403)
+                and wrong_row.get("code") == "reauth_evidence_record_mismatch",
+                (s, wrong_row),
+            )
+        else:
+            print("  SKIP  only one open register row — no VR-006 pair to test")
+
         s, ack = _req(
             "POST",
             f"/consumables/{target}/acknowledge",
             token=token,
-            json_body={"disposition": "discarded", "note": "smoke check"},
+            json_body={
+                "disposition": "discarded",
+                "note": "smoke check",
+                "evidence_id": _reauth(
+                    token,
+                    ACK_ACTION,
+                    record_table="app.consumable_issues",
+                    record_id=target,
+                ),
+            },
         )
         check("acknowledge accepted", s == 200, (s, ack))
         if s == 200:
@@ -569,7 +640,10 @@ def main() -> int:
             "POST",
             f"/consumables/{target}/acknowledge",
             token=token,
-            json_body={"disposition": "consumed"},
+            json_body={
+                "disposition": "consumed",
+                "evidence_id": _reauth(token, ACK_ACTION),
+            },
         )
         check(
             "double acknowledge rejected",
@@ -604,7 +678,11 @@ def main() -> int:
             "POST",
             f"/consumables/{unflagged['id']}/acknowledge",
             token=token,
-            json_body={"disposition": "consumed", "note": "used up early"},
+            json_body={
+                "disposition": "consumed",
+                "note": "used up early",
+                "evidence_id": _reauth(token, ACK_ACTION),
+            },
         )
         check("unflagged row can be acknowledged", s == 200, (s, ack2))
         if s == 200:

@@ -45,7 +45,7 @@ export interface Forest {
  * navigation agree. Anything not named here sorts after, by name — a new room
  * appears without a code change.
  */
-const ROOM_CODE_ORDER = ['MM', 'CS', 'AL'];
+const ROOM_CODE_ORDER = ['STG', 'MM', 'CS', 'AL'];
 
 // ── Cached forest (fetched once, shared across all picker instances) ─────────
 
@@ -582,10 +582,15 @@ function TreeRow({
           <button
             type="button"
             onClick={() => hasChildren && onToggle(node.id)}
-            className={cn(
-              'flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-sm',
-              node.isGroup ? 'font-medium text-text-2' : 'text-text-3',
-            )}
+            // One style for everything you cannot pick. This used to give a
+            // SYNTHETIC group (`grp:ln2`, `grp:production`) heavier, darker text
+            // than a real room — but both kinds sit at the top level as
+            // siblings, and both behave identically: expand to reveal children,
+            // never selectable. The weight tracked whether the app stores a row
+            // or synthesises it, which is invisible to whoever is reading the
+            // list; all it did was make LN2 and Production look pickable when
+            // they are not. Black is reserved for rows you can actually choose.
+            className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-sm text-text-3"
           >
             <span className="truncate">{node.name}</span>
           </button>
