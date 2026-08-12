@@ -73,11 +73,16 @@ def downgrade() -> None:
     # Re-tightening can only fail because of rows this fix allowed. Name them,
     # rather than letting Postgres raise on an index build with no context.
     conn = op.get_bind()
+    # Written out rather than interpolated from ``_TABLE``: a table name cannot
+    # be a bind parameter, so an f-string here reads as string-built SQL and
+    # trips bandit's S608 — a false positive on a constant, but one that costs
+    # either a `noqa` or an entry in pyproject's per-file ignores. The literal is
+    # cheaper than either, and this query is read-only anyway.
     dupes = conn.execute(
         sa.text(
-            f"""
+            """
             SELECT parent_id, code, count(*) AS n
-            FROM {_TABLE}
+            FROM meta.location_nodes
             WHERE parent_id IS NOT NULL
             GROUP BY parent_id, code
             HAVING count(*) > 1
