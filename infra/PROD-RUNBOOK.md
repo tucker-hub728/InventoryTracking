@@ -198,11 +198,23 @@ The app is running but the database is **empty** — you cannot log in yet.
 
 Run these on the EB instance (or locally with prod's `DATABASE_URL` exported), in order:
 
+Every one of these is **idempotent** (a node whose `(parent, code)` already
+exists is skipped), so re-running after a release that adds a new area is safe
+and is how you pick that area up — `seed_locations` runs them all.
+
+> A migration never inserts a location row (`created_by_user_id` is NOT NULL, and
+> the audit trail wants a real owner), so a release that adds a location AREA
+> ships the code but not the rows, and the screen reads "… isn't set up yet"
+> until this step runs. **Storage is not in this list** and needs nothing here:
+> its room is created by the server when the first location is added, precisely
+> so that a missed deploy step cannot strand the screen. Prefer that pattern for
+> any new area whose container the client never names.
+
 ```bash
 # Reference data
 python -m scripts.seed_item_tiers
 python -m scripts.seed_suppliers
-python -m scripts.seed_locations
+python -m scripts.seed_locations       # runs every area below
 python -m scripts.seed_cold_storage
 python -m scripts.seed_analytical_lab
 python -m scripts.seed_materials_management

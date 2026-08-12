@@ -23,6 +23,7 @@ from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
     STORAGE_GROUPS,
+    STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
 )
@@ -236,6 +237,52 @@ def _slugify_storage_code(name: str) -> str:
     :func:`_slugify_area_code`."""
     slug = re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-") or "LOCATION"
     return f"STG-{slug}"[:64]
+
+
+async def get_or_create_storage_room(
+    session: AsyncSession, *, created_by_user_id: uuid.UUID
+) -> LocationNode:
+    """The Storage room, created on first use if it isn't there yet.
+
+    Storage is a fixed screen, not something the client sets up: they never name
+    it, never see it as a row, and cannot have two of them. It exists only
+    because a ``storage_category`` needs a parent. Requiring it to be seeded per
+    environment therefore bought nothing and cost a manual deploy step that, when
+    missed, showed a working page reporting it "isn't set up yet".
+
+    Production makes the same point from the other side: its areas are
+    parent-less roots, so there is no Production room to seed, and nobody has
+    ever had to.
+
+    Creating a ``room`` bypasses the strict ``PARENT_OF`` engine on purpose, the
+    same deliberate exception ``create_production_area`` takes — ``room`` is not
+    in ``CreatableNodeType`` precisely so that nobody can mint one by hand.
+
+    Ordered by ``created_at`` so that if two super admins ever race the very
+    first create, both settle on the same room rather than splitting the tree.
+    Roots cannot be covered by ``uq_location_nodes_parent_code`` (its NULLs are
+    distinct), so this is the guard that keeps them together.
+    """
+    stmt = (
+        select(LocationNode)
+        .where(
+            LocationNode.node_type == "room",
+            func.upper(LocationNode.code) == STORAGE_ROOM_CODE,
+            LocationNode.parent_id.is_(None),
+        )
+        .order_by(LocationNode.created_at)
+    )
+    room = (await session.execute(stmt)).scalars().first()
+    if room is not None:
+        return room
+    return await create_node(
+        session,
+        node_type="room",
+        code=STORAGE_ROOM_CODE,
+        name="Storage",
+        created_by_user_id=created_by_user_id,
+        parent_id=None,
+    )
 
 
 async def create_storage_category(

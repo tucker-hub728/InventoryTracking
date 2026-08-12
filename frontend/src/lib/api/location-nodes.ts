@@ -464,9 +464,13 @@ export const locationNodesApi = {
    *  SUPER ADMIN only. The category and the sub-types switched on are created
    *  together, so the response already carries the groups as `children` and the
    *  page can render its tabs without a second read. The `STG-` code is
-   *  generated server-side; rename later via {@link rename}. */
-  createStorageCategory: (roomId: string, input: StorageCategoryInput) =>
-    api.post<NodeTree>(`/location-nodes/${roomId}/storage-categories`, { json: input }),
+   *  generated server-side; rename later via {@link rename}.
+   *
+   *  Takes no room id: there is only one Storage room, the client never names or
+   *  picks it, and the server creates it on first use. So this works on an
+   *  environment where nothing Storage-related exists yet. */
+  createStorageCategory: (input: StorageCategoryInput) =>
+    api.post<NodeTree>('/location-nodes/storage-categories', { json: input }),
 
   /** Turn a Storage location's sub-types on or off after the fact (LOC-004) —
    *  SUPER ADMIN only. Switching one ON revives the group and its units if it

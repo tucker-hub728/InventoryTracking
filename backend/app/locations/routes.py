@@ -831,7 +831,7 @@ async def add_production_area(
 
 
 @nodes_router.post(
-    "/{node_id}/storage-categories",
+    "/storage-categories",
     response_model=NodeTreeRead,
     status_code=status.HTTP_201_CREATED,
     summary="Create a Storage location from the standard template — super-admin only",
@@ -840,10 +840,15 @@ async def add_production_area(
 async def add_storage_category(
     db: DBSession,
     current: CurrentDbUserDep,
-    node_id: Annotated[uuid.UUID, Path()],
     payload: StorageCategoryCreate,
 ) -> NodeTreeRead:
     """Provision one location in the Storage room (REQ-2026-08-04-LOC-001).
+
+    Takes no parent id, because there is only ever one Storage room and the
+    client neither names it nor chooses it — the server resolves it, creating it
+    on first use. It used to be a seeded row addressed by id here, which meant a
+    release could ship this whole screen and still leave it reporting "isn't set
+    up yet" until someone ran a script by hand on that environment.
 
     The category and its groups are created together, in one transaction, so a
     location can never exist without the sub-types it was provisioned with. The
@@ -855,18 +860,7 @@ async def add_storage_category(
     two spellings of one physical place split its register in half.
     """
     _require_super_admin(current, what="Storage locations")
-    room = await loc_repo.get_node(db, node_id)
-    if room is None:
-        raise NotFoundError(f"Location node {node_id} not found")
-    # ``room`` alone would also match Cold Storage and the Analytical Lab, both
-    # of which are exempt from the template (LOC-002 / LOC-003).
-    if room.node_type != "room" or room.code.upper() != STORAGE_ROOM_CODE:
-        raise ValidationError(
-            "A Storage location is created inside the Storage room.",
-            code="parent_not_storage_room",
-        )
-    if not room.is_active:
-        raise ValidationError("The Storage room is inactive", code="node_inactive")
+    room = await loc_repo.get_or_create_storage_room(db, created_by_user_id=current.id)
     await _require_unique_name(
         db, node_type="storage_category", parent_id=room.id, name=payload.name
     )
