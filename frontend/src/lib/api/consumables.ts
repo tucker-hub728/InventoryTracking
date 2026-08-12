@@ -10,8 +10,9 @@
  *  * expiration keeps being tracked after the quantity is gone (TX Spec §4.3) —
  *    which is what the register below is.
  *
- * Only the issue is e-signed (`evidence_id`); acknowledging a flag is a "simple
- * acknowledgment" per TRX-006 and moves no stock.
+ * Both writes are e-signed (`evidence_id`): the issue, and — since 2026-08-12 —
+ * closing out an expiry check, whose disposition is the only record anywhere of
+ * what happened to the material.
  */
 import { api } from './client';
 import type { CellOption } from './kits';
@@ -131,6 +132,9 @@ export interface IssuedConsumableList {
 export interface AcknowledgeInput {
   disposition: Disposition;
   note?: string | null;
+  /** E-signature minted for `consumable.expiry_check`, bound to the register
+   *  row being closed out. */
+  evidence_id: string;
 }
 
 export interface ExpiryPolicy {
@@ -184,7 +188,8 @@ export const consumablesApi = {
   issue: (input: ConsumableIssueInput) =>
     api.post<ConsumableIssueResult>('/consumables/issue', { json: input }),
 
-  /** Clear a flag after the physical check. Not e-signed (TRX-006). */
+  /** Clear a flag after the physical check. E-signed — action verb:
+   *  `consumable.expiry_check`. */
   acknowledge: (issueId: string, input: AcknowledgeInput) =>
     api.post<IssuedConsumable>(`/consumables/${issueId}/acknowledge`, { json: input }),
 
@@ -197,3 +202,8 @@ export const consumablesApi = {
 
 /** The e-sign action verb the issue dialog must mint evidence for. */
 export const CONSUMABLE_ISSUE_ACTION = 'movement.consumable_issue';
+
+/** The e-sign action verb for closing out an expiry check. Separate from the
+ *  issue verb on purpose: a signature made to issue stock is not a signature
+ *  saying that stock was later discarded, and the backend refuses the swap. */
+export const CONSUMABLE_EXPIRY_CHECK_ACTION = 'consumable.expiry_check';

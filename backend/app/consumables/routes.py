@@ -58,6 +58,11 @@ consumables_router = APIRouter(prefix="/consumables", tags=["consumables"])
 #: by shape only, like every other action (see app/auth/reauth.py).
 ISSUE_ACTION = "movement.consumable_issue"
 
+#: The verb for closing out an expiry flag. Deliberately NOT the issue verb: a
+#: signature minted to move stock into a Kanban must not be spendable on the
+#: statement that the same stock was later discarded.
+ACK_ACTION = "consumable.expiry_check"
+
 
 def _parse_uuid(value: str, *, field: str) -> uuid.UUID:
     try:
@@ -515,8 +520,8 @@ async def issue_to_kanban(
 @consumables_router.post(
     "/{issue_id}/acknowledge",
     response_model=IssuedConsumableRead,
-    summary="Clear an expiration flag after the physical check (LOC-008)",
-    dependencies=[Depends(RequirePermission("inventory", "edit"))],
+    summary="Clear an expiration flag after the physical check (LOC-008, e-signed)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
 )
 async def acknowledge(
     db: DBSession,
@@ -524,14 +529,26 @@ async def acknowledge(
     issue_id: Annotated[uuid.UUID, Path()],
     payload: AcknowledgeRequest,
 ) -> IssuedConsumableRead:
-    """Not e-signed: 07-09 TRX-006 asks for "a simple acknowledgment", and no
-    quantity moves. It is written to the audit trail regardless, so the
-    who/when/why survives.
+    """E-signed (client 2026-08-12), action ``consumable.expiry_check``.
+
+    07-09 TRX-006 asks for "a simple acknowledgment" and no quantity moves,
+    which is why this was originally unsigned. The disposition is what changed
+    the reading: "discarded" / "consumed before its date" is an attributable
+    statement about what happened to material, and it is the ONLY record of
+    that outcome anywhere in the system — the ledger stopped at the issue. Part
+    11 §11.200 wants the person behind such a statement re-identified at the
+    moment they make it. "Simple" is honoured as *one step and no quantities to
+    reconcile*, which the dialog still is.
+
+    Evidence is consumed LAST so a replay rolls the clearing back with it, and
+    the signature is bound to this register row (VR-006) — a ticket minted on
+    one flagged row cannot close out another.
 
     The flag is cleared, never the record — the register keeps saying where and
     when the material was issued, which is the part TRX-006 requires the
     acknowledgment to show.
     """
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
     issue = await cons_repo.get_issue(db, issue_id)
     if issue is None:
         raise NotFoundError(f"Issued consumable {issue_id} not found", code="issue_not_found")
@@ -565,6 +582,19 @@ async def acknowledge(
             "disposition": payload.disposition,
             "note": payload.note,
         },
+        signature_id=evidence_uuid,
+    )
+    # The row this write produced IS the row it was signed about — unlike an
+    # issue, nothing new is created here.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action=ACK_ACTION,
+        target_table="app.consumable_issues",
+        target_id=issue.id,
+        record_table="app.consumable_issues",
+        record_id=issue.id,
     )
     warn_days = await cons_repo.get_warn_days(db)
     reads = await _to_reads(db, [issue], warn_days=warn_days)

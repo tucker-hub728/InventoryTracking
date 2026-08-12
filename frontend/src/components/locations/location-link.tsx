@@ -10,6 +10,7 @@
  *   Materials Management  →  /materials-management/{warehouse|cold-storage}/{id}
  *   Cold Storage          →  /cold-storage/{id}
  *   Analytical Lab        →  /analytical-lab/{id}
+ *   Storage               →  /storage/{category}/{tab}/{id}
  *   LN2                   →  /ln2/{tank}/{quadrant}/{rack}/{box}
  *   Production            →  /production/{id}
  *
@@ -35,6 +36,12 @@ import {
   ANALYTICAL_LAB_ROOM,
   COLD_STORAGE_ROOM,
 } from '@/components/rooms/room-config';
+import {
+  DEFAULT_GROUP_SEGMENT,
+  STORAGE_ROOM_CODE,
+  groupByCode,
+  storageHref,
+} from '@/components/storage/storage-groups';
 import type { KitStatus } from '@/lib/api/kits';
 import {
   nodeChain,
@@ -120,6 +127,24 @@ export function locationHref(
       return `${COLD_STORAGE_ROOM.href}/${node.id}`;
     case ANALYTICAL_LAB_ROOM.code:
       return `${ANALYTICAL_LAB_ROOM.href}/${node.id}`;
+    case STORAGE_ROOM_CODE: {
+      // Storage is the one room four levels deep — room › category › group ›
+      // unit (LOC-001) — so its href needs two ids, not one: the category owns
+      // the page and the group is the tab. Anything shallower opens the page at
+      // whichever tab it can.
+      const real = chain.filter((n) => !n.isGroup);
+      const category = real.find((n) => n.nodeType === 'storage_category');
+      if (!category) return null;
+      // The group is whatever sits between the category and the leaf. Its tab is
+      // found by CODE, which is immutable — the client may rename "Shelf" to
+      // "Racks" without breaking a link already in the ledger.
+      const group = real[real.indexOf(category) + 1];
+      const segment = groupByCode(group?.code)?.segment ?? DEFAULT_GROUP_SEGMENT;
+      // The category itself opens the page; a group opens its tab; a unit opens
+      // its tab with the contents panel up.
+      const isUnit = node.id !== category.id && node.id !== group?.id;
+      return storageHref(category.id, segment, isUnit ? node.id : undefined);
+    }
     default:
       // A room with no page of its own yet. Plain text beats a dead link.
       return null;

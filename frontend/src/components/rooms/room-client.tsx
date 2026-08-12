@@ -30,6 +30,7 @@ import { RoomSearch } from '@/components/rooms/room-search';
 import { LocationGroups } from '@/components/rooms/location-groups';
 import { AddNodeDialog, RenameNodeDialog } from '@/components/rooms/node-dialogs';
 import { canRenameLocation, type RoomConfig } from '@/components/rooms/room-config';
+import { DeprecationNotice } from '@/components/shared/deprecation-notice';
 import { EmptyState } from '@/components/shared/empty-state';
 import { PageHeader } from '@/components/shared/page-header';
 import { Badge } from '@/components/ui/badge';
@@ -152,6 +153,9 @@ export function RoomClient({
   return (
     <>
       <PageHeader title={config.label} subtitle={config.subtitle} />
+      {/* A sibling BELOW the header, not a slot inside it — PageHeader is shared
+          with every screen and has no business knowing about deprecation. */}
+      {config.deprecated && <DeprecationNotice id={config.href.replace(/^\//, '')} />}
 
       <div className="px-6 py-5 sm:px-8">
         {loadError ? (
@@ -169,7 +173,7 @@ export function RoomClient({
           <div className="rounded-lg border border-border bg-bg-elev">
             <EmptyState
               title={`${config.label} isn't set up yet`}
-              hint={`No room with code “${config.code}” exists. Seed it with scripts/seed_locations.py.`}
+              hint={`${config.label} hasn't been created yet. Seed it with scripts/seed_locations.py.`}
             />
           </div>
         ) : (

@@ -21,6 +21,11 @@ NodeType = Literal[
     "cryo_box_rack",
     "box",
     "room",
+    # REQ-2026-08-04-LOC-001 — the standard template's CATEGORY, the level that
+    # makes Storage four deep (storage01). Read-only here: a category comes with
+    # its groups, from ``POST /location-nodes/{room}/storage-categories``, so it
+    # is absent from ``CreatableNodeType`` below.
+    "storage_category",
     "room_location",
     "sub_location",
     "warehouse",
@@ -148,6 +153,56 @@ class KanbanCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+
+
+class StorageCategoryCreate(BaseModel):
+    """Create one Storage location from the standard template (LOC-001).
+
+    The client names it — "Materials Management" — and switches on the sub-types
+    it uses. Each switched-on sub-type becomes a group node the client may rename
+    afterwards; a switched-off one is simply not created, which is what LOC-001
+    means by "may leave any unused: a location without a given sub-type simply
+    does not use it".
+
+    All three default to on, because the requirement provisions a location with
+    all three and leaving one out is the exception. At least one is required —
+    a location with no sub-types has nowhere to put anything.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+    shelf: bool = True
+    refrigerator: bool = True
+    freezer: bool = True
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> StorageCategoryCreate:
+        if not (self.shelf or self.refrigerator or self.freezer):
+            raise ValueError("Choose at least one of shelf, refrigerator or freezer")
+        return self
+
+
+class StorageGroupsUpdate(BaseModel):
+    """Turn a Storage location's sub-types on or off after the fact (LOC-004).
+
+    Switching one ON revives the group node if it was switched off before, so its
+    units come back with it rather than being stranded. Switching one OFF is
+    refused by the route while it still holds units — the alternative is
+    orphaning stock nobody can see.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    shelf: bool
+    refrigerator: bool
+    freezer: bool
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> StorageGroupsUpdate:
+        if not (self.shelf or self.refrigerator or self.freezer):
+            raise ValueError("A location must keep at least one sub-type")
+        return self
 
 
 class GridUpdateRequest(BaseModel):

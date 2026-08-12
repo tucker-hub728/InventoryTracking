@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Boxes,
   Building2,
   Contact,
   Factory,
@@ -32,6 +33,14 @@ export interface NavItem {
    *  enough to use while it's still being built out. Use ``disabled`` instead
    *  when the page shouldn't be reachable at all. */
   comingSoon?: boolean;
+  /** Show a "Deprecated" pill. The row stays fully clickable and everything
+   *  inside keeps working — this marks a module being SUPERSEDED, not one that
+   *  is unfinished or switched off.
+   *
+   *  Distinct from ``comingSoon`` (which renders "WIP", the opposite meaning)
+   *  and emphatically not ``disabled``: the client is still using these rooms
+   *  daily, and the tag is a signpost towards Storage rather than a gate. */
+  deprecated?: boolean;
   /** When true, the nav row renders muted, non-clickable, and exposes
    *  ``disabledReason`` via title + tooltip. Use for modules whose
    *  backend isn't ready yet (LN2, Kanban) — the link target stays in
@@ -129,38 +138,63 @@ export const navSections: readonly NavSection[] = [
     // ``components/rooms/room-config.ts``.
     title: 'Locations',
     items: [
+      // REQ-2026-08-04-LOC-001: the standard location template. Storage leads
+      // the section because it is the room the three below it are being
+      // replaced by — a new location is provisioned here, not there.
+      //
+      // Storage is the one area with FOUR levels: room → category → group →
+      // unit, where the groups are the template's shelf / refrigerator /
+      // freezer. See components/storage/storage-groups.ts.
+      {
+        id: 'storage',
+        label: 'Storage',
+        href: '/storage',
+        icon: Boxes,
+        resource: 'inventory',
+      },
       // REQ-2026-07-15-LOC-005: Warehouse One is a location INSIDE the Materials
       // Management room, not a peer of it — so there is no top-level Warehouse
       // entry. It is a tab on this page, beside the Minus-20 Freezers.
       // /freezer and /warehouse redirect here.
+      //
+      // DEPRECATED 2026-08-12 in favour of Storage. Still fully functional and
+      // still in daily use — the client was explicit that nothing here changes
+      // (see the pill in the sidebar and the notice on the page itself).
       {
         id: 'materials-management',
         label: 'Materials Management',
         href: '/materials-management',
         icon: Warehouse,
         resource: 'inventory',
+        deprecated: true,
       },
       // LOC-002 renamed the Freezer category to Cold Storage, since the same
       // level also holds refrigerators: −20 °C, −80 °C and 2–8 °C. This is the
       // one room where a Super Admin adds a LOCATION as well as its units.
+      // DEPRECATED 2026-08-12 — Storage's template covers the same ground
+      // (LOC-001). Unchanged and fully usable in the meantime.
       {
         id: 'cold-storage',
         label: 'Cold Storage',
         href: '/cold-storage',
         icon: Thermometer,
         resource: 'inventory',
+        deprecated: true,
       },
       // PROVISIONAL room — LOC-005 supersedes REQ-2026-07-09-LOC-002, the only
       // requirement that placed freezers in the Analytical Lab, and does not
       // mention the room. Kept at the client's direction (2026-07-30) on the
       // strength of Q-2026-07-01-002's resolution and the equipment list
       // (T90020A, T90019D), pending an amendment that names it.
+      // DEPRECATED 2026-08-12, alongside the other two rooms. It was already
+      // provisional (see above); Storage supersedes it either way.
       {
         id: 'analytical-lab',
         label: 'Analytical Lab',
         href: '/analytical-lab',
         icon: FlaskRound,
         resource: 'inventory',
+        deprecated: true,
       },
       // The old combined /locations page now lives at /ln2 (redirect kept for
       // bookmarks). LN2 is the one area deeper than three levels:

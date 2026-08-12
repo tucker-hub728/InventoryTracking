@@ -37,7 +37,6 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     Text,
-    UniqueConstraint,
     func,
     text,
 )
@@ -83,6 +82,45 @@ LN2_LEVELS: tuple[str, ...] = (
 #   * ``room_location`` — Cold Storage (LOC-002: −20 °C, −80 °C, 2–8 °C fridges),
 #     whose leaves are the equipment units
 FREEZER_LEVELS: tuple[str, ...] = ("room", "room_location", "sub_location")
+
+# Storage (REQ-2026-08-04-LOC-001/004, the "standardized location template"): the
+# Room → CATEGORY → Group → Unit chain. It is FREEZER_LEVELS with one level
+# inserted above it, and that is the whole point — from the group down, Storage
+# is byte-identical to Cold Storage, so it reuses the same create route, the same
+# dialogs and the same components. The client intends Storage to replace the Cold
+# Storage structure later, so the two are deliberately the same idiom.
+#
+#   Storage            room              the room (seeded, code STG)
+#   └ Materials Mgmt   storage_category  what the client calls a "location"
+#     ├ Shelf          room_location     a template group
+#     │ └ T123213B     sub_location      the equipment unit — stock lives here
+#     ├ Refrigerator   room_location
+#     └ Freezer        room_location
+#
+# The category is a real node rather than a UI facet because LOC-001 says the
+# client "may rename these": a tab you can rename and that carries its own units
+# is a node. Which groups a category uses is simply WHICH GROUP NODES EXIST — an
+# unused sub-type is an absent node, and an empty tab is a group with no
+# children. There is deliberately no flag, no JSON blob and no second source of
+# truth to drift.
+STORAGE_LEVELS: tuple[str, ...] = (
+    "room",
+    "storage_category",
+    "room_location",
+    "sub_location",
+)
+# The room's seeded code. Every screen resolves a room by code, never by
+# position — ``/location-nodes/freezer-tree`` returns them all.
+STORAGE_ROOM_CODE = "STG"
+# The template's three groups, fixed at three (LOC-001 names exactly these).
+# ``(key, code, default name)`` — the CODE is the stable identity used in URLs
+# and to tell the groups apart after a rename; the NAME is the client's to change.
+STORAGE_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("shelf", "SHF", "Shelf"),
+    ("refrigerator", "REF", "Refrigerator"),
+    ("freezer", "FRZ", "Freezer"),
+)
+STORAGE_GROUP_CODES: tuple[str, ...] = tuple(code for _, code, _ in STORAGE_GROUPS)
 # Warehouse (LOC-005): Warehouse One → Shelf (A–Z), the free-storage leaf. A
 # shelf holds units freely — no bins, positions or slots below it. Warehouse One
 # is no longer a root: LOC-005 places it INSIDE the Materials Management room,
@@ -121,6 +159,10 @@ LEGACY_NODE_TYPES: tuple[str, ...] = (
 NODE_TYPES: tuple[str, ...] = (
     *LN2_LEVELS,
     *FREEZER_LEVELS,
+    # Only the level STORAGE_LEVELS adds — the other three it names are already
+    # in FREEZER_LEVELS, and NODE_TYPES drives the CHECK constraint, so a
+    # duplicate would widen the enum with a repeat.
+    "storage_category",
     *WAREHOUSE_LEVELS,
     *KANBAN_LEVELS,
     *LEGACY_NODE_TYPES,
@@ -135,7 +177,13 @@ PARENT_OF: dict[str, tuple[str, ...] | None] = {
     "rack": ("tank_quadrant",),
     "box": ("rack",),
     "room": None,
-    "room_location": ("room",),
+    # LOC-001: a Storage category hangs under the Storage room. The route checks
+    # the parent really is the STG room — ``room`` alone would also match Cold
+    # Storage, which is exempt from the template.
+    "storage_category": ("room",),
+    # A group is a peer of a Cold Storage location; under Storage it hangs off a
+    # category instead of straight off the room. Same type, one level deeper.
+    "room_location": ("room", "storage_category"),
     "sub_location": ("room_location",),
     # LOC-005: Warehouse One is a location INSIDE a room, not a root of its own.
     "warehouse": ("room",),
@@ -213,9 +261,21 @@ class LocationNode(Base):
 
     __tablename__ = "location_nodes"
     __table_args__ = (
-        # Sibling codes are unique under a parent (NULLs distinct, so roots
-        # are checked in the repository instead).
-        UniqueConstraint("parent_id", "code", name="uq_location_nodes_parent_code"),
+        # Sibling codes are unique under a parent, among ACTIVE rows only (NULLs
+        # distinct, so roots are checked in the repository instead).
+        #
+        # Partial on ``is_active`` to match the two NAME indexes from
+        # ``locname01``, so a delete frees a unit's code and its name together
+        # (``loccode01``). It was unconditional until 2026-08-12, which meant a
+        # deleted equipment number could never be re-added — the name was freed,
+        # the code was not, and for a sub_location the name IS the code.
+        Index(
+            "uq_location_nodes_parent_code",
+            "parent_id",
+            "code",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
         Index("ix_location_nodes_parent_id", "parent_id"),
         Index("ix_location_nodes_node_type", "node_type"),
         Index("ix_location_nodes_flat_category", "flat_category"),

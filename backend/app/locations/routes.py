@@ -3,7 +3,8 @@
 Strict validation (Requirements v2 §4.1): the LN2 parent-type rules are
 enforced here on every create; only ``box`` (the grid-bearing leaf) and
 ``flat`` nodes can hold lots; a Box cell is single-occupancy (override-gated);
-deletion is blocked when a node has children, active lots, or ledger history.
+deletion is blocked when a node still contains something or still holds stock —
+but NOT by ledger history, since deletion is soft and old rows keep resolving.
 
 Quantity-changing allocation ops go to the GxP ledger (``app.stock_movements``):
 ``consume`` posts a dispense/discard and ``transfer`` a transfer pair — both
@@ -50,6 +51,8 @@ from app.locations.schemas import (
     PlaceBatchRequest,
     PlaceRequest,
     ProductionAreaCreate,
+    StorageCategoryCreate,
+    StorageGroupsUpdate,
     TransferBatchRequest,
     TransferMultiRequest,
     TransferRequest,
@@ -58,6 +61,8 @@ from app.models.inventory import StockMovement
 from app.models.locations import (
     MAX_QUADRANTS_PER_TANK,
     PARENT_OF,
+    STORAGE_GROUPS,
+    STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
     can_store,
@@ -226,16 +231,20 @@ async def get_ln2_tree(
 @nodes_router.get(
     "/freezer-tree",
     response_model=list[NodeTreeRead],
-    summary="Freezer hierarchy as nested trees (room → location → sub-location)",
+    summary="Room hierarchies as nested trees (room → [category] → location → sub-location)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
 async def get_freezer_tree(
     db: DBSession,
     active_only: Annotated[bool, Query()] = True,
 ) -> list[NodeTreeRead]:
-    from app.models.locations import FREEZER_LEVELS
+    # STORAGE_LEVELS is FREEZER_LEVELS plus ``storage_category``, so one query
+    # still returns every room. Storage's branch simply comes back one level
+    # deeper; the other rooms are unchanged, and each screen picks its own room
+    # out by code.
+    from app.models.locations import STORAGE_LEVELS
 
-    nodes = await loc_repo.list_nodes_by_types(db, FREEZER_LEVELS, active_only=active_only)
+    nodes = await loc_repo.list_nodes_by_types(db, STORAGE_LEVELS, active_only=active_only)
     # Free-storage leaves hold units (SUM qty), not one-per-cell — occupancy is
     # the unit total.
     units = await loc_repo.active_allocation_units_by_node(db)
@@ -644,6 +653,16 @@ async def move_node(
             code="invalid_parent_type",
         )
 
+    # PARENT_OF can only say "a room"; it cannot say WHICH room. Cold Storage and
+    # the Analytical Lab are exempt from the standard template (LOC-002/LOC-003),
+    # so a category under either of them would be a shape no screen renders — the
+    # room pages read their locations straight off the room.
+    if node.node_type == "storage_category" and new_parent.code.upper() != STORAGE_ROOM_CODE:
+        raise ValidationError(
+            f"A Storage location belongs in the Storage room, not in '{new_parent.name}'",
+            code="invalid_parent_room",
+        )
+
     # Dropping a node onto its own descendant would orphan the whole branch from
     # every root — it would still exist, but no tree walk could ever reach it.
     if await loc_repo.is_descendant_of(db, ancestor_id=node.id, candidate_id=new_parent_id):
@@ -706,7 +725,13 @@ async def move_node(
 # This deliberately overrides LOC-003's older sentence that "adding freezers,
 # refrigerators, and LN2 tanks remains available to the appropriate admin role":
 # LOC-006 is the later requirement and was signed off on 2026-07-29.
-SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset({"shelf", "room_location", "sub_location"})
+#   * ``storage_category`` — REQ-2026-08-04-LOC-004, the standard template's
+#     sub-locations are "admin-configurable, consistent with the role-restricted
+#     location administration already defined". Its groups and units are
+#     ``room_location`` / ``sub_location``, so they are already covered above.
+SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset(
+    {"shelf", "room_location", "sub_location", "storage_category"}
+)
 
 # LN2 structure — the second, looser tier. LOC-003 draws an explicit contrast:
 # shelves are "restricted to the Super Admin role", while freezers, refrigerators
@@ -801,6 +826,171 @@ async def add_production_area(
         after=loc_repo.node_to_audit_snapshot(node),
     )
     response = _node_to_read(node)
+    await db.commit()
+    return response
+
+
+@nodes_router.post(
+    "/{node_id}/storage-categories",
+    response_model=NodeTreeRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a Storage location from the standard template — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_storage_category(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: StorageCategoryCreate,
+) -> NodeTreeRead:
+    """Provision one location in the Storage room (REQ-2026-08-04-LOC-001).
+
+    The category and its groups are created together, in one transaction, so a
+    location can never exist without the sub-types it was provisioned with. The
+    response is the new category WITH its groups nested, since that is exactly
+    what the page needs to render its tabs — a bare category would send the
+    client straight back for another read.
+
+    Super-admin only per LOC-004, on the same rationale as LOC-003's shelf rule:
+    two spellings of one physical place split its register in half.
+    """
+    _require_super_admin(current, what="Storage locations")
+    room = await loc_repo.get_node(db, node_id)
+    if room is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+    # ``room`` alone would also match Cold Storage and the Analytical Lab, both
+    # of which are exempt from the template (LOC-002 / LOC-003).
+    if room.node_type != "room" or room.code.upper() != STORAGE_ROOM_CODE:
+        raise ValidationError(
+            "A Storage location is created inside the Storage room.",
+            code="parent_not_storage_room",
+        )
+    if not room.is_active:
+        raise ValidationError("The Storage room is inactive", code="node_inactive")
+    await _require_unique_name(
+        db, node_type="storage_category", parent_id=room.id, name=payload.name
+    )
+    wanted = {
+        code
+        for key, code, _default in STORAGE_GROUPS
+        if getattr(payload, key)
+    }
+    category, groups = await loc_repo.create_storage_category(
+        db,
+        room_node_id=room.id,
+        name=payload.name,
+        group_codes=wanted,
+        created_by_user_id=current.id,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="meta.location_nodes",
+        subject_id=category.id,
+        subject_label=category.name,
+        before=None,
+        after={
+            **loc_repo.node_to_audit_snapshot(category),
+            # The groups are what makes this a TEMPLATE rather than an empty
+            # node, so the audit entry has to say which ones were provisioned.
+            "storage_groups": [g.code for g in groups],
+        },
+    )
+    response = NodeTreeRead(
+        **_node_to_read(category).model_dump(),
+        children=[NodeTreeRead(**_node_to_read(g).model_dump()) for g in groups],
+    )
+    await db.commit()
+    return response
+
+
+@nodes_router.patch(
+    "/{node_id}/storage-groups",
+    response_model=NodeTreeRead,
+    summary="Turn a Storage location's sub-types on or off — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def update_storage_groups(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: StorageGroupsUpdate,
+) -> NodeTreeRead:
+    """Reconfigure which sub-types a Storage location uses (LOC-004).
+
+    Turning one ON revives the group if it existed before — so its units come
+    back with it — and otherwise creates it fresh with the template's default
+    name. Turning one OFF soft-deletes the group, and is REFUSED while it still
+    holds units: switching off a tab that holds stock would hide that stock
+    rather than move it, and the ledger would still count it.
+    """
+    _require_super_admin(current, what="Storage locations")
+    category = await loc_repo.get_node(db, node_id)
+    if category is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+    if category.node_type != "storage_category":
+        raise ValidationError(
+            "Sub-types are configured on a Storage location.",
+            code="node_not_storage_category",
+        )
+
+    before = loc_repo.node_to_audit_snapshot(category)
+    before_groups = [g.code for g in await loc_repo.list_storage_groups(db, category.id)]
+    changed: list[str] = []
+    for key, code, default_name in STORAGE_GROUPS:
+        want = bool(getattr(payload, key))
+        existing = await loc_repo.get_child_by_code(
+            db, parent_id=category.id, code=code, active_only=False
+        )
+        is_on = existing is not None and existing.is_active
+        if want == is_on:
+            continue
+        if want:
+            if existing is None:
+                await loc_repo.create_node(
+                    db,
+                    node_type="room_location",
+                    code=code,
+                    name=default_name,
+                    created_by_user_id=current.id,
+                    parent_id=category.id,
+                )
+            else:
+                await loc_repo.set_node_active(db, node=existing, is_active=True)
+        else:
+            assert existing is not None  # is_on implies it exists
+            units = await loc_repo.count_active_children(db, existing.id)
+            if units:
+                raise ConflictError(
+                    f"'{existing.name}' still holds {units} "
+                    f"{'unit' if units == 1 else 'units'}. Move or remove them before "
+                    f"switching it off.",
+                    code="storage_group_in_use",
+                    details={"group_code": code, "units": units},
+                )
+            await loc_repo.set_node_active(db, node=existing, is_active=False)
+        changed.append(code)
+
+    groups = await loc_repo.list_storage_groups(db, category.id)
+    if changed:
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="updated",
+            subject_table="meta.location_nodes",
+            subject_id=category.id,
+            subject_label=category.name,
+            before={**before, "storage_groups": before_groups},
+            after={
+                **loc_repo.node_to_audit_snapshot(category),
+                "storage_groups": [g.code for g in groups],
+            },
+        )
+    response = NodeTreeRead(
+        **_node_to_read(category).model_dump(),
+        children=[NodeTreeRead(**_node_to_read(g).model_dump()) for g in groups],
+    )
     await db.commit()
     return response
 
@@ -965,10 +1155,49 @@ async def update_node_dedication(
     return response
 
 
+async def _require_node_empty(
+    db: DBSession,
+    node: LocationNode,
+    *,
+    skip_children: bool = False,
+) -> None:
+    """Refuse unless this node holds nothing (§4.1 block rules).
+
+    Three independent reasons a node is not empty, each with its own error code
+    so the UI can say which one applies: it still contains something, it still
+    holds stock, or the ledger refers to it. Errors name the NODE, because a
+    cascade validates several and "cannot delete a node" would not say which.
+    """
+    if not skip_children and await loc_repo.node_has_children(db, node.id):
+        raise ValidationError(
+            f"'{node.name}' still contains other locations", code="node_has_children"
+        )
+    if await loc_repo.node_has_any_allocations(db, node.id):
+        raise ValidationError(
+            f"'{node.name}' still holds stock", code="node_has_active_lots"
+        )
+    # Ledger history deliberately does NOT block (client, 2026-08-12).
+    #
+    # It used to, on the reasoning that a node must survive "so its name still
+    # resolves on historical rows". That reasoning does not apply to a SOFT
+    # delete: ``is_active=false`` hides the node from trees and pickers but never
+    # removes the row, and ``node_label_map`` reads every node regardless of
+    # ``is_active``, so a deleted location still names itself on every movement
+    # it ever appeared on. Nothing in the audit trail changes.
+    #
+    # What the old rule actually did was make decommissioning impossible: every
+    # real freezer picks up history the first time it is used, so only a location
+    # created by mistake and never touched could ever be removed.
+    #
+    # The guards that remain are the ones that protect something real — you
+    # cannot delete a node that still CONTAINS anything, or that still holds
+    # stock.
+
+
 @nodes_router.delete(
     "/{node_id}",
     response_model=NodeRead,
-    summary="Soft-delete a node (blocked if it has children / lots / history)",
+    summary="Soft-delete a node (blocked only if it still holds something; a Storage location takes its empty sub-types with it)",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def delete_node(
@@ -982,17 +1211,46 @@ async def delete_node(
     if not node.is_active:
         return _node_to_read(node)
 
-    # Block rules (§4.1) — strict, no cascade.
-    if await loc_repo.node_has_children(db, node_id):
-        raise ValidationError("Cannot delete a node that has child nodes", code="node_has_children")
-    if await loc_repo.node_has_any_allocations(db, node_id):
-        raise ValidationError(
-            "Cannot delete a node that holds active lots", code="node_has_active_lots"
-        )
-    if await loc_repo.node_has_movement_history(db, node_id):
-        raise ValidationError("Cannot delete a node with ledger history", code="node_has_history")
+    # Deletion is gated exactly as CREATION is — super admin for the room levels
+    # (LOC-003 / LOC-006 / LOC-004), admin for LN2 structure. This route used to
+    # sit on the bare ``inventory:create`` dependency, which operators also hold,
+    # so an operator could remove a Cold Storage unit they were never allowed to
+    # add. Removing a location is not the lesser act.
+    _require_super_admin_for_node_type(current, node.node_type)
+
+    # A Storage location's sub-type groups were put there by the TEMPLATE, not by
+    # hand (LOC-001), so they go with it. "Empty" for a location means it holds no
+    # units anywhere — making the client switch all three sub-types off first
+    # would be ceremony over a structure they never chose to build.
+    #
+    # Every group is held to exactly the same emptiness rules as the location
+    # itself, and they are validated BEFORE anything is written, so a location
+    # with one occupied shelf fails whole rather than half-deleted.
+    cascade: list[LocationNode] = []
+    if node.node_type == "storage_category":
+        cascade = await loc_repo.list_storage_groups(db, node.id)
+        for group in cascade:
+            await _require_node_empty(db, group)
+
+    # ``skip_children`` because the category's children ARE the groups just
+    # cleared above — checking them again would refuse a delete over nodes that
+    # are going with it. Everything else (lots, ledger history) still applies.
+    await _require_node_empty(db, node, skip_children=bool(cascade))
 
     before = loc_repo.node_to_audit_snapshot(node)
+    for group in cascade:
+        group_before = loc_repo.node_to_audit_snapshot(group)
+        deleted_group = await loc_repo.soft_delete_node(db, node=group)
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="deleted",
+            subject_table="meta.location_nodes",
+            subject_id=deleted_group.id,
+            subject_label=deleted_group.name,
+            before=group_before,
+            after=loc_repo.node_to_audit_snapshot(deleted_group),
+        )
     updated = await loc_repo.soft_delete_node(db, node=node)
     await record_entity_change(
         db,

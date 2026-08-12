@@ -176,25 +176,41 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
                     {!collapsed && (
                       <>
                         <span className="truncate">{item.label}</span>
-                        {(item.disabled || item.comingSoon) && (
-                          <span
-                            aria-label="In development"
-                            className="ml-auto rounded-sm bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-3"
-                          >
-                            WIP
-                          </span>
-                        )}
-                        {/* Count of things needing attention. Hidden at zero:
-                            a "0" pill is visual noise that trains people to
-                            ignore the badge that matters. */}
-                        {badgeCount > 0 && (
-                          <span
-                            aria-label={`${badgeCount} needing attention`}
-                            className="ml-auto rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-warning"
-                          >
-                            {badgeCount > 99 ? '99+' : badgeCount}
-                          </span>
-                        )}
+                        {/* One right-hand slot for every pill. Each used to
+                            carry its own `ml-auto`, which only works while
+                            exactly one of them renders — the second would sit
+                            flush against the first. */}
+                        <span className="ml-auto flex shrink-0 items-center gap-1">
+                          {(item.disabled || item.comingSoon) && (
+                            <span
+                              aria-label="In development"
+                              className="rounded-sm bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-3"
+                            >
+                              WIP
+                            </span>
+                          )}
+                          {/* Being replaced, not switched off — the row stays
+                              clickable and everything inside still works. */}
+                          {item.deprecated && (
+                            <span
+                              aria-label="Deprecated — being replaced"
+                              className="rounded-sm bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-warning"
+                            >
+                              Deprecated
+                            </span>
+                          )}
+                          {/* Count of things needing attention. Hidden at zero:
+                              a "0" pill is visual noise that trains people to
+                              ignore the badge that matters. */}
+                          {badgeCount > 0 && (
+                            <span
+                              aria-label={`${badgeCount} needing attention`}
+                              className="rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-warning"
+                            >
+                              {badgeCount > 99 ? '99+' : badgeCount}
+                            </span>
+                          )}
+                        </span>
                       </>
                     )}
                   </>

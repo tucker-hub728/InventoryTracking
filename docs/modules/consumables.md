@@ -23,7 +23,7 @@ CR item (is_consumable)
       · stock_movements: consumable_issue   shelf → Kanban, qty_delta < 0
       · consumable_issues: one row PER SOURCE LOT, carrying its expiration
   → the register flags it as the date approaches / passes
-  → POST /v1/consumables/{id}/acknowledge  after the physical check
+  → POST /v1/consumables/{id}/acknowledge  after the physical check (e-signed)
 ```
 
 ## 2. Kanban is a node, not a flag or a tab
@@ -115,11 +115,32 @@ client.** Deliberately *not* shared with Planning's "expiring within a year"
 horizon (`PLN-003`): different screen, different question.
 
 Clearing captures §4.2's outcomes — `consumed | reworked | retested |
-discarded` — plus who and when. Not e-signed: 07-09 `TRX-006` asks for "a simple
-acknowledgment" and no quantity moves. It is audited regardless. The flag
-clears; the record does not, so the register keeps answering *where and when*
-the material was issued, which is what TRX-006 requires the acknowledgment to
-show.
+discarded` — plus who and when. The flag clears; the record does not, so the
+register keeps answering *where and when* the material was issued, which is what
+TRX-006 requires the acknowledgment to show.
+
+**E-signed** (client 2026-08-12), action `consumable.expiry_check`. It was built
+unsigned on the reading that 07-09 `TRX-006` asks for "a simple acknowledgment"
+and no quantity moves. The disposition is what overturned that: "discarded" /
+"consumed before its date" is an attributable statement about what became of
+material, and it is the **only** record of that outcome anywhere — the ledger
+stopped at the issue, and nothing else ever writes it. Part 11 §11.200 wants the
+person behind such a statement re-identified as they make it. "Simple" is
+honoured as *one step, no quantities to reconcile*, which the dialog still is:
+pick the outcome, sign, done.
+
+Two properties worth keeping when this code is touched:
+
+* the verb is **not** the issue verb. A ticket minted to move stock into a
+  Kanban must not be spendable on the claim that the same stock was later
+  discarded;
+* the signature is bound to the **register row** (`app.consumable_issues`,
+  VR-006) — with several flagged rows open at once, an unbound ticket would
+  close out whichever one the next request named.
+
+The signature's optional comment IS `clear_note`, the same trade the issue
+dialog makes — one place to explain yourself, not two free-text boxes back to
+back. Evidence is consumed last, so a replay rolls the clearing back with it.
 
 ## 5. Open requirement conflict — read before changing behaviour
 
@@ -162,7 +183,7 @@ either way. That is why Kanbans are real nodes rather than a UI grouping.
 | GET | `/v1/consumables/expiring` | `inventory:view` | Cross-Kanban alert feed |
 | GET/PUT | `/v1/consumables/expiry-policy` | `view` / `edit` | `warn_days` |
 | POST | `/v1/consumables/issue` | `inventory:sign` | **E-signed** `movement.consumable_issue` |
-| POST | `/v1/consumables/{id}/acknowledge` | `inventory:edit` | Not e-signed (TRX-006) |
+| POST | `/v1/consumables/{id}/acknowledge` | `inventory:sign` | **E-signed** `consumable.expiry_check`, bound to the register row |
 | POST | `/v1/location-nodes/{id}/kanbans` | `inventory:create` + **super admin** | Add a Kanban |
 
 Route order matters: every literal path is declared before `/{issue_id}/…`, or
@@ -178,7 +199,7 @@ both the issue dialog's destination picker and the floor's Kanban tab.
 | Issue to Kanban | `components/inventory/issue-to-kanban-dialog.tsx` | On the CR drill-down, next to Transfer. Only for `is_consumable`; reuses `LotSourcePicker` for multi-lot |
 | Kanban tab | `components/production/kanban-panel.tsx` | Fourth tab on a production floor, grouped apart from the three kit-state tabs |
 | Add kanban | same file | Super-admin only, mirrors the "Add area" button |
-| Acknowledge | same file + `components/consumables/expiring-client.tsx` | Restates where/when issued (TRX-006) |
+| Acknowledge | `components/consumables/acknowledge-dialog.tsx`, used by both | Restates where/when issued (TRX-006), then `PasswordReauthDialog` |
 | Expiring feed | `app/(app)/consumables/page.tsx` | Cross-area alert list + the warning-period setting |
 
 Two UI notes worth keeping:
