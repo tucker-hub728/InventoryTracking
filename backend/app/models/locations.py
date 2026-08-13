@@ -211,6 +211,25 @@ MAX_QUADRANTS_PER_TANK = 4
 # freezer sub-locations and warehouse shelves are free (qty) storage leaves.
 STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
 
+# The only node type that may carry ``is_scrap`` (issue01) — a LOCATION, the
+# level the client names "PD" or "QC 1".
+#
+# Debit-and-gone (REQ-2026-08-04-TRX-001/002) is a TRANSACTION, not a location
+# type: the client's rule is that one physical area supports both actions, and
+# which happened is the operator's choice, not the destination's nature —
+#
+#     Transfer → QC 1 › Freezer 1     stock stays tracked at the new node
+#     Issue    → QC 1                 stock leaves controlled inventory
+#
+# So a scrap location is an ORDINARY ``storage_category``: same page, same
+# template groups, and it still RECEIVES transfers into its shelves and freezers.
+# ``is_scrap`` decides one thing only — whether Issue may target it.
+#
+# That the two destination sets are DISJOINT is what makes "issued and stored"
+# unrepresentable rather than merely rejected: a transfer takes a
+# STORAGE_NODE_TYPES node, an issue takes this one, and no node is both.
+SCRAP_NODE_TYPE = "storage_category"
+
 # Node types that carry a configurable rows×cols grid. Only the Box.
 GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
 
@@ -248,6 +267,16 @@ def is_kanban_node(node_type: str) -> bool:
     """True iff a node of this type is a Kanban station (LOC-006) — the only
     legal destination for a consumable issue."""
     return node_type in KANBAN_LEVELS
+
+
+def is_scrap_location(node: LocationNode) -> bool:
+    """True iff this node is a debit-and-gone destination (TRX-001/002).
+
+    Both halves are checked, not just the flag: the node type is what keeps the
+    Issue and Transfer destination sets disjoint, and a CHECK constraint alone
+    would not stop a caller reading the flag off the wrong row.
+    """
+    return bool(node.is_scrap) and node.node_type == SCRAP_NODE_TYPE
 
 
 class LocationNode(Base):
@@ -312,6 +341,14 @@ class LocationNode(Base):
             "(grid_rows IS NULL OR grid_rows >= 1) " "AND (grid_cols IS NULL OR grid_cols >= 1)",
             name="ck_location_nodes_grid_positive",
         ),
+        # Only a LOCATION can be a scrap destination (issue01). Marking a shelf,
+        # a box or a room would put a node in the Issue destination list that is
+        # simultaneously a legal TRANSFER target — the exact ambiguity the
+        # disjoint-destination rule exists to prevent.
+        CheckConstraint(
+            f"NOT is_scrap OR node_type = '{SCRAP_NODE_TYPE}'",
+            name="ck_location_nodes_scrap_category_only",
+        ),
         # Quadrant dedication: at most one of customer / product, and only on a
         # tank_quadrant. Advisory — placement is never blocked by it.
         CheckConstraint(
@@ -352,6 +389,9 @@ class LocationNode(Base):
     code: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+    # Debit-and-gone marker (REQ-2026-08-04-TRX-001/002, issue01) — see
+    # :func:`is_scrap_location`. Set at creation, immutable afterwards.
+    is_scrap: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("FALSE"))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Grid dimensions — only a Box carries them (CHECK above). A Box under a
     # Cassette is single-column (grid_cols = 1, enforced in the route).

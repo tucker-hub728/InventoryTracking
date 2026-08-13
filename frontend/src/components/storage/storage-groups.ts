@@ -114,6 +114,26 @@ export const STORAGE_GROUPS: readonly StorageGroup[] = [
 
 export const GROUP_SEGMENTS: readonly string[] = STORAGE_GROUPS.map((g) => g.segment);
 
+/**
+ * The disposition-log tab on a scrap location (REQ-2026-08-04-TRX-001/002).
+ *
+ * Not a StorageGroup, and deliberately not in {@link STORAGE_GROUPS}: every
+ * entry there is backed by a real ``room_location`` node the client can rename,
+ * switch off and put units into. This tab is backed by ledger history and holds
+ * nothing. Adding a fake fourth group to get a fourth tab would be modelling
+ * debit-and-gone as a location sub-type, which is exactly what the client ruled
+ * out — it is a transaction, and this tab shows the transactions.
+ *
+ * It appears only when the location's ``is_scrap`` is true.
+ */
+export const ISSUED_SEGMENT = 'issued';
+
+/** Every segment the ``/storage/{id}/{tab}`` route accepts. The route validates
+ *  the SHAPE of the URL; whether this particular location has that tab is a
+ *  question about data the server component has not loaded, and the client
+ *  redirects if not. */
+export const STORAGE_SEGMENTS: readonly string[] = [...GROUP_SEGMENTS, ISSUED_SEGMENT];
+
 /** The tab a bare category URL opens on. Not necessarily present — a location
  *  may have Shelf switched off — so callers fall back to its first group. */
 export const DEFAULT_GROUP_SEGMENT = STORAGE_GROUPS[0]!.segment;

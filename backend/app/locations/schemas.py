@@ -167,6 +167,15 @@ class StorageCategoryCreate(BaseModel):
     All three default to on, because the requirement provisions a location with
     all three and leaving one out is the exception. At least one is required —
     a location with no sub-types has nowhere to put anything.
+
+    ``is_scrap`` marks it a debit-and-gone destination (REQ-2026-08-04-TRX-001/
+    002) — the client's PD, R&D and QC labs. It is asked here and only here: the
+    flag is immutable after creation, because turning it on later would leave
+    stock sitting in a place now meant to consume everything sent to it, and
+    turning it off would imply already-issued material has a home. It does NOT
+    change the location's structure — a scrap location keeps its sub-types and
+    still receives transfers into them; it only becomes eligible as an Issue
+    destination.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -175,9 +184,17 @@ class StorageCategoryCreate(BaseModel):
     shelf: bool = True
     refrigerator: bool = True
     freezer: bool = True
+    is_scrap: bool = False
 
     @model_validator(mode="after")
     def _at_least_one(self) -> StorageCategoryCreate:
+        # "A location with no sub-types has nowhere to put anything" — true of a
+        # normal location, and precisely NOT true of a scrap one, where the
+        # location itself is the destination and nothing is ever put down. So a
+        # scrap location may have none, and forcing the client to tick a
+        # refrigerator they will never use would be inventing structure.
+        if self.is_scrap:
+            return self
         if not (self.shelf or self.refrigerator or self.freezer):
             raise ValueError("Choose at least one of shelf, refrigerator or freezer")
         return self
@@ -190,6 +207,11 @@ class StorageGroupsUpdate(BaseModel):
     units come back with it rather than being stranded. Switching one OFF is
     refused by the route while it still holds units — the alternative is
     orphaning stock nobody can see.
+
+    "Keep at least one" is enforced in the ROUTE rather than here, because it
+    depends on the category: a scrap location is allowed to keep none (see
+    :class:`StorageCategoryCreate`), and this schema cannot see which kind it is
+    being applied to.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -197,12 +219,6 @@ class StorageGroupsUpdate(BaseModel):
     shelf: bool
     refrigerator: bool
     freezer: bool
-
-    @model_validator(mode="after")
-    def _at_least_one(self) -> StorageGroupsUpdate:
-        if not (self.shelf or self.refrigerator or self.freezer):
-            raise ValueError("A location must keep at least one sub-type")
-        return self
 
 
 class GridUpdateRequest(BaseModel):
@@ -240,6 +256,9 @@ class NodeRead(BaseModel):
     code: str
     name: str
     is_active: bool
+    # Debit-and-gone destination (issue01). Only ever true on a
+    # ``storage_category``; the UI badges it and the Issue dialog lists it.
+    is_scrap: bool = False
     notes: str | None
     grid_rows: int | None = None
     grid_cols: int | None = None

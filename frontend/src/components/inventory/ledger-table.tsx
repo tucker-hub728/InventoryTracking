@@ -93,6 +93,10 @@ const TXN_LABEL: Record<MovementType, { label: string; tone: BadgeTone }> = {
   // Consumable issued to a Kanban (TRX-003). Terminal for quantity like a kit
   // issue, so it carries the same "stock left" tone.
   consumable_issue: { label: 'Issued', tone: 'danger' },
+  // Debit-and-gone to PD / R&D / QC (TRX-001/002). Labelled "Issued out" rather
+  // than "Issued" so it reads apart from the Kanban issue above it — in a ledger
+  // the two would otherwise be one word covering two transactions.
+  material_issue: { label: 'Issued out', tone: 'danger' },
 };
 
 function TransactionCell({ entry }: { entry: LedgerEntry }) {

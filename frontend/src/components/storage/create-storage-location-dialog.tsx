@@ -3,15 +3,29 @@
 /**
  * Create one location from the standard template (REQ-2026-08-04-LOC-001).
  *
- * Name it, then switch on the sub-types it uses. All three start ON: the
- * requirement provisions a location with all three, and leaving one out is the
- * exception rather than the rule. A switched-off sub-type is simply not created
- * — "a location without a given sub-type simply does not use it".
+ * Name it, choose what happens to material sent there, then switch on the
+ * sub-types it uses. All three sub-types start ON: the requirement provisions a
+ * location with all three, and leaving one out is the exception rather than the
+ * rule. A switched-off sub-type is simply not created — "a location without a
+ * given sub-type simply does not use it".
  *
  * The switches are not a setting stored against the location; each one that is
  * on becomes a real group node the client may rename afterwards. That is why
  * they can be changed later (the ⋯ menu on the location) rather than being
  * frozen at creation.
+ *
+ * The **debit-and-gone** choice (REQ-2026-08-04-TRX-001/002) is the opposite: it
+ * IS frozen at creation, because it changes what a transaction to this place
+ * MEANS. Turning it on later would leave stock sitting somewhere now supposed to
+ * consume everything sent to it; turning it off would imply already-issued
+ * material has a home. So it is asked here, once, and the server refuses to
+ * change it afterwards.
+ *
+ * Note what the choice does NOT do: a scrap location is still an ordinary
+ * location. It may carry shelves, refrigerators and freezers, and stock can be
+ * TRANSFERRED into those and stay tracked. What the flag adds is that the
+ * location itself becomes a legal ISSUE destination — and issuing is what
+ * removes material from inventory.
  *
  * Super-Admin-only (LOC-004). The API enforces it; the caller decides whether to
  * render the control at all.
@@ -51,6 +65,7 @@ export function CreateStorageLocationDialog({
   onDone: () => void;
 }) {
   const [name, setName] = React.useState('');
+  const [isScrap, setIsScrap] = React.useState(false);
   const [enabled, setEnabled] = React.useState<Record<string, boolean>>(
     () => Object.fromEntries(STORAGE_GROUPS.map((g) => [g.key, true])),
   );
@@ -73,7 +88,9 @@ export function CreateStorageLocationDialog({
       setError(`“${v}” is already a location in Storage.`);
       return;
     }
-    if (chosen.length === 0) {
+    // A scrap location may have none: the location IS the destination, so there
+    // is nothing to put anywhere. Mirrors the server's own relaxation.
+    if (chosen.length === 0 && !isScrap) {
       setError('Choose at least one sub-type — a location needs somewhere to put things.');
       return;
     }
@@ -82,6 +99,7 @@ export function CreateStorageLocationDialog({
     try {
       await locationNodesApi.createStorageCategory({
         name: v,
+        is_scrap: isScrap,
         ...Object.fromEntries(STORAGE_GROUPS.map((g) => [g.key, Boolean(enabled[g.key])])),
       });
       // Receipt Admin and kitting cache the destination tree for the session, so
@@ -89,7 +107,9 @@ export function CreateStorageLocationDialog({
       // Every mutation of the location structure has to do this.
       invalidateLocationForest();
       toast.success('Location created', {
-        description: `${v} — ${chosen.map((g) => g.defaultName).join(', ')}`,
+        description: isScrap
+          ? `${v} — material issued here leaves inventory`
+          : `${v} — ${chosen.map((g) => g.defaultName).join(', ')}`,
       });
       onDone();
     } catch (err) {
@@ -128,8 +148,59 @@ export function CreateStorageLocationDialog({
             />
           </div>
 
+          {/* The debit-and-gone choice (REQ-2026-08-04-TRX-001/002). Two radio
+              options rather than one checkbox: "scrap" is not a modifier on a
+              normal location, it is a decision about what a transaction here
+              means, and stating both outcomes side by side is what makes the
+              consequence legible before it is frozen. */}
           <div className="space-y-2">
-            <p className="text-xs font-medium text-text-2">Sub-types this location uses</p>
+            <p className="text-xs font-medium text-text-2">Material sent to this location</p>
+            <ul className="divide-y divide-border rounded-lg border border-border">
+              {[
+                {
+                  scrap: false,
+                  title: 'Stays in inventory',
+                  hint: 'Stock transferred here is still tracked, in the shelf, refrigerator or freezer it goes to.',
+                },
+                {
+                  scrap: true,
+                  title: 'Leaves inventory when issued',
+                  hint: 'For PD, R&D and QC labs. Material issued to this location is removed from inventory permanently — it cannot be returned or transferred back.',
+                },
+              ].map((opt) => (
+                <li key={String(opt.scrap)}>
+                  <label
+                    className="flex cursor-pointer items-start gap-3 px-3 py-2.5"
+                    htmlFor={`storage-disposition-${opt.scrap}`}
+                  >
+                    <input
+                      id={`storage-disposition-${opt.scrap}`}
+                      type="radio"
+                      name="storage-disposition"
+                      className="mt-0.5 accent-accent"
+                      checked={isScrap === opt.scrap}
+                      onChange={() => setIsScrap(opt.scrap)}
+                    />
+                    <span className="flex flex-col gap-0.5">
+                      <span className="text-sm text-text">{opt.title}</span>
+                      <span className="text-xs text-text-3">{opt.hint}</span>
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            {isScrap && (
+              <p className="text-xs text-warning">
+                This cannot be changed after the location is created.
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs font-medium text-text-2">
+              Sub-types this location uses
+              {isScrap && <span className="font-normal text-text-3"> (optional)</span>}
+            </p>
             <ul className="divide-y divide-border rounded-lg border border-border">
               {STORAGE_GROUPS.map((g) => {
                 const Icon = g.icon;
@@ -159,10 +230,14 @@ export function CreateStorageLocationDialog({
                 switches concrete rather than abstract. */}
             <p className="text-xs text-text-3">
               {chosen.length === 0
-                ? 'Choose at least one — a location needs somewhere to put things.'
+                ? isScrap
+                  ? 'None — material is issued to the location itself, so it needs nowhere to put things.'
+                  : 'Choose at least one — a location needs somewhere to put things.'
                 : `Creates ${chosen.length} ${chosen.length === 1 ? 'tab' : 'tabs'}: ${chosen
                     .map((g) => g.defaultName)
-                    .join(', ')}. Each starts empty and can be renamed.`}
+                    .join(', ')}. Each starts empty and can be renamed.${
+                    isScrap ? ' Stock can still be transferred into these.' : ''
+                  }`}
             </p>
           </div>
 
@@ -180,7 +255,7 @@ export function CreateStorageLocationDialog({
             type="button"
             variant="primary"
             onClick={submit}
-            disabled={busy || chosen.length === 0}
+            disabled={busy || (chosen.length === 0 && !isScrap)}
           >
             {busy ? 'Creating…' : 'Create'}
           </Button>

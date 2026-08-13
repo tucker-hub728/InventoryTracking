@@ -34,6 +34,7 @@ import { cn } from '@/lib/utils';
 import { CreateStorageLocationDialog } from './create-storage-location-dialog';
 import {
   DEFAULT_GROUP_SEGMENT,
+  ISSUED_SEGMENT,
   STORAGE_GROUPS,
   STORAGE_ROOM_CODE,
   groupByCode,
@@ -228,7 +229,14 @@ function CategoryCard({ category }: { category: NodeTree }) {
   const groups = category.children ?? [];
   // Open on the location's FIRST group rather than the template's first — a
   // location with Shelf switched off has no `shf` tab to land on.
-  const firstSegment = groupByCode(groups[0]?.code)?.segment ?? DEFAULT_GROUP_SEGMENT;
+  // A scrap location opens on its disposition log: what was issued to it IS the
+  // point of the place, and its sub-type tabs — which it may not even have — are
+  // one click away. For a normal location, the first group it actually has;
+  // landing on the template's first tab would 404 into a redirect on a location
+  // with Shelf switched off.
+  const firstSegment = category.is_scrap
+    ? ISSUED_SEGMENT
+    : (groupByCode(groups[0]?.code)?.segment ?? DEFAULT_GROUP_SEGMENT);
 
   const stock = groups.reduce(
     (sum, g) => sum + (g.children ?? []).reduce((s, l) => s + l.active_allocation_count, 0),
@@ -251,28 +259,51 @@ function CategoryCard({ category }: { category: NodeTree }) {
                 it. */}
             <p className="truncate text-sm font-medium text-text">{category.name}</p>
             <p className="mt-0.5 text-xs text-text-3">
+              {/* The unit count, on a scrap location too. What a scrap location
+                  DOES with issued material is the badge's job; this line is
+                  still "what is physically in here", and a scrap location can
+                  legitimately hold transferred stock in its sub-types. Blanking
+                  it made held units belong to no visible location. */}
               {units === 0
-                ? 'No units yet'
+                ? category.is_scrap && groups.length === 0
+                  ? 'Disposition only'
+                  : 'No units yet'
                 : `${units} ${units === 1 ? 'unit' : 'units'}`}
             </p>
           </div>
           {/* What the card is really for: telling a location that holds
-              something from one that does not, without reading three rows. */}
-          {stock > 0 ? (
-            <Badge tone="accent">{stock.toLocaleString()} in stock</Badge>
-          ) : (
-            <span className="shrink-0 text-[11px] font-medium uppercase tracking-wide text-text-3">
-              Empty
-            </span>
-          )}
+              something from one that does not, without reading three rows.
+              A scrap location shows BOTH — the badge says what an ISSUE here
+              does, the count says what is currently HELD here. They are
+              different facts and the badge must not swallow the number, or the
+              page's own "Stock on hand" total stops reconciling with its cards. */}
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            {category.is_scrap && <Badge tone="warning">Debit-and-gone</Badge>}
+            {stock > 0 ? (
+              <Badge tone="accent">{stock.toLocaleString()} in stock</Badge>
+            ) : (
+              !category.is_scrap && (
+                <span className="text-[11px] font-medium uppercase tracking-wide text-text-3">
+                  Empty
+                </span>
+              )
+            )}
+          </div>
         </div>
 
         {groups.length === 0 ? (
           // A location whose sub-types were all switched off. Three "not used"
           // rows would describe it accurately and tell you nothing about what to
           // do, so it says the one thing that matters.
+          //
+          // For a SCRAP location that is not a misconfiguration at all — the
+          // location itself is the destination, and the create dialog offers
+          // exactly this. Telling its admin to "switch one on" would send them
+          // to build storage the design says they do not need.
           <p className="border-t border-border px-4 py-3 text-xs text-text-3">
-            No sub-types — switch one on from the location’s menu.
+            {category.is_scrap
+              ? 'No storage sub-types — material is issued to the location itself.'
+              : 'No sub-types — switch one on from the location’s menu.'}
           </p>
         ) : (
           <dl className="mt-auto space-y-1.5 border-t border-border px-4 py-3">

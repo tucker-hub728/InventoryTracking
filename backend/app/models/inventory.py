@@ -751,6 +751,18 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     # back-flush, per 07-09 TRX-004. Expiration keeps being tracked afterwards
     # through ``app.consumable_issues`` (Transaction Spec §4.3).
     "consumable_issue",
+    # Debit-and-gone issue to a scrap location (REQ-2026-08-04-TRX-001/002,
+    # issue01). Unit-OUT from a storage node INTO the LOCATION it was issued to —
+    # PD, R&D, a QC lab. Terminal: no allocation is created at the destination
+    # and nothing back-flushes it, exactly like ``customer_shipment``.
+    #
+    # BOTH ends are set, unlike ``customer_shipment``, because "issued to QC 1"
+    # and "issued to PD" are different dispositions and the ledger has to say
+    # which one happened. Spelled ``material_issue`` rather than ``issue`` so it
+    # can never be misread as ``consumable_issue`` — that one is a consumable
+    # going to a Kanban and keeps an expiration flag; this one is any item
+    # leaving controlled inventory and keeps nothing.
+    "material_issue",
 )
 
 

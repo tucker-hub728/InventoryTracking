@@ -26,6 +26,11 @@ export interface PNode {
   code: string;
   nodeType: string;
   canStore: boolean;
+  /** Debit-and-gone location (TRX-001/002). Only ever true on a
+   *  `storage_category`, and never on anything selectable in this picker — a
+   *  location is not a storage node. Carried so a LINK to this node can open its
+   *  disposition log rather than a storage tab. */
+  isScrap: boolean;
   isGroup: boolean;
   area: LocationArea | null;
   /** Real breadcrumb (excludes any synthetic group), e.g. "Warehouse One › Shelf A". */
@@ -69,6 +74,7 @@ function convertTree(
     code: n.code,
     nodeType: n.node_type,
     canStore: n.can_store,
+    isScrap: Boolean(n.is_scrap),
     isGroup: false,
     area,
     path: path.join(' › '),
@@ -136,6 +142,9 @@ async function buildForest(): Promise<Forest> {
       code: '',
       nodeType: 'group',
       canStore: false,
+      // A synthetic heading, not a real node — it can be neither storage nor a
+      // debit-and-gone destination.
+      isScrap: false,
       isGroup: true,
       area,
       path: '',

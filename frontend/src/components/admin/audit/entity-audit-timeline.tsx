@@ -141,6 +141,14 @@ const MOVEMENT_ICON: Record<MovementType, IconStyle> = {
     tint: 'text-warning',
     pill: 'border-warning/30 bg-warning/5 text-warning',
   },
+  // Debit-and-gone to PD / R&D / QC (TRX-001/002). Leaves controlled inventory
+  // for good, like a shipment — so it takes the shipment's tint rather than the
+  // Kanban issue's, even though it shares that one's "into a named place" shape.
+  material_issue: {
+    Icon: ArrowUpFromLine,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
 };
 
 // Kit audit operations → icon + tint (per-item history for built AY/FG items).
@@ -499,6 +507,13 @@ function MovementRow({
     if (movement.movement_type === 'customer_shipment') {
       const cust = movement.customer_name ?? 'Catalog (no customer)';
       return fromCode ? `from ${fromCode} → ${cust}` : `→ ${cust}`;
+    }
+    // An issue also leaves inventory, but its destination IS a location, so the
+    // plain "from → to" below would read as a transfer. Say where it went out
+    // to, so nobody mistakes the destination for a place holding stock.
+    if (movement.movement_type === 'material_issue') {
+      const dest = toCode ?? 'a location';
+      return fromCode ? `from ${fromCode} → out to ${dest}` : `→ out to ${dest}`;
     }
     if (fromCode && toCode) return `${fromCode} → ${toCode}`;
     if (toCode) return `into ${toCode}`;

@@ -69,8 +69,15 @@ export function ConfigureGroupsDialog({
   const chosen = STORAGE_GROUPS.filter((g) => enabled[g.key]);
   const dirty = STORAGE_GROUPS.some((g) => Boolean(enabled[g.key]) !== state.has(g.code));
 
+  // A scrap location may keep NONE — the location itself is the destination, so
+  // it needs nowhere to put things. The create dialog already allows that, and
+  // the server relaxes its own at-least-one rule for a scrap category; without
+  // the same relaxation here a location could be CREATED with zero sub-types and
+  // then never returned to zero, which is a state the UI can reach but not undo.
+  const mayBeEmpty = Boolean(category.is_scrap);
+
   const submit = async () => {
-    if (chosen.length === 0) {
+    if (chosen.length === 0 && !mayBeEmpty) {
       setError('A location must keep at least one sub-type.');
       return;
     }
@@ -84,7 +91,10 @@ export function ConfigureGroupsDialog({
       });
       invalidateLocationForest();
       toast.success('Sub-types updated', {
-        description: `${category.name} — ${chosen.map((g) => g.defaultName).join(', ')}`,
+        description:
+          chosen.length === 0
+            ? `${category.name} — no sub-types; material is issued to the location itself`
+            : `${category.name} — ${chosen.map((g) => g.defaultName).join(', ')}`,
       });
       onDone();
     } catch (err) {
@@ -165,7 +175,7 @@ export function ConfigureGroupsDialog({
             type="button"
             variant="primary"
             onClick={submit}
-            disabled={busy || !dirty || chosen.length === 0}
+            disabled={busy || !dirty || (chosen.length === 0 && !mayBeEmpty)}
           >
             {busy ? 'Saving…' : 'Save'}
           </Button>
