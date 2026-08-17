@@ -2614,6 +2614,18 @@ function ReturnExcessDialog({
   const setRow = (key: string, patch: Partial<ReturnRow>) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
 
+  /** Cells the OTHER rows already claim in the box ``r`` is returning to. Two
+   *  rows may return to one box (two lots, or one lot split) but never to the
+   *  same physical position; nothing on the server knows about a claim until
+   *  this is submitted. The same guard close-out (``reservedFor``) and the
+   *  transfer dialog already apply. */
+  const reservedFor = (r: ReturnRow) =>
+    new Set(
+      rows
+        .filter((x) => x.key !== r.key && x.isBox && x.node === r.node)
+        .flatMap((x) => x.cells),
+    );
+
   const totalReturn = rows.reduce((s, r) => s + rowEff(r), 0);
   const ready =
     rows.length > 0 &&
@@ -2731,6 +2743,7 @@ function ReturnExcessDialog({
                               onResolved={(isBox) => {
                                 if (isBox !== r.isBox) setRow(r.key, { isBox, cells: [], qty: isBox ? null : cap });
                               }}
+                              reserved={reservedFor(r)}
                               derive
                             />
                             {!r.isBox && (

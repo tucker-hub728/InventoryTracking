@@ -71,9 +71,12 @@ export function CellGridPicker({
   onChange: (next: string[]) => void;
   /** Cap on how many may be selected — the quantity being moved. */
   max?: number;
-  /** `"row:col"` cells claimed by ANOTHER picker on the same box in this form
-   *  (a split-output row, a back-flush line). Blocked in `destination` mode so
-   *  two placements can't fight over one physical cell. */
+  /** Cells claimed by ANOTHER picker on the same box in this form (a
+   *  split-output row, a back-flush line, a second transfer row drawing on the
+   *  same box). Blocked, so two rows can't fight over one physical vial.
+   *
+   *  Keyed the same way the mode selects: allocation ids in `source` mode,
+   *  `"row:col"` positions in `destination` mode. */
   reserved?: Set<string>;
   disabled?: boolean;
   /** Window for the amber "near expiry" tint on source cells. */
@@ -191,11 +194,15 @@ export function CellGridPicker({
                   const key = mode === 'source' ? (cell?.allocation_id ?? pos) : pos;
                   const isSelected = selected.has(key);
                   // A cell claimed by another picker on this same box (a split
-                  // output row / a back-flush line) is taken, even though the API
+                  // output row / a back-flush line / another row of a transfer
+                  // drawing on this box) is taken, even though the API
                   // occupancy — committed allocations only — doesn't show it yet.
-                  const isReserved = mode === 'destination' && reservedSet.has(pos);
+                  // Matched on whatever this mode selects by, so a source row
+                  // reserves the VIAL and a destination row reserves the SLOT.
+                  const isReserved = reservedSet.has(key);
                   // Source takes an occupied position; destination fills a free one.
-                  const pickable = mode === 'source' ? Boolean(cell) : !cell && !isReserved;
+                  const pickable =
+                    !isReserved && (mode === 'source' ? Boolean(cell) : !cell);
                   const blocked = disabled || !pickable || (!isSelected && atLimit);
                   const label = positionLabel(r, c, cols);
                   // FIFO cue: tint occupied source cells by expiry urgency so the
@@ -209,6 +216,10 @@ export function CellGridPicker({
                         cell.lot_number ?? 'no lot',
                         cell.expiration_date ? `expires ${cell.expiration_date}` : null,
                         mode === 'destination' ? 'occupied' : null,
+                        // An occupied source vial that another row has already
+                        // claimed still renders as a vial, so the reason it
+                        // won't take a click has to be said here.
+                        isReserved && mode === 'source' ? 'already taken by another row' : null,
                       ]
                         .filter(Boolean)
                         .join(' · ')
