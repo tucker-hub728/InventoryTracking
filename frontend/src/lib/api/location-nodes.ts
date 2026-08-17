@@ -236,6 +236,15 @@ export function subtreeStats(node: NodeTree): { capacity: number; occupied: numb
   return { capacity, occupied };
 }
 
+/**
+ * Largest grid a Box may have, per axis (client 2026-08-17).
+ *
+ * Mirrors ``MAX_GRID_DIM`` in ``app/locations/schemas.py`` — the API is the
+ * authority and rejects anything over it with a 422; this exists so the inputs
+ * cap before the operator gets there.
+ */
+export const MAX_GRID_DIM = 10;
+
 export interface Allocation {
   id: string;
   lot_id: string;

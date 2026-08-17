@@ -105,6 +105,15 @@ export interface BoxGridProps {
   /** Show the lot legend under the map. Off for the compact inline picker,
    *  where the map is a control rather than something to read. */
   showLegend?: boolean;
+  /**
+   * Clicking a legend chip selects EVERY cell that lot occupies, so a whole
+   * holding can be transferred without clicking seventeen vials one at a time.
+   * Called with the lot id; the caller owns the selection and decides whether
+   * this is a select or a deselect.
+   *
+   * Omitted on the inline picker, where the legend is only a key.
+   */
+  onSelectLot?: (lotId: string) => void;
   onSelectCell?: (cell: {
     row: number;
     col: number;
@@ -137,6 +146,7 @@ export function BoxGrid({
   reservedCells,
   showLegend = false,
   onSelectCell,
+  onSelectLot,
 }: BoxGridProps) {
   const occupied = React.useMemo(() => {
     const m = new Map<string, Allocation>();
@@ -150,12 +160,19 @@ export function BoxGrid({
 
   const facets = React.useMemo(() => buildFacets(allocations), [allocations]);
 
-  // A lot the operator is pointing at in the legend. Peeking only — it never
-  // changes what is selected, so moving the mouse away puts the map back.
+  // A lot the operator is pointing at in the legend. Peeking only — moving the
+  // mouse away puts the map back. Clicking a chip SELECTS the lot instead (see
+  // ``onSelectLot``), which sets ``batchLotId`` and holds the highlight for
+  // real, so there is no separate "pinned" state to keep.
   const [peekLot, setPeekLot] = React.useState<string | null>(null);
-  // The batch under way wins: while one is open the rule (single lot) is real,
-  // not a preview.
-  const focusLot = batchLotId ?? peekLot;
+
+  // A hover beats the batch, so a lot can be glanced at without clearing the
+  // selection under way.
+  const rawFocus = peekLot ?? batchLotId;
+  // The selection outlives a change of node — this component stays mounted
+  // while the panel switches boxes. Without this guard the stale id matches
+  // nothing and every cell in the new box greys out at once.
+  const focusLot = rawFocus && facets.has(rawFocus) ? rawFocus : null;
 
   // Column-template: a row-label gutter + N equal columns.
   const template = `1.75rem repeat(${cols}, minmax(2.25rem, 1fr))`;
@@ -284,29 +301,52 @@ export function BoxGrid({
           onMouseLeave={() => setPeekLot(null)}
         >
           {legend.map(([lotId, f]) => {
+            // Selected = this lot is the batch under way. The chip and the
+            // cells then say the same thing, because they ARE the same thing.
+            const isSelected = batchLotId === lotId;
             const isFocus = focusLot === lotId;
             const dimmed = !!focusLot && !isFocus;
+            const label = `${f.itemNumber ?? ''} ${f.lotNumber ?? ''} · ${f.count} unit${
+              f.count === 1 ? '' : 's'
+            }`.trim();
             return (
               <li key={lotId}>
                 <button
                   type="button"
+                  aria-pressed={isSelected}
+                  disabled={!onSelectLot}
+                  onClick={() => onSelectLot?.(lotId)}
                   onMouseEnter={() => setPeekLot(lotId)}
                   onFocus={() => setPeekLot(lotId)}
                   onBlur={() => setPeekLot(null)}
-                  title={`${f.itemNumber ?? ''} ${f.lotNumber ?? ''} · ${f.count} unit${
-                    f.count === 1 ? '' : 's'
-                  }`.trim()}
+                  title={
+                    onSelectLot
+                      ? `${label} — click to select ${
+                          isSelected ? 'none' : `all ${f.count}`
+                        }`
+                      : label
+                  }
                   className={cn(
                     'flex items-center gap-1.5 rounded border px-1.5 py-0.5 text-[11px] transition-colors',
                     'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                    isFocus
-                      ? 'border-accent bg-accent/10 text-accent'
-                      : 'border-border text-text-2 hover:border-accent/50',
+                    // Solid once selected: after the pointer moves away this is
+                    // the only thing explaining why the rest of the map is grey
+                    // and a batch panel has appeared.
+                    isSelected
+                      ? 'border-accent bg-accent text-white'
+                      : isFocus
+                        ? 'border-accent bg-accent/10 text-accent'
+                        : 'border-border text-text-2',
+                    onSelectLot && !isSelected && 'hover:border-accent/50',
                     dimmed && 'opacity-50',
                   )}
                 >
                   <span className="font-mono">{f.lotNumber ?? f.itemNumber ?? '—'}</span>
-                  <span className="tabular-nums text-text-3">{f.count}</span>
+                  <span
+                    className={cn('tabular-nums', isSelected ? 'text-white/70' : 'text-text-3')}
+                  >
+                    {f.count}
+                  </span>
                 </button>
               </li>
             );

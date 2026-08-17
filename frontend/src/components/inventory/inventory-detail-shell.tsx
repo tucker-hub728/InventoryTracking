@@ -584,6 +584,7 @@ export function InventoryDetailShell({
                 },
                 onReverseRequest: undefined,
                 canSign,
+                refreshSeq: releaseSeq,
               }}
             >
               {children}

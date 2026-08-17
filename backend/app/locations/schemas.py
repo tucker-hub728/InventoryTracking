@@ -64,6 +64,17 @@ FlatCategory = Literal["kanban", "lab", "qc", "engineering", "materials", "produ
 MovementType = InventoryMovementType
 
 
+# Largest grid a Box may have, per axis (client 2026-08-17). Ten is the size of
+# the cryoboxes actually in use, and the unit map is drawn at a fixed cell size —
+# past this it stops being a map you can read at a glance and becomes a
+# spreadsheet that scrolls in both directions.
+#
+# A policy, not a data invariant, so it lives here rather than in a CHECK
+# constraint: raising it is a one-line change, not a migration. The DB still
+# enforces the real invariant (>= 1) on its own.
+MAX_GRID_DIM = 10
+
+
 def _trim_nonblank(field: str):
     def _check(v: str | None) -> str | None:
         if v is None:
@@ -98,8 +109,8 @@ class NodeCreate(BaseModel):
     code: Annotated[str, _trim_nonblank("code")] = Field(max_length=64)
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
     parent_id: str | None = None
-    grid_rows: int | None = Field(default=None, ge=1, le=400)
-    grid_cols: int | None = Field(default=None, ge=1, le=400)
+    grid_rows: int | None = Field(default=None, ge=1, le=MAX_GRID_DIM)
+    grid_cols: int | None = Field(default=None, ge=1, le=MAX_GRID_DIM)
     dedicated_customer_id: str | None = None
     dedicated_product_id: str | None = None
     notes: str | None = Field(default=None, max_length=2048)
@@ -226,8 +237,8 @@ class GridUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    grid_rows: int = Field(ge=1, le=400)
-    grid_cols: int = Field(ge=1, le=400)
+    grid_rows: int = Field(ge=1, le=MAX_GRID_DIM)
+    grid_cols: int = Field(ge=1, le=MAX_GRID_DIM)
 
 
 class DedicationUpdateRequest(BaseModel):

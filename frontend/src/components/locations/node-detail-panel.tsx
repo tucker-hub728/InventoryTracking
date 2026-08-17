@@ -66,6 +66,7 @@ import {
   parentTypesOf,
   subtreeStats,
   CHILD_TYPES_OF,
+  MAX_GRID_DIM,
   NODE_TYPE_LABEL,
   type Allocation,
   type LocationNode,
@@ -85,6 +86,8 @@ import {
   type AreaTrees,
 } from '@/components/inventory/receipt-admin/receive-location-picker';
 
+import { CellGridPicker } from '@/components/reconciliation/cell-grid-picker';
+import type { CellOption } from '@/lib/api/kits';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
 import {
   ReleaseStateDialog,
@@ -435,6 +438,34 @@ export function NodeDetailPanel({
     }
   };
 
+  /**
+   * Select every cell one lot occupies, from its legend chip.
+   *
+   * The batch flow is per-cell, which is right when you are picking four vials
+   * out of seventeen and wrong when you want the whole holding — nobody should
+   * click seventeen cells to move a lot (client 2026-08-17). Clicking the chip
+   * again clears it, so the same control both selects and deselects.
+   *
+   * Only active, placed cells count: an emptied allocation still has
+   * coordinates but nothing to move.
+   */
+  const handleSelectLot = (lotId: string) => {
+    if (batchLotId === lotId) {
+      setSelectedOccupied(new Set());
+      setBatchLotId(null);
+      return;
+    }
+    const cells = allocations
+      .filter((a) => a.is_active && a.lot_id === lotId && a.grid_row != null && a.grid_col != null)
+      .map((a) => `${a.grid_row}:${a.grid_col}`);
+    if (cells.length === 0) return;
+    // Unit-out and placement are different modes; entering one leaves the other.
+    setSelectedCells(new Set());
+    setPlaceLot('');
+    setSelectedOccupied(new Set(cells));
+    setBatchLotId(lotId);
+  };
+
   // The allocations behind the currently multi-selected occupied cells.
   const selectedOutAllocs = React.useMemo(
     () =>
@@ -613,26 +644,13 @@ export function NodeDetailPanel({
             </div>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {/* A release decision about the batches stored here — not a structural
-              change, so it sits outside ``canManageStructure`` and is offered
-              to any admin. Hidden when nothing here is release-tracked, which
-              is every location holding only consumables (STS-001). */}
-          {isAdminOrAbove && releaseCandidates.length > 0 && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setReleaseLot(null);
-                setReleaseOpen(true);
-              }}
-            >
-              <ShieldCheck size={14} /> Release state
-            </Button>
-          )}
-        </div>
-        {canManageStructure && (
-          <div className="flex shrink-0 items-center gap-2">
+        {/* ONE action bar. These used to be two sibling groups, which under
+            ``justify-between`` made the header a three-part layout and stranded
+            the middle group in the centre of the row. Structural actions and the
+            release decision keep their own permission gates inside it. */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {canManageStructure && (
+            <>
             <Button size="sm" variant="ghost" onClick={() => setShowEdit(true)}>
               <Tag size={14} /> Edit
             </Button>
@@ -672,8 +690,31 @@ export function NodeDetailPanel({
               </Button>
             )}
             {/* Remove is hidden for now. */}
-          </div>
-        )}
+            </>
+          )}
+
+          {/* A release decision about the batches stored here — NOT a structural
+              change, so it carries its own gate rather than riding on
+              ``canManageStructure``: an admin who cannot re-hang a rack can
+              still release a batch. Hidden when nothing here is release-tracked,
+              which is every location holding only consumables (STS-001).
+
+              Last and primary: it is the action someone opens this page to
+              perform, and this app puts the primary action at the right-hand
+              end of a header (client 2026-08-17). */}
+          {isAdminOrAbove && releaseCandidates.length > 0 && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => {
+                setReleaseLot(null);
+                setReleaseOpen(true);
+              }}
+            >
+              <ShieldCheck size={14} /> Release state
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Stat cards */}
@@ -769,6 +810,7 @@ export function NodeDetailPanel({
               batchLotId={batchLotId}
               showLegend
               onSelectCell={handleSelectCell}
+              onSelectLot={canWrite ? handleSelectLot : undefined}
             />
             {/* The batch panel used to hang here, under the map, so selecting a
                 unit grew this card and pushed the page down — the map moved out
@@ -1052,9 +1094,12 @@ export function NodeDetailPanel({
         onDone={() => {
           setReleaseOpen(false);
           setReleaseLot(null);
-          // The badge is denormalised onto every allocation of this lot, so the
-          // whole box has to be re-read, not just the row that was clicked.
-          onChanged();
+          // ``reload()``, not ``onChanged()``: the badge in Contents and the
+          // unit map is read off each ALLOCATION, and only this refetches them.
+          // ``onChanged`` refreshes the hierarchy in the sidebar, whose counts a
+          // release decision never moves — so it left the list showing the old
+          // state (client 2026-08-17).
+          void reload();
         }}
       />
 
@@ -1454,7 +1499,19 @@ function RemainingHint({ avail, selecting }: { avail: LotAvailability | null; se
   );
 }
 
-/** A target box's grid, used to click destination cells for a transfer. */
+/**
+ * A target box's grid, used to click destination cells for a transfer.
+ *
+ * Renders the SHARED {@link CellGridPicker} — the same compact grid every other
+ * destination picker in the app uses (Receive, the item-workspace transfer,
+ * kitting's split-output, back-flush and return-excess). It used to render
+ * {@link BoxGrid}, the large lot-labelled map, so the two LN2 transfer flows
+ * showed a different control from every other screen doing the identical job
+ * (client 2026-08-17).
+ *
+ * ``BoxGrid`` stays where it belongs: the unit map above, where reading which
+ * lot sits in which position IS the task.
+ */
 function DestGridPicker({
   node,
   value,
@@ -1480,30 +1537,36 @@ function DestGridPicker({
     };
   }, [node.id]);
 
+  // Occupied cells in the shape the shared grid reads. ``expiration_date`` is
+  // null because a destination grid never tints by expiry — that cue is for
+  // choosing which vial to TAKE.
+  const cells: CellOption[] = React.useMemo(
+    () =>
+      allocs
+        .filter((a) => a.is_active && a.grid_row != null && a.grid_col != null)
+        .map((a) => ({
+          allocation_id: a.id,
+          grid_row: a.grid_row as number,
+          grid_col: a.grid_col as number,
+          lot_id: a.lot_id,
+          lot_number: a.lot_number,
+          expiration_date: null,
+        })),
+    [allocs],
+  );
+
   return (
-    <div className="rounded-md border border-border bg-bg-elev p-2">
-      <BoxGrid
-        rows={node.grid_rows ?? 0}
-        cols={node.grid_cols ?? 0}
-        allocations={allocs}
-        selectedCells={value}
-        onSelectCell={(c) => {
-          if (c.occupant) return;
-          const key = `${c.row}:${c.col}`;
-          const next = new Set(value);
-          if (next.has(key)) {
-            next.delete(key);
-          } else {
-            if (next.size >= max) {
-              toast.error(`Select at most ${max} cell(s).`);
-              return;
-            }
-            next.add(key);
-          }
-          onChange(next);
-        }}
-      />
-    </div>
+    <CellGridPicker
+      mode="destination"
+      rows={node.grid_rows ?? 1}
+      cols={node.grid_cols ?? 1}
+      cells={cells}
+      // The grid enforces ``max`` by disabling the remaining free cells, so the
+      // "select at most N" toast this used to raise has nothing left to report.
+      max={max}
+      value={[...value]}
+      onChange={(next) => onChange(new Set(next))}
+    />
   );
 }
 
@@ -1927,6 +1990,7 @@ function ResizeDialog({
               <Input
                 type="number"
                 min={1}
+                max={MAX_GRID_DIM}
                 step="1"
                 value={rows}
                 onChange={(e) => setRows(e.target.value)}
@@ -1939,6 +2003,7 @@ function ResizeDialog({
               <Input
                 type="number"
                 min={1}
+                max={MAX_GRID_DIM}
                 step="1"
                 value={cols}
                 onChange={(e) => setCols(e.target.value)}

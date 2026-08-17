@@ -107,9 +107,14 @@ export function ItemProductsPanel() {
  *  Transfer action (INV-007 / TRX-001). Shown for every tier: a built item
  *  holds real stock too, once a kit close-out has placed its output. */
 export function ItemStockPanel() {
-  const { item, refresh, canSign } = useInventoryDetail();
+  const { item, refresh, canSign, refreshSeq } = useInventoryDetail();
   return (
     <ItemStockLocationsTab
+      // Remounted when a release state changes elsewhere on the page, which is
+      // the house pattern here (see ``AllocationActions`` in the location
+      // panel). Losing the tab's filter selection is the right trade: the lot
+      // has just left whichever state was being filtered on.
+      key={refreshSeq}
       item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
       nearExpiryThresholdDays={item.nearExpiryThresholdDays}
       canSign={canSign}

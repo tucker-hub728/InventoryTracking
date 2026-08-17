@@ -30,6 +30,7 @@ import { isBuiltTier } from '@/lib/api/tiers';
 import {
   locationNodesApi,
   CHILD_TYPES_OF,
+  MAX_GRID_DIM,
   NODE_TYPE_LABEL,
   type CreatableNodeType,
   type LocationNode,
@@ -256,6 +257,7 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
                 <Input
                   type="number"
                   min={1}
+                  max={MAX_GRID_DIM}
                   step="1"
                   aria-label="Rows"
                   value={gridRows}
@@ -266,13 +268,16 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
                 <Input
                   type="number"
                   min={1}
+                  max={MAX_GRID_DIM}
                   step="1"
                   aria-label="Columns"
                   value={gridCols}
                   onChange={(e) => setGridCols(e.target.value)}
                   className="w-20 font-mono"
                 />
-                <span className="text-xs text-text-3">rows × columns</span>
+                <span className="text-xs text-text-3">
+                  rows × columns · max {MAX_GRID_DIM}×{MAX_GRID_DIM}
+                </span>
               </div>
             </div>
           )}
