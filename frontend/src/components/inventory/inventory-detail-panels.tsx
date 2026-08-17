@@ -65,6 +65,9 @@ export function ItemLedgerPanel() {
           setStatusFilter={controls.setStatusFilter}
           withinInput={controls.withinInput}
           setWithinInput={controls.setWithinInput}
+          releaseFilter={controls.releaseFilter}
+          setReleaseFilter={controls.setReleaseFilter}
+          presentReleaseStates={controls.presentReleaseStates}
           filtersActive={controls.filtersActive}
           resetFilters={controls.resetFilters}
           visibleLots={controls.visibleLots}

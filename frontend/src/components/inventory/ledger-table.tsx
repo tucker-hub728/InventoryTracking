@@ -38,6 +38,8 @@ import type { BadgeTone } from '@/types/ui';
 import type { MovementType } from '@/lib/api/movements';
 import { expiryStatus } from '@/lib/inventory-helpers';
 import { cn, daysFromNow } from '@/lib/utils';
+import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
+import { RELEASE_STATE_OPTIONS, type LotReleaseState } from '@/lib/api/lots';
 
 interface LotGroup {
   lot: string;
@@ -56,6 +58,9 @@ interface LotGroup {
   exp: string | null;
   /** ``daysFromNow(exp)`` for the representative date; ``null`` if no date. */
   expDays: number | null;
+  /** The lot's CURRENT release state. A property of the batch, which is why it
+   *  belongs on the group and not on the rows — the rows are past events. */
+  releaseState: LotReleaseState | null;
 }
 
 /** Tri-state expiry sort: off → soonest-first → latest-first → off. */
@@ -125,6 +130,9 @@ function TransactionCell({ entry }: { entry: LedgerEntry }) {
 
 /** Expiry-status filter; ``all`` disables it. */
 type StatusFilter = 'all' | 'expired' | 'near' | 'ok';
+/** Release-state narrowing. A separate axis from expiry — a lot can be near
+ *  expiry AND quarantined, and the two filters compose. */
+type ReleaseFilter = LotReleaseState | 'all';
 
 const STATUS_LABEL: Record<Exclude<StatusFilter, 'all'>, string> = {
   expired: 'Expired',
@@ -175,6 +183,7 @@ function groupByLot(entries: LedgerEntry[]): LotGroup[] {
       balance: totalIn - totalOut,
       exp,
       expDays,
+      releaseState: rows.find((e) => e.lotReleaseState)?.lotReleaseState ?? null,
     };
   });
 }
@@ -251,19 +260,43 @@ export function useLedgerExpiryControls(
   const [sortDir, setSortDir] = React.useState<SortDir>(null);
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('all');
   const [withinInput, setWithinInput] = React.useState('');
+  const [releaseFilter, setReleaseFilter] = React.useState<ReleaseFilter>('all');
 
   const allGroups = React.useMemo(() => groupByLot(entries), [entries]);
   const within = parseWithin(withinInput);
   const groups = React.useMemo(
-    () =>
-      sortGroups(
-        filterGroups(allGroups, statusFilter, within, nearExpiryThresholdDays),
-        sortDir,
-      ),
-    [allGroups, statusFilter, within, nearExpiryThresholdDays, sortDir],
+    () => {
+      const byExpiry = filterGroups(
+        allGroups,
+        statusFilter,
+        within,
+        nearExpiryThresholdDays,
+      );
+      // Narrowing by release state drops untracked lots outright — unlike the
+      // expiry filters, which keep a lot that simply has no date. Asking for
+      // "quarantine" is asking about release-tracked stock specifically, and a
+      // consumable has no answer to give.
+      const byRelease =
+        releaseFilter === 'all'
+          ? byExpiry
+          : byExpiry.filter((g) => g.releaseState === releaseFilter);
+      return sortGroups(byRelease, sortDir);
+    },
+    [allGroups, statusFilter, within, nearExpiryThresholdDays, releaseFilter, sortDir],
   );
 
-  const filtersActive = statusFilter !== 'all' || withinInput.trim() !== '';
+  // Which states the visible lots actually carry, so the dropdown never offers
+  // a state this item has never been in.
+  const presentReleaseStates = React.useMemo(
+    () =>
+      RELEASE_STATE_OPTIONS.filter((o) =>
+        allGroups.some((g) => g.releaseState === o.code),
+      ),
+    [allGroups],
+  );
+
+  const filtersActive =
+    statusFilter !== 'all' || withinInput.trim() !== '' || releaseFilter !== 'all';
   const cycleSort = React.useCallback(
     () => setSortDir((d) => (d === null ? 'asc' : d === 'asc' ? 'desc' : null)),
     [],
@@ -271,6 +304,7 @@ export function useLedgerExpiryControls(
   const resetFilters = React.useCallback(() => {
     setStatusFilter('all');
     setWithinInput('');
+    setReleaseFilter('all');
   }, []);
 
   return {
@@ -283,6 +317,9 @@ export function useLedgerExpiryControls(
     setStatusFilter,
     withinInput,
     setWithinInput,
+    releaseFilter,
+    setReleaseFilter,
+    presentReleaseStates,
     filtersActive,
     resetFilters,
   };
@@ -300,6 +337,9 @@ export function LedgerExpiryToolbar({
   setStatusFilter,
   withinInput,
   setWithinInput,
+  releaseFilter,
+  setReleaseFilter,
+  presentReleaseStates,
   filtersActive,
   resetFilters,
   visibleLots,
@@ -310,6 +350,9 @@ export function LedgerExpiryToolbar({
   | 'setStatusFilter'
   | 'withinInput'
   | 'setWithinInput'
+  | 'releaseFilter'
+  | 'setReleaseFilter'
+  | 'presentReleaseStates'
   | 'filtersActive'
   | 'resetFilters'
   | 'visibleLots'
@@ -331,6 +374,30 @@ export function LedgerExpiryToolbar({
           <SelectItem value="ok">OK</SelectItem>
         </SelectContent>
       </Select>
+
+      {/* Only for items that actually have release-tracked stock. On a
+          consumable the control would have nothing but "All" in it. */}
+      {presentReleaseStates.length > 0 && (
+        <Select
+          value={releaseFilter}
+          onValueChange={(v) => setReleaseFilter(v as ReleaseFilter)}
+        >
+          <SelectTrigger
+            className="w-[170px] [&>span]:min-w-0 [&>span]:truncate"
+            aria-label="Filter by release state"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All release states</SelectItem>
+            {presentReleaseStates.map((o) => (
+              <SelectItem key={o.code} value={o.code}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
 
       <Input
         type="number"
@@ -685,8 +752,15 @@ export function LedgerTable({
               <TableCell className="text-right font-mono text-xs">{group.balance}</TableCell>
               <TableCell />
               {showCustomer && <TableCell />}
+              {/* The one place a release state belongs in this table: the
+                  subtotal is about the LOT, not about a moment, so "as it is
+                  now" is the right reading. Deliberately absent from the
+                  movement rows above (client 2026-08-17). */}
               <TableCell className="font-mono text-xs text-text-2">
-                <LotLink lotId={group.lotId} lotNumber={group.lot} />
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <LotLink lotId={group.lotId} lotNumber={group.lot} />
+                  <ReleaseStateBadge state={group.releaseState} size="xs" />
+                </span>
               </TableCell>
               <TableCell />
               <TableCell />

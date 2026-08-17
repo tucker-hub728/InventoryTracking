@@ -1,3 +1,5 @@
+import type { LotReleaseState } from '@/lib/api/lots';
+
 export type InventoryStatus =
   | 'Available'
   | 'Low stock'
@@ -70,6 +72,10 @@ export interface LedgerEntry {
   /** Lot UUID behind the cell — drives the link to the originating order. */
   lotId?: string | null;
   exp: string;
+  /** The LOT's release state as it is now — carried on the row only so the
+   *  per-lot subtotal can show it. Never rendered against an individual
+   *  movement: a movement is a past event and this is the present state. */
+  lotReleaseState?: LotReleaseState | null;
   initials: string;
   /** Full ``app.users.full_name`` of the operator who recorded the row.
    *  Rendered in the ledger "By" column and the audit-timeline movement

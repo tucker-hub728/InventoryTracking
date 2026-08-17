@@ -10,6 +10,7 @@ import {
   MinusCircle,
   PackageOpen,
   Pencil,
+  ShieldCheck,
   Truck,
 } from 'lucide-react';
 
@@ -24,6 +25,12 @@ import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { IssueToKanbanDialog } from '@/components/inventory/issue-to-kanban-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
 import { IssueToLocationDialog } from './issue-to-location-dialog';
+import {
+  ReleaseStateDialog,
+  type ReleaseLotChoice,
+} from './release-state-dialog';
+import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
+import { itemsApi } from '@/lib/api/items';
 import { ShipToCustomerDialog } from './ship-to-customer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
@@ -150,6 +157,15 @@ export function InventoryDetailShell({
   const [editing, setEditing] = React.useState(false);
   const [shipping, setShipping] = React.useState(false);
   const [transferring, setTransferring] = React.useState(false);
+  const [changingRelease, setChangingRelease] = React.useState(false);
+  // Admin / super admin only — mirrors the backend's ``_require_admin``.
+  const canDecideRelease = useAuthStore(selectIsAdminOrAbove);
+  /** The item's release-tracked batches, one entry per LOT however many
+   *  locations it is spread over. Read from the stock-by-location rows, which
+   *  already carry the state. */
+  const [releaseCandidates, setReleaseCandidates] = React.useState<ReleaseLotChoice[]>([]);
+  /** Bumped after a signed change so the header's list re-reads. */
+  const [releaseSeq, setReleaseSeq] = React.useState(0);
   // Two different issues, deliberately not one flag: `issuing` is the
   // consumable→Kanban transaction (TRX-003), `issuingToLocation` is
   // debit-and-gone to PD/R&D/QC (TRX-001/002). Different destinations,
@@ -220,6 +236,34 @@ export function InventoryDetailShell({
       .finally(() => setLedgerLoading(false));
     return () => ctrl.abort();
   }, [item]);
+
+  // The item's release-tracked batches, for the header's Release state control.
+  // Only fetched for admins, since nobody else can act on it, and re-read after
+  // a change so the header reflects the new state.
+  React.useEffect(() => {
+    if (!item || !canDecideRelease) return;
+    const ctrl = new AbortController();
+    itemsApi
+      .stockLocations(item.uuid, { signal: ctrl.signal })
+      .then((rows) => {
+        const byLot = new Map<string, ReleaseLotChoice>();
+        for (const r of rows) {
+          if (!r.release_state || byLot.has(r.lot_id)) continue;
+          byLot.set(r.lot_id, {
+            id: r.lot_id,
+            lot_number: r.lot_number ?? r.lot_id.slice(0, 8),
+            release_state: r.release_state,
+            hint: r.location,
+          });
+        }
+        setReleaseCandidates([...byLot.values()]);
+      })
+      .catch(() => {
+        // The control simply doesn't appear; the Stock by location tab is the
+        // other way in and reports its own errors.
+      });
+    return () => ctrl.abort();
+  }, [item, canDecideRelease, releaseSeq]);
 
   // Forecast demand = Σ over the items that consume this one (where-used) of
   // (qty_per_unit × that parent's forecast runs this year). Temporarily hidden
@@ -402,6 +446,21 @@ export function InventoryDetailShell({
                 <MinusCircle size={14} /> Issue
               </Button>
             )}
+            {/* The release decision on a manufactured batch (REQ-2026-07-31-STS-002).
+                Its own header control, not a row action buried in a tab: it is
+                the thing someone comes to this page to do. The dialog asks WHICH
+                batch, because release state belongs to a lot and an item
+                usually has several.
+
+                Admin / super admin only, mirroring the backend — an operator
+                holds ``inventory:sign`` and can transfer, but must not release
+                the batch they just produced. Hidden when this item has no
+                release-tracked stock at all, so consumable pages are unchanged. */}
+            {canDecideRelease && releaseCandidates.length > 0 && (
+              <Button onClick={() => setChangingRelease(true)}>
+                <ShieldCheck size={14} /> Release state
+              </Button>
+            )}
             {/* Ship-to-customer is the terminal transaction for a built item —
                 a finished good, or a sub-assembly sold directly (INV-004 /
                 CUST-001). E-signed, so gate on ``inventory:sign``. */}
@@ -566,6 +625,18 @@ export function InventoryDetailShell({
         onOpenChange={setIssuingToLocation}
         item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
         onDone={refresh}
+      />
+
+      <ReleaseStateDialog
+        open={changingRelease}
+        onOpenChange={setChangingRelease}
+        lots={releaseCandidates}
+        scopeLabel={item.id}
+        onDone={() => {
+          setChangingRelease(false);
+          setReleaseSeq((s) => s + 1);
+          refresh();
+        }}
       />
     </>
   );

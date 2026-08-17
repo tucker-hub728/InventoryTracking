@@ -81,6 +81,7 @@ export function apiMovementsToLedgerEntries(
       lot: m.lot_number ?? '—',
       lotId: m.lot_id,
       exp: m.lot_expiration_date ?? '—',
+      lotReleaseState: m.lot_release_state,
       // ``initials`` is the compact form for the narrow ledger column —
       // ``actorName`` carries the full name for tooltips and the audit
       // timeline.

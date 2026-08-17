@@ -295,6 +295,11 @@ class AllocationRead(BaseModel):
     id: str
     lot_id: str
     lot_number: str | None = None
+    # The lot's release state (STS-001), carried here so an LN2 box view can
+    # badge its cells without a second fetch per lot. Denormalised from the lot
+    # on read only — the lot remains the one place it is stored, because a
+    # release decision is about the batch, not about where a vial happens to sit.
+    release_state: str | None = None
     # The item's UUID — item detail URLs key on it, so the UI can link straight
     # to the canonical page instead of resolving the (derived) number first.
     item_id: str | None = None
@@ -522,6 +527,9 @@ class ItemStockLocationRead(BaseModel):
 
     lot_id: str
     lot_number: str | None
+    # The lot's release state (STS-001), so the drill-down can badge a row
+    # without a fetch per lot. Null where no release workflow applies.
+    release_state: str | None = None
     expiration_date: date | None
     node_id: str
     # Human location path, e.g. "Warehouse One › Shelf B".

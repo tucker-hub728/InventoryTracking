@@ -16,6 +16,7 @@
  */
 
 import { api } from './client';
+import type { LotReleaseState } from './lots';
 import type { MovementType as LedgerMovementType } from './movements';
 
 export type NodeType =
@@ -239,6 +240,9 @@ export interface Allocation {
   id: string;
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, denormalised on read so a box view can badge
+   *  its cells without a fetch per lot. Null where no release workflow applies. */
+  release_state: LotReleaseState | null;
   /** Item UUID — item detail URLs key on it, so links can go straight there. */
   item_id: string | null;
   item_number: string | null;

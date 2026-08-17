@@ -127,6 +127,7 @@ def _alloc_to_read(a: LotAllocation) -> AllocationRead:
         id=str(a.id),
         lot_id=str(a.lot_id),
         lot_number=a.lot.lot_number if a.lot else None,
+        release_state=a.lot.release_state if a.lot else None,
         item_id=str(a.lot.item.id) if a.lot and a.lot.item else None,
         item_number=a.lot.item.item_number if a.lot and a.lot.item else None,
         location_node_id=str(a.location_node_id),

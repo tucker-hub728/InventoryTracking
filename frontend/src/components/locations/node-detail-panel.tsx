@@ -74,12 +74,22 @@ import {
   type NodeTree,
   type NodeType,
 } from '@/lib/api/location-nodes';
-import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
+import {
+  selectIsAdminOrAbove,
+  selectIsSuperAdmin,
+  useAuthStore,
+} from '@/stores/auth.store';
 
 import {
   LocationLeafPicker,
   type AreaTrees,
 } from '@/components/inventory/receipt-admin/receive-location-picker';
+
+import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
+import {
+  ReleaseStateDialog,
+  type ReleaseLotChoice,
+} from '@/components/inventory/release-state-dialog';
 
 import { BoxGrid, rowLabel } from './box-grid';
 
@@ -187,6 +197,21 @@ export function NodeDetailPanel({
   const childType = CHILD_TYPES_OF[node.node_type];
 
   const [allocations, setAllocations] = React.useState<Allocation[]>([]);
+  /** The release-tracked batches sitting in this node, one entry per LOT even
+   *  when it occupies twenty cells — a release decision is about the batch. */
+  const releaseCandidates = React.useMemo<ReleaseLotChoice[]>(() => {
+    const byLot = new Map<string, ReleaseLotChoice>();
+    for (const a of allocations) {
+      if (!a.is_active || !a.release_state || byLot.has(a.lot_id)) continue;
+      byLot.set(a.lot_id, {
+        id: a.lot_id,
+        lot_number: a.lot_number ?? a.lot_id.slice(0, 8),
+        release_state: a.release_state,
+        hint: a.item_number ?? undefined,
+      });
+    }
+    return [...byLot.values()];
+  }, [allocations]);
   const [lots, setLots] = React.useState<Lot[]>([]);
   const [targets, setTargets] = React.useState<LocationNode[]>([]);
   // Full area trees for the transfer-destination picker and Relocate.
@@ -205,6 +230,11 @@ export function NodeDetailPanel({
   const [batchLotId, setBatchLotId] = React.useState<string | null>(null);
   // The allocation whose full details are shown in the side sheet.
   const [detailAlloc, setDetailAlloc] = React.useState<Allocation | null>(null);
+  /** Set when a specific batch was named (a row action); null when the header
+   *  button opened the dialog and the operator still has to choose. Held as a
+   *  lot rather than an allocation because the state belongs to the batch. */
+  const [releaseLot, setReleaseLot] = React.useState<ReleaseLotChoice | null>(null);
+  const [releaseOpen, setReleaseOpen] = React.useState(false);
   const [placeLot, setPlaceLot] = React.useState('');
   const [placeAvail, setPlaceAvail] = React.useState<LotAvailability | null>(null);
   const [placeQty, setPlaceQty] = React.useState(isBox ? '1' : '');
@@ -213,6 +243,7 @@ export function NodeDetailPanel({
   const [showMove, setShowMove] = React.useState(false);
   // Relocating a node is super-admin-only (LOC-004, enforced by the API).
   const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  const isAdminOrAbove = useAuthStore(selectIsAdminOrAbove);
   // Can this node type be re-hung AT ALL? A root cannot — a tank is the top of
   // its cascade (LOC-001) with nothing above it, so ``PARENT_OF`` has no entry
   // and the API returns ``node_not_movable``.
@@ -582,6 +613,24 @@ export function NodeDetailPanel({
             </div>
           </div>
         </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {/* A release decision about the batches stored here — not a structural
+              change, so it sits outside ``canManageStructure`` and is offered
+              to any admin. Hidden when nothing here is release-tracked, which
+              is every location holding only consumables (STS-001). */}
+          {isAdminOrAbove && releaseCandidates.length > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setReleaseLot(null);
+                setReleaseOpen(true);
+              }}
+            >
+              <ShieldCheck size={14} /> Release state
+            </Button>
+          )}
+        </div>
         {canManageStructure && (
           <div className="flex shrink-0 items-center gap-2">
             <Button size="sm" variant="ghost" onClick={() => setShowEdit(true)}>
@@ -834,8 +883,13 @@ export function NodeDetailPanel({
                             <span className="text-text-1 block truncate text-sm">
                               {a.item_number ?? '—'}
                             </span>
-                            <span className="block truncate text-xs text-text-3">
-                              {a.lot_number ?? a.lot_id.slice(0, 8)}
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className="truncate text-xs text-text-3">
+                                {a.lot_number ?? a.lot_id.slice(0, 8)}
+                              </span>
+                              {/* Renders nothing unless the lot actually has a
+                                  release state, so consumable rows are unchanged. */}
+                              <ReleaseStateBadge state={a.release_state} size="xs" />
                             </span>
                           </span>
                           <ChevronRight size={15} className="shrink-0 text-text-3" />
@@ -968,6 +1022,40 @@ export function NodeDetailPanel({
         allocation={detailAlloc}
         locationName={node.name}
         onClose={() => setDetailAlloc(null)}
+        // Admin-only, mirroring the backend's ``_require_admin``: releasing a
+        // batch is a release decision, and an operator holding ``inventory:sign``
+        // must not be able to sign off their own production (STS-002).
+        canSetReleaseState={isAdminOrAbove}
+        onSetReleaseState={(a) => {
+          setDetailAlloc(null);
+          setReleaseLot({
+            id: a.lot_id,
+            lot_number: a.lot_number ?? a.lot_id.slice(0, 8),
+            release_state: a.release_state,
+          });
+          setReleaseOpen(true);
+        }}
+      />
+
+      <ReleaseStateDialog
+        open={releaseOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setReleaseOpen(false);
+            setReleaseLot(null);
+          }
+        }}
+        // From the header: every release-tracked batch in this box, so the
+        // operator picks. From a row: the one they already named.
+        lots={releaseLot ? [releaseLot] : releaseCandidates}
+        scopeLabel={node.name}
+        onDone={() => {
+          setReleaseOpen(false);
+          setReleaseLot(null);
+          // The badge is denormalised onto every allocation of this lot, so the
+          // whole box has to be re-read, not just the row that was clicked.
+          onChanged();
+        }}
       />
 
       <EditDialog
@@ -1212,10 +1300,15 @@ function AllocationDetailSheet({
   allocation,
   locationName,
   onClose,
+  canSetReleaseState = false,
+  onSetReleaseState,
 }: {
   allocation: Allocation | null;
   locationName: string;
   onClose: () => void;
+  /** Admin / super-admin only — mirrors the backend guard (STS-002). */
+  canSetReleaseState?: boolean;
+  onSetReleaseState?: (allocation: Allocation) => void;
 }) {
   const [lot, setLot] = React.useState<Lot | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -1293,6 +1386,28 @@ function AllocationDetailSheet({
                       value={<ItemLink itemNumber={lot.item_number} itemId={lot.item_id} />}
                     />
                     <DetailRow label="Status" value={lot.status} />
+                    {/* Only for batches that carry one. A consumable lot has no
+                        release workflow and gets no row at all, rather than an
+                        empty one inviting the question. */}
+                    {lot.release_state && (
+                      <DetailRow
+                        label="Release state"
+                        value={
+                          <span className="flex flex-wrap items-center gap-2">
+                            <ReleaseStateBadge state={lot.release_state} />
+                            {canSetReleaseState && (
+                              <Button
+                                size="sm"
+                                onClick={() => onSetReleaseState?.(allocation)}
+                                aria-label="Change this lot's release state"
+                              >
+                                <ShieldCheck size={13} /> Change
+                              </Button>
+                            )}
+                          </span>
+                        }
+                      />
+                    )}
                     <DetailRow label="Supplier" value={lot.supplier_name ?? '—'} />
                     <DetailRow label="PO reference" value={lot.po_reference ?? '—'} />
                     <DetailRow

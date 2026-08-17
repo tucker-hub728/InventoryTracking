@@ -4,6 +4,7 @@ import * as React from 'react';
 
 import { cn } from '@/lib/utils';
 import type { Allocation } from '@/lib/api/location-nodes';
+import { RELEASE_STATE_LABEL } from '@/lib/api/lots';
 
 /** Row label: 1→A … 26→Z, then 27→AA. Mirrors the physical cryo-box labels. */
 export function rowLabel(row1Based: number): string {
@@ -224,7 +225,17 @@ export function BoxGrid({
                           : reserved
                             ? `${address} · already taken by another row of this transfer`
                             : occ
-                              ? `${address} · ${occ.item_number ?? ''} ${occ.lot_number ?? ''}`.trim()
+                              ? [
+                                  address,
+                                  `${occ.item_number ?? ''} ${occ.lot_number ?? ''}`.trim(),
+                                  // Only for lots that carry one — consumables
+                                  // in an LN2 box have no release workflow.
+                                  occ.release_state
+                                    ? RELEASE_STATE_LABEL[occ.release_state]
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')
                               : `${address} · empty`
                       }
                       className={cn(

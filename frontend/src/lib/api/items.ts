@@ -17,6 +17,7 @@
 
 import { api } from './client';
 import type { CellOption } from './kits';
+import type { LotReleaseState } from './lots';
 
 // ── Wire shape ─────────────────────────────────────────────────────────
 
@@ -29,6 +30,8 @@ export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
 export interface ApiItemStockLocation {
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, or null where no release workflow applies. */
+  release_state: LotReleaseState | null;
   expiration_date: string | null;
   node_id: string;
   /** Human location path, e.g. "Warehouse One › Shelf B". */

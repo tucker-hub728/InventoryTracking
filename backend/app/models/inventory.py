@@ -27,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, JSONB, UUID
+from sqlalchemy.dialects.postgresql import CITEXT, ENUM, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -563,6 +563,30 @@ LOT_STATUSES: tuple[str, ...] = (
     "available",
 )
 
+# Release state (REQ-2026-07-31-STS-001). NOT the same axis as
+# ``LOT_STATUSES`` above, which is procurement — a lot can perfectly well be
+# ``available`` and ``quarantine`` at once, and usually is. A native PG enum
+# ``app.lot_release_state`` (client 2026-08-17), like ``kit_status``.
+#
+# Declaration order is the workflow's reading order: held, under review, then
+# the two decided outcomes. No state is terminal — every transition is legal,
+# including out of ``rejected`` (client 2026-08-17), because a reversal is a
+# normal signed decision and the append-only audit trail is what makes it
+# defensible. There is deliberately no state machine to enforce.
+LOT_RELEASE_STATES: tuple[str, ...] = (
+    "quarantine",
+    "qc_hold",
+    "released",
+    "rejected",
+)
+
+lot_release_state_enum = ENUM(
+    *LOT_RELEASE_STATES,
+    name="lot_release_state",
+    schema="app",
+    create_type=False,
+)
+
 
 class Lot(Base):
     """Manufacturer batch of an item.
@@ -643,6 +667,14 @@ class Lot(Base):
         Text,
         nullable=False,
         server_default=text("'available'"),
+    )
+    # Release state (STS-001). NULL means "no release workflow applies" —
+    # consumables and raw materials never carry one. Only kit output starts with
+    # a value, and only a signed change moves it after that; nothing here
+    # defaults, on purpose (see relstate01).
+    release_state: Mapped[str | None] = mapped_column(
+        lot_release_state_enum,
+        nullable=True,
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 

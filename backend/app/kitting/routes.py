@@ -1008,6 +1008,15 @@ async def _produce_batch(
             lot_number=lot_number,
             created_by_user_id=current.id,
             expiration_date=expiration_date,
+            # REQ-2026-07-31-STS-001: newly manufactured product defaults to
+            # quarantine until somebody signs it out of there. This is the ONLY
+            # place a release state is set without a signature, and rightly so —
+            # it is the absence of a release decision, not a decision.
+            #
+            # A label only: the vials are placed, allocated and transferable
+            # exactly as before. Nothing downstream reads this to gate anything
+            # (STS-003 — prior behaviour intact).
+            release_state="quarantine",
         )
         for node_id, qty, cells in destinations:
             await _place_units(

@@ -723,6 +723,7 @@ async def create_lot(
     manufacture_date: date | None = None,
     expiration_date: date | None = None,
     status: str = "available",
+    release_state: str | None = None,
     notes: str | None = None,
     unit_price_amount: Decimal | None = None,
     po_reference: str | None = None,
@@ -746,6 +747,10 @@ async def create_lot(
         manufacture_date=manufacture_date,
         expiration_date=expiration_date,
         status=status,
+        # Defaults to None, NOT to 'quarantine': most lots created through here
+        # are received consumables and raw materials, which have no release
+        # workflow. Only manufacture passes a value (STS-001).
+        release_state=release_state,
         notes=notes,
         unit_price_amount=unit_price_amount,
         po_reference=po_reference,
@@ -810,6 +815,10 @@ def lot_to_audit_snapshot(lot: Lot) -> dict[str, object | None]:
         "manufacture_date": lot.manufacture_date.isoformat() if lot.manufacture_date else None,
         "expiration_date": lot.expiration_date.isoformat() if lot.expiration_date else None,
         "status": lot.status,
+        # The release state rides in the same snapshot, so a signed change
+        # shows up as a before/after diff in the audit store — which is where
+        # STS-002's "who and when" record lives (there is no history table).
+        "release_state": lot.release_state,
         "notes": lot.notes,
         "unit_price_amount": (
             str(lot.unit_price_amount) if lot.unit_price_amount is not None else None
@@ -822,6 +831,23 @@ def lot_to_audit_snapshot(lot: Lot) -> dict[str, object | None]:
         "parent_lot_id": str(lot.parent_lot_id) if lot.parent_lot_id else None,
         "deleted_at": lot.deleted_at.isoformat() if lot.deleted_at else None,
     }
+
+
+async def lot_release_states(
+    session: AsyncSession, lot_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, str | None]:
+    """``{lot_id: release_state}`` for the lots asked about (STS-001).
+
+    Only lots that HAVE a state are returned, so callers should ``.get()`` and
+    treat a miss as "no release workflow applies" — which is the common case,
+    every consumable and raw material.
+    """
+    if not lot_ids:
+        return {}
+    stmt = select(Lot.id, Lot.release_state).where(
+        Lot.id.in_(lot_ids), Lot.release_state.is_not(None)
+    )
+    return {row[0]: row[1] for row in (await session.execute(stmt)).all()}
 
 
 async def lot_has_movements(session: AsyncSession, lot_id: uuid.UUID) -> bool:
