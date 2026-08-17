@@ -135,57 +135,21 @@ async def _consume_source(
     cell_allocation_ids: list[str] | None,
     line_no: int,
 ) -> None:
-    """Draw ``qty`` of one lot at one node — exact vials for an LN2 box, else
-    FIFO across the lot's allocations there. Reducing an allocation to zero
-    deactivates it (incl. box cells)."""
-    allocs = [
-        a
-        for a in await kit_repo.allocations_for_item_at_node(
-            db, item_id, node_uuid, for_update=True
-        )
-        if a.lot_id == lot_uuid
-    ]
-    available = sum(int(a.qty) for a in allocs)
-    if available == 0:
-        raise NotFoundError(
-            f"Source {line_no}: that lot is no longer stored at that location",
-            code="no_stock_at_location",
-        )
+    """Draw ``qty`` of one lot at one node for a shipment.
 
-    if cell_allocation_ids:
-        wanted = [_parse_uuid(c, field="cell_allocation_ids") for c in cell_allocation_ids]
-        if qty != len(set(wanted)):
-            raise ValidationError(
-                f"Source {line_no}: {len(set(wanted))} vials selected but qty is {qty} — "
-                f"for a box the quantity is the number of vials.",
-                code="cell_count_mismatch",
-            )
-        chosen = await kit_repo.allocations_by_ids(db, wanted)
-        found = {a.id for a in chosen}
-        if [str(w) for w in wanted if w not in found] or any(
-            a.lot_id != lot_uuid or a.location_node_id != node_uuid for a in chosen
-        ):
-            raise ValidationError(
-                f"Source {line_no}: one or more selected vials are no longer available.",
-                code="invalid_cell",
-            )
-        for alloc in chosen:
-            await loc_repo.reduce_allocation(db, allocation=alloc, qty=int(alloc.qty))
-        return
-
-    if qty > available:
-        raise ValidationError(
-            f"Source {line_no}: requested {qty} exceeds the {available} available for this "
-            f"lot here",
-            code="ship_exceeds_available",
-        )
-    remaining = qty
-    for alloc in allocs:
-        if remaining <= 0:
-            break
-        take = min(remaining, int(alloc.qty))
-        await loc_repo.reduce_allocation(db, allocation=alloc, qty=take)
-        remaining -= take
+    The drain is shared with the transfer and material-issue paths
+    (:func:`loc_repo.draw_lot_at_node`); only the over-draw error code names a
+    shipment."""
+    await loc_repo.draw_lot_at_node(
+        db,
+        item_id=item_id,
+        lot_id=lot_uuid,
+        node_id=node_uuid,
+        qty=qty,
+        cell_allocation_ids=cell_allocation_ids,
+        line_no=line_no,
+        exceeds_code="ship_exceeds_available",
+    )
 
 
 @shipments_router.post(

@@ -424,6 +424,9 @@ MovementType = Literal[
     "customer_shipment",
     # Consumable issued to a Kanban (TRX-003) — see MOVEMENT_TYPES (consum01).
     "consumable_issue",
+    # Debit-and-gone issue to a scrap location (TRX-001/002) — see
+    # MOVEMENT_TYPES (issue01).
+    "material_issue",
 ]
 
 

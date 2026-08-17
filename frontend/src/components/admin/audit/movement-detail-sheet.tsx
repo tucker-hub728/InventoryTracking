@@ -52,6 +52,7 @@ const TYPE_STYLE: Record<MovementType, string> = {
   kit_cancel_return: 'border-warning/40 bg-warning/10 text-warning',
   customer_shipment: 'border-warning/40 bg-warning/10 text-warning',
   consumable_issue: 'border-warning/40 bg-warning/10 text-warning',
+  material_issue: 'border-warning/40 bg-warning/10 text-warning',
 };
 
 /**
@@ -233,15 +234,24 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
             )
           }
         />
+        {/* An issue's destination is a DISPOSITION, not a place holding stock
+            (TRX-001/002) — the material left inventory when it got there. A row
+            labelled "To" would say the opposite of what happened, so it is
+            relabelled and annotated rather than reusing the transfer wording. */}
         <KV
-          label="To"
+          label={movement.movement_type === 'material_issue' ? 'Issued to' : 'To'}
           value={
             movement.to_location_node_name ? (
-              <LocationLink
-                nodeId={movement.to_location_node_id}
-                name={movement.to_location_node_name}
-                path={movement.to_location_node_path}
-              />
+              <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
+                <LocationLink
+                  nodeId={movement.to_location_node_id}
+                  name={movement.to_location_node_name}
+                  path={movement.to_location_node_path}
+                />
+                {movement.movement_type === 'material_issue' && (
+                  <span className="text-xs text-text-3">— left inventory, not stored here</span>
+                )}
+              </span>
             ) : (
               '—'
             )

@@ -149,6 +149,21 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     });
   };
 
+  /** Cells in ``nodeId`` that OTHER lines of this same receipt already aim at,
+   *  as ``"row:col"`` keys. One delivery routinely puts several lines into one
+   *  LN2 box, and until the receipt is signed no claim exists on the server —
+   *  so without this two lines can both choose A1 and only collide at submit.
+   *  The transfer dialog and kitting close-out both already guard this. */
+  const cellsClaimedByOtherLines = (lineId: string, nodeId: string | undefined) => {
+    const claimed = new Set<string>();
+    if (!nodeId) return claimed;
+    for (const [id, d] of Object.entries(drafts)) {
+      if (id === lineId || !d.include || d.placement?.nodeId !== nodeId) continue;
+      for (const c of d.placement.cells) claimed.add(`${c.grid_row}:${c.grid_col}`);
+    }
+    return claimed;
+  };
+
   const buildLines = ():
     | ReceiveEventLineInput[]
     | { error: string; lineId?: string } => {
@@ -443,6 +458,10 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                           trees={trees}
                           value={d.placement}
                           onChange={(v) => patch(line.id, { placement: v })}
+                          reservedCells={cellsClaimedByOtherLines(
+                            line.id,
+                            d.placement?.nodeId,
+                          )}
                         />
                       ) : (
                         <p className="text-xs text-text-3">Loading locations…</p>

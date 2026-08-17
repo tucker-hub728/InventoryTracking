@@ -16,6 +16,7 @@
  */
 
 import { api } from './client';
+import type { MovementType as LedgerMovementType } from './movements';
 
 export type NodeType =
   // LN2: tank → quadrant → rack → box (REQ-2026-07-15-LOC-001)
@@ -78,13 +79,15 @@ export type CreatableNodeType =
 export const MAX_QUADRANTS_PER_TANK = 4;
 
 export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials' | 'production';
-export type MovementType =
-  | 'receipt'
-  | 'dispense'
-  | 'discard'
-  | 'adjustment'
-  | 'transfer_out'
-  | 'transfer_in';
+/**
+ * Movement kinds a node's click-through history can show.
+ *
+ * Re-exported from the canonical list rather than hand-maintained here: this
+ * used to name only the six original types, so a node that had seen a kit issue
+ * or a shipment rendered those rows as unknown. `/allocations/movements` does
+ * not filter by type, so anything the ledger can hold can arrive here.
+ */
+export type MovementType = LedgerMovementType;
 
 /** Human labels for each node level. */
 export const NODE_TYPE_LABEL: Record<NodeType, string> = {
@@ -180,6 +183,16 @@ export interface LocationNode {
   code: string;
   name: string;
   is_active: boolean;
+  /**
+   * Debit-and-gone destination (REQ-2026-08-04-TRX-001/002) — the client's PD,
+   * R&D and QC labs. Only ever true on a `storage_category`.
+   *
+   * It marks the location as an ISSUE destination and nothing else. A scrap
+   * location is an ordinary location otherwise: same page, it may still carry
+   * shelves / refrigerators / freezers, and stock can still be TRANSFERRED into
+   * those. What leaves inventory is what is issued to the location itself.
+   */
+  is_scrap: boolean;
   notes: string | null;
   grid_rows: number | null;
   grid_cols: number | null;
@@ -284,6 +297,18 @@ export interface StorageGroupsInput {
 
 export interface StorageCategoryInput extends Partial<StorageGroupsInput> {
   name: string;
+  /**
+   * Mark this location debit-and-gone (REQ-2026-08-04-TRX-001/002).
+   *
+   * Asked at creation and only at creation — the server refuses to change it
+   * afterwards, because turning it on later would strand the stock already
+   * sitting there and turning it off would imply issued material has a home.
+   *
+   * A scrap location may have NO sub-types (the server relaxes the
+   * at-least-one rule for it): the location itself is the destination, so
+   * ticking a refrigerator it will never use would be inventing structure.
+   */
+  is_scrap?: boolean;
 }
 
 export interface GridUpdateInput {

@@ -38,6 +38,7 @@ import {
 } from '@/components/rooms/room-config';
 import {
   DEFAULT_GROUP_SEGMENT,
+  ISSUED_SEGMENT,
   STORAGE_ROOM_CODE,
   groupByCode,
   storageHref,
@@ -139,10 +140,17 @@ export function locationHref(
       // found by CODE, which is immutable — the client may rename "Shelf" to
       // "Racks" without breaking a link already in the ledger.
       const group = real[real.indexOf(category) + 1];
-      const segment = groupByCode(group?.code)?.segment ?? DEFAULT_GROUP_SEGMENT;
       // The category itself opens the page; a group opens its tab; a unit opens
       // its tab with the contents panel up.
       const isUnit = node.id !== category.id && node.id !== group?.id;
+      // A link to the LOCATION of a scrap site goes to its disposition log —
+      // that is the ledger row's own subject ("issued to QC 1"), and a storage
+      // tab would answer a question nobody asked. A link to a unit INSIDE it is
+      // still a storage link: those units hold real, transferred stock.
+      if (category.isScrap && !isUnit && !group) {
+        return storageHref(category.id, ISSUED_SEGMENT);
+      }
+      const segment = groupByCode(group?.code)?.segment ?? DEFAULT_GROUP_SEGMENT;
       return storageHref(category.id, segment, isUnit ? node.id : undefined);
     }
     default:

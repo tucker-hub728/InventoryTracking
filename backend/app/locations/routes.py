@@ -31,7 +31,6 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.inventory import repository as inv_repo
-from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import (
     AllocationRead,
@@ -61,6 +60,7 @@ from app.models.inventory import StockMovement
 from app.models.locations import (
     MAX_QUADRANTS_PER_TANK,
     PARENT_OF,
+    SCRAP_NODE_TYPE,
     STORAGE_GROUPS,
     STORAGE_ROOM_CODE,
     LocationNode,
@@ -101,6 +101,7 @@ def _node_to_read(
         code=node.code,
         name=node.name,
         is_active=node.is_active,
+        is_scrap=node.is_scrap,
         notes=node.notes,
         grid_rows=node.grid_rows,
         grid_cols=node.grid_cols,
@@ -875,6 +876,7 @@ async def add_storage_category(
         name=payload.name,
         group_codes=wanted,
         created_by_user_id=current.id,
+        is_scrap=payload.is_scrap,
     )
     await record_entity_change(
         db,
@@ -927,6 +929,14 @@ async def update_storage_groups(
         raise ValidationError(
             "Sub-types are configured on a Storage location.",
             code="node_not_storage_category",
+        )
+    # A normal location must keep somewhere to put things; a scrap location need
+    # not, since the location itself is the disposition and nothing is stored in
+    # it. Checked here rather than on the schema, which cannot see the category.
+    if not (payload.shelf or payload.refrigerator or payload.freezer) and not category.is_scrap:
+        raise ValidationError(
+            "A location must keep at least one sub-type.",
+            code="storage_groups_empty",
         )
 
     before = loc_repo.node_to_audit_snapshot(category)
@@ -1327,6 +1337,19 @@ async def _resolve_storage_node(db: DBSession, node_id: str) -> LocationNode:
     if not node.is_active:
         raise ValidationError("Location node is inactive", code="node_inactive")
     if not can_store(node.node_type):
+        # A LOCATION is the common mistake here, and it is a meaningful one:
+        # "QC 1" is a legitimate destination for an Issue and never for a
+        # transfer, so the message names both the fix and the other action
+        # rather than leaving the operator to guess which they wanted.
+        # Keeping these two destination sets disjoint is what makes it
+        # impossible to both issue a quantity and store it (client rule 5).
+        if node.node_type == SCRAP_NODE_TYPE:
+            raise ValidationError(
+                f"'{node.name}' is a location, not a storage place — pick the shelf, "
+                f"refrigerator or freezer inside it. To remove the material from "
+                f"inventory instead, use Issue.",
+                code="node_not_storable",
+            )
         raise ValidationError(
             f"A '{node.node_type}' cannot store lots — only boxes and " "flat locations can",
             code="node_not_storable",
@@ -1933,61 +1956,23 @@ async def _draw_transfer_source(
     cell_allocation_ids: list[str] | None,
     line_no: int,
 ) -> None:
-    """Draw ``qty`` of one lot at one node — the exact vials for an LN2 box,
-    else FIFO across that lot's allocations there. Reducing an allocation to
-    zero deactivates it (incl. box cells), which is what frees the source cell.
+    """Draw ``qty`` of one lot at one node for a transfer.
 
-    Mirrors the shipment source drain; the difference is only in the error
-    codes, which name a transfer so the dialog can phrase its message.
+    The drain itself is shared with the shipment and material-issue paths
+    (:func:`loc_repo.draw_lot_at_node`) — it was three near-identical copies, and
+    this one's own comment used to say so. All that is transfer-specific is the
+    over-draw error code, which the dialog matches on to phrase its message.
     """
-    allocs = [
-        a
-        for a in await kit_repo.allocations_for_item_at_node(
-            db, item_id, node_uuid, for_update=True
-        )
-        if a.lot_id == lot_uuid
-    ]
-    available = sum(int(a.qty) for a in allocs)
-    if available == 0:
-        raise NotFoundError(
-            f"Source {line_no}: that lot is no longer stored at that location",
-            code="no_stock_at_location",
-        )
-
-    if cell_allocation_ids:
-        wanted = [_parse_uuid(c, field="cell_allocation_ids") for c in cell_allocation_ids]
-        if qty != len(set(wanted)):
-            raise ValidationError(
-                f"Source {line_no}: {len(set(wanted))} vials selected but qty is {qty} — "
-                f"for a box the quantity is the number of vials.",
-                code="cell_count_mismatch",
-            )
-        chosen = await kit_repo.allocations_by_ids(db, wanted)
-        found = {a.id for a in chosen}
-        if [str(w) for w in wanted if w not in found] or any(
-            a.lot_id != lot_uuid or a.location_node_id != node_uuid for a in chosen
-        ):
-            raise ValidationError(
-                f"Source {line_no}: one or more selected vials are no longer available.",
-                code="invalid_cell",
-            )
-        for alloc in chosen:
-            await loc_repo.reduce_allocation(db, allocation=alloc, qty=int(alloc.qty))
-        return
-
-    if qty > available:
-        raise ValidationError(
-            f"Source {line_no}: requested {qty} exceeds the {available} available for "
-            f"this lot here",
-            code="transfer_exceeds_available",
-        )
-    remaining = qty
-    for alloc in allocs:
-        if remaining <= 0:
-            break
-        take = min(remaining, int(alloc.qty))
-        await loc_repo.reduce_allocation(db, allocation=alloc, qty=take)
-        remaining -= take
+    await loc_repo.draw_lot_at_node(
+        db,
+        item_id=item_id,
+        lot_id=lot_uuid,
+        node_id=node_uuid,
+        qty=qty,
+        cell_allocation_ids=cell_allocation_ids,
+        line_no=line_no,
+        exceeds_code="transfer_exceeds_available",
+    )
 
 
 @alloc_router.post(

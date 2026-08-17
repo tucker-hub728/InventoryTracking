@@ -28,7 +28,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { MoreHorizontal, Pencil, Plus, Settings2, Trash2 } from 'lucide-react';
+import { MinusCircle, MoreHorizontal, Pencil, Plus, Settings2, Trash2 } from 'lucide-react';
 
 import { NodeContentsSheet } from '@/components/locations/node-contents-sheet';
 import { useHierarchySearch } from '@/components/locations/use-hierarchy-search';
@@ -56,7 +56,9 @@ import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import { cn } from '@/lib/utils';
 
 import { ConfigureGroupsDialog } from './configure-groups-dialog';
+import { IssuedMaterialPanel } from './issued-material-panel';
 import {
+  ISSUED_SEGMENT,
   STORAGE_HREF,
   STORAGE_ROOM_CODE,
   groupByCode,
@@ -137,6 +139,15 @@ export function StorageCategoryClient({
     [tabs, segment],
   );
 
+  /** A scrap location (TRX-001/002) gets one extra tab: what has been ISSUED to
+   *  it. Not a group — it is backed by ledger history, holds nothing, and has no
+   *  node behind it. See ISSUED_SEGMENT for why it is not a StorageGroup. */
+  const isScrap = Boolean(category?.is_scrap);
+  const issuedActive = isScrap && segment.toLowerCase() === ISSUED_SEGMENT;
+  /** Is the URL pointing at a tab this location actually has? Both kinds count —
+   *  the redirect below fires only when NEITHER does. */
+  const onKnownTab = Boolean(active) || issuedActive;
+
   /** Open/close the unit panel and keep the address bar in step, without routing. */
   const setOpen = React.useCallback(
     (id: string | undefined, { replace = false } = {}) => {
@@ -161,14 +172,22 @@ export function StorageCategoryClient({
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  // A segment this location doesn't have — a stale link, or a sub-type switched
-  // off since. Send it to the first tab it DOES have. Replace, don't push: a
-  // dead link should not become a history entry to go Back to. Gated on
-  // `loaded`, since a tab cannot be judged missing until the tree has arrived.
+  // A segment this location doesn't have — a stale link, a sub-type switched off
+  // since, or the route's default `shf` landing on a scrap location that has no
+  // shelf. Send it to the first tab it DOES have, falling back to the Issued tab
+  // when there are no sub-types at all: a scrap location is allowed to have
+  // none, and before this that case reached "This location has no sub-types"
+  // with its actual contents one un-linked URL away. Replace, don't push: a dead
+  // link should not become a history entry to go Back to. Gated on `loaded`,
+  // since a tab cannot be judged missing until the tree has arrived.
   React.useEffect(() => {
-    if (!loaded || loadError || !category || active || tabs.length === 0) return;
-    router.replace(storageHref(categoryId, tabs[0]!.tpl.segment));
-  }, [loaded, loadError, category, active, tabs, categoryId, router]);
+    if (!loaded || loadError || !category || onKnownTab) return;
+    if (tabs.length > 0) {
+      router.replace(storageHref(categoryId, tabs[0]!.tpl.segment));
+    } else if (isScrap) {
+      router.replace(storageHref(categoryId, ISSUED_SEGMENT));
+    }
+  }, [loaded, loadError, category, onKnownTab, tabs, isScrap, categoryId, router]);
 
   // Search the whole location at once — the units live two levels down, so a
   // per-tab box would make you retype the query for every sub-type.
@@ -235,12 +254,22 @@ export function StorageCategoryClient({
     }
     const ok = await confirm({
       title: `Delete ${category.name}?`,
-      description:
+      description: [
         tabs.length > 0
           ? `This also removes its ${tabs.length} empty sub-${tabs.length === 1 ? 'type' : 'types'} (${tabs
               .map((t) => t.group.name)
               .join(', ')}). Nothing is stored in them.`
           : 'It holds nothing, so nothing is lost.',
+        // "Nothing is lost" is only true of STOCK. A scrap location's real
+        // content is its issue history, and deleting the location does not
+        // delete that — the ledger is append-only and still names it. Saying so
+        // is what stops this reading as "and the record goes too".
+        isScrap
+          ? 'Material already issued here stays on the ledger and in the audit trail; only the location is removed.'
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' '),
       confirmLabel: 'Delete location',
       destructive: true,
     });
@@ -255,7 +284,7 @@ export function StorageCategoryClient({
         err instanceof ApiError ? err.message : `Could not delete ${category.name}.`,
       );
     }
-  }, [category, tabs, confirm, router]);
+  }, [category, tabs, isScrap, confirm, router]);
 
   const missing = loaded && !loadError && !category;
 
@@ -282,7 +311,10 @@ export function StorageCategoryClient({
     <div className="scroll-strip -mx-6 px-6 sm:-mx-8 sm:px-8">
       <nav
         className="inline-flex items-center justify-start gap-1"
-        aria-label={`${category?.name ?? 'Location'} sub-types`}
+        // Not "sub-types": on a scrap location the last tab is a disposition
+        // record, not a place, and naming the whole strip after the other kind
+        // misdescribes it to anyone reading by screen reader.
+        aria-label={`${category?.name ?? 'Location'} sections`}
       >
         {tabs.map(({ group, tpl }) => {
           const isActive = active?.tpl.segment === tpl.segment;
@@ -317,6 +349,27 @@ export function StorageCategoryClient({
             </Link>
           );
         })}
+        {/* The disposition log, on a scrap location only. Last in the strip and
+            visually separated: the tabs before it are places that HOLD things,
+            this one is history of things that left, and sitting it flush among
+            them would invite reading it as a fourth sub-type. */}
+        {isScrap && (
+          <Link
+            key={ISSUED_SEGMENT}
+            href={storageHref(categoryId, ISSUED_SEGMENT)}
+            aria-current={issuedActive ? 'page' : undefined}
+            className={cn(
+              '-mb-px ml-1 inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent border-l border-l-border pl-4 pr-3.5 py-2.5 text-sm font-normal text-text-2 transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+              issuedActive && 'border-b-text font-medium text-text',
+            )}
+          >
+            <MinusCircle
+              size={14}
+              className={issuedActive ? 'text-warning' : 'text-text-3'}
+            />
+            Issued
+          </Link>
+        )}
       </nav>
     </div>
   );
@@ -357,12 +410,22 @@ export function StorageCategoryClient({
         // subtitle that actually says something — what this location holds.
         subtitle={
           loading ? undefined : (
-            <span className="text-text-3">
-              {totals.units > 0
-                ? `${totals.units} ${totals.units === 1 ? 'unit' : 'units'} across ${tabs.length} ${
-                    tabs.length === 1 ? 'sub-type' : 'sub-types'
-                  }${totals.stock > 0 ? ` · ${totals.stock} on hand` : ''}`
-                : `${tabs.length} ${tabs.length === 1 ? 'sub-type' : 'sub-types'}, nothing added yet`}
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-text-3">
+              {/* On a scrap location this comes FIRST. What happens to material
+                  sent here changes the meaning of everything else on the page,
+                  so it cannot be a footnote after the unit count. */}
+              {isScrap && (
+                <Badge tone="warning">Issued material leaves inventory</Badge>
+              )}
+              <span>
+                {totals.units > 0
+                  ? `${totals.units} ${totals.units === 1 ? 'unit' : 'units'} across ${tabs.length} ${
+                      tabs.length === 1 ? 'sub-type' : 'sub-types'
+                    }${totals.stock > 0 ? ` · ${totals.stock} on hand` : ''}`
+                  : tabs.length === 0
+                    ? 'No storage sub-types'
+                    : `${tabs.length} ${tabs.length === 1 ? 'sub-type' : 'sub-types'}, nothing added yet`}
+              </span>
             </span>
           )
         }
@@ -437,8 +500,10 @@ export function StorageCategoryClient({
           <>
             {/* Only once there is something to search. A search box over zero
                 units is a control that cannot succeed, and it was the first
-                thing on the page. */}
-            {totals.units > 0 && (
+                thing on the page. Hidden on the Issued tab too: it searches the
+                UNIT tree, and no row of the disposition log is in it — a query
+                there would silently match nothing. */}
+            {totals.units > 0 && !issuedActive && (
               <RoomSearch
                 value={search}
                 onChange={setSearch}
@@ -447,7 +512,15 @@ export function StorageCategoryClient({
                 placeholder="Unit, lot, or item…"
               />
             )}
-            {active ? (
+            {issuedActive ? (
+              // The disposition log. Not searched by RoomSearch above — that
+              // searches the location's UNIT tree, and none of these rows are in
+              // it; the panel pages server-side instead.
+              <IssuedMaterialPanel
+                nodeId={categoryId}
+                locationName={category?.name ?? 'this location'}
+              />
+            ) : active ? (
               units.length === 0 && !loading && !found.active ? (
                 // A dedicated empty state instead of the grid's three zero stat
                 // tiles. "SHELVES 0 / OCCUPIED 0 of 0 / UNITS ON HAND 0 across
@@ -484,17 +557,35 @@ export function StorageCategoryClient({
               )
             ) : (
               // Only reachable for the instant before the redirect above, or if
-              // the location somehow has no groups at all.
+              // the location somehow has no groups at all. On a SCRAP location
+              // that is a legitimate configuration rather than a misconfigured
+              // one — the location itself is the destination — so it is told a
+              // different story, pointing at the tab that does have content.
               !loading && (
                 <div className="rounded-lg border border-border bg-bg-elev">
-                  <EmptyState
-                    title="This location has no sub-types"
-                    hint={
-                      isSuperAdmin
-                        ? 'Switch one on from the ⋯ menu.'
-                        : 'A Super Admin configures its sub-types.'
-                    }
-                  />
+                  {isScrap ? (
+                    <EmptyState
+                      icon={MinusCircle}
+                      title="This location has no storage sub-types"
+                      hint="Material is issued to the location itself. See the Issued tab for what has been sent here."
+                      action={
+                        <Button asChild variant="primary">
+                          <Link href={storageHref(categoryId, ISSUED_SEGMENT)}>
+                            View issued material
+                          </Link>
+                        </Button>
+                      }
+                    />
+                  ) : (
+                    <EmptyState
+                      title="This location has no sub-types"
+                      hint={
+                        isSuperAdmin
+                          ? 'Switch one on from the ⋯ menu.'
+                          : 'A Super Admin configures its sub-types.'
+                      }
+                    />
+                  )}
                 </div>
               )
             )}

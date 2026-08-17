@@ -23,10 +23,9 @@
 
 import * as React from 'react';
 
-import { toast } from '@/components/ui/sonner';
-import { cn } from '@/lib/utils';
-import { BoxGrid } from '@/components/locations/box-grid';
+import { CellGridPicker } from '@/components/reconciliation/cell-grid-picker';
 import { LocationTreePicker } from '@/components/reconciliation/location-tree-picker';
+import type { CellOption } from '@/lib/api/kits';
 import {
   locationNodesApi,
   type Allocation,
@@ -111,6 +110,8 @@ export function ReceiveLocationPicker({
   onChange,
   disabled,
   reservedCells,
+  excludeNodeId,
+  excludeLabel,
 }: {
   qty: number;
   trees: AreaTrees;
@@ -121,8 +122,33 @@ export function ReceiveLocationPicker({
    *  ``"row:col"`` keys. The transfer dialog aims several rows at one box, and
    *  a claim exists only in the unsaved form until it is signed. */
   reservedCells?: Set<string>;
+  /** A node this placement may NOT target — the location the stock is being
+   *  moved OUT of. A transfer has to change location, so offering the source
+   *  back as a destination only leads to "the destination is the location it is
+   *  already in" after the operator has picked their cells (client 2026-08-17).
+   *
+   *  Dropped from the tree, not greyed: kitting's split-output picker already
+   *  removes a location another row has taken, and one convention for "not a
+   *  choice here" beats two. */
+  excludeNodeId?: string;
+  /** Name of {@link excludeNodeId}, for the note that says why it is missing. */
+  excludeLabel?: string;
 }) {
   const selected = findNode(trees, value?.nodeId ?? '');
+
+  // Everything storable EXCEPT the excluded node. Passing the allow-list is what
+  // prunes the branch — ``LocationTreePicker`` keeps only allowed nodes and the
+  // ancestors leading to them. Null when nothing is excluded, so the ordinary
+  // whole-tree case is untouched.
+  const allowedNodeIds = React.useMemo(() => {
+    if (!excludeNodeId) return null;
+    const ids = new Set<string>();
+    for (const area of AREA_ORDER) {
+      for (const leaf of collectLeaves(trees[area] ?? [])) ids.add(leaf.id);
+    }
+    ids.delete(excludeNodeId);
+    return ids;
+  }, [trees, excludeNodeId]);
 
   const pick = (nodeId: string) => {
     const found = findNode(trees, nodeId);
@@ -146,6 +172,7 @@ export function ReceiveLocationPicker({
         aria-label="Destination"
         value={value?.nodeId ?? ''}
         onChange={pick}
+        allowedNodeIds={allowedNodeIds}
         showPath
         // Inside a Dialog, so the popover owns its own scroll-lock.
         modal
@@ -168,6 +195,14 @@ export function ReceiveLocationPicker({
         <p className="text-xs text-text-3">
           All {qty} unit{qty === 1 ? '' : 's'} will be placed at{' '}
           <span className="font-mono text-text-2">{selected.node.name}</span>.
+        </p>
+      ) : excludeLabel ? (
+        // Nothing chosen yet, and one location is missing from the tree. Say
+        // which and why — an operator hunting for the box they are standing in
+        // should not have to conclude it was deleted.
+        <p className="text-xs text-text-3">
+          Moving out of <span className="font-mono text-text-2">{excludeLabel}</span>, so it
+          isn&apos;t offered as the destination.
         </p>
       ) : null}
     </div>
@@ -208,6 +243,21 @@ export function LocationLeafPicker({
   );
 }
 
+/**
+ * Free-cell picker for a box destination.
+ *
+ * Renders the SHARED {@link CellGridPicker} — the same compact grid kitting's
+ * issue, split-output, back-flush and return-excess pickers use. It used to
+ * render {@link BoxGrid}, the large lot-labelled grid, which meant the two
+ * dialogs that go through here (Receive and Transfer) showed a different
+ * control from every other cell-picking screen in the app for the same job
+ * (client 2026-08-17). ``BoxGrid`` stays where it belongs: the LN2 location
+ * page, where reading which lot sits in which position IS the task.
+ *
+ * The grid owns its own heading, counter, legend and occupancy summary, so the
+ * only thing left here is the capacity warning — which is about this ROW, not
+ * about the box, and has nowhere else to live.
+ */
 function CellSelector({
   box,
   qty,
@@ -234,33 +284,36 @@ function CellSelector({
     return () => ctrl.abort();
   }, [box.id]);
 
-  const selectedSet = new Set(value.map((c) => `${c.grid_row}:${c.grid_col}`));
-  const complete = value.length === qty;
+  // Occupied cells in the shape the shared grid reads. ``expiration_date`` is
+  // null because a destination grid never tints by expiry — that cue is for
+  // choosing which vial to TAKE.
+  const cells: CellOption[] = React.useMemo(
+    () =>
+      allocs
+        .filter((a) => a.is_active && a.grid_row != null && a.grid_col != null)
+        .map((a) => ({
+          allocation_id: a.id,
+          grid_row: a.grid_row as number,
+          grid_col: a.grid_col as number,
+          lot_id: a.lot_id,
+          lot_number: a.lot_number,
+          expiration_date: null,
+        })),
+    [allocs],
+  );
 
   // How many cells this box can actually offer: the grid, minus what is stored
   // in it, minus what a sibling row of the same form has already claimed.
-  const capacity = React.useMemo(() => {
-    const total = (box.grid_rows ?? 0) * (box.grid_cols ?? 0);
-    const taken = allocs.filter(
-      (a) => a.is_active && a.grid_row != null && a.grid_col != null,
-    ).length;
-    return Math.max(0, total - taken - (reservedCells?.size ?? 0));
-  }, [box.grid_rows, box.grid_cols, allocs, reservedCells]);
+  const capacity = Math.max(
+    0,
+    (box.grid_rows ?? 0) * (box.grid_cols ?? 0) - cells.length - (reservedCells?.size ?? 0),
+  );
   // The operator cannot finish this row here — say so, rather than leaving them
   // clicking at a grid that will not accept the last unit.
   const tooSmall = capacity < qty;
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-text-3">
-          Select exactly {qty} empty cell{qty === 1 ? '' : 's'} in{' '}
-          <span className="font-mono text-text-2">{box.name}</span>
-        </span>
-        <span className={cn('font-mono', complete ? 'text-success' : 'text-text-3')}>
-          {value.length}/{qty}
-        </span>
-      </div>
       {tooSmall && (
         <p className="rounded-md border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] text-warning">
           <span className="font-mono">{box.name}</span> has {capacity} free cell
@@ -269,28 +322,23 @@ function CellSelector({
           bigger destination.
         </p>
       )}
-      <div className="overflow-x-auto rounded-md border border-border bg-bg-elev p-2">
-        <BoxGrid
-          rows={box.grid_rows ?? 1}
-          cols={box.grid_cols ?? 1}
-          allocations={allocs}
-          selectedCells={selectedSet}
-          reservedCells={reservedCells}
-          onSelectCell={({ row, col, occupant }) => {
-            if (occupant) return;
-            const key = `${row}:${col}`;
-            if (selectedSet.has(key)) {
-              onChange(value.filter((c) => !(c.grid_row === row && c.grid_col === col)));
-            } else {
-              if (value.length >= qty) {
-                toast.error(`Select exactly ${qty} cell${qty === 1 ? '' : 's'} for this line.`);
-                return;
-              }
-              onChange([...value, { grid_row: row, grid_col: col }]);
-            }
-          }}
-        />
-      </div>
+      <CellGridPicker
+        mode="destination"
+        rows={box.grid_rows ?? 1}
+        cols={box.grid_cols ?? 1}
+        cells={cells}
+        value={value.map((c) => `${c.grid_row}:${c.grid_col}`)}
+        max={qty}
+        reserved={reservedCells}
+        onChange={(keys) =>
+          onChange(
+            keys.map((k) => {
+              const [row, col] = k.split(':');
+              return { grid_row: Number(row), grid_col: Number(col) };
+            }),
+          )
+        }
+      />
     </div>
   );
 }

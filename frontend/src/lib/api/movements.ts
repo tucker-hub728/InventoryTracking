@@ -35,7 +35,12 @@ export type MovementType =
   | 'customer_shipment'
   // Consumable issued to a Kanban (TRX-003, consum01). Unit-out of the shelf,
   // into the room; terminal for quantity and never back-flushed.
-  | 'consumable_issue';
+  | 'consumable_issue'
+  // Debit-and-gone issue to a scrap location (TRX-001/002, issue01) — PD, R&D,
+  // a QC lab. Unit-out of the shelf INTO that location; the material leaves
+  // controlled inventory and nothing is stored at the destination. The `to`
+  // node on these rows is the disposition, not a balance.
+  | 'material_issue';
 
 /** Display labels — keep aligned with the backend ``MovementType`` enum. */
 export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
@@ -54,6 +59,9 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   kit_cancel_return: 'Cancel return',
   customer_shipment: 'Shipped to customer',
   consumable_issue: 'Issued to Kanban',
+  // Named for where it went, like the two above it — "Issued" alone would read
+  // as the Kanban issue, and the two are different transactions.
+  material_issue: 'Issued to location',
 };
 
 /** Sign of the qty_delta enforced by each type — useful for colouring the row. */
@@ -75,6 +83,9 @@ export const MOVEMENT_TYPE_SIGN: Record<MovementType, 'in' | 'out' | 'signed'> =
   customer_shipment: 'out',
   // Leaves the shelf for good — terminal for quantity (07-09 TRX-001).
   consumable_issue: 'out',
+  // Leaves controlled inventory entirely (TRX-001/002), despite carrying a
+  // destination node — that node records where it went, not where it now is.
+  material_issue: 'out',
 };
 
 export interface ApiMovement {

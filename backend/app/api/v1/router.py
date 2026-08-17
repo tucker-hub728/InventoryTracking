@@ -22,6 +22,7 @@ from app.inventory.routes import (
     suppliers_router,
 )
 from app.invitations.routes import router as invitations_router
+from app.issues.routes import issues_router
 from app.kitting.routes import kits_router
 from app.locations.routes import alloc_router, nodes_router
 from app.products.routes import customers_router
@@ -45,6 +46,7 @@ api_router.include_router(bom_router)
 api_router.include_router(kits_router)
 api_router.include_router(customers_router)
 api_router.include_router(shipments_router)
+api_router.include_router(issues_router)
 api_router.include_router(consumables_router)
 api_router.include_router(forecasts_router)
 api_router.include_router(audit_router)

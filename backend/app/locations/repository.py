@@ -18,10 +18,11 @@ from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
+    SCRAP_NODE_TYPE,
     STORAGE_GROUPS,
     STORAGE_ROOM_CODE,
     LocationNode,
@@ -171,6 +172,7 @@ async def create_node(
     grid_cols: int | None = None,
     dedicated_customer_id: uuid.UUID | None = None,
     dedicated_product_id: uuid.UUID | None = None,
+    is_scrap: bool = False,
     notes: str | None = None,
 ) -> LocationNode:
     """Insert a node. Caller has already validated the hierarchy. Commits."""
@@ -184,6 +186,7 @@ async def create_node(
         grid_cols=grid_cols,
         dedicated_customer_id=dedicated_customer_id,
         dedicated_product_id=dedicated_product_id,
+        is_scrap=is_scrap,
         notes=notes,
         created_by_user_id=created_by_user_id,
     )
@@ -292,6 +295,7 @@ async def create_storage_category(
     name: str,
     group_codes: Collection[str],
     created_by_user_id: uuid.UUID,
+    is_scrap: bool = False,
 ) -> tuple[LocationNode, list[LocationNode]]:
     """Create one Storage category and its template groups (LOC-001).
 
@@ -304,7 +308,13 @@ async def create_storage_category(
     An unused sub-type is simply an absent child — there is no flag to keep in
     step. Both levels are created together so a category can never exist without
     the groups it was provisioned with. Caller has already checked the parent is
-    the Storage room and that the caller is a Super Admin. Caller commits."""
+    the Storage room and that the caller is a Super Admin. Caller commits.
+
+    ``is_scrap`` marks the category as a debit-and-gone destination
+    (REQ-2026-08-04-TRX-001/002). It lands on the CATEGORY only — the groups stay
+    ordinary storage, because a scrap location still receives transfers into its
+    shelves and freezers; what the flag governs is whether the Issue action may
+    name this location. Set here at creation and never afterwards."""
     base = _slugify_storage_code(name)
     code = base
     n = 2
@@ -319,6 +329,7 @@ async def create_storage_category(
         name=name,
         created_by_user_id=created_by_user_id,
         parent_id=room_node_id,
+        is_scrap=is_scrap,
     )
     wanted = set(group_codes)
     groups = [
@@ -492,6 +503,25 @@ async def list_nodes_by_types(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def list_scrap_locations(
+    session: AsyncSession, *, active_only: bool = True
+) -> list[LocationNode]:
+    """Every location marked debit-and-gone (REQ-2026-08-04-TRX-001/002).
+
+    The Issue destination list. Ordered by NAME rather than code, because the
+    operator picks "QC 1 Analytical Lab" from a list of a handful of labs and the
+    ``STG-`` code is a generated handle they never see.
+    """
+    stmt = select(LocationNode).where(
+        LocationNode.node_type == SCRAP_NODE_TYPE,
+        LocationNode.is_scrap.is_(True),
+    )
+    if active_only:
+        stmt = stmt.where(LocationNode.is_active.is_(True))
+    stmt = stmt.order_by(func.lower(LocationNode.name))
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def count_children(session: AsyncSession, node_id: uuid.UUID) -> int:
     n = (
         await session.execute(
@@ -645,6 +675,10 @@ def node_to_audit_snapshot(node: LocationNode) -> dict[str, object | None]:
             str(node.dedicated_product_id) if node.dedicated_product_id else None
         ),
         "is_active": node.is_active,
+        # The debit-and-gone decision (issue01). Set once at creation and never
+        # editable, so the audit trail's only record of it is this snapshot —
+        # which is exactly why it has to be here.
+        "is_scrap": node.is_scrap,
     }
 
 
@@ -1071,6 +1105,96 @@ async def reduce_allocation(
     return allocation
 
 
+async def draw_lot_at_node(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    node_id: uuid.UUID,
+    qty: int,
+    cell_allocation_ids: list[str] | None,
+    line_no: int,
+    exceeds_code: str,
+) -> None:
+    """Draw ``qty`` of one lot at one node — the exact vials for an LN2 box, else
+    FIFO across that lot's allocations there. Reducing an allocation to zero
+    deactivates it (incl. box cells), which is what frees the source cell.
+
+    The unit-OUT half of every multi-source transaction: transfer, customer
+    shipment and material issue all start by taking stock off a source, and the
+    taking is identical in all three. It lived as three near-copies (the transfer
+    one even documented itself as "mirrors the shipment source drain; the
+    difference is only in the error codes"), so ``exceeds_code`` is that
+    difference, passed in — the caller names the action the operator was
+    performing and everything else is shared.
+
+    ``line_no`` prefixes the messages because these transactions are multi-source
+    and "Source 3: …" is the only thing that tells the operator which row of
+    their picker is the problem.
+    """
+    # Imported here rather than at module scope: this is the one place the
+    # location repository needs kitting's allocation readers, and a top-level
+    # import would tie every location import to the kitting module.
+    from app.kitting import repository as kit_repo
+
+    allocs = [
+        a
+        for a in await kit_repo.allocations_for_item_at_node(
+            session, item_id, node_id, for_update=True
+        )
+        if a.lot_id == lot_id
+    ]
+    available = sum(int(a.qty) for a in allocs)
+    if available == 0:
+        raise NotFoundError(
+            f"Source {line_no}: that lot is no longer stored at that location",
+            code="no_stock_at_location",
+        )
+
+    if cell_allocation_ids:
+        wanted: list[uuid.UUID] = []
+        for raw in cell_allocation_ids:
+            try:
+                wanted.append(uuid.UUID(raw))
+            except (ValueError, AttributeError) as exc:
+                raise ValidationError(
+                    "cell_allocation_ids is not a valid UUID",
+                    code="invalid_cell_allocation_ids",
+                ) from exc
+        if qty != len(set(wanted)):
+            raise ValidationError(
+                f"Source {line_no}: {len(set(wanted))} vials selected but qty is {qty} — "
+                f"for a box the quantity is the number of vials.",
+                code="cell_count_mismatch",
+            )
+        chosen = await kit_repo.allocations_by_ids(session, wanted)
+        found = {a.id for a in chosen}
+        if [str(w) for w in wanted if w not in found] or any(
+            a.lot_id != lot_id or a.location_node_id != node_id for a in chosen
+        ):
+            raise ValidationError(
+                f"Source {line_no}: one or more selected vials are no longer available.",
+                code="invalid_cell",
+            )
+        for alloc in chosen:
+            await reduce_allocation(session, allocation=alloc, qty=int(alloc.qty))
+        return
+
+    if qty > available:
+        raise ValidationError(
+            f"Source {line_no}: requested {qty} exceeds the {available} available for "
+            f"this lot here",
+            code=exceeds_code,
+        )
+    remaining = qty
+    for alloc in allocs:
+        if remaining <= 0:
+            break
+        take = min(remaining, int(alloc.qty))
+        await reduce_allocation(session, allocation=alloc, qty=take)
+        remaining -= take
+
+
 async def is_descendant_of(
     session: AsyncSession, *, ancestor_id: uuid.UUID, candidate_id: uuid.UUID
 ) -> bool:
@@ -1265,6 +1389,52 @@ async def create_node_shipment_movement(
         qty_abs=qty,
         customer_id=customer_id,
         reference_number=reference_number,
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
+async def create_node_issue_movement(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    from_location_node_id: uuid.UUID,
+    to_location_node_id: uuid.UUID,
+    qty: int,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> StockMovement:
+    """Issue material to a scrap location — debit-and-gone
+    (REQ-2026-08-04-TRX-001/002). Unit-OUT from the storage node; the material
+    leaves controlled inventory and NO allocation is created at the destination.
+
+    ``to_location_node_id`` is set and required, which is the one thing that
+    separates this from :func:`create_node_shipment_movement`. A shipment leaves
+    the building and its destination is a customer, recorded elsewhere on the
+    row; an issue leaves *inventory* while staying in the building, so the
+    disposition — PD, R&D, QC 1 — is the destination and the ledger has to name
+    it. Reading a ``to`` node here as "stock is now there" would be a mistake:
+    the address is the record of where it went, not a balance.
+    """
+    from_path, to_path = await node_paths(
+        session, from_node_id=from_location_node_id, to_node_id=to_location_node_id
+    )
+    movement = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_location_node_id,
+        to_location_node_id=to_location_node_id,
+        from_location_path=from_path,
+        to_location_path=to_path,
+        movement_type="material_issue",
+        qty_delta=-qty,
+        qty_abs=qty,
         notes=notes,
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,

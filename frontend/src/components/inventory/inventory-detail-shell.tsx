@@ -3,7 +3,15 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeft, ArrowLeftRight, Loader2, PackageOpen, Pencil, Truck } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  Loader2,
+  MinusCircle,
+  PackageOpen,
+  Pencil,
+  Truck,
+} from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -15,6 +23,7 @@ import { StatusBadge } from '@/components/shared/status-badge';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { IssueToKanbanDialog } from '@/components/inventory/issue-to-kanban-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
+import { IssueToLocationDialog } from './issue-to-location-dialog';
 import { ShipToCustomerDialog } from './ship-to-customer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
@@ -141,7 +150,12 @@ export function InventoryDetailShell({
   const [editing, setEditing] = React.useState(false);
   const [shipping, setShipping] = React.useState(false);
   const [transferring, setTransferring] = React.useState(false);
+  // Two different issues, deliberately not one flag: `issuing` is the
+  // consumable→Kanban transaction (TRX-003), `issuingToLocation` is
+  // debit-and-gone to PD/R&D/QC (TRX-001/002). Different destinations,
+  // different ledger types, different dialogs.
   const [issuing, setIssuing] = React.useState(false);
+  const [issuingToLocation, setIssuingToLocation] = React.useState(false);
 
   // Land on a tab that has scrolled out of the strip — say Audit History,
   // reached from a bookmark — and nothing on screen says which one you are on.
@@ -372,6 +386,22 @@ export function InventoryDetailShell({
                 <PackageOpen size={14} /> Issue to Kanban
               </Button>
             )}
+            {/* Issue is debit-and-gone (REQ-2026-08-04-TRX-001/002): material
+                goes to PD, R&D or a QC lab and leaves controlled inventory.
+                Deliberately a SEPARATE button from Transfer, not a destination
+                inside it — the same lab is a valid target for both actions and
+                they mean opposite things, so which one happened has to be the
+                operator's explicit choice. Offered on every tier, since those
+                labs receive raw material and finished goods alike. E-signed.
+
+                The dialog itself handles the "no debit-and-gone location exists
+                yet" case; hiding the button on that state would leave nothing to
+                explain why the action is missing. */}
+            {canSign && (
+              <Button onClick={() => setIssuingToLocation(true)}>
+                <MinusCircle size={14} /> Issue
+              </Button>
+            )}
             {/* Ship-to-customer is the terminal transaction for a built item —
                 a finished good, or a sub-assembly sold directly (INV-004 /
                 CUST-001). E-signed, so gate on ``inventory:sign``. */}
@@ -527,6 +557,13 @@ export function InventoryDetailShell({
       <IssueToKanbanDialog
         open={issuing}
         onOpenChange={setIssuing}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+        onDone={refresh}
+      />
+
+      <IssueToLocationDialog
+        open={issuingToLocation}
+        onOpenChange={setIssuingToLocation}
         item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
         onDone={refresh}
       />
