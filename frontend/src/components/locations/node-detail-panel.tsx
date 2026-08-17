@@ -681,7 +681,15 @@ export function NodeDetailPanel({
         // carries its own ``overflow-x-auto``; it just never got the chance to
         // use it until its parent was allowed to be narrower than its contents.
         <div className="grid grid-cols-1 gap-4 [&>*]:min-w-0 lg:grid-cols-2">
-          <div className="min-w-0 rounded-lg border border-border bg-bg-elev p-4">
+          {/* Pinned while the contents list is read. The scrollport is the
+              ``<main>`` of the Location System (it owns ``overflow-y-auto``),
+              not the window, so sticky resolves against that pane. ``top-5``
+              matches the panel's own ``py-5`` so the card lands where it
+              normally sits rather than jammed against the edge. ``self-start``
+              is what gives it room to travel: stretched to the row it would be
+              exactly as tall as its grid area and sticky would have nowhere to
+              go (client 2026-08-17). */}
+          <div className="min-w-0 rounded-lg border border-border bg-bg-elev p-4 lg:sticky lg:top-5 lg:self-start">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-sm font-medium text-text-2">
                 Unit map · {gridRows}×{gridCols}
@@ -710,31 +718,14 @@ export function NodeDetailPanel({
               selectedCells={selectedCells}
               selectedOccupied={selectedOccupied}
               batchLotId={batchLotId}
+              showLegend
               onSelectCell={handleSelectCell}
             />
-            {/* Batch unit-out (transfer / consume) for the selected units. */}
-            {canWrite && selectedOutAllocs.length > 0 && (
-              <div className="mt-3">
-                <BatchOutPanel
-                  selected={selectedOutAllocs}
-                  targets={targets}
-                  trees={trees}
-                  busy={busy}
-                  onClear={() => {
-                    setSelectedOccupied(new Set());
-                    setBatchLotId(null);
-                  }}
-                  onTransfer={(p) => {
-                    setPending({ kind: 'transfer-batch', ...p });
-                    setShowReauth(true);
-                  }}
-                  onConsume={(p) => {
-                    setPending({ kind: 'consume-batch', ...p });
-                    setShowReauth(true);
-                  }}
-                />
-              </div>
-            )}
+            {/* The batch panel used to hang here, under the map, so selecting a
+                unit grew this card and pushed the page down — the map moved out
+                from under the cursor mid-selection (client 2026-08-17). It now
+                lives in the right-hand column, where it takes its space from
+                the contents list instead of from the layout. */}
             {/* Batch placement into empty cells — disabled: unit-in is done
                 only from Receipt Admin. */}
             {canWrite && LN2_UNIT_IN_ENABLED && selectedCells.size > 0 && (
@@ -780,46 +771,80 @@ export function NodeDetailPanel({
             )}
           </div>
 
-          <div className="rounded-lg border border-border bg-bg-elev">
-            <div className="border-b border-border px-4 py-3">
-              <p className="text-sm font-medium text-text-2">
-                Contents <span className="text-text-3">· {allocations.length} placed</span>
-                {loading && <span className="ml-2 text-text-3">loading…</span>}
-              </p>
-            </div>
-            {allocations.length === 0 ? (
-              <p className="px-4 py-10 text-center text-sm text-text-3">Nothing placed yet.</p>
-            ) : (
-              <ul className="max-h-[28rem] divide-y divide-border overflow-y-auto">
-                {[...allocations]
-                  .sort((a, b) => cellSort(a) - cellSort(b))
-                  .map((a) => (
-                    <li key={a.id}>
-                      <button
-                        type="button"
-                        className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface"
-                        onClick={() => setDetailAlloc(a)}
-                        title="View details"
-                      >
-                        <span className="w-8 shrink-0 font-mono text-xs text-text-3">
-                          {a.grid_row != null && a.grid_col != null
-                            ? `${rowLabel(a.grid_row)}${a.grid_col}`
-                            : '—'}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="text-text-1 block truncate text-sm">
-                            {a.item_number ?? '—'}
-                          </span>
-                          <span className="block truncate text-xs text-text-3">
-                            {a.lot_number ?? a.lot_id.slice(0, 8)}
-                          </span>
-                        </span>
-                        <ChevronRight size={15} className="shrink-0 text-text-3" />
-                      </button>
-                    </li>
-                  ))}
-              </ul>
+          {/* Right column. The batch panel lives here rather than under the map
+              so that selecting units never resizes the map card — and with the
+              map pinned alongside, it cannot move the map either. */}
+          <div className="flex min-w-0 flex-col gap-4">
+            {canWrite && selectedOutAllocs.length > 0 && (
+              <div className="shrink-0 rounded-lg border border-accent/40 bg-bg-elev p-3">
+                <BatchOutPanel
+                  selected={selectedOutAllocs}
+                  targets={targets}
+                  trees={trees}
+                  busy={busy}
+                  onClear={() => {
+                    setSelectedOccupied(new Set());
+                    setBatchLotId(null);
+                  }}
+                  onTransfer={(p) => {
+                    setPending({ kind: 'transfer-batch', ...p });
+                    setShowReauth(true);
+                  }}
+                  onConsume={(p) => {
+                    setPending({ kind: 'consume-batch', ...p });
+                    setShowReauth(true);
+                  }}
+                />
+              </div>
             )}
+
+            <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-bg-elev">
+              <div className="border-b border-border px-4 py-3">
+                <p className="text-sm font-medium text-text-2">
+                  Contents <span className="text-text-3">· {allocations.length} placed</span>
+                  {loading && <span className="ml-2 text-text-3">loading…</span>}
+                </p>
+              </div>
+              {allocations.length === 0 ? (
+                <p className="px-4 py-10 text-center text-sm text-text-3">Nothing placed yet.</p>
+              ) : (
+                // Always bounded, so a full box (100 units) scrolls INSIDE this
+                // card instead of running the pane down the page and taking the
+                // unit map off the top of it. The ceiling is the scrollport
+                // rather than a fixed 28rem on a wide screen: the pane is about
+                // a viewport tall, less the app header and this panel's own
+                // header, stats and padding.
+                <ul className="max-h-[28rem] min-h-0 flex-1 divide-y divide-border overflow-y-auto lg:max-h-[calc(100vh-16rem)]">
+                  {[...allocations]
+                    .sort((a, b) => cellSort(a) - cellSort(b))
+                    .map((a) => (
+                      <li key={a.id}>
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface"
+                          onClick={() => setDetailAlloc(a)}
+                          title="View details"
+                        >
+                          <span className="w-8 shrink-0 font-mono text-xs text-text-3">
+                            {a.grid_row != null && a.grid_col != null
+                              ? `${rowLabel(a.grid_row)}${a.grid_col}`
+                              : '—'}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="text-text-1 block truncate text-sm">
+                              {a.item_number ?? '—'}
+                            </span>
+                            <span className="block truncate text-xs text-text-3">
+                              {a.lot_number ?? a.lot_id.slice(0, 8)}
+                            </span>
+                          </span>
+                          <ChevronRight size={15} className="shrink-0 text-text-3" />
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </div>
           </div>
         </div>
       )}
