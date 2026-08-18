@@ -105,6 +105,10 @@ async def ship_sources(
             if a.lot_id == lot_id
         ]
 
+    # One query for the lots on show rather than widening the shared source
+    # tuple, which also feeds kitting's Issue picker.
+    release_states = await inv_repo.lot_release_states(db, {r[0] for r in rows})
+
     out: list[ShipSourceRead] = []
     for (lot_id, lot_number, exp, node_id, qty) in rows:
         dims = grid_meta.get(node_id)
@@ -112,6 +116,7 @@ async def ship_sources(
             ShipSourceRead(
                 lot_id=str(lot_id),
                 lot_number=lot_number,
+                release_state=release_states.get(lot_id),
                 expiration_date=exp,
                 node_id=str(node_id),
                 location=_label(node_id),

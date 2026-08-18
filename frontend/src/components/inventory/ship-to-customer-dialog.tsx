@@ -29,6 +29,7 @@ import {
   picksValid,
   type LotPick,
 } from '@/components/reconciliation/lot-source-picker';
+import { RejectedLotWarning } from '@/components/inventory/rejected-lot-warning';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import type { KitLineSourceLot } from '@/lib/api/kits';
@@ -57,6 +58,7 @@ function toSourceLot(s: ShipSource): KitLineSourceLot {
   return {
     lot_id: s.lot_id,
     lot_number: s.lot_number,
+    release_state: s.release_state,
     expiration_date: s.expiration_date,
     node_id: s.node_id,
     node_name: s.location,
@@ -121,6 +123,24 @@ export function ShipToCustomerDialog({ open, onOpenChange, item, onDone }: Props
   const total = picksTotal(picks);
   const noStock = lots !== null && lots.length === 0;
   const picksOk = lots !== null && total >= 1 && picksValid(lots, picks);
+
+  /**
+   * Rejected batches among the picked sources (STS-003, client 2026-08-17).
+   *
+   * A warning, not a gate — the client was explicit that the status is a record
+   * in this version. It matters most here of all the outbound flows: a rejected
+   * batch reaching a customer is a different order of mistake from one moving
+   * between freezers.
+   */
+  const rejectedLots = React.useMemo(() => {
+    const names = new Set<string>();
+    for (const p of picks) {
+      if (!p.lot_id) continue;
+      const src = lots?.find((l) => l.lot_id === p.lot_id && l.node_id === p.node_id);
+      if (src?.release_state === 'rejected') names.add(src.lot_number ?? p.lot_id.slice(0, 8));
+    }
+    return [...names];
+  }, [picks, lots]);
 
   const customerOptions: SearchableSelectOption[] = React.useMemo(
     () =>
@@ -257,6 +277,8 @@ export function ShipToCustomerDialog({ open, onOpenChange, item, onDone }: Props
                 </div>
               </>
             )}
+
+            <RejectedLotWarning lotNumbers={rejectedLots} action="ship it" />
 
             {error && (
               <p
