@@ -30,15 +30,13 @@ import { ApiError } from '@/lib/api/client';
 import { issuesApi, type IssuedSummary } from '@/lib/api/issues';
 import { locationNodesApi, type NodeTree } from '@/lib/api/location-nodes';
 import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
-import { cn } from '@/lib/utils';
 
 import { CreateStorageLocationDialog } from './create-storage-location-dialog';
 import {
   DEFAULT_GROUP_SEGMENT,
   ISSUED_SEGMENT,
-  STORAGE_GROUPS,
   STORAGE_ROOM_CODE,
-  groupByCode,
+  groupFor,
   storageHref,
 } from './storage-groups';
 
@@ -272,9 +270,15 @@ function CategoryCard({
   // one click away. For a normal location, the first group it actually has;
   // landing on the template's first tab would 404 into a redirect on a location
   // with Shelf switched off.
+  // ``groupFor`` rather than a template lookup: a location whose first sub-type
+  // is one the client added (code ``GRP-1``) has no template entry to find, and
+  // falling back to `shf` would land the card on a tab the location may not have
+  // — a redirect on every click through from this page.
   const firstSegment = category.is_scrap
     ? ISSUED_SEGMENT
-    : (groupByCode(groups[0]?.code)?.segment ?? DEFAULT_GROUP_SEGMENT);
+    : groups[0]
+      ? groupFor(groups[0]).segment
+      : DEFAULT_GROUP_SEGMENT;
 
   const stock = groups.reduce(
     (sum, g) => sum + (g.children ?? []).reduce((s, l) => s + l.active_allocation_count, 0),
@@ -386,33 +390,31 @@ function CategoryCard({
           </p>
         ) : (
           <dl className="mt-auto space-y-1.5 border-t border-border px-4 py-3">
-            {/* Iterate the TEMPLATE, not the category's children, so every card
-                lists the same three rows in the same places and an unused
-                sub-type reads as deliberately off rather than missing. */}
-            {STORAGE_GROUPS.map((tpl) => {
-              const group = groups.find((g) => g.code.toUpperCase() === tpl.code);
-              const count = group ? (group.children ?? []).length : 0;
-              const Icon = tpl.icon;
-              return (
-                <div
-                  key={tpl.code}
-                  className={cn(
-                    'flex items-center gap-2 text-xs',
-                    group ? 'text-text-2' : 'text-text-3/70',
-                  )}
-                >
-                  <Icon
-                    size={13}
-                    className={cn('shrink-0', group ? 'text-accent' : 'text-text-3/60')}
-                  />
-                  {/* The group's OWN name — the client may have renamed it. */}
-                  <span className="truncate">{group?.name ?? tpl.defaultName}</span>
-                  <span className="ml-auto shrink-0 tabular-nums">
-                    {!group ? 'not used' : count === 0 ? '—' : count}
-                  </span>
-                </div>
-              );
-            })}
+            {/* The location's ACTUAL sub-types, one row each.
+                This used to iterate the three kinds and match a group by exact
+                code, which held only while a location had at most one of each.
+                It now can have several ("Minus-20 Freezer", "Minus-80 Freezer",
+                codes FRZ and FRZ-2) or none at all — and the old lookup would
+                have reported a location whose only freezer is FRZ-2 as having no
+                freezer, because it searched for the bare code. */}
+            {groups.length === 0 ? (
+              <div className="text-xs text-text-3/70">No sub-types yet</div>
+            ) : (
+              groups.map((group) => {
+                const Icon = groupFor(group).icon;
+                const count = (group.children ?? []).length;
+                return (
+                  <div key={group.id} className="flex items-center gap-2 text-xs text-text-2">
+                    <Icon size={13} className="shrink-0 text-accent" />
+                    {/* The sub-type's OWN name — the client named it. */}
+                    <span className="truncate">{group.name}</span>
+                    <span className="ml-auto shrink-0 tabular-nums">
+                      {count === 0 ? '—' : count}
+                    </span>
+                  </div>
+                );
+              })
+            )}
           </dl>
         )}
       </Link>

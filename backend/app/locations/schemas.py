@@ -167,69 +167,121 @@ class KanbanCreate(BaseModel):
 
 
 class StorageCategoryCreate(BaseModel):
-    """Create one Storage location from the standard template (LOC-001).
+    """Create one Storage location — bare, with no sub-types (LOC-001).
 
-    The client names it — "Materials Management" — and switches on the sub-types
-    it uses. Each switched-on sub-type becomes a group node the client may rename
-    afterwards; a switched-off one is simply not created, which is what LOC-001
-    means by "may leave any unused: a location without a given sub-type simply
-    does not use it".
+    The client names it ("Materials Management") and says what happens to
+    material sent there. That is all: the location is created with NO shelves,
+    refrigerators or freezers, and they are added afterwards through
+    :class:`StorageGroupsUpdate`.
 
-    All three default to on, because the requirement provisions a location with
-    all three and leaving one out is the exception. At least one is required —
-    a location with no sub-types has nowhere to put anything.
+    This used to carry ``shelf`` / ``refrigerator`` / ``freezer`` booleans and
+    provision the ticked ones. The client dropped that on 2026-08-19: sub-types
+    are configurable after creation, so ONE screen should decide them, and it
+    should be the same screen whether the location is a minute old or a year old.
+    Asking at create time was a second answer to the same question — and one that
+    could not express a location with two freezers, which is the case the amended
+    LOC-001 exists for.
 
     ``is_scrap`` marks it a debit-and-gone destination (REQ-2026-08-04-TRX-001/
     002) — the client's PD, R&D and QC labs. It is asked here and only here: the
     flag is immutable after creation, because turning it on later would leave
     stock sitting in a place now meant to consume everything sent to it, and
     turning it off would imply already-issued material has a home. It does NOT
-    change the location's structure — a scrap location keeps its sub-types and
-    still receives transfers into them; it only becomes eligible as an Issue
-    destination.
+    change the location's structure — a scrap location may still be given
+    sub-types and still receives transfers into them; it only becomes eligible as
+    an Issue destination.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
-    shelf: bool = True
-    refrigerator: bool = True
-    freezer: bool = True
     is_scrap: bool = False
 
-    @model_validator(mode="after")
-    def _at_least_one(self) -> StorageCategoryCreate:
-        # "A location with no sub-types has nowhere to put anything" — true of a
-        # normal location, and precisely NOT true of a scrap one, where the
-        # location itself is the destination and nothing is ever put down. So a
-        # scrap location may have none, and forcing the client to tick a
-        # refrigerator they will never use would be inventing structure.
-        if self.is_scrap:
-            return self
-        if not (self.shelf or self.refrigerator or self.freezer):
-            raise ValueError("Choose at least one of shelf, refrigerator or freezer")
-        return self
 
+class StorageGroupRef(BaseModel):
+    """One entry in a location's desired sub-type list — an ``id`` OR a ``kind``.
 
-class StorageGroupsUpdate(BaseModel):
-    """Turn a Storage location's sub-types on or off after the fact (LOC-004).
+    ``id`` means "this existing sub-type stays". ``kind`` means "add a new one of
+    this kind", optionally under a ``name`` of the client's choosing (defaulting
+    to the kind's own name). Exactly one of id/kind, because an id WITH a kind
+    would be asking to change what an existing sub-type IS, which nothing
+    supports: the kind decides the code, and the code is in every link.
 
-    Switching one ON revives the group node if it was switched off before, so its
-    units come back with it rather than being stranded. Switching one OFF is
-    refused by the route while it still holds units — the alternative is
-    orphaning stock nobody can see.
-
-    "Keep at least one" is enforced in the ROUTE rather than here, because it
-    depends on the category: a scrap location is allowed to keep none (see
-    :class:`StorageCategoryCreate`), and this schema cannot see which kind it is
-    being applied to.
+    ``name`` is only meaningful alongside ``kind``. An id WITH a name would be a
+    rename, and renaming has its own endpoint and its own audit action
+    (``PATCH /location-nodes/{id}``); accepting it here would give one change two
+    ways in, which is how two audit trails start disagreeing.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    shelf: bool
-    refrigerator: bool
-    freezer: bool
+    id: str | None = None
+    kind: Literal["shelf", "refrigerator", "freezer"] | None = None
+    name: Annotated[str | None, _trim_nonblank("name")] = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> StorageGroupRef:
+        if (self.id is None) == (self.kind is None):
+            raise ValueError("Give either id (keep this sub-type) or kind (add one), not both")
+        if self.id is not None and self.name is not None:
+            raise ValueError("Renaming a sub-type uses PATCH /location-nodes/{id}, not this list")
+        return self
+
+
+#: Upper bound on a location's sub-types. Not a requirement — LOC-001 sets no
+#: limit — but an unbounded list is an unbounded number of tabs and an unbounded
+#: number of INSERTs in one request. High enough that nobody legitimately hits
+#: it; low enough that a runaway client cannot mint a thousand groups.
+MAX_STORAGE_GROUPS = 24
+
+
+class StorageGroupsUpdate(BaseModel):
+    """The sub-types a Storage location should have, after the fact (LOC-001).
+
+    DECLARATIVE, not a set of switches: send the list you want to end up with.
+    Entries carrying an ``id`` are kept, entries carrying a ``kind`` are added,
+    and any current sub-type whose id is absent is removed. One shape covers add
+    and remove, and it is idempotent — re-sending the same list changes nothing.
+
+    It replaced three booleans (``shelf`` / ``refrigerator`` / ``freezer``). A
+    boolean per sub-type cannot express the thing the amended LOC-001 exists to
+    allow: "an additional freezer (e.g. minus-80 alongside minus-20)" — two
+    freezers is not a state ``freezer: true`` can describe. There are still only
+    three KINDS; what changed is that a location may hold any number of each,
+    told apart by the names the client gives them.
+
+    An empty list is legal for ANY location, not only a scrap one. A location is
+    now CREATED with no sub-types, so zero is a state every location passes
+    through — refusing to return to it would make the first save irreversible.
+
+    Adding a kind under a name that a removed sub-type of that kind already had
+    REVIVES that node rather than minting a second one beside it. Both sibling
+    indexes are partial on ``is_active``, so the duplicate would be permitted —
+    and the result would be a tab that reads identically but is a different node
+    under a different code, silently breaking every link already built from the
+    old one. Removing a sub-type is refused by the route while it still holds
+    units: hiding the tab does not move the stock, and the ledger keeps counting
+    it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    groups: list[StorageGroupRef] = Field(default_factory=list, max_length=MAX_STORAGE_GROUPS)
+
+    @model_validator(mode="after")
+    def _no_duplicates(self) -> StorageGroupsUpdate:
+        ids = [g.id for g in self.groups if g.id is not None]
+        if len(set(ids)) != len(ids):
+            raise ValueError("The same sub-type is listed twice")
+        # Case-insensitively, to match the sibling-name index the route would
+        # otherwise trip on with a much worse message ("already exists here"
+        # naming a sub-type created moments earlier in the same request).
+        # Only the NAMED additions are checked — two unnamed adds of the same
+        # kind are legal, and the route numbers their default names apart.
+        names = [g.name.lower() for g in self.groups if g.kind is not None and g.name is not None]
+        if len(set(names)) != len(names):
+            raise ValueError("Two new sub-types have the same name")
+        return self
 
 
 class GridUpdateRequest(BaseModel):

@@ -40,7 +40,7 @@ import {
   DEFAULT_GROUP_SEGMENT,
   ISSUED_SEGMENT,
   STORAGE_ROOM_CODE,
-  groupByCode,
+  groupFor,
   storageHref,
 } from '@/components/storage/storage-groups';
 import type { KitStatus } from '@/lib/api/kits';
@@ -150,7 +150,10 @@ export function locationHref(
       if (category.isScrap && !isUnit && !group) {
         return storageHref(category.id, ISSUED_SEGMENT);
       }
-      const segment = groupByCode(group?.code)?.segment ?? DEFAULT_GROUP_SEGMENT;
+      // Any sub-type, not just the template's three: a ledger row naming a unit
+      // inside a sub-type the client added (code ``GRP-1``) still has to link to
+      // the tab that unit is actually on.
+      const segment = group ? groupFor(group).segment : DEFAULT_GROUP_SEGMENT;
       return storageHref(category.id, segment, isUnit ? node.id : undefined);
     }
     default:

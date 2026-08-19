@@ -295,20 +295,31 @@ export interface NodeCreateInput {
   notes?: string | null;
 }
 
+/** The three kinds of storage sub-type (LOC-001). */
+export type StorageGroupKind = 'shelf' | 'refrigerator' | 'freezer';
+
 /**
- * Which sub-types a Storage location uses (REQ-2026-08-04-LOC-001).
+ * The sub-types a Storage location should end up with (LOC-001).
  *
- * All three default to on server-side — the requirement provisions a location
- * with all three and leaving one out is the exception. At least one is required;
- * a location with no sub-types has nowhere to put anything.
+ * DECLARATIVE: send the whole list. An entry with an `id` keeps that sub-type,
+ * an entry with a `kind` adds a new one (optionally under a `name`; the server
+ * defaults it to the kind's own name, numbered if that is taken), and any current
+ * sub-type not listed is removed. An empty list is legal — a location is created
+ * with no sub-types, so zero is a state every one starts in.
+ *
+ * Never `id` and `name` on one entry: that would be a rename, which has its own
+ * endpoint ({@link locationNodesApi.rename}) and its own audit action.
+ *
+ * It replaced three booleans, because a boolean per sub-type cannot express what
+ * the amended requirement exists to allow: "an additional freezer (e.g. minus-80
+ * alongside minus-20)". There are still only three KINDS; a location may hold
+ * several of each, told apart by the names the client gives them.
  */
 export interface StorageGroupsInput {
-  shelf: boolean;
-  refrigerator: boolean;
-  freezer: boolean;
+  groups: Array<{ id: string } | { kind: StorageGroupKind; name?: string }>;
 }
 
-export interface StorageCategoryInput extends Partial<StorageGroupsInput> {
+export interface StorageCategoryInput {
   name: string;
   /**
    * Mark this location debit-and-gone (REQ-2026-08-04-TRX-001/002).
@@ -317,9 +328,9 @@ export interface StorageCategoryInput extends Partial<StorageGroupsInput> {
    * afterwards, because turning it on later would strand the stock already
    * sitting there and turning it off would imply issued material has a home.
    *
-   * A scrap location may have NO sub-types (the server relaxes the
-   * at-least-one rule for it): the location itself is the destination, so
-   * ticking a refrigerator it will never use would be inventing structure.
+   * It does not change the location's structure: every location is created with
+   * no sub-types, and a scrap one may simply never be given any — the location
+   * itself is the destination, so it needs nowhere to put things.
    */
   is_scrap?: boolean;
 }
@@ -498,11 +509,12 @@ export const locationNodesApi = {
   createKanban: (areaId: string, name: string) =>
     api.post<LocationNode>(`/location-nodes/${areaId}/kanbans`, { json: { name } }),
 
-  /** Provision one Storage location from the standard template (LOC-001) —
-   *  SUPER ADMIN only. The category and the sub-types switched on are created
-   *  together, so the response already carries the groups as `children` and the
-   *  page can render its tabs without a second read. The `STG-` code is
-   *  generated server-side; rename later via {@link rename}.
+  /** Create one Storage location (LOC-001) — SUPER ADMIN only. It is created
+   *  BARE: no shelves, refrigerators or freezers. Add those with
+   *  {@link updateStorageGroups}, which is the whole of "sub-types shall be
+   *  configurable after creation". The response carries an empty `children` so
+   *  the page renders from one shape either way. The `STG-` code is generated
+   *  server-side; rename later via {@link rename}.
    *
    *  Takes no room id: there is only one Storage room, the client never names or
    *  picks it, and the server creates it on first use. So this works on an
@@ -510,11 +522,11 @@ export const locationNodesApi = {
   createStorageCategory: (input: StorageCategoryInput) =>
     api.post<NodeTree>('/location-nodes/storage-categories', { json: input }),
 
-  /** Turn a Storage location's sub-types on or off after the fact (LOC-004) —
-   *  SUPER ADMIN only. Switching one ON revives the group and its units if it
-   *  had been switched off; switching one OFF is refused by the server while it
-   *  still holds units (`storage_group_in_use`). Returns the category with its
-   *  remaining groups nested. */
+  /** Set which sub-types a Storage location has, after creation (LOC-001) —
+   *  SUPER ADMIN only. Adding a name a switched-off sub-type already had REVIVES
+   *  that node rather than minting a second one under a new code; removing one is
+   *  refused by the server while it still holds units (`storage_group_in_use`).
+   *  Returns the category with its remaining sub-types nested, in tab order. */
   updateStorageGroups: (categoryId: string, input: StorageGroupsInput) =>
     api.patch<NodeTree>(`/location-nodes/${categoryId}/storage-groups`, { json: input }),
 

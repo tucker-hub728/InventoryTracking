@@ -1,29 +1,42 @@
-"""Ad-hoc smoke test: the standard location template (REQ-2026-08-04-LOC-001/004).
+"""Ad-hoc smoke test: location sub-types (REQ-2026-08-04-LOC-001/004, amended 2026-08-13).
 
-LOC-001 provisions a new location "from a standard template that automatically
-includes a configurable shelf, refrigerator, and freezer", which the client may
-rename and may leave unused. LOC-004 makes those sub-types admin-configurable.
+LOC-001 named three sub-types — "a configurable shelf, refrigerator, and freezer"
+— and LOC-004 made them admin-configurable. The 2026-08-13 amendment then made
+them configurable AFTER creation and allowed MORE THAN ONE of a kind: "an
+additional freezer (e.g. minus-80 alongside minus-20)".
 
-The template's sub-types are REAL NODES, not a stored flag — a category's groups
-are simply the ``room_location`` children it has. So this test asserts the
-structure, not a setting: switching a sub-type off soft-deletes its group, and
-switching it back on revives the same node with its units still attached.
+So a location is now CREATED BARE and its sub-types are added afterwards, one
+kind at a time, each under a name the client chooses. There are still only the
+three kinds; what tells two freezers apart is the name, and the server numbers
+their codes (``FRZ``, then ``FRZ-2``).
 
-Storage is the only room with four levels (room → category → group → unit), so
+The sub-types are REAL NODES, not a stored flag — a location's are simply the
+``room_location`` children it has. So this test asserts the structure, not a
+setting: removing a sub-type soft-deletes its node, and adding it back by name
+revives that same node.
+
+Storage is the only room with four levels (room → location → sub-type → unit), so
 the parentage rules get exercised here too.
 
     SMOKE_SA_EMAIL=… SMOKE_SA_PASSWORD=… python backend/tests/smoke_storage_template.py
 
 Verifies:
-  * a category is created with exactly the sub-types switched on
-  * the groups come back in TEMPLATE order (Shelf, Refrigerator, Freezer)
-  * a switched-off sub-type is simply absent
-  * units are added to a group with the ordinary create route (as Cold Storage)
-  * switching a sub-type OFF while it holds units is refused (409)
+  * a new location is created with NO sub-types
+  * the three kinds are added afterwards, and come back in kind order
+  * a location may be given only some of the kinds
+  * units are added to a sub-type with the ordinary create route (as Cold Storage)
+  * removing a sub-type while it holds units is refused (409)
   * …and succeeds once the unit is gone
-  * switching one back ON revives the group AND its units
+  * adding it back revives the SAME node, not a duplicate under a new code
+  * a location can hold TWO freezers at once, told apart only by name (LOC-001)
+  * a second freezer is numbered within its kind (FRZ-2) and sorts beside the first
+  * an unnamed add gets a numbered default name rather than colliding
+  * an equipment number is unique across BOTH freezers, "regardless of temperature"
+  * a code is never reused within a kind after a sub-type is removed
+  * a duplicate sub-type name on one location is refused (409)
+  * an unknown kind is refused — there are only three
+  * a location may be left with NO sub-types (it is created that way)
   * every location lands in ONE Storage room, created on demand if absent
-  * a category with no sub-types at all is refused
   * a non-super-admin is refused (403)
   * duplicate equipment numbers are refused anywhere (409)
   * cleans up everything it creates
@@ -113,9 +126,9 @@ def main() -> int:
     created: list[str] = []
     run = {"n": 1}
 
-    def make_category(name: str, **switches):
+    def make_category(name: str, **extra):
         for _ in range(60):
-            payload = {"name": f"{name} {run['n']}", **switches}
+            payload = {"name": f"{name} {run['n']}", **extra}
             s, b = _req(
                 "POST",
                 "/location-nodes/storage-categories",
@@ -128,67 +141,97 @@ def main() -> int:
             return s, b
         return 0, {"raw": "ran out of suffixes"}
 
-    print("\n-- create from the template")
-    s, cat = make_category("Smoke Location", shelf=True, refrigerator=True, freezer=True)
-    check("a category is created with all three sub-types", s == 201, (s, cat))
+    def set_groups(cat_id: str, *, keep: list[dict], add: tuple = ()):
+        """PATCH the sub-type list to exactly ``keep`` + ``add``.
+
+        The payload is DECLARATIVE (LOC-001): kept sub-types go by id, new ones
+        by KIND (optionally with a name), and anything not listed is removed. It
+        replaced three booleans, which could not express two freezers.
+
+        ``add`` entries are either a kind (``"freezer"``, taking the kind's
+        default name) or a ``(kind, name)`` pair.
+        """
+        entries: list[dict] = [{"id": g["id"]} for g in keep]
+        for a in add:
+            entries.append({"kind": a[0], "name": a[1]} if isinstance(a, tuple) else {"kind": a})
+        return _req(
+            "PATCH",
+            f"/location-nodes/{cat_id}/storage-groups",
+            token=token,
+            json_body={"groups": entries},
+        )
+
+    def add_unit(parent_id: str, name: str):
+        return _req(
+            "POST",
+            "/location-nodes",
+            token=token,
+            json_body={
+                "node_type": "sub_location",
+                "parent_id": parent_id,
+                "code": name,
+                "name": name,
+            },
+        )
+
+    print("\n-- a new location is created BARE")
+    s, cat = make_category("Smoke Location")
+    check("a category is created", s == 201, (s, cat))
     if s != 201:
         print("==> cannot continue without a category")
         return 1
     created.append(cat["id"])
-    groups = cat.get("children", [])
-    created.extend(g["id"] for g in groups)
-    check("it comes back with its groups nested", len(groups) == 3, groups)
     check(
-        "the groups are in TEMPLATE order — Shelf, Refrigerator, Freezer",
+        "it has NO sub-types — they are added afterwards (LOC-001)",
+        cat.get("children") == [],
+        cat.get("children"),
+    )
+    check("the category's code is derived from its name", cat["code"].startswith("STG-"), cat["code"])
+
+    print("\n-- the three kinds are added afterwards")
+    s, cat = set_groups(cat["id"], keep=[], add=("shelf", "refrigerator", "freezer"))
+    check("all three kinds are added in one save", s == 200, (s, cat))
+    groups = cat.get("children", []) if s == 200 else []
+    created.extend(g["id"] for g in groups)
+    check("the location now has three sub-types", len(groups) == 3, groups)
+    check(
+        "in KIND order — Shelf, Refrigerator, Freezer",
         [g["code"] for g in groups] == ["SHF", "REF", "FRZ"],
         [g["code"] for g in groups],
     )
     check(
-        "each group carries the template's default name",
+        "each carries its kind's default name",
         [g["name"] for g in groups] == ["Shelf", "Refrigerator", "Freezer"],
         [g["name"] for g in groups],
     )
-    check("the category's code is derived from its name", cat["code"].startswith("STG-"), cat["code"])
 
-    print("\n-- a switched-off sub-type is simply absent")
-    s, partial = make_category("Smoke Partial", shelf=True, refrigerator=False, freezer=True)
-    check("a category is created with two sub-types", s == 201, (s, partial))
+    print("\n-- a location may be given only some of the kinds")
+    s, partial = make_category("Smoke Partial")
     if s == 201:
         created.append(partial["id"])
+        s, partial = set_groups(partial["id"], keep=[], add=("shelf", "freezer"))
+        check("two kinds are added", s == 200, (s, partial))
         created.extend(g["id"] for g in partial.get("children", []))
         check(
-            "only the switched-on groups exist",
+            "only those two exist",
             [g["code"] for g in partial.get("children", [])] == ["SHF", "FRZ"],
             [g["code"] for g in partial.get("children", [])],
         )
 
     print("\n-- units go in with the ordinary create route (as Cold Storage)")
     shelf = next(g for g in groups if g["code"] == "SHF")
+    ref = next(g for g in groups if g["code"] == "REF")
+    frz = next(g for g in groups if g["code"] == "FRZ")
     unit_name = f"SMKT{run['n']}0001A"
-    s, unit = _req(
-        "POST",
-        "/location-nodes",
-        token=token,
-        json_body={
-            "node_type": "sub_location",
-            "parent_id": shelf["id"],
-            "code": unit_name,
-            "name": unit_name,
-        },
-    )
-    check("an equipment unit is added to a group", s == 201, (s, unit))
+    s, unit = add_unit(shelf["id"], unit_name)
+    check("an equipment unit is added to a sub-type", s == 201, (s, unit))
     if s == 201:
         created.append(unit["id"])
 
-    print("\n-- a sub-type holding units cannot be switched off (LOC-004)")
-    s, b = _req(
-        "PATCH",
-        f"/location-nodes/{cat['id']}/storage-groups",
-        token=token,
-        json_body={"shelf": False, "refrigerator": True, "freezer": True},
-    )
+    print("\n-- a sub-type holding units cannot be removed (LOC-004)")
+    s, b = set_groups(cat["id"], keep=[ref, frz])
     check(
-        "switching off a group with units is refused",
+        "removing a sub-type with units is refused",
         s == 409 and b.get("code") == "storage_group_in_use",
         (s, b),
     )
@@ -198,45 +241,158 @@ def main() -> int:
     if unit.get("id"):
         s, _ = _req("DELETE", f"/location-nodes/{unit['id']}", token=token)
         check("the unit is removed", s in (200, 204), s)
-    s, b = _req(
-        "PATCH",
-        f"/location-nodes/{cat['id']}/storage-groups",
-        token=token,
-        json_body={"shelf": False, "refrigerator": True, "freezer": True},
-    )
-    check("the empty group switches off", s == 200, (s, b))
+    s, b = set_groups(cat["id"], keep=[ref, frz])
+    check("the empty sub-type is removed", s == 200, (s, b))
     check(
         "and disappears from the category",
         s == 200 and [g["code"] for g in b.get("children", [])] == ["REF", "FRZ"],
         [g["code"] for g in b.get("children", [])] if s == 200 else b,
     )
 
-    print("\n-- switching one back ON revives the same group")
-    s, b = _req(
-        "PATCH",
-        f"/location-nodes/{cat['id']}/storage-groups",
-        token=token,
-        json_body={"shelf": True, "refrigerator": True, "freezer": True},
-    )
-    check("the group comes back", s == 200, (s, b))
+    print("\n-- adding it back revives the SAME node")
+    # By KIND + NAME, not by id: a removed sub-type has no id the client can send
+    # (the list only carries the live ones), so re-adding is an add that the
+    # server recognises. If it created a fresh node instead, the old one's code
+    # would be orphaned and every link built from it would break.
+    s, b = set_groups(cat["id"], keep=[ref, frz], add=(("shelf", shelf["name"]),))
+    check("the sub-type comes back", s == 200, (s, b))
     revived = next((g for g in b.get("children", []) if g["code"] == "SHF"), None) if s == 200 else None
     check(
-        "it is the SAME node, not a second one with the same code",
+        "it is the SAME node, not a second one with that name",
         revived is not None and revived["id"] == shelf["id"],
         (revived or {}).get("id"),
     )
 
+    print("\n-- a location can hold TWO freezers at once (LOC-001)")
+    # The requirement's own example, and the case three booleans could not
+    # express: "an additional freezer (e.g. minus-80 alongside minus-20)".
+    s, b = set_groups(
+        cat["id"], keep=[shelf, ref, frz], add=(("freezer", "Smoke Minus-80 Freezer"),)
+    )
+    check("a fourth sub-type is added", s == 200, (s, b))
+    kids = b.get("children", []) if s == 200 else []
+    extra = next((g for g in kids if g["name"] == "Smoke Minus-80 Freezer"), None)
+    if extra:
+        created.append(extra["id"])
+    check("the location now has four sub-types", len(kids) == 4, [g["name"] for g in kids])
+    check(
+        "the second freezer is numbered within its KIND — FRZ-2",
+        extra is not None and extra["code"] == "FRZ-2",
+        (extra or {}).get("code"),
+    )
+    check(
+        "and sorts beside the first freezer, not at the end",
+        [g["code"] for g in kids] == ["SHF", "REF", "FRZ", "FRZ-2"],
+        [g["code"] for g in kids],
+    )
+
+    print("\n-- an equipment number is unique across BOTH freezers")
+    # LOC-001's second sentence: "freezers are identified by unique equipment
+    # number regardless of temperature". Nothing in the code knows either of
+    # these sub-types is a freezer — the guard is that a ``sub_location`` name is
+    # unique installation-wide, whatever it hangs under.
+    shared_name = f"SMKT{run['n']}0002A"
+    s, in_20 = add_unit(frz["id"], shared_name)
+    check("the number goes into the minus-20 freezer", s == 201, (s, in_20))
+    if s == 201:
+        created.append(in_20["id"])
+    if extra:
+        s, b = add_unit(extra["id"], shared_name)
+        check(
+            "the SAME number is refused in the minus-80 freezer",
+            s == 409 and b.get("code") == "node_name_conflict",
+            (s, b),
+        )
+
+    print("\n-- an unnamed add gets a numbered default rather than colliding")
+    # "Freezer" is taken, so a bare ``{"kind": "freezer"}`` must not fail on the
+    # sibling-name index — the Add button offers no name field until you type one.
+    s, b = set_groups(cat["id"], keep=[shelf, ref, frz, extra], add=("freezer",))
+    auto = (
+        next((g for g in b.get("children", []) if g["code"] == "FRZ-3"), None) if s == 200 else None
+    )
+    if auto:
+        created.append(auto["id"])
+    check("a third unnamed freezer is accepted", s == 200, (s, b))
+    check(
+        "and is named 'Freezer 2' — the kind's name, numbered past the live one",
+        auto is not None and auto["name"] == "Freezer 2",
+        (auto or {}).get("name"),
+    )
+
+    print("\n-- two sub-types cannot share a name")
+    s, b = set_groups(cat["id"], keep=[shelf, ref, frz], add=(("freezer", frz["name"]),))
+    check(
+        "adding a name the location already uses is refused",
+        s == 409 and b.get("code") == "node_name_conflict",
+        (s, b),
+    )
+    s, b = set_groups(
+        cat["id"],
+        keep=[shelf, ref, frz],
+        add=(("shelf", "Dup Name"), ("freezer", "dup name")),
+    )
+    check("nor two new sub-types with one name, case-insensitively", s == 422, (s, b))
+
+    print("\n-- a code is never reused within a kind")
+    # ``uq_location_nodes_parent_code`` is partial on ``is_active``, so a removed
+    # FRZ-2 would NOT stop a new freezer taking that code — and a link to
+    # /storage/{cat}/frz-2 minted earlier would then open a different sub-type.
+    # The sequence only ever goes up.
+    if extra:
+        s, b = set_groups(cat["id"], keep=[shelf, ref, frz])
+        check("the added freezers are removed", s == 200, (s, b))
+        s, b = set_groups(cat["id"], keep=[shelf, ref, frz], add=(("freezer", "Smoke Later Freezer"),))
+        later = (
+            next((g for g in b.get("children", []) if g["name"] == "Smoke Later Freezer"), None)
+            if s == 200
+            else None
+        )
+        if later:
+            created.append(later["id"])
+        check(
+            "the next freezer is FRZ-4, not FRZ-2 again",
+            later is not None and later["code"] == "FRZ-4",
+            (later or {}).get("code"),
+        )
+
     print("\n-- the shape is enforced")
+    # On ``partial``, not ``cat``: cat's freezer still holds the equipment number
+    # from the section above, so emptying cat would be refused for a reason that
+    # has nothing to do with what this checks.
+    s, b = set_groups(partial["id"], keep=[])
+    check(
+        # Legal now: a location is CREATED with none, so refusing to return to
+        # zero would make the first save a one-way door.
+        "a location may be left with no sub-types",
+        s == 200 and b.get("children") == [],
+        (s, b.get("children")),
+    )
     s, b = _req(
         "PATCH",
         f"/location-nodes/{cat['id']}/storage-groups",
         token=token,
-        json_body={"shelf": False, "refrigerator": False, "freezer": False},
+        json_body={"groups": [{"id": shelf["id"], "name": "Renamed Here"}]},
     )
-    check("a category cannot lose every sub-type", s == 422, (s, b))
-
-    s, b = make_category("Smoke None", shelf=False, refrigerator=False, freezer=False)
-    check("nor be created without one", s == 422, (s, b))
+    check("an entry cannot carry both id and name (rename has its own route)", s == 422, (s, b))
+    s, b = _req(
+        "PATCH",
+        f"/location-nodes/{cat['id']}/storage-groups",
+        token=token,
+        json_body={"groups": [{"kind": "icebox"}]},
+    )
+    check("an unknown kind is refused — there are only three", s == 422, (s, b))
+    s, b = _req(
+        "PATCH",
+        f"/location-nodes/{cat['id']}/storage-groups",
+        token=token,
+        json_body={"groups": [{"id": cat["id"]}]},
+    )
+    check(
+        "keeping a sub-type that isn't on this location is refused",
+        s == 422 and b.get("code") == "storage_group_not_found",
+        (s, b),
+    )
 
     # "A category cannot be created in the wrong room" used to be checked here by
     # POSTing at the Analytical Lab's id. The route no longer takes a room id at
@@ -309,8 +465,10 @@ def main() -> int:
 
     print("\n-- delete when empty")
     # A fresh category, so this section is not fighting the residue above.
-    s, doomed = make_category("Smoke Doomed", shelf=True, refrigerator=False, freezer=False)
-    if s != 201:
+    s, doomed = make_category("Smoke Doomed")
+    if s == 201:
+        s, doomed = set_groups(doomed["id"], keep=[], add=("shelf",))
+    if s not in (200, 201):
         check("a category could be created for the delete case", False, (s, doomed))
     else:
         # Tracked for cleanup like everything else. This section deletes the
@@ -361,8 +519,12 @@ def main() -> int:
         )
 
         # And the cascade: a location takes its remaining empty sub-types with it.
-        s, again = make_category("Smoke Cascade", shelf=True, refrigerator=True, freezer=True)
+        s, again = make_category("Smoke Cascade")
         if s == 201:
+            s, again = set_groups(
+                again["id"], keep=[], add=("shelf", "refrigerator", "freezer")
+            )
+        if s == 200:
             group_ids = [g["id"] for g in again.get("children", [])]
             s, b = _req("DELETE", f"/location-nodes/{again['id']}", token=token)
             check("a location with three empty sub-types deletes", s in (200, 204), (s, b))
@@ -427,38 +589,57 @@ def main() -> int:
                     again_unit["id"],
                 )
 
-    # The other half of the same change: a group is looked up by code INCLUDING
-    # inactive rows, so that switching a sub-type back on revives the node it had
-    # rather than making a second one. Now that a code is only unique among live
-    # siblings, that lookup has to be ordered — live first, then newest — or it
-    # would revive whichever row the planner happened to return.
+    # The other half of the same change: a sub-type is looked up by NAME including
+    # inactive rows, so that adding one back revives the node it had rather than
+    # making a second one. Now that a name is only unique among live siblings,
+    # that lookup has to be ordered — live first, then newest — or it would revive
+    # whichever row the planner happened to return.
     #
     # On its OWN category, deliberately. Run against the shared one, this failed
     # for a reason that had nothing to do with reviving: the section above leaves
-    # a unit in the freezer group, so switching that group off was correctly
-    # refused and the revive never ran. A check whose result depends on what an
-    # earlier section left behind is not testing what it claims to.
-    print("\n-- reviving a sub-type still returns the node it had")
-    s, probe = make_category("Smoke Revive", shelf=True, refrigerator=False, freezer=True)
-    if s != 201:
+    # a unit in the freezer sub-type, so removing it was correctly refused and the
+    # revive never ran. A check whose result depends on what an earlier section
+    # left behind is not testing what it claims to.
+    print("\n-- re-adding a sub-type still returns the node it had")
+    s, probe = make_category("Smoke Revive")
+    if s == 201:
+        created.append(probe["id"])
+        s, probe = set_groups(probe["id"], keep=[], add=("shelf", "freezer"))
+    if s != 200:
         check("a category could be created for the revive case", False, (s, probe))
     else:
-        created.append(probe["id"])
         created.extend(g["id"] for g in probe.get("children", []))
+        probe_shelf = next(g for g in probe["children"] if g["code"] == "SHF")
         frz_before = next((g for g in probe["children"] if g["code"] == "FRZ"), None)
+        # A unit goes in and comes out again first, so the sub-type being revived
+        # is one that has actually been USED — the case where its node identity
+        # matters, because ledger rows and links already name it.
+        #
+        # SMKV, not SMKR: the reuse section above leaves an SMKR unit live, and a
+        # sub_location name is unique INSTALLATION-wide, so the two would collide
+        # in a way that has nothing to do with what this section tests.
+        parked_name = f"SMKV{run['n']}0001A"
+        s, parked = add_unit(frz_before["id"], parked_name) if frz_before else (0, {})
+        check("a unit is parked in the freezer sub-type", s == 201, (s, parked))
+        if s == 201:
+            created.append(parked["id"])
+            # It has to be EMPTY to be removable — the point here is the revive,
+            # not the in-use guard, which has its own section above.
+            s, _ = _req("DELETE", f"/location-nodes/{parked['id']}", token=token)
+            check("…and taken out again so the sub-type can be removed", s in (200, 204), s)
         b: dict = {}
-        for want in (False, True):
-            s, b = _req(
-                "PATCH",
-                f"/location-nodes/{probe['id']}/storage-groups",
-                token=token,
-                json_body={"shelf": True, "refrigerator": False, "freezer": want},
-            )
-            if s != 200:
-                break
+        if frz_before is not None:
+            # Off…
+            s, b = set_groups(probe["id"], keep=[probe_shelf])
+            check("the freezer sub-type is removed", s == 200, (s, b))
+            # …and on again, as the same KIND under the name it had.
+            if s == 200:
+                s, b = set_groups(
+                    probe["id"], keep=[probe_shelf], add=(("freezer", frz_before["name"]),)
+                )
         frz_after = next((g for g in b.get("children", []) if g["code"] == "FRZ"), None)
         check(
-            "off then on brings back the SAME group node",
+            "off then on brings back the SAME sub-type node",
             s == 200
             and frz_before is not None
             and frz_after is not None
@@ -466,7 +647,7 @@ def main() -> int:
             (s, (frz_after or {}).get("id")),
         )
         check(
-            "and does not leave a second group with that code",
+            "and does not leave a second sub-type with that code",
             s == 200
             and len([g for g in b.get("children", []) if g["code"] == "FRZ"]) == 1,
             [g["code"] for g in b.get("children", [])],
@@ -490,7 +671,10 @@ def main() -> int:
             "PATCH",
             f"/location-nodes/{cat['id']}/storage-groups",
             token=admin_token,
-            json_body={"shelf": True, "refrigerator": True, "freezer": False},
+            # A VALID payload, deliberately: the body is validated before the
+            # route runs, so a malformed one would 422 and never reach the
+            # permission check this is here to prove.
+            json_body={"groups": [{"kind": "freezer", "name": "Smoke Forbidden Sub-type"}]},
         )
         check("nor reconfigure its sub-types", s == 403, (s, b))
         # Deletion used to sit on the bare ``inventory:create`` dependency, which

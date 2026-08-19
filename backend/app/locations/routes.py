@@ -61,11 +61,12 @@ from app.models.locations import (
     MAX_QUADRANTS_PER_TANK,
     PARENT_OF,
     SCRAP_NODE_TYPE,
-    STORAGE_GROUPS,
     STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
     can_store,
+    group_default_name,
+    group_kind_for_code,
     is_grid_node,
 )
 from app.security.permissions import RequirePermission, has_permission
@@ -832,11 +833,31 @@ async def add_production_area(
     return response
 
 
+async def _default_group_name(db: DBSession, *, category_id: uuid.UUID, kind: str) -> str:
+    """The name a sub-type gets when the client doesn't type one.
+
+    The kind's own name ("Freezer"), numbered if the location already has a live
+    one ("Freezer 2"). Without the numbering, adding a second freezer without
+    renaming it would fail on the sibling-name index — the client would be told
+    to pick a different name for a button that offered no name field.
+
+    Only ACTIVE siblings count. A dormant "Freezer" should be re-used, not
+    stepped over: leaving the default at "Freezer" is what lets the add revive it.
+    """
+    base = group_default_name(kind)
+    name = base
+    n = 2
+    while await loc_repo.get_child_by_name(db, parent_id=category_id, name=name) is not None:
+        name = f"{base} {n}"
+        n += 1
+    return name
+
+
 @nodes_router.post(
     "/storage-categories",
     response_model=NodeTreeRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a Storage location from the standard template — super-admin only",
+    summary="Create a Storage location — super-admin only",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def add_storage_category(
@@ -844,7 +865,7 @@ async def add_storage_category(
     current: CurrentDbUserDep,
     payload: StorageCategoryCreate,
 ) -> NodeTreeRead:
-    """Provision one location in the Storage room (REQ-2026-08-04-LOC-001).
+    """Create one location in the Storage room (LOC-001).
 
     Takes no parent id, because there is only ever one Storage room and the
     client neither names it nor chooses it — the server resolves it, creating it
@@ -852,11 +873,11 @@ async def add_storage_category(
     release could ship this whole screen and still leave it reporting "isn't set
     up yet" until someone ran a script by hand on that environment.
 
-    The category and its groups are created together, in one transaction, so a
-    location can never exist without the sub-types it was provisioned with. The
-    response is the new category WITH its groups nested, since that is exactly
-    what the page needs to render its tabs — a bare category would send the
-    client straight back for another read.
+    The location is created BARE — no shelves, refrigerators or freezers. Those
+    are added afterwards through ``PATCH /{id}/storage-groups``, which is the
+    whole of "location sub-types shall be configurable after creation". The
+    response still carries an (empty) ``children`` list so the page renders its
+    tab strip from one shape whether the location has sub-types or not.
 
     Super-admin only per LOC-004, on the same rationale as LOC-003's shelf rule:
     two spellings of one physical place split its register in half.
@@ -866,16 +887,10 @@ async def add_storage_category(
     await _require_unique_name(
         db, node_type="storage_category", parent_id=room.id, name=payload.name
     )
-    wanted = {
-        code
-        for key, code, _default in STORAGE_GROUPS
-        if getattr(payload, key)
-    }
-    category, groups = await loc_repo.create_storage_category(
+    category = await loc_repo.create_storage_category(
         db,
         room_node_id=room.id,
         name=payload.name,
-        group_codes=wanted,
         created_by_user_id=current.id,
         is_scrap=payload.is_scrap,
     )
@@ -887,17 +902,9 @@ async def add_storage_category(
         subject_id=category.id,
         subject_label=category.name,
         before=None,
-        after={
-            **loc_repo.node_to_audit_snapshot(category),
-            # The groups are what makes this a TEMPLATE rather than an empty
-            # node, so the audit entry has to say which ones were provisioned.
-            "storage_groups": [g.code for g in groups],
-        },
+        after=loc_repo.node_to_audit_snapshot(category),
     )
-    response = NodeTreeRead(
-        **_node_to_read(category).model_dump(),
-        children=[NodeTreeRead(**_node_to_read(g).model_dump()) for g in groups],
-    )
+    response = NodeTreeRead(**_node_to_read(category).model_dump(), children=[])
     await db.commit()
     return response
 
@@ -905,7 +912,7 @@ async def add_storage_category(
 @nodes_router.patch(
     "/{node_id}/storage-groups",
     response_model=NodeTreeRead,
-    summary="Turn a Storage location's sub-types on or off — super-admin only",
+    summary="Set which sub-types a Storage location has — super-admin only",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def update_storage_groups(
@@ -914,13 +921,30 @@ async def update_storage_groups(
     node_id: Annotated[uuid.UUID, Path()],
     payload: StorageGroupsUpdate,
 ) -> NodeTreeRead:
-    """Reconfigure which sub-types a Storage location uses (LOC-004).
+    """Reconfigure a Storage location's sub-types after creation (LOC-001).
 
-    Turning one ON revives the group if it existed before — so its units come
-    back with it — and otherwise creates it fresh with the template's default
-    name. Turning one OFF soft-deletes the group, and is REFUSED while it still
-    holds units: switching off a tab that holds stock would hide that stock
-    rather than move it, and the ledger would still count it.
+    The payload is the list the location should END UP with: entries with an
+    ``id`` stay, entries with a ``kind`` are added, and any current sub-type not
+    listed is removed. Sending the same list twice changes nothing.
+
+    This used to take three booleans, one per sub-type. The amended LOC-001 is
+    precisely the case that shape cannot express — "add an additional freezer
+    (e.g. minus-80 alongside minus-20)" — because a location may hold several
+    sub-types of the SAME kind. There are still only the three kinds LOC-001
+    names; what tells two freezers apart is the ``name`` the client gives them,
+    and the server numbers their codes (``FRZ``, then ``FRZ-2``).
+
+    An empty list is accepted for any location: a location is created with no
+    sub-types at all, so zero is a state each one starts in, and refusing to
+    return to it would make the first save a one-way door.
+
+    Adding a kind under a name a REMOVED sub-type of that kind already had
+    revives that node rather than minting a second one beside it. Both sibling
+    indexes are partial on ``is_active``, so the duplicate would be allowed
+    through — leaving a tab that reads identically but is a different node under
+    a different code, and silently breaking every link built from the old one.
+    Removing a sub-type soft-deletes it and is REFUSED while it still holds
+    units: hiding a tab does not move the stock, and the ledger keeps counting it.
     """
     _require_super_admin(current, what="Storage locations")
     category = await loc_repo.get_node(db, node_id)
@@ -931,51 +955,83 @@ async def update_storage_groups(
             "Sub-types are configured on a Storage location.",
             code="node_not_storage_category",
         )
-    # A normal location must keep somewhere to put things; a scrap location need
-    # not, since the location itself is the disposition and nothing is stored in
-    # it. Checked here rather than on the schema, which cannot see the category.
-    if not (payload.shelf or payload.refrigerator or payload.freezer) and not category.is_scrap:
-        raise ValidationError(
-            "A location must keep at least one sub-type.",
-            code="storage_groups_empty",
-        )
 
     before = loc_repo.node_to_audit_snapshot(category)
-    before_groups = [g.code for g in await loc_repo.list_storage_groups(db, category.id)]
-    changed: list[str] = []
-    for key, code, default_name in STORAGE_GROUPS:
-        want = bool(getattr(payload, key))
-        existing = await loc_repo.get_child_by_code(
-            db, parent_id=category.id, code=code, active_only=False
-        )
-        is_on = existing is not None and existing.is_active
-        if want == is_on:
+    existing = await loc_repo.list_storage_groups(db, category.id)
+    before_groups = [g.code for g in existing]
+    by_id = {g.id: g for g in existing}
+
+    keep: set[uuid.UUID] = set()
+    for entry in payload.groups:
+        if entry.id is None:
             continue
-        if want:
-            if existing is None:
-                await loc_repo.create_node(
-                    db,
-                    node_type="room_location",
-                    code=code,
-                    name=default_name,
-                    created_by_user_id=current.id,
-                    parent_id=category.id,
-                )
-            else:
-                await loc_repo.set_node_active(db, node=existing, is_active=True)
+        gid = _parse_uuid(entry.id, field="groups[].id")
+        if gid not in by_id:
+            # Deliberately not "revive it for them": ``list_storage_groups``
+            # returns only ACTIVE sub-types, so an id we don't recognise is either
+            # a stale tree the client is holding or one someone removed meanwhile.
+            # Bringing a removed one back is the ADD path — silently reviving here
+            # would resurrect a sub-type the client's screen never showed them.
+            raise ValidationError(
+                "That sub-type is not on this location.",
+                code="storage_group_not_found",
+                details={"group_id": entry.id},
+            )
+        keep.add(gid)
+    additions = [e for e in payload.groups if e.kind is not None]
+
+    changed = False
+    # Removals FIRST, so a name freed in this request is available to an add in
+    # the same request — otherwise replacing a sub-type with a like-named one
+    # would collide with the row it is replacing.
+    for group in existing:
+        if group.id in keep:
+            continue
+        units = await loc_repo.count_active_children(db, group.id)
+        if units:
+            raise ConflictError(
+                f"'{group.name}' still holds {units} "
+                f"{'unit' if units == 1 else 'units'}. Move or remove them before "
+                f"removing it.",
+                code="storage_group_in_use",
+                details={"group_code": group.code, "units": units},
+            )
+        await loc_repo.set_node_active(db, node=group, is_active=False)
+        changed = True
+
+    for entry in additions:
+        kind = entry.kind
+        assert kind is not None  # the schema guarantees id XOR kind
+        name = entry.name or await _default_group_name(db, category_id=category.id, kind=kind)
+        prior = await loc_repo.get_child_by_name(
+            db, parent_id=category.id, name=name, active_only=False
+        )
+        if prior is not None and prior.is_active:
+            # Still active after the removals above means it is one the caller
+            # asked to KEEP — so this entry would be a second sub-type with the
+            # same name, which is exactly what the sibling-name index forbids.
+            raise ConflictError(
+                f"'{prior.name}' already exists here.",
+                code="node_name_conflict",
+                details={"existing_id": str(prior.id), "name": prior.name},
+            )
+        # Revive only when the retired node is the SAME KIND. A dormant freezer
+        # called "Cold Store" must not come back as the refrigerator someone just
+        # asked for: its code is FRZ, and the code drives the icon, the add-unit
+        # wording and the URL. Different kind, same name ⇒ a new node, which the
+        # partial index permits precisely because the old one is inactive.
+        if prior is not None and group_kind_for_code(prior.code) == kind:
+            await loc_repo.set_node_active(db, node=prior, is_active=True)
         else:
-            assert existing is not None  # is_on implies it exists
-            units = await loc_repo.count_active_children(db, existing.id)
-            if units:
-                raise ConflictError(
-                    f"'{existing.name}' still holds {units} "
-                    f"{'unit' if units == 1 else 'units'}. Move or remove them before "
-                    f"switching it off.",
-                    code="storage_group_in_use",
-                    details={"group_code": code, "units": units},
-                )
-            await loc_repo.set_node_active(db, node=existing, is_active=False)
-        changed.append(code)
+            await loc_repo.create_node(
+                db,
+                node_type="room_location",
+                code=await loc_repo.next_group_code(db, category.id, kind),
+                name=name,
+                created_by_user_id=current.id,
+                parent_id=category.id,
+            )
+        changed = True
 
     groups = await loc_repo.list_storage_groups(db, category.id)
     if changed:

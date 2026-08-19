@@ -61,7 +61,7 @@ import {
   ISSUED_SEGMENT,
   STORAGE_HREF,
   STORAGE_ROOM_CODE,
-  groupByCode,
+  groupFor,
   storageHref,
   type StorageGroup,
 } from './storage-groups';
@@ -123,9 +123,11 @@ export function StorageCategoryClient({
   }, [reload]);
 
   const groups = React.useMemo(() => category?.children ?? [], [category]);
-  /** The tabs: this location's groups, each paired with its template entry.
-   *  Anything without a recognised code is skipped rather than rendered as a
-   *  nameless tab — it would have no icon, no copy and no segment. */
+  /** The tabs: this location's sub-types, each paired with how to present it.
+   *  Every sub-type gets a tab — the template's three by their own icon and
+   *  copy, and the ones the client added (LOC-001, 2026-08-13) by the neutral
+   *  set. Nothing is filtered out: a sub-type we can't classify still holds real
+   *  stock, and skipping it would hide that stock rather than label it plainly. */
   /** A scrap location (TRX-001/002) gets one extra tab: what has been ISSUED to
    *  it. Not a group — it is backed by ledger history, holds nothing, and has no
    *  node behind it. See ISSUED_SEGMENT for why it is not a StorageGroup. */
@@ -140,9 +142,10 @@ export function StorageCategoryClient({
     () =>
       isScrap
         ? []
-        : groups
-            .map((group) => ({ group, tpl: groupByCode(group.code) }))
-            .filter((t): t is { group: NodeTree; tpl: StorageGroup } => t.tpl !== undefined),
+        : groups.map((group): { group: NodeTree; tpl: StorageGroup } => ({
+            group,
+            tpl: groupFor(group),
+          })),
     [groups, isScrap],
   );
 
@@ -606,7 +609,7 @@ export function StorageCategoryClient({
                       title="This location has no sub-types"
                       hint={
                         isSuperAdmin
-                          ? 'Switch one on from the ⋯ menu.'
+                          ? 'Add one from the ⋯ menu.'
                           : 'A Super Admin configures its sub-types.'
                       }
                     />
