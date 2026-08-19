@@ -63,6 +63,39 @@ async def list_issued_at_node(
     return list((await session.execute(stmt)).scalars().unique().all())
 
 
+async def issued_totals_by_node(
+    session: AsyncSession,
+) -> dict[uuid.UUID, tuple[int, int, object]]:
+    """``{node_id: (row count, total units, last issued at)}`` for every
+    location that has ever been issued to.
+
+    One grouped query rather than a call per location: the Storage overview
+    renders every debit-and-gone card at once, and asking per card turns a page
+    with six labs into six round trips that all say almost nothing.
+
+    Locations with no issues are simply absent — the caller renders "nothing
+    issued yet" from the gap rather than from a row of zeroes.
+    """
+    stmt = (
+        select(
+            StockMovement.to_location_node_id,
+            func.count(StockMovement.id),
+            func.coalesce(func.sum(StockMovement.qty_abs), 0),
+            func.max(StockMovement.performed_at),
+        )
+        .where(
+            StockMovement.movement_type == ISSUE_MOVEMENT_TYPE,
+            StockMovement.to_location_node_id.is_not(None),
+        )
+        .group_by(StockMovement.to_location_node_id)
+    )
+    out: dict[uuid.UUID, tuple[int, int, object]] = {}
+    for node_id, count, qty, last_at in (await session.execute(stmt)).all():
+        if node_id is not None:
+            out[node_id] = (int(count), int(qty), last_at)
+    return out
+
+
 async def issued_totals_at_node(
     session: AsyncSession, *, node_id: uuid.UUID
 ) -> tuple[int, int]:

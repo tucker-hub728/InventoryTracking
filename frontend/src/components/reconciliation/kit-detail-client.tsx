@@ -2603,13 +2603,20 @@ function ReturnExcessDialog({
   const onFloor = line.on_floor_qty;
   const lotAvail = (lotId: string) => floorLots.find((l) => l.lot_id === lotId)?.qty ?? 0;
   const rowEff = (r: ReturnRow) => (r.isBox ? r.cells.length : r.qty ?? 0);
-  // This row's cap = its lot's on-floor qty minus what other rows already take
-  // from the SAME lot (a lot can be split to more than one destination).
+  // This row's cap is the LOWER of two limits, and both are needed:
+  //
+  //   * its lot's on-floor qty, minus what other rows already take from the
+  //     SAME lot — a lot can be split across more than one destination;
+  //   * what THIS KIT still holds, minus what every other row takes — because
+  //     the kit's on-floor total is the real ceiling, and with two lots each
+  //     capped at that total the rows could otherwise sum past it and the
+  //     return would be refused (``return_exceeds_on_floor``) only on submit.
   const rowCap = (r: ReturnRow) => {
-    const usedElsewhere = rows
+    const sameLot = rows
       .filter((x) => x.key !== r.key && x.lot_id === r.lot_id)
       .reduce((s, x) => s + rowEff(x), 0);
-    return Math.max(0, lotAvail(r.lot_id) - usedElsewhere);
+    const anyRow = rows.filter((x) => x.key !== r.key).reduce((s, x) => s + rowEff(x), 0);
+    return Math.max(0, Math.min(lotAvail(r.lot_id) - sameLot, onFloor - anyRow));
   };
   const setRow = (key: string, patch: Partial<ReturnRow>) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));

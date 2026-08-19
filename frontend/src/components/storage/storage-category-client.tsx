@@ -126,12 +126,24 @@ export function StorageCategoryClient({
   /** The tabs: this location's groups, each paired with its template entry.
    *  Anything without a recognised code is skipped rather than rendered as a
    *  nameless tab — it would have no icon, no copy and no segment. */
+  /** A scrap location (TRX-001/002) gets one extra tab: what has been ISSUED to
+   *  it. Not a group — it is backed by ledger history, holds nothing, and has no
+   *  node behind it. See ISSUED_SEGMENT for why it is not a StorageGroup. */
+  const isScrap = Boolean(category?.is_scrap);
+  // A debit-and-gone location has ONE tab: what was issued here. Its storage
+  // sub-types are SUPPRESSED, not deleted — locations created before this rule
+  // still have the group nodes in the database, and three permanently empty
+  // tabs beside the only one that holds anything is what made the page read as
+  // broken. Nothing is stored at such a location, so there is nothing for a
+  // shelf tab to show.
   const tabs = React.useMemo(
     () =>
-      groups
-        .map((group) => ({ group, tpl: groupByCode(group.code) }))
-        .filter((t): t is { group: NodeTree; tpl: StorageGroup } => t.tpl !== undefined),
-    [groups],
+      isScrap
+        ? []
+        : groups
+            .map((group) => ({ group, tpl: groupByCode(group.code) }))
+            .filter((t): t is { group: NodeTree; tpl: StorageGroup } => t.tpl !== undefined),
+    [groups, isScrap],
   );
 
   const active = React.useMemo(
@@ -139,10 +151,6 @@ export function StorageCategoryClient({
     [tabs, segment],
   );
 
-  /** A scrap location (TRX-001/002) gets one extra tab: what has been ISSUED to
-   *  it. Not a group — it is backed by ledger history, holds nothing, and has no
-   *  node behind it. See ISSUED_SEGMENT for why it is not a StorageGroup. */
-  const isScrap = Boolean(category?.is_scrap);
   const issuedActive = isScrap && segment.toLowerCase() === ISSUED_SEGMENT;
   /** Is the URL pointing at a tab this location actually has? Both kinds count —
    *  the redirect below fires only when NEITHER does. */
@@ -417,19 +425,29 @@ export function StorageCategoryClient({
               {isScrap && (
                 <Badge tone="warning">Issued material leaves inventory</Badge>
               )}
-              <span>
-                {totals.units > 0
-                  ? `${totals.units} ${totals.units === 1 ? 'unit' : 'units'} across ${tabs.length} ${
-                      tabs.length === 1 ? 'sub-type' : 'sub-types'
-                    }${totals.stock > 0 ? ` · ${totals.stock} on hand` : ''}`
-                  : tabs.length === 0
-                    ? 'No storage sub-types'
-                    : `${tabs.length} ${tabs.length === 1 ? 'sub-type' : 'sub-types'}, nothing added yet`}
-              </span>
+              {/* "No storage sub-types" beside the badge was answering a
+                  question nobody asked once the sub-types stopped being part of
+                  this page at all — the badge already says what the location
+                  is. Kept for normal storage, where the count is the summary. */}
+              {!isScrap && (
+                <span>
+                  {totals.units > 0
+                    ? `${totals.units} ${totals.units === 1 ? 'unit' : 'units'} across ${tabs.length} ${
+                        tabs.length === 1 ? 'sub-type' : 'sub-types'
+                      }${totals.stock > 0 ? ` · ${totals.stock} on hand` : ''}`
+                    : tabs.length === 0
+                      ? 'No storage sub-types'
+                      : `${tabs.length} ${tabs.length === 1 ? 'sub-type' : 'sub-types'}, nothing added yet`}
+                </span>
+              )}
             </span>
           )
         }
-        tabs={tabStrip}
+        // A debit-and-gone location has exactly one view, so a tab strip
+        // containing a single tab is a control that can never be used — it
+        // offers a choice with one option and costs a row of chrome above the
+        // only thing on the page.
+        tabs={isScrap ? undefined : tabStrip}
         actions={
           isSuperAdmin && category ? (
             <div className="flex items-center gap-2">
@@ -466,10 +484,17 @@ export function StorageCategoryClient({
                     <span className="ml-2">Rename “{active.group.name}”</span>
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem onSelect={() => setConfiguring(true)}>
-                  <Settings2 size={14} />
-                  <span className="ml-2">Configure sub-types…</span>
-                </DropdownMenuItem>
+                {/* Hidden for a debit-and-gone location: it stores nothing,
+                    its sub-types are not shown anywhere, and switching one on
+                    would build a shelf that no screen offers and no transfer
+                    can reach. Leaving the entry would be offering to configure
+                    something the location does not have. */}
+                {!isScrap && (
+                  <DropdownMenuItem onSelect={() => setConfiguring(true)}>
+                    <Settings2 size={14} />
+                    <span className="ml-2">Configure sub-types…</span>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   // Not disabled when occupied: a greyed row with no explanation

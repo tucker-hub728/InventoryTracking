@@ -206,6 +206,14 @@ export function CreateStorageLocationDialog({
             )}
           </div>
 
+          {/* Sub-types are what STORAGE needs — a shelf, a fridge, a freezer for
+              stock to sit in. A debit-and-gone location stores nothing: the
+              material's life ends when it is issued there. Offering to create
+              three containers for it produced exactly the confusion of a page
+              with three permanently empty tabs, so they are shown only for
+              normal storage. */}
+          {!isScrap ? (
+            <>
           <div className="space-y-2">
             <p className="text-xs font-medium text-text-2">
               Sub-types this location uses
@@ -250,6 +258,16 @@ export function CreateStorageLocationDialog({
                   }`}
             </p>
           </div>
+            </>
+          ) : (
+            <div className="rounded-lg border border-border bg-surface/50 px-3 py-2.5">
+              <p className="text-xs font-medium text-text-2">No shelves, fridges or freezers</p>
+              <p className="mt-0.5 text-xs text-text-3">
+                Nothing is stored at a debit-and-gone location, so it has nowhere to put stock.
+                Its page shows what has been issued here instead.
+              </p>
+            </div>
+          )}
 
           {error && (
             <p role="alert" className="text-xs text-danger">

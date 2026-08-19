@@ -303,9 +303,26 @@ def _line_read(
         source_options=options,
         source_lots=source_lots,
         issued_from=issued_from,
+        # Return sources, capped at what THIS KIT holds.
+        #
+        # ``floor_lots`` is the WIP for the item at the production node, summed
+        # across every kit open on that floor — material is never bound to a kit
+        # (REQ-2026-07-09-TRX-002), so the node cannot say whose the units are.
+        # Reported raw, a kit holding 1 unit advertised "30 on floor" because
+        # another kit had 29 there, and the operator only learned otherwise when
+        # the return was refused (``return_exceeds_on_floor``).
+        #
+        # Each lot is therefore capped at the line's own on-floor quantity: it
+        # says WHICH lots the returned units may be attributed to (the operator
+        # still chooses, so the unit goes back on a real lot and is never
+        # stranded), while never implying this kit may hand back more than it
+        # took. The TOTAL across lots is enforced on the return route.
         on_floor_lots=[
-            KitLineFloorLot(lot_id=str(lot_id), lot_number=lot_number, qty=qty)
+            KitLineFloorLot(
+                lot_id=str(lot_id), lot_number=lot_number, qty=min(qty, _on_floor(line))
+            )
             for lot_id, lot_number, qty in (floor_lots or {}).get(line.item_id, [])
+            if _on_floor(line) > 0
         ],
         source_available=(
             per_node.get(line.source_location_node_id, 0) if line.source_location_node_id else 0

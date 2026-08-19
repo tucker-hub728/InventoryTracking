@@ -445,8 +445,9 @@ interface Props {
    * who lack the ``inventory:sign`` permission.
    */
   onReverseRequest?: (entry: LedgerEntry) => void;
-  /** Show the Customer column. Only built items (finished goods / sub-assemblies)
-   *  can ship to a customer, so raw materials omit it (it would always be —). */
+  /** Show the Customer column. Every tracked tier can ship to a customer
+   *  (TRX-001), so this is on for raw materials as well as built items; only a
+   *  consumable omits it, being consumed on issue and never shipped. */
   showCustomer?: boolean;
   /**
    * Per-kit reconciliation for this item — issued / used / returned.
@@ -645,9 +646,9 @@ export function LedgerTable({
                       className="block truncate"
                     />
                   </TableCell>
-                  {/* Customer — the named recipient a shipment left inventory to
-                      (CUST-001). Shown only for built items (raw materials never
-                      ship). Only shipments populate it; other rows are —. */}
+                  {/* Customer — the named recipient a shipment left inventory
+                      to (CUST-001). Only a shipment populates it; every other
+                      movement stays inside the building, so those rows are —. */}
                   {showCustomer && (
                     <TableCell className="text-xs text-text-2">
                       {e.movementType === 'customer_shipment' ? (

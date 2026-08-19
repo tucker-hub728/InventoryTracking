@@ -3,7 +3,6 @@
 import * as React from 'react';
 
 import { useMinDuration } from '@/hooks/use-min-duration';
-import { isBuiltTier } from '@/lib/api/tiers';
 import { kitsApi, type ApiItemKitConsumption } from '@/lib/api/kits';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
@@ -86,9 +85,12 @@ export function ItemLedgerPanel() {
           onCycleSort={controls.cycleSort}
           filtersActive={controls.filtersActive}
           onReverseRequest={onReverseRequest}
-          // Only built items (finished goods / sub-assemblies) can ship to a
-          // customer, so the Customer column is shown only for them.
-          showCustomer={isBuiltTier(item.tierType)}
+          // Shown wherever a customer shipment is POSSIBLE, which since
+          // TRX-001 means every tier — a raw material may be issued to a
+          // customer too, so hiding the column on CR pages left those
+          // shipments with no visible recipient. Only a consumable is
+          // excluded: it is consumed on issue, so it never ships.
+          showCustomer={!item.isConsumable}
           kitUsage={kitUsage}
         />
       </div>

@@ -129,6 +129,15 @@ export interface IssueResult {
   lines: IssueLine[];
 }
 
+/** What one debit-and-gone location has consumed. Absent from the list
+ *  entirely when nothing has been issued there yet. */
+export interface IssuedSummary {
+  node_id: string;
+  issue_count: number;
+  total_qty: number;
+  last_issued_at: string | null;
+}
+
 export const issuesApi = {
   /** Locations material may be issued to. An EMPTY list is a real state, not an
    *  error: it means no debit-and-gone location has been created yet, and the
@@ -138,6 +147,12 @@ export const issuesApi = {
 
   sources: (itemId: string, opts?: { signal?: AbortSignal }) =>
     api.get<IssueSource[]>(`/issues/sources/${itemId}`, { signal: opts?.signal }),
+
+  /** Per-destination totals for the Storage overview. One call for every card —
+   *  a debit-and-gone location holds nothing, so its card shows what it has
+   *  TAKEN, and asking per card would be a round trip each. */
+  summary: (opts?: { signal?: AbortSignal }) =>
+    api.get<IssuedSummary[]>('/issues/summary', { signal: opts?.signal }),
 
   /** What has been issued TO a location — its disposition log, newest first.
    *  Not `/location-nodes/{id}/allocations`, which is stock actually held at a
