@@ -102,7 +102,7 @@ export function ReleaseDecisionHistory({ lotId }: { lotId: string }) {
   if (rows.length === 0) {
     return (
       <p className="px-1 py-2 text-xs text-text-3">
-        No release decisions yet — this batch is still in the state it was made in.
+        No quality decisions yet — this batch is still in the status it was made in.
       </p>
     );
   }

@@ -54,6 +54,18 @@ export const RELEASE_STATE_OPTIONS: {
   { code: 'rejected', label: 'Rejected', meaning: 'Failed. Not to be used.' },
 ];
 
+/**
+ * The UI calls this concept **"Quality status"**; the code, the API and the
+ * column all still say ``release_state``. That is deliberate, not drift.
+ *
+ * "Release state" named only one of the four outcomes — a batch can equally be
+ * quarantined, held or rejected — so the label was changed (client 2026-08-19).
+ * The identifiers were not: ``lot.release_state`` is the e-signature verb
+ * standing behind signatures that are already recorded, and renaming it would
+ * either orphan them or require rewriting an append-only table. The DB column
+ * matches the API, the API matches the client, and only the words a person
+ * reads changed.
+ */
 export const RELEASE_STATE_LABEL: Record<LotReleaseState, string> = Object.fromEntries(
   RELEASE_STATE_OPTIONS.map((o) => [o.code, o.label]),
 ) as Record<LotReleaseState, string>;

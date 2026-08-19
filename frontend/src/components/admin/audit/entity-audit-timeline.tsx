@@ -656,7 +656,7 @@ function ReleaseRow({
       <RowIcon Icon={ShieldCheck} pillClass="border-accent/30 bg-accent-soft text-accent" />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-text-1 text-sm font-medium">Release state</span>
+          <span className="text-text-1 text-sm font-medium">Quality status</span>
           {from && <ReleaseStateBadge state={from} size="xs" />}
           {from && <ArrowRight size={12} className="shrink-0 text-text-3" />}
           {to && <ReleaseStateBadge state={to} size="xs" />}

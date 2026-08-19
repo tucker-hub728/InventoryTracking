@@ -384,12 +384,12 @@ export function LedgerExpiryToolbar({
         >
           <SelectTrigger
             className="w-[170px] [&>span]:min-w-0 [&>span]:truncate"
-            aria-label="Filter by release state"
+            aria-label="Filter by quality status"
           >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All release states</SelectItem>
+            <SelectItem value="all">All quality statuses</SelectItem>
             {presentReleaseStates.map((o) => (
               <SelectItem key={o.code} value={o.code}>
                 {o.label}
@@ -753,7 +753,7 @@ export function LedgerTable({
               <TableCell className="text-right font-mono text-xs">{group.balance}</TableCell>
               <TableCell />
               {showCustomer && <TableCell />}
-              {/* The one place a release state belongs in this table: the
+              {/* The one place a quality status belongs in this table: the
                   subtotal is about the LOT, not about a moment, so "as it is
                   now" is the right reading. Deliberately absent from the
                   movement rows above (client 2026-08-17). */}

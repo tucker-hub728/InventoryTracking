@@ -166,7 +166,7 @@ export function ItemStockLocationsTab({
         {presentStates.length > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-1.5">
             <span className="mr-1 text-[11px] uppercase tracking-wider text-text-3">
-              Release state
+              Quality status
             </span>
             <FilterChip
               label={`All (${rows.length})`}
@@ -256,7 +256,7 @@ export function ItemStockLocationsTab({
                             {canDecide && r.release_state && (
                               <Button
                                 size="sm"
-                                aria-label={`Change release state of ${r.lot_number ?? 'this lot'}`}
+                                aria-label={`Change quality status of ${r.lot_number ?? 'this lot'}`}
                                 onClick={() =>
                                   setReleaseLot({
                                     id: r.lot_id,
@@ -265,7 +265,7 @@ export function ItemStockLocationsTab({
                                   })
                                 }
                               >
-                                <ShieldCheck size={13} /> Release state
+                                <ShieldCheck size={13} /> Quality status
                               </Button>
                             )}
                             <Button
