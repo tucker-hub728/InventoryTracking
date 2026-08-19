@@ -80,6 +80,10 @@ export interface ApiAuditEventListResponse {
 }
 
 export interface ListAuditEventsParams {
+  /** Scope to events about the LOTS of this item. Release decisions are recorded
+   *  against the lot, so an item's own history needs this to see them — pair it
+   *  with `subjectTable: 'app.lots'`. */
+  lotsOfItem?: string;
   subjectTable?: ApiAuditSubjectTable;
   subjectId?: string;
   actorUserId?: string;
@@ -176,6 +180,7 @@ export const auditApi = {
       query: {
         subject_table: params.subjectTable,
         subject_id: params.subjectId,
+        lots_of_item: params.lotsOfItem,
         actor_user_id: params.actorUserId,
         event_type: params.eventType,
         severity: params.severity,

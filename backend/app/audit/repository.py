@@ -60,6 +60,7 @@ async def list_audit_events(
     *,
     subject_table: str | None = None,
     subject_id: uuid.UUID | None = None,
+    lots_of_item: uuid.UUID | None = None,
     actor_user_id: uuid.UUID | None = None,
     event_type: str | None = None,
     severity: str | None = None,
@@ -86,6 +87,15 @@ async def list_audit_events(
     if subject_id is not None:
         stmt = stmt.where(AuditEvent.subject_id == subject_id)
         count_stmt = count_stmt.where(AuditEvent.subject_id == subject_id)
+    if lots_of_item is not None:
+        # "What was decided about THIS item's batches" — release decisions are
+        # recorded against the LOT (STS-002 keeps no history table), so an item's
+        # own history would otherwise never show them. A subquery rather than a
+        # join: audit rows carry no foreign key to their subject, only a table
+        # name and an id, so the set of lot ids is resolved first.
+        lot_ids = select(Lot.id).where(Lot.item_id == lots_of_item)
+        stmt = stmt.where(AuditEvent.subject_id.in_(lot_ids))
+        count_stmt = count_stmt.where(AuditEvent.subject_id.in_(lot_ids))
     if actor_user_id is not None:
         stmt = stmt.where(AuditEvent.actor_user_id == actor_user_id)
         count_stmt = count_stmt.where(AuditEvent.actor_user_id == actor_user_id)

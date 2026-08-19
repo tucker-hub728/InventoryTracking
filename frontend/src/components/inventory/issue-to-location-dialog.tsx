@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { MinusCircle } from 'lucide-react';
+import { Check, MapPin, MinusCircle, Truck } from 'lucide-react';
 
 import {
   Dialog,
@@ -28,6 +28,8 @@ import {
   picksValid,
   type LotPick,
 } from '@/components/reconciliation/lot-source-picker';
+import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import type { KitLineSourceLot } from '@/lib/api/kits';
@@ -37,13 +39,29 @@ import {
   type IssueDestination,
   type IssueSource,
 } from '@/lib/api/issues';
+import { customersApi, type Customer } from '@/lib/api/customers';
+import { shipmentsApi } from '@/lib/api/shipments';
+
+/** Where material can go when it leaves inventory (REQ-2026-07-31-TRX-001).
+ *
+ *  One control, two terminal transactions — deliberately not one transaction
+ *  with two flavours. A customer shipment carries a customer and a reference
+ *  number and is the terminal event for a product (REQ-2026-07-09-TRX-001); an
+ *  issue to a lab carries neither and simply ends the material's life in the
+ *  system. Merging their LEDGERS would cost CUST-001 its requirement that the
+ *  movement names the customer, so what is unified here is the operator's entry
+ *  point, not the record.
+ */
+type DestinationKind = 'location' | 'customer';
 
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The item being issued. Any item may be issued — PD/R&D and the QC labs
-   *  receive raw material and finished goods alike. */
-  item: { uuid: string; id: string; desc: string } | null;
+  /** The item being issued. Any item may be issued to an internal location;
+   *  ``isConsumable`` is carried because a consumable cannot go to a CUSTOMER
+   *  (it is consumed on issue and has no balance left to ship), and the dialog
+   *  has to say so BEFORE the operator signs rather than failing afterwards. */
+  item: { uuid: string; id: string; desc: string; isConsumable?: boolean } | null;
   onDone: () => void;
 }
 
@@ -91,8 +109,12 @@ function toSourceLot(s: IssueSource): KitLineSourceLot {
 export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Props) {
   const [lots, setLots] = React.useState<KitLineSourceLot[] | null>(null);
   const [destinations, setDestinations] = React.useState<IssueDestination[] | null>(null);
+  const [customers, setCustomers] = React.useState<Customer[]>([]);
+  const [kind, setKind] = React.useState<DestinationKind>('location');
   const [picks, setPicks] = React.useState<LotPick[]>([]);
   const [destSel, setDestSel] = React.useState('');
+  const [customerSel, setCustomerSel] = React.useState('');
+  const [reference, setReference] = React.useState('');
   const [showReauth, setShowReauth] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -101,8 +123,12 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
     if (!open) return;
     setLots(null);
     setDestinations(null);
+    setCustomers([]);
+    setKind('location');
     setPicks([]);
     setDestSel('');
+    setCustomerSel('');
+    setReference('');
     setShowReauth(false);
     setSubmitting(false);
     setError(null);
@@ -114,11 +140,16 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
     Promise.all([
       issuesApi.sources(item.uuid, { signal: ctrl.signal }),
       issuesApi.destinations({ signal: ctrl.signal }),
+      // Customers are a destination kind now, not a separate dialog. Failing
+      // this fetch must not take the whole dialog down — issuing to a lab still
+      // works with no customers on file.
+      customersApi.list({}, { signal: ctrl.signal }).catch(() => [] as Customer[]),
     ])
-      .then(([src, dests]) => {
+      .then(([src, dests, custs]) => {
         const mapped = src.map(toSourceLot);
         setLots(mapped);
         setDestinations(dests);
+        setCustomers(custs);
         // Seed one blank pick row — there is no target quantity; the operator
         // decides how much leaves.
         setPicks(autoFillFifo(mapped, 0));
@@ -151,14 +182,52 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
     [destinations],
   );
 
-  const destLabel = destinations?.find((d) => d.node_id === destSel)?.name ?? 'this location';
+  const customerOptions: SearchableSelectOption[] = React.useMemo(
+    () =>
+      customers.map((c) => ({
+        value: c.id,
+        label: c.name,
+        searchText: `${c.name} ${c.contact_person ?? ''} ${c.email ?? ''}`,
+      })),
+    [customers],
+  );
+
+  const toCustomer = kind === 'customer';
+  const noCustomers = toCustomer && customers.length === 0;
+  // A consumable is consumed the moment it is issued, so there is no tracked
+  // balance to send anyone (Transaction Spec §4.3). The backend refuses it —
+  // this stops the operator reaching a password prompt first.
+  const customerBlocked = Boolean(item?.isConsumable);
+  const destLabel = toCustomer
+    ? (customers.find((c) => c.id === customerSel)?.name ?? 'this customer')
+    : (destinations?.find((d) => d.node_id === destSel)?.name ?? 'this location');
+  /** Whichever destination the chosen kind requires. */
+  const destChosen = toCustomer ? Boolean(customerSel) : Boolean(destSel);
 
   const validate = (): string | null => {
-    if (noDestinations) return 'No debit-and-gone location has been set up yet.';
+    if (toCustomer && customerBlocked) {
+      return 'A consumable is consumed when issued, so it cannot go to a customer.';
+    }
+    if (!toCustomer && noDestinations) return 'No debit-and-gone location has been set up yet.';
+    if (noCustomers) return 'No customers are on file yet.';
     if (!lots || lots.length === 0) return 'No stock is available to issue.';
     if (total < 1) return 'Pick at least one lot and quantity to issue.';
     if (!picksValid(lots, picks)) return 'One or more picks exceed the available quantity.';
-    if (!destSel) return 'Choose where the material is going.';
+    if (!destChosen) return 'Choose where the material is going.';
+    return null;
+  };
+
+  /** Why the operator cannot sign yet — shown next to the button instead of
+   *  leaving it greyed out with no explanation. Ordered by what they would fix
+   *  first: the destination, then the stock, then the amount. */
+  const blockedReason = (): string | null => {
+    if (toCustomer && customerBlocked) return 'A consumable cannot go to a customer.';
+    if (toCustomer && noCustomers) return 'No customers on file yet.';
+    if (!toCustomer && noDestinations) return 'No debit-and-gone location set up yet.';
+    if (noStock) return 'No stock available to issue.';
+    if (!destChosen) return toCustomer ? 'Choose a customer.' : 'Choose a location.';
+    if (total < 1) return 'Add at least one lot and quantity.';
+    if (lots && !picksValid(lots, picks)) return 'A pick exceeds the quantity available.';
     return null;
   };
 
@@ -176,17 +245,35 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
     setSubmitting(true);
     setError(null);
     try {
-      const result = await issuesApi.issue({
-        sources: picksToSources(picks),
-        destination_node_id: destSel,
-        evidence_id: evidence.evidence_id,
-        notes: evidence.comment ?? '',
-      });
-      toast.success('Material issued', {
-        description: `${result.total_qty} unit${
-          result.total_qty === 1 ? '' : 's'
-        } issued to ${result.destination_name} — removed from inventory`,
-      });
+      // Two endpoints behind one control: the destination decides which ledger
+      // row is written, so a shipment stays a shipment (named customer, its own
+      // movement type) rather than becoming an issue with a customer attached.
+      if (toCustomer) {
+        const shipment = await shipmentsApi.ship({
+          sources: picksToSources(picks),
+          customer_id: customerSel,
+          reference_number: reference.trim() || null,
+          evidence_id: evidence.evidence_id,
+          notes: evidence.comment ?? '',
+        });
+        toast.success('Shipment recorded', {
+          description: `${shipment.total_qty} unit${
+            shipment.total_qty === 1 ? '' : 's'
+          } issued to ${shipment.customer_name} — removed from inventory`,
+        });
+      } else {
+        const result = await issuesApi.issue({
+          sources: picksToSources(picks),
+          destination_node_id: destSel,
+          evidence_id: evidence.evidence_id,
+          notes: evidence.comment ?? '',
+        });
+        toast.success('Material issued', {
+          description: `${result.total_qty} unit${
+            result.total_qty === 1 ? '' : 's'
+          } issued to ${result.destination_name} — removed from inventory`,
+        });
+      }
       onDone();
       onOpenChange(false);
     } catch (err) {
@@ -211,24 +298,187 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
           <DialogHeader>
             <DialogTitle>Issue material</DialogTitle>
             <DialogDescription>
-              Issue <span className="font-medium">{item?.desc}</span> to a lab or development
-              area. This removes it from inventory — it is not a transfer.
+              Send <span className="font-medium">{item?.desc}</span> out of inventory. To keep
+              tracking it, use Transfer.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
-            {noDestinations ? (
-              <p className="rounded-md border border-border bg-bg-subtle px-3 py-2 text-sm text-text-2">
-                No debit-and-gone location has been set up yet. A super admin can create one
-                from Storage → Create new location, choosing “Leaves inventory when issued”.
-              </p>
-            ) : noStock ? (
+            {noStock ? (
               <p className="rounded-md border border-border bg-bg-subtle px-3 py-2 text-sm text-text-2">
                 No stock is available to issue.
               </p>
             ) : (
               <>
                 <div className="space-y-1.5">
-                  <Label>Issue from (add a lot per location)</Label>
+                  <Label>
+                    Issue to <span className="text-danger">*</span>
+                  </Label>
+                  {/* Two kinds, chosen before the destination, because a single
+                      mixed dropdown would sit "Acme Bio" next to "PD" as though
+                      they were the same sort of place. They are not: one is a
+                      company, the other a room.
+
+                      Named for what they ARE, not for what anyone expects to be
+                      in them. The operator names their own locations — calling
+                      this "Lab / development area" would repeat the mistake of
+                      listing example labs, and be wrong the moment someone
+                      creates a location called "Scrap". */}
+                  {/* Cards, not tabs. The two options are not two views of the
+                      same thing — they write DIFFERENT ledger rows, one of which
+                      names a customer and one of which does not, and both are
+                      irreversible. A card has room to say what each one means,
+                      which is the difference between an operator choosing and an
+                      operator guessing.
+
+                      Neither description names an example location. The operator
+                      names their own, so listing "PD, QC, scrap" would be wrong
+                      the moment they call one something else. */}
+                  <div
+                    role="radiogroup"
+                    aria-label="Destination type"
+                    className="grid gap-2 sm:grid-cols-2"
+                  >
+                    {(
+                      [
+                        {
+                          value: 'location' as const,
+                          label: 'Debit-and-gone',
+                          hint: 'Material ends there.',
+                          Icon: MapPin,
+                        },
+                        {
+                          value: 'customer' as const,
+                          label: 'Customer',
+                          hint: 'Leaves the site, on the record.',
+                          Icon: Truck,
+                        },
+                      ]
+                    ).map((opt) => {
+                      const active = kind === opt.value;
+                      const disabled = opt.value === 'customer' && customerBlocked;
+                      const { Icon } = opt;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          disabled={disabled}
+                          onClick={() => setKind(opt.value)}
+                          title={
+                            disabled
+                              ? 'A consumable is consumed when issued, so it cannot go to a customer.'
+                              : undefined
+                          }
+                          className={cn(
+                            'group relative flex items-start gap-3 rounded-lg border p-3 text-left transition-all',
+                            active
+                              ? 'border-accent bg-accent-soft/30 ring-1 ring-accent'
+                              : 'border-border hover:border-accent/50 hover:bg-surface/60',
+                            disabled && 'cursor-not-allowed opacity-45 hover:border-border hover:bg-transparent',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border transition-colors',
+                              active
+                                ? 'border-accent/40 bg-accent text-white'
+                                : 'border-border bg-surface text-text-3',
+                            )}
+                          >
+                            <Icon size={15} />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-sm font-medium text-text">{opt.label}</span>
+                            <span className="mt-0.5 block text-xs leading-snug text-text-3">
+                              {opt.hint}
+                            </span>
+                          </span>
+                          {active && (
+                            <span className="absolute right-2 top-2 text-accent">
+                              <Check size={14} />
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {customerBlocked && (
+                    <p className="text-xs text-text-3">
+                      A consumable is consumed the moment it is issued, so there is no tracked
+                      stock left to send to a customer.
+                    </p>
+                  )}
+
+                  {toCustomer ? (
+                    <>
+                      <SearchableSelect
+                        id="issue-customer"
+                        modal
+                        options={customerOptions}
+                        value={customerSel}
+                        onChange={setCustomerSel}
+                        placeholder="Select a customer…"
+                        searchPlaceholder="Search customers…"
+                        emptyText="No customers on file."
+                      />
+                      {noCustomers && (
+                        <p className="text-xs text-text-3">
+                          No customers have been added yet — add one from Customers first.
+                        </p>
+                      )}
+                      <div className="space-y-1.5 pt-2">
+                        <Label htmlFor="issue-reference">Reference number</Label>
+                        <Input
+                          id="issue-reference"
+                          value={reference}
+                          onChange={(e) => setReference(e.target.value)}
+                          placeholder="e.g. SO-1042 or a tracking number"
+                        />
+                        <p className="text-xs text-text-3">
+                          Optional. The shipping, tracking or sales-order number, kept on the
+                          ledger row beside the customer.
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <SearchableSelect
+                        id="issue-destination"
+                        modal
+                        options={destOptions}
+                        value={destSel}
+                        onChange={setDestSel}
+                        placeholder="Select a debit-and-gone location…"
+                        searchPlaceholder="Search locations…"
+                        emptyText="No debit-and-gone locations."
+                      />
+                      {noDestinations ? (
+                        <p className="text-xs text-text-3">
+                          No debit-and-gone location has been set up yet. A super admin can
+                          create one from Storage → Create new location, choosing “Leaves
+                          inventory when issued”.
+                        </p>
+                      ) : (
+                        /* Say what the picker is NOT offering. An operator looking
+                           for "QC 1 › Freezer 1" needs to know it is missing on
+                           purpose and which action has it, or they will read the
+                           list as broken. */
+                        <p className="text-xs text-text-3">
+                          The location itself, not a shelf inside it.
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Destination BEFORE stock. Where it goes decides which
+                    transaction is written, which fields appear, and — for a
+                    consumable — whether the action is possible at all. Asking
+                    last would mean picking lots that then turn out to be
+                    unusable. */}
+                <div className="space-y-1.5">
+                  <Label>Issue from</Label>
                   {lots === null ? (
                     <p className="text-xs text-text-3">Loading available stock…</p>
                   ) : (
@@ -243,35 +493,12 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
                   )}
                 </div>
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="issue-destination">
-                    Issue to <span className="text-danger">*</span>
-                  </Label>
-                  <SearchableSelect
-                    id="issue-destination"
-                    modal
-                    options={destOptions}
-                    value={destSel}
-                    onChange={setDestSel}
-                    placeholder="Select a location…"
-                    searchPlaceholder="Search locations…"
-                    emptyText="No debit-and-gone locations."
-                  />
-                  {/* Say what the picker is NOT offering. An operator looking for
-                      "QC 1 › Freezer 1" needs to know it is missing on purpose
-                      and which action has it, or they will read the list as
-                      broken. */}
-                  <p className="text-xs text-text-3">
-                    The location itself, not a shelf or freezer inside it. To move stock into
-                    one of those and keep tracking it, use Transfer.
-                  </p>
-                </div>
-
-                <p className="rounded-md border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-warning">
-                  {total > 0 ? `These ${total} unit${total === 1 ? '' : 's'} will be` : 'Issued material is'}{' '}
-                  removed from inventory permanently and cannot be returned or transferred
-                  back. Nothing is stored at {destLabel}.
-                </p>
+                {/* No warning band here. "Permanent, cannot be returned" was
+                    being said three times over — in the header, on the chosen
+                    card, and again in this box — and the one statement that
+                    actually binds is the meaning text on the signature dialog,
+                    which the operator must read to proceed. Repeating a warning
+                    is how it stops being read. */}
               </>
             )}
 
@@ -284,7 +511,22 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
               </p>
             )}
           </DialogBody>
-          <DialogFooter>
+          <DialogFooter className="items-center justify-between gap-3 sm:justify-between">
+            {/* What is about to happen, in one line, next to the button that
+                does it — and when it cannot happen, why. A greyed-out button
+                with no explanation is the most common dead end in this app. */}
+            <p className="text-xs text-text-3">
+              {blockedReason() ? (
+                <span className="text-warning">{blockedReason()}</span>
+              ) : (
+                <>
+                  Issuing <span className="font-mono text-text">{total}</span>{' '}
+                  {total === 1 ? 'unit' : 'units'} to{' '}
+                  <span className="font-medium text-text">{destLabel}</span>
+                </>
+              )}
+            </p>
+            <div className="flex gap-2">
             <Button type="button" onClick={() => onOpenChange(false)} disabled={submitting}>
               Cancel
             </Button>
@@ -292,10 +534,18 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
               type="button"
               variant="primary"
               onClick={openSign}
-              disabled={submitting || noStock || noDestinations || !picksOk || !destSel}
+              disabled={
+                submitting ||
+                noStock ||
+                (!toCustomer && noDestinations) ||
+                noCustomers ||
+                !picksOk ||
+                !destChosen
+              }
             >
               <MinusCircle size={14} /> Sign &amp; issue
             </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -303,13 +553,15 @@ export function IssueToLocationDialog({ open, onOpenChange, item, onDone }: Prop
       <PasswordReauthDialog
         open={showReauth}
         onOpenChange={setShowReauth}
-        action={MATERIAL_ISSUE_ACTION}
+        action={toCustomer ? 'movement.customer_shipment' : MATERIAL_ISSUE_ACTION}
         recordTable="app.items"
         recordId={item?.uuid}
         meaning={`I am issuing ${total} unit(s) of ${
           item?.desc ?? 'this item'
         } to ${destLabel}. This removes them from inventory permanently.`}
-        commentPlaceholder="e.g. Sent to QC for release testing"
+        commentPlaceholder={
+          toCustomer ? 'e.g. Shipped against SO-1042' : 'e.g. Sent to QC for release testing'
+        }
         onConfirmed={submit}
         title="Sign this issue"
         submitLabel="Sign & issue"

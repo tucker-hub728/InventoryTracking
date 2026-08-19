@@ -21,7 +21,7 @@ import {
 import { toast } from '@/components/ui/sonner';
 import { cn } from '@/lib/utils';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
-import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timeline';
+import { ReleaseDecisionHistory } from '@/components/inventory/release-decision-history';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import {
@@ -292,7 +292,7 @@ export function ReleaseStateDialog({
                   Decision history
                 </summary>
                 <div className="max-h-64 overflow-y-auto border-t border-border p-2">
-                  <EntityAuditTimeline subjectTable="app.lots" subjectId={lot.id} limit={50} />
+                  <ReleaseDecisionHistory lotId={lot.id} />
                 </div>
               </details>
             )}

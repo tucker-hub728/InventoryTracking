@@ -87,6 +87,10 @@ async def list_audit_events(
     db: DBSession,
     subject_table: Annotated[SubjectTable | None, Query()] = None,
     subject_id: Annotated[uuid.UUID | None, Query()] = None,
+    lots_of_item: Annotated[
+        uuid.UUID | None,
+        Query(description="Scope to events about this item's lots (pair with subject_table)"),
+    ] = None,
     actor_user_id: Annotated[uuid.UUID | None, Query()] = None,
     event_type: Annotated[str | None, Query(max_length=128)] = None,
     severity: Annotated[SeverityFilter | None, Query()] = None,
@@ -108,6 +112,9 @@ async def list_audit_events(
     Common queries:
       * ``?subject_table=app.items&subject_id=<uuid>`` — "what happened
         to this item" (per-entity history tab on the detail page).
+      * ``?subject_table=app.lots&lots_of_item=<uuid>`` — "what was decided
+        about this item's batches". Release-state changes are recorded against
+        the LOT, so an item filtered by its own id would never find them.
       * ``?actor_user_id=<uuid>`` — "what did this user touch today"
         (admin audit drill-down).
       * ``?action=deleted&occurred_from=<iso>`` — "what got deleted in
@@ -117,6 +124,7 @@ async def list_audit_events(
         db,
         subject_table=subject_table,
         subject_id=subject_id,
+        lots_of_item=lots_of_item,
         actor_user_id=actor_user_id,
         event_type=event_type,
         severity=severity,

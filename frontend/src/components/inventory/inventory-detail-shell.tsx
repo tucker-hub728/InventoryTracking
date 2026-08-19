@@ -11,7 +11,6 @@ import {
   PackageOpen,
   Pencil,
   ShieldCheck,
-  Truck,
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
@@ -31,7 +30,6 @@ import {
 } from './release-state-dialog';
 import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
 import { itemsApi } from '@/lib/api/items';
-import { ShipToCustomerDialog } from './ship-to-customer-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber, isUuid } from '@/lib/utils';
@@ -155,7 +153,6 @@ export function InventoryDetailShell({
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [editing, setEditing] = React.useState(false);
-  const [shipping, setShipping] = React.useState(false);
   const [transferring, setTransferring] = React.useState(false);
   const [changingRelease, setChangingRelease] = React.useState(false);
   // Admin / super admin only — mirrors the backend's ``_require_admin``.
@@ -430,19 +427,22 @@ export function InventoryDetailShell({
                 <PackageOpen size={14} /> Issue to Kanban
               </Button>
             )}
-            {/* Issue is debit-and-gone (REQ-2026-08-04-TRX-001/002): material
-                goes to PD, R&D or a QC lab and leaves controlled inventory.
-                Deliberately a SEPARATE button from Transfer, not a destination
-                inside it — the same lab is a valid target for both actions and
-                they mean opposite things, so which one happened has to be the
-                operator's explicit choice. Offered on every tier, since those
-                labs receive raw material and finished goods alike. E-signed.
+            {/* Issue is the single way material leaves inventory
+                (REQ-2026-07-31-TRX-001): to a customer, or to PD / R&D / a QC
+                lab. It replaces the old Ship-to-customer button, which existed
+                only on built tiers — this one is offered on all three, since a
+                customer may take back raw material they supplied and those labs
+                receive every tier alike.
 
-                The dialog itself handles the "no debit-and-gone location exists
-                yet" case; hiding the button on that state would leave nothing to
-                explain why the action is missing. */}
+                Still deliberately SEPARATE from Transfer, not a destination
+                inside it: the same lab is a valid target for both actions and
+                they mean opposite things, so which one happened has to be the
+                operator's explicit choice. E-signed.
+
+                The dialog handles the "no destination set up yet" cases; hiding
+                the button would leave nothing to explain the absence. */}
             {canSign && (
-              <Button onClick={() => setIssuingToLocation(true)}>
+              <Button variant="primary" onClick={() => setIssuingToLocation(true)}>
                 <MinusCircle size={14} /> Issue
               </Button>
             )}
@@ -459,14 +459,6 @@ export function InventoryDetailShell({
             {canDecideRelease && releaseCandidates.length > 0 && (
               <Button onClick={() => setChangingRelease(true)}>
                 <ShieldCheck size={14} /> Release state
-              </Button>
-            )}
-            {/* Ship-to-customer is the terminal transaction for a built item —
-                a finished good, or a sub-assembly sold directly (INV-004 /
-                CUST-001). E-signed, so gate on ``inventory:sign``. */}
-            {built && canSign && (
-              <Button variant="primary" onClick={() => setShipping(true)}>
-                <Truck size={14} /> Ship to customer
               </Button>
             )}
           </>
@@ -600,13 +592,6 @@ export function InventoryDetailShell({
         onUpdated={refresh}
       />
 
-      <ShipToCustomerDialog
-        open={shipping}
-        onOpenChange={setShipping}
-        item={{ uuid: item.uuid, id: item.id, desc: item.desc, tierType: item.tierType }}
-        onDone={refresh}
-      />
-
       <TransferDialog
         open={transferring}
         onOpenChange={setTransferring}
@@ -624,7 +609,7 @@ export function InventoryDetailShell({
       <IssueToLocationDialog
         open={issuingToLocation}
         onOpenChange={setIssuingToLocation}
-        item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc, isConsumable: item.isConsumable }}
         onDone={refresh}
       />
 
