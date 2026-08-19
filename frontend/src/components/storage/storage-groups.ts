@@ -143,16 +143,21 @@ export const STORAGE_GROUP_KINDS = STORAGE_GROUPS.map((g) => g.key);
 export type StorageGroupKind = TemplateGroup['key'];
 
 /**
- * The disposition-log tab on a scrap location (REQ-2026-08-04-TRX-001/002).
+ * The RETIRED disposition-log tab (REQ-2026-08-04-TRX-001/002).
  *
- * Not a StorageGroup, and deliberately not in {@link STORAGE_GROUPS}: every
- * entry there is backed by a real ``room_location`` node the client can rename,
- * switch off and put units into. This tab is backed by ledger history and holds
- * nothing. Adding a fake sub-type to get a tab would be modelling debit-and-gone
- * as a location sub-type, which is exactly what the client ruled out — it is a
- * transaction, and this tab shows the transactions.
+ * `/storage/{id}/issued` was where a debit-and-gone location's issue history
+ * lived, as a tab beside sub-type tabs that were suppressed for it anyway. On
+ * 2026-08-19 those locations moved to their own section at `/debit-and-gone`.
  *
- * It appears only when the location's ``is_scrap`` is true.
+ * The constant survives for ONE job: keeping `issued` a legal URL shape, so an
+ * old link reaches `StorageCategoryClient` and gets redirected there instead of
+ * being bounced to a storage tab by the shape check. Nothing renders it.
+ *
+ * It was never a StorageGroup and must not become one: every entry in
+ * {@link STORAGE_GROUPS} is a KIND backed by real ``room_location`` nodes that
+ * hold units, and this is ledger history that holds nothing. A fake sub-type to
+ * get a tab would model debit-and-gone as a location sub-type — exactly what the
+ * client ruled out.
  */
 export const ISSUED_SEGMENT = 'issued';
 

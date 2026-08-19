@@ -980,6 +980,25 @@ async def update_storage_groups(
         keep.add(gid)
     additions = [e for e in payload.groups if e.kind is not None]
 
+    # A debit-and-gone location is a DISPOSITION, not a place (client
+    # 2026-08-19). Nothing is stored at one: material issued there leaves
+    # inventory, and its page shows that history instead of tabs.
+    #
+    # This closes a gap rather than adding a restriction. The UI already
+    # suppressed a scrap location's tabs and hid "Configure sub-types" from its
+    # menu, so sub-types on one were unreachable — but the old create dialog left
+    # its three switches ON behind the debit-and-gone choice and sent them
+    # anyway, which is how R&D and Scrap ended up carrying three ``room_location``
+    # nodes no screen rendered and no control could remove.
+    #
+    # Removals stay legal, so those orphans can still be cleared out.
+    if additions and category.is_scrap:
+        raise ValidationError(
+            f"'{category.name}' is a debit-and-gone location — material issued there "
+            "leaves inventory, so it has nowhere to put things and takes no sub-types.",
+            code="storage_groups_scrap",
+        )
+
     changed = False
     # Removals FIRST, so a name freed in this request is available to an add in
     # the same request — otherwise replacing a sub-type with a like-named one

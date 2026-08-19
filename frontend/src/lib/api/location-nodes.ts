@@ -328,9 +328,9 @@ export interface StorageCategoryInput {
    * afterwards, because turning it on later would strand the stock already
    * sitting there and turning it off would imply issued material has a home.
    *
-   * It does not change the location's structure: every location is created with
-   * no sub-types, and a scrap one may simply never be given any — the location
-   * itself is the destination, so it needs nowhere to put things.
+   * A debit-and-gone location is DISPOSITION-ONLY: it takes no sub-types at all
+   * (the server refuses to add one), stores nothing, and its page shows what has
+   * been issued to it instead of tabs.
    */
   is_scrap?: boolean;
 }

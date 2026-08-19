@@ -35,6 +35,7 @@ Verifies:
   * a code is never reused within a kind after a sub-type is removed
   * a duplicate sub-type name on one location is refused (409)
   * an unknown kind is refused — there are only three
+  * a DEBIT-AND-GONE location takes no sub-types at all (422), removal still works
   * a location may be left with NO sub-types (it is created that way)
   * every location lands in ONE Storage room, created on demand if absent
   * a non-super-admin is refused (403)
@@ -355,6 +356,35 @@ def main() -> int:
             later is not None and later["code"] == "FRZ-4",
             (later or {}).get("code"),
         )
+
+    print("\n-- a debit-and-gone location takes NO sub-types (client 2026-08-19)")
+    # It is a DISPOSITION, not a place: material issued there leaves inventory, so
+    # it has nowhere to put anything. The UI already suppressed its tabs and hid
+    # its Configure entry, but the old create dialog left its three switches on
+    # behind the debit-and-gone choice and sent them anyway — which is how live
+    # scrap locations ended up carrying three sub-type nodes no screen rendered
+    # and no control could remove. The server refuses them now.
+    s, scrap = make_category("Smoke Scrap", is_scrap=True)
+    check("a debit-and-gone location is created", s == 201, (s, scrap))
+    if s == 201:
+        created.append(scrap["id"])
+        check("it is flagged", scrap.get("is_scrap") is True, scrap.get("is_scrap"))
+        check("and starts with no sub-types", scrap.get("children") == [], scrap.get("children"))
+        s, b = set_groups(scrap["id"], keep=[], add=("shelf",))
+        check(
+            "adding a sub-type to it is refused",
+            s == 422 and b.get("code") == "storage_groups_scrap",
+            (s, b),
+        )
+        check(
+            "and the refusal explains why, not just that",
+            "leaves inventory" in b.get("message", ""),
+            b.get("message"),
+        )
+        # Removal stays legal — that is the path that clears out the sub-types
+        # live scrap locations were given before this rule.
+        s, b = set_groups(scrap["id"], keep=[])
+        check("an empty list is still accepted on one", s == 200, (s, b))
 
     print("\n-- the shape is enforced")
     # On ``partial``, not ``cat``: cat's freezer still holds the equipment number

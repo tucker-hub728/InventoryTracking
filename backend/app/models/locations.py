@@ -277,19 +277,23 @@ STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
 # level the client names "PD" or "QC 1".
 #
 # Debit-and-gone (REQ-2026-08-04-TRX-001/002) is a TRANSACTION, not a location
-# type: the client's rule is that one physical area supports both actions, and
-# which happened is the operator's choice, not the destination's nature —
+# type — ``is_scrap`` is a marker on an ordinary location row, not a node type of
+# its own, and what it decides is whether Issue may target that location:
 #
-#     Transfer → QC 1 › Freezer 1     stock stays tracked at the new node
 #     Issue    → QC 1                 stock leaves controlled inventory
+#     Transfer → Materials Mgmt › Freezer 1     stock stays tracked at the node
 #
-# So a scrap location is an ORDINARY ``storage_category``: same page, same
-# template groups, and it still RECEIVES transfers into its shelves and freezers.
-# ``is_scrap`` decides one thing only — whether Issue may target it.
+# It used to say a scrap location ALSO receives transfers into its own shelves
+# and freezers. The client settled that on 2026-08-19: it does not. A
+# debit-and-gone location is a DISPOSITION, not a place — it takes no sub-types
+# (enforced in ``update_storage_groups``), so it has no storage descendants for a
+# transfer to land in, and its page shows issue history instead of tabs.
 #
 # That the two destination sets are DISJOINT is what makes "issued and stored"
 # unrepresentable rather than merely rejected: a transfer takes a
-# STORAGE_NODE_TYPES node, an issue takes this one, and no node is both.
+# STORAGE_NODE_TYPES node, an issue takes this one, and no node is both. The
+# disposition-only rule strengthens that — a scrap location now has no storage
+# descendants at all, so the two sets cannot even meet under one roof.
 SCRAP_NODE_TYPE = "storage_category"
 
 # Node types that carry a configurable rows×cols grid. Only the Box.

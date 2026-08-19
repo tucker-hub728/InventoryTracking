@@ -328,11 +328,13 @@ export function ConfigureGroupsDialog({
             </div>
           </div>
 
+          {/* No debit-and-gone branch here: one cannot reach this dialog. Its
+              page redirects to /debit-and-gone, and the server refuses to add a
+              sub-type to it anyway (storage_groups_scrap). */}
           {total === 0 && (
             <p className="text-xs text-text-2">
-              {category.is_scrap
-                ? 'No sub-types — material is issued to the location itself, so it needs nowhere to put things.'
-                : 'No sub-types yet. Until one is added there is nowhere to put stock at this location.'}
+              No sub-types yet. Until one is added there is nowhere to put stock at this
+              location.
             </p>
           )}
 

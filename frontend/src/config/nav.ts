@@ -9,6 +9,7 @@ import {
   History,
   Layers,
   LineChart,
+  MinusCircle,
   Package,
   Scale,
   Snowflake,
@@ -150,6 +151,23 @@ export const navSections: readonly NavSection[] = [
         label: 'Storage',
         href: '/storage',
         icon: Boxes,
+        resource: 'inventory',
+      },
+      // REQ-2026-08-04-TRX-001/002 — where material goes to LEAVE inventory
+      // (PD, R&D, QC, scrap). Its own row since 2026-08-19, next to Storage
+      // because that is where these used to live and where people will look.
+      //
+      // ⚠ These are ``storage_category`` rows in the STORAGE room carrying
+      // ``is_scrap`` — this row opens a FILTERED VIEW of them, not a room of its
+      // own. Debit-and-gone is a TRANSACTION, not a location type (the client
+      // rejected a scrap-node model twice), and "issued AND stored" is
+      // unrepresentable only because Issue and Transfer take DISJOINT
+      // destination node types. Promote this to a real room and both go.
+      {
+        id: 'debit-and-gone',
+        label: 'Debit-and-gone',
+        href: '/debit-and-gone',
+        icon: MinusCircle,
         resource: 'inventory',
       },
       // REQ-2026-07-15-LOC-005: Warehouse One is a location INSIDE the Materials

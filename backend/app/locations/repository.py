@@ -316,10 +316,11 @@ async def create_storage_category(
     is a Super Admin. Caller commits.
 
     ``is_scrap`` marks the category as a debit-and-gone destination
-    (REQ-2026-08-04-TRX-001/002). It lands on the CATEGORY only — sub-types added
-    later stay ordinary storage, because a scrap location still receives transfers
-    into its shelves and freezers; what the flag governs is whether the Issue
-    action may name this location. Set here at creation and never afterwards."""
+    (REQ-2026-08-04-TRX-001/002) — what the flag governs is whether the Issue
+    action may name this location. Set here at creation and never afterwards.
+    Such a location is disposition-only: it takes no sub-types at all (client
+    2026-08-19, enforced in ``update_storage_groups``), so nothing is ever stored
+    at it and no transfer has anywhere inside it to land."""
     base = _slugify_storage_code(name)
     code = base
     n = 2

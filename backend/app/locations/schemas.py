@@ -186,10 +186,12 @@ class StorageCategoryCreate(BaseModel):
     002) — the client's PD, R&D and QC labs. It is asked here and only here: the
     flag is immutable after creation, because turning it on later would leave
     stock sitting in a place now meant to consume everything sent to it, and
-    turning it off would imply already-issued material has a home. It does NOT
-    change the location's structure — a scrap location may still be given
-    sub-types and still receives transfers into them; it only becomes eligible as
-    an Issue destination.
+    turning it off would imply already-issued material has a home.
+
+    Such a location is DISPOSITION-ONLY (client 2026-08-19): it takes no
+    sub-types, so nothing is ever stored there and its page shows what has been
+    issued to it instead of tabs. :func:`update_storage_groups` refuses to add
+    one.
     """
 
     model_config = ConfigDict(extra="forbid")
