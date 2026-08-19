@@ -27,6 +27,37 @@ export const LOT_STATUS_LABEL: Record<LotStatus, string> = Object.fromEntries(
   LOT_STATUS_OPTIONS.map((o) => [o.code, o.label]),
 ) as Record<LotStatus, string>;
 
+/**
+ * The release state of a batch (REQ-2026-07-31-STS-001).
+ *
+ * A different axis from {@link LotStatus}, which is procurement — a lot is
+ * routinely `available` AND `quarantine` at the same time. `null` means no
+ * release workflow applies: consumables and raw materials never carry one, and
+ * the UI shows nothing at all for them rather than an "n/a" badge.
+ *
+ * It is a LABEL. It blocks no transfer, issue, kit or shipment (client
+ * 2026-08-17) — the requirement is visibility, and STS-003 forbids altering
+ * existing LN2 behaviour.
+ */
+export type LotReleaseState = 'quarantine' | 'qc_hold' | 'released' | 'rejected';
+
+/** Ordered as the workflow reads: held, under review, then the two outcomes. */
+export const RELEASE_STATE_OPTIONS: {
+  code: LotReleaseState;
+  label: string;
+  /** What choosing this one asserts — shown under the option when signing. */
+  meaning: string;
+}[] = [
+  { code: 'quarantine', label: 'Quarantine', meaning: 'Held pending a release decision.' },
+  { code: 'qc_hold', label: 'QC Hold', meaning: 'Under active investigation or retest.' },
+  { code: 'released', label: 'Released', meaning: 'Cleared for use.' },
+  { code: 'rejected', label: 'Rejected', meaning: 'Failed. Not to be used.' },
+];
+
+export const RELEASE_STATE_LABEL: Record<LotReleaseState, string> = Object.fromEntries(
+  RELEASE_STATE_OPTIONS.map((o) => [o.code, o.label]),
+) as Record<LotReleaseState, string>;
+
 export interface Lot {
   id: string;
   item_id: string;
@@ -39,6 +70,8 @@ export interface Lot {
   manufacture_date: string | null;
   expiration_date: string | null;
   status: LotStatus;
+  /** Release state, or null when no release workflow applies. */
+  release_state: LotReleaseState | null;
   notes: string | null;
   // ── Receipt Admin v2 ──────────────────────────────────────────────
   /** Price paid for this lot (Postgres NUMERIC → string), captured at receipt. */
@@ -139,4 +172,16 @@ export const lotsApi = {
    */
   update: (lotId: string, input: LotUpdateInput) =>
     api.patch<Lot>(`/lots/${lotId}`, { json: input }),
+
+  /**
+   * Move a batch between release states (REQ-2026-07-31-STS-002).
+   *
+   * Its OWN endpoint and its own signing verb (`lot.release_state`) rather than
+   * a field on {@link update}: a ticket minted to correct an expiry date must
+   * not be spendable on releasing a batch. Admin / super-admin only.
+   */
+  setReleaseState: (
+    lotId: string,
+    input: { release_state: LotReleaseState; evidence_id: string; reason?: string | null },
+  ) => api.post<Lot>(`/lots/${lotId}/release-state`, { json: input }),
 };

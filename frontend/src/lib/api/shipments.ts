@@ -9,6 +9,7 @@
 
 import { api } from './client';
 import type { CellOption } from './kits';
+import type { LotReleaseState } from './lots';
 
 /** A shippable source row: a lot at a storage location with its available qty.
  *  For an LN2 box it also carries the grid geometry + occupied vials so the
@@ -16,6 +17,8 @@ import type { CellOption } from './kits';
 export interface ShipSource {
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, or null where no release workflow applies. */
+  release_state: LotReleaseState | null;
   expiration_date: string | null;
   node_id: string;
   /** Human location path, e.g. "Warehouse One › Shelf B". */

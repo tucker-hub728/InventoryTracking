@@ -11,6 +11,7 @@
  */
 
 import { api } from './client';
+import type { LotReleaseState } from './lots';
 
 export type MovementType =
   | 'receipt'
@@ -98,6 +99,10 @@ export interface ApiMovement {
   lot_number: string | null;
   /** Lot expiry (ISO date) — surfaced in the ledger's Expiry column. */
   lot_expiration_date: string | null;
+  /** The lot's release state AS IT IS NOW — not the state when this movement
+   *  happened, which nothing records. Rendered on the ledger's per-lot subtotal
+   *  row only, never on a movement row, or it would misread history. */
+  lot_release_state: LotReleaseState | null;
 
   /** Location System node references + resolved name / breadcrumb path. */
   from_location_node_id: string | null;

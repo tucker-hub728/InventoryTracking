@@ -22,7 +22,6 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.inventory import repository as inv_repo
 from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
-from app.models.inventory import BUILT_TIER_TYPES
 from app.products import repository as products_repo
 from app.security.permissions import RequirePermission
 
@@ -49,14 +48,30 @@ def _parse_uuid(value: str, *, field: str) -> uuid.UUID:
 
 
 async def _require_shippable_item(db: DBSession, item_id: uuid.UUID):
-    """The item must be built (a finished good, or a sub-assembly sold directly
-    per INV-004) — raw materials and consumables never ship to a customer."""
+    """Any tracked tier may be issued to a customer (REQ-2026-07-31-TRX-001).
+
+    **This deliberately reverses the earlier rule.** Until now only a built item
+    could go to a customer — a finished good, or a sub-assembly sold directly
+    per INV-004 — and a raw material was refused outright. TRX-001 puts the
+    Issue control on all three tiers with "customer" among its destinations, and
+    the client confirmed on 2026-08-18 that a raw material may indeed be sent to
+    one (a customer supplying their own starting material gets it back the same
+    way it arrived). Flagged for the beta cover page, since it overturns a rule
+    an earlier requirement set.
+
+    Consumables remain out. They are not a tier — they are a flag on a raw
+    material — and their terminal transaction is already defined elsewhere:
+    issued to a Kanban and consumed on arrival, never quantity-adjusted again
+    (Transaction Spec §4.3, REQ-2026-07-09-TRX-004). There is no per-lot balance
+    left to ship.
+    """
     item = await inv_repo.get_item(db, item_id)
     if item is None:
         raise NotFoundError(f"Item {item_id} not found", code="item_not_found")
-    if item.tier is None or item.tier.type not in BUILT_TIER_TYPES:
+    if item.is_consumable:
         raise ValidationError(
-            "Only a finished good or sub-assembly can be shipped to a customer",
+            "A consumable is consumed when it is issued, so it cannot be sent "
+            "to a customer. Issue it to a Kanban instead.",
             code="item_not_shippable",
         )
     return item
@@ -105,6 +120,10 @@ async def ship_sources(
             if a.lot_id == lot_id
         ]
 
+    # One query for the lots on show rather than widening the shared source
+    # tuple, which also feeds kitting's Issue picker.
+    release_states = await inv_repo.lot_release_states(db, {r[0] for r in rows})
+
     out: list[ShipSourceRead] = []
     for (lot_id, lot_number, exp, node_id, qty) in rows:
         dims = grid_meta.get(node_id)
@@ -112,6 +131,7 @@ async def ship_sources(
             ShipSourceRead(
                 lot_id=str(lot_id),
                 lot_number=lot_number,
+                release_state=release_states.get(lot_id),
                 expiration_date=exp,
                 node_id=str(node_id),
                 location=_label(node_id),

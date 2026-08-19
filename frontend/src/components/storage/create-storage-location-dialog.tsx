@@ -149,23 +149,33 @@ export function CreateStorageLocationDialog({
           </div>
 
           {/* The debit-and-gone choice (REQ-2026-08-04-TRX-001/002). Two radio
-              options rather than one checkbox: "scrap" is not a modifier on a
+              options rather than one checkbox: this is not a modifier on a
               normal location, it is a decision about what a transaction here
               means, and stating both outcomes side by side is what makes the
-              consequence legible before it is frozen. */}
+              consequence legible before it is frozen.
+
+              Named for the KIND of location, with the consequence underneath —
+              "Debit-and-gone" is the term the app uses everywhere else,
+              including the badge on the location itself, so the choice made
+              here and the label seen afterwards read as the same thing.
+
+              No lab names in the copy. The operator names the location: it may
+              be R&D, Scrap, QC or anything else, and listing three examples as
+              though they were the options invites the reading that nothing else
+              qualifies. */}
           <div className="space-y-2">
             <p className="text-xs font-medium text-text-2">Material sent to this location</p>
             <ul className="divide-y divide-border rounded-lg border border-border">
               {[
                 {
                   scrap: false,
-                  title: 'Stays in inventory',
-                  hint: 'Stock transferred here is still tracked, in the shelf, refrigerator or freezer it goes to.',
+                  title: 'Normal storage',
+                  hint: 'Stays in inventory. Stock transferred here is still tracked, in the shelf, refrigerator or freezer it goes to.',
                 },
                 {
                   scrap: true,
-                  title: 'Leaves inventory when issued',
-                  hint: 'For PD, R&D and QC labs. Material issued to this location is removed from inventory permanently — it cannot be returned or transferred back.',
+                  title: 'Debit-and-gone',
+                  hint: 'Leaves inventory when issued. Material issued here is removed from inventory permanently and cannot be returned. Stock can still be transferred into its shelves and freezers and stays tracked — only issuing ends it.',
                 },
               ].map((opt) => (
                 <li key={String(opt.scrap)}>
@@ -196,6 +206,14 @@ export function CreateStorageLocationDialog({
             )}
           </div>
 
+          {/* Sub-types are what STORAGE needs — a shelf, a fridge, a freezer for
+              stock to sit in. A debit-and-gone location stores nothing: the
+              material's life ends when it is issued there. Offering to create
+              three containers for it produced exactly the confusion of a page
+              with three permanently empty tabs, so they are shown only for
+              normal storage. */}
+          {!isScrap ? (
+            <>
           <div className="space-y-2">
             <p className="text-xs font-medium text-text-2">
               Sub-types this location uses
@@ -240,6 +258,16 @@ export function CreateStorageLocationDialog({
                   }`}
             </p>
           </div>
+            </>
+          ) : (
+            <div className="rounded-lg border border-border bg-surface/50 px-3 py-2.5">
+              <p className="text-xs font-medium text-text-2">No shelves, fridges or freezers</p>
+              <p className="mt-0.5 text-xs text-text-3">
+                Nothing is stored at a debit-and-gone location, so it has nowhere to put stock.
+                Its page shows what has been issued here instead.
+              </p>
+            </div>
+          )}
 
           {error && (
             <p role="alert" className="text-xs text-danger">

@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -101,6 +101,20 @@ export function NumberedPagination({
         </label>
 
         <div className="inline-flex gap-1">
+          {/* Jump to either end. With an elided page list ("1 … 7 8 9 … 42")
+              the last page is reachable only by walking or by guessing which
+              number the ellipsis hides, and on a long log the newest and oldest
+              rows are exactly the two an operator wants first. */}
+          <Button
+            size="icon-sm"
+            variant="default"
+            onClick={() => onPageChange(1)}
+            disabled={page === 1}
+            aria-label="First page"
+            title="First page"
+          >
+            <ChevronsLeft size={13} />
+          </Button>
           <Button
             size="icon-sm"
             variant="default"
@@ -144,6 +158,16 @@ export function NumberedPagination({
             aria-label="Next page"
           >
             <ChevronRight size={13} />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="default"
+            onClick={() => onPageChange(pageCount)}
+            disabled={page === pageCount}
+            aria-label="Last page"
+            title="Last page"
+          >
+            <ChevronsRight size={13} />
           </Button>
         </div>
       </div>

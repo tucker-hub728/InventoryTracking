@@ -38,6 +38,10 @@ class ShipSourceRead(BaseModel):
 
     lot_id: str
     lot_number: str | None
+    # The lot's release state (STS-001), so the ship dialog can warn before a
+    # rejected batch goes out to a customer (client 2026-08-17). Null where no
+    # release workflow applies.
+    release_state: str | None = None
     expiration_date: date | None
     node_id: str
     # Human location path, e.g. "Warehouse One › Shelf B".

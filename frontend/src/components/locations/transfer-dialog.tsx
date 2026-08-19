@@ -27,6 +27,7 @@ import {
   picksValid,
   type LotPick,
 } from '@/components/reconciliation/lot-source-picker';
+import { RejectedLotWarning } from '@/components/inventory/rejected-lot-warning';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import type { KitLineSourceLot } from '@/lib/api/kits';
@@ -79,6 +80,7 @@ function toSourceLot(s: ApiItemStockLocation): KitLineSourceLot {
   return {
     lot_id: s.lot_id,
     lot_number: s.lot_number,
+    release_state: s.release_state,
     expiration_date: s.expiration_date,
     node_id: s.node_id,
     node_name: s.location,
@@ -406,6 +408,28 @@ export function TransferDialog(props: Props) {
     }
   };
 
+  /**
+   * Rejected batches among what is actually being moved (STS-003, client
+   * 2026-08-17). A warning only — Product Development routinely consumes
+   * rejects, so nothing here gates the submit button.
+   *
+   * Item mode reads the picked rows; location mode reads the allocation the
+   * operator is standing on, which carries the state denormalised.
+   */
+  const rejectedLots = React.useMemo(() => {
+    const names = new Set<string>();
+    if (byItem) {
+      for (const p of picks) {
+        if (!p.lot_id) continue;
+        const src = lots?.find((l) => l.lot_id === p.lot_id && l.node_id === p.node_id);
+        if (src?.release_state === 'rejected') names.add(src.lot_number ?? p.lot_id.slice(0, 8));
+      }
+    } else if (allocation?.release_state === 'rejected') {
+      names.add(allocation.lot_number ?? allocation.lot_id.slice(0, 8));
+    }
+    return [...names];
+  }, [byItem, picks, lots, allocation]);
+
   const subject = byItem
     ? item?.id ?? 'this item'
     : allocation?.lot_number ?? 'this lot';
@@ -539,6 +563,8 @@ export function TransferDialog(props: Props) {
                 <p className="text-xs text-text-3">Loading locations…</p>
               )}
             </div>
+
+            <RejectedLotWarning lotNumbers={rejectedLots} action="transfer it" />
 
             {error && (
               <p

@@ -2603,13 +2603,20 @@ function ReturnExcessDialog({
   const onFloor = line.on_floor_qty;
   const lotAvail = (lotId: string) => floorLots.find((l) => l.lot_id === lotId)?.qty ?? 0;
   const rowEff = (r: ReturnRow) => (r.isBox ? r.cells.length : r.qty ?? 0);
-  // This row's cap = its lot's on-floor qty minus what other rows already take
-  // from the SAME lot (a lot can be split to more than one destination).
+  // This row's cap is the LOWER of two limits, and both are needed:
+  //
+  //   * its lot's on-floor qty, minus what other rows already take from the
+  //     SAME lot — a lot can be split across more than one destination;
+  //   * what THIS KIT still holds, minus what every other row takes — because
+  //     the kit's on-floor total is the real ceiling, and with two lots each
+  //     capped at that total the rows could otherwise sum past it and the
+  //     return would be refused (``return_exceeds_on_floor``) only on submit.
   const rowCap = (r: ReturnRow) => {
-    const usedElsewhere = rows
+    const sameLot = rows
       .filter((x) => x.key !== r.key && x.lot_id === r.lot_id)
       .reduce((s, x) => s + rowEff(x), 0);
-    return Math.max(0, lotAvail(r.lot_id) - usedElsewhere);
+    const anyRow = rows.filter((x) => x.key !== r.key).reduce((s, x) => s + rowEff(x), 0);
+    return Math.max(0, Math.min(lotAvail(r.lot_id) - sameLot, onFloor - anyRow));
   };
   const setRow = (key: string, patch: Partial<ReturnRow>) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
@@ -3029,6 +3036,72 @@ interface TimelineNode {
   moves: ApiKitActivityRow[];
 }
 
+/** REQ-2026-07-31-KIT-002 — the campaign day an event happened on.
+ *
+ *  The client's own picture of a multi-day kit is a tree of ISSUE EVENTS by day
+ *  (day 0, 5, 12, 18 …), not a partition of the recipe: the same material comes
+ *  out again whenever the campaign calls for it, so "media" legitimately appears
+ *  under day 0, day 12 AND day 18. That shape can only be read off the ledger —
+ *  a label stored per material could never express it, since a material has no
+ *  single day.
+ *
+ *  So nothing here is stored. The rows are the ``kit_issue`` /
+ *  ``kit_additional_issue`` movements the system already writes, grouped by the
+ *  day they were performed. That is what the requirement means by "a
+ *  naming/organization layer over the existing issue logic, not new consumption
+ *  logic" — this file computes headings and nothing else.
+ */
+
+/** Local calendar day of a timestamp, as a stable YYYY-MM-DD key.
+ *
+ *  Deliberately LOCAL rather than the ISO string's UTC date: the day an operator
+ *  means is the day they were standing in the suite, and a late-evening pull
+ *  would otherwise be filed under tomorrow. */
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
+}
+
+/** Midnight-to-midnight days between two timestamps, so "day 5" means the fifth
+ *  calendar day of the campaign rather than 120-odd hours. */
+function daysBetween(fromIso: string, toIso: string): number {
+  const a = new Date(fromIso);
+  const b = new Date(toIso);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.max(0, Math.round((midnight(b) - midnight(a)) / 86_400_000));
+}
+
+function formatDayDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: '2-digit',
+  });
+}
+
+/** A date rule between one campaign day and the next.
+ *
+ *  Day 0 is the day material was FIRST ISSUED, not the day the kit record was
+ *  created — a kit may be drafted a week before anyone reaches the bench, and
+ *  numbering from the draft would put the campaign's first day at "day 7". */
+function TimelineDayHeading({ dayIndex, time }: { dayIndex: number; time: string }) {
+  return (
+    <li className="flex items-center gap-3 pb-3 pt-1 first:pt-0">
+      <span className="text-[11px] font-medium uppercase tracking-wider text-text-2">
+        Day {dayIndex}
+      </span>
+      <span className="text-[11px] text-text-3">{formatDayDate(time)}</span>
+      <span className="h-px flex-1 bg-border" />
+    </li>
+  );
+}
+
 /** Fold the audit events + stock movements into one chronological timeline.
  *  Every movement shares its transaction's timestamp with the event that caused
  *  it (both use the DB's transaction clock), so we attach movements to events by
@@ -3115,6 +3188,25 @@ function ActivitySheet({
     [events, rows],
   );
 
+  /** Day 0 of the campaign — the first node that actually MOVED material.
+   *  Falls back to the first node at all, so a kit that has only been created
+   *  still numbers from something rather than crashing. */
+  const day0 = React.useMemo(() => {
+    const firstIssue = timeline.find((n) =>
+      n.moves.some(
+        (m) => m.movement_type === 'kit_issue' || m.movement_type === 'kit_additional_issue',
+      ),
+    );
+    return (firstIssue ?? timeline[0])?.time ?? null;
+  }, [timeline]);
+
+  // Headings show from the first day, not only once a kit turns out to span
+  // several. A campaign is only "multi-day" in hindsight: suppressing the
+  // heading until day 2 means the structure appears days after the operator
+  // started working to it, and on day 0 the feature looks absent. One line
+  // reading "Day 0" is orientation, not noise — the client's own picture of a
+  // campaign starts at Day 0 with a single day on it.
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="sm:w-[640px]">
@@ -3122,7 +3214,8 @@ function ActivitySheet({
           <SheetTitle>Activity — {kitNumber}</SheetTitle>
           <p className="text-xs text-text-3">
             The kit’s full story, oldest first. Each step shows what happened and the exact stock it
-            moved.
+            moved. Steps are grouped by intervention day, counted from the day material was first
+            issued — so a campaign that runs over several days reads day by day.
           </p>
         </SheetHeader>
         <SheetBody className="px-0 py-0">
@@ -3134,9 +3227,24 @@ function ActivitySheet({
             </div>
           ) : (
             <ol className="px-5 py-4">
-              {timeline.map((node, i) => (
-                <TimelineItem key={node.key} node={node} last={i === timeline.length - 1} />
-              ))}
+              {timeline.map((node, i) => {
+                // A heading whenever the calendar day changes — including on the
+                // first node, so the campaign opens with "Day 0" rather than
+                // starting mid-air.
+                const prev = i > 0 ? timeline[i - 1] : undefined;
+                const newDay = !prev || dayKey(prev.time) !== dayKey(node.time);
+                return (
+                  <React.Fragment key={node.key}>
+                    {newDay && day0 && (
+                      <TimelineDayHeading
+                        dayIndex={daysBetween(day0, node.time)}
+                        time={node.time}
+                      />
+                    )}
+                    <TimelineItem node={node} last={i === timeline.length - 1} />
+                  </React.Fragment>
+                );
+              })}
             </ol>
           )}
         </SheetBody>

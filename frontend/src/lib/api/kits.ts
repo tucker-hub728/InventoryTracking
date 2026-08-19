@@ -7,6 +7,7 @@
 import type { BadgeTone } from '@/types/ui';
 
 import { api } from './client';
+import type { LotReleaseState } from './lots';
 
 export type KitStatus = 'draft' | 'issued' | 'in_production' | 'closed' | 'cancelled';
 
@@ -62,6 +63,10 @@ export interface KitLineSourceOption {
 export interface KitLineSourceLot {
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, or null where no release workflow applies.
+   *  Optional: kitting's own source list doesn't carry it, only the transfer
+   *  and shipment pickers that reuse this shape. */
+  release_state?: LotReleaseState | null;
   expiration_date: string | null;
   node_id: string;
   node_name: string;

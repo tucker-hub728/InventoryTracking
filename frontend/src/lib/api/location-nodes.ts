@@ -16,6 +16,7 @@
  */
 
 import { api } from './client';
+import type { LotReleaseState } from './lots';
 import type { MovementType as LedgerMovementType } from './movements';
 
 export type NodeType =
@@ -235,10 +236,22 @@ export function subtreeStats(node: NodeTree): { capacity: number; occupied: numb
   return { capacity, occupied };
 }
 
+/**
+ * Largest grid a Box may have, per axis (client 2026-08-17).
+ *
+ * Mirrors ``MAX_GRID_DIM`` in ``app/locations/schemas.py`` — the API is the
+ * authority and rejects anything over it with a 422; this exists so the inputs
+ * cap before the operator gets there.
+ */
+export const MAX_GRID_DIM = 10;
+
 export interface Allocation {
   id: string;
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, denormalised on read so a box view can badge
+   *  its cells without a fetch per lot. Null where no release workflow applies. */
+  release_state: LotReleaseState | null;
   /** Item UUID — item detail URLs key on it, so links can go straight there. */
   item_id: string | null;
   item_number: string | null;

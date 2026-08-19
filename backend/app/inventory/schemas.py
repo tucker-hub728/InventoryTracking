@@ -287,6 +287,10 @@ class ItemListResponse(BaseModel):
 
 LotStatus = Literal["on_order", "available"]
 
+# Release state (REQ-2026-07-31-STS-001) — a DIFFERENT axis from
+# ``LotStatus`` above, which is procurement. Both live on a lot at once.
+LotReleaseState = Literal["quarantine", "qc_hold", "released", "rejected"]
+
 
 class LotCreate(BaseModel):
     """Payload for ``POST /v1/items/{item_id}/lots``.
@@ -351,6 +355,30 @@ class LotUpdate(BaseModel):
     )
 
 
+class LotReleaseStateUpdate(BaseModel):
+    """Payload for ``POST /v1/lots/{id}/release-state`` (REQ-2026-07-31-STS-002).
+
+    Changing a batch's release state is a decision about the material, not a
+    correction to a record, and the requirement is explicit that it is "a
+    distinct process from manufacturing". So it gets its own endpoint and its
+    own signing verb (``lot.release_state``) rather than riding along on
+    ``PATCH /lots/{id}`` — a ticket minted to fix a typo in an expiry date can
+    never be spent releasing a batch.
+
+    There is no ``from`` field: the caller states only where the lot should end
+    up, and the server reads the current value itself. Sending both would invite
+    a stale client overwriting a state somebody else has already moved.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    release_state: LotReleaseState
+    evidence_id: str
+    # The e-signature comment. Optional like every other signed flow here
+    # (2026-07-01 client directive), though in practice one is always written.
+    reason: str | None = Field(default=None, max_length=2048)
+
+
 class LotRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -364,6 +392,9 @@ class LotRead(BaseModel):
     manufacture_date: date | None
     expiration_date: date | None
     status: LotStatus
+    # NULL for anything with no release workflow — consumables, raw materials.
+    # The UI shows a badge only when this is set (STS-001).
+    release_state: LotReleaseState | None = None
     notes: str | None
     # ── Receipt Admin v2 ──────────────────────────────────────────────
     unit_price_amount: Decimal | None = None
@@ -450,6 +481,12 @@ class MovementRead(BaseModel):
     lot_id: str | None
     lot_number: str | None = None
     lot_expiration_date: date | None = None
+    # The lot's release state AS IT IS NOW — deliberately not "the state when
+    # this movement happened", which nothing records and which would usually be
+    # different. Named for the lot rather than the movement so a caller cannot
+    # mistake it for history: the ledger renders it on the per-lot subtotal row,
+    # never on an individual movement (client 2026-08-17).
+    lot_release_state: str | None = None
 
     # Location System node references. For consume, ``to_location_node_id`` is
     # the Flat location that consumed the unit. ``*_name`` / ``*_path`` are

@@ -3,7 +3,6 @@
 import * as React from 'react';
 
 import { useMinDuration } from '@/hooks/use-min-duration';
-import { isBuiltTier } from '@/lib/api/tiers';
 import { kitsApi, type ApiItemKitConsumption } from '@/lib/api/kits';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
@@ -65,6 +64,9 @@ export function ItemLedgerPanel() {
           setStatusFilter={controls.setStatusFilter}
           withinInput={controls.withinInput}
           setWithinInput={controls.setWithinInput}
+          releaseFilter={controls.releaseFilter}
+          setReleaseFilter={controls.setReleaseFilter}
+          presentReleaseStates={controls.presentReleaseStates}
           filtersActive={controls.filtersActive}
           resetFilters={controls.resetFilters}
           visibleLots={controls.visibleLots}
@@ -83,9 +85,12 @@ export function ItemLedgerPanel() {
           onCycleSort={controls.cycleSort}
           filtersActive={controls.filtersActive}
           onReverseRequest={onReverseRequest}
-          // Only built items (finished goods / sub-assemblies) can ship to a
-          // customer, so the Customer column is shown only for them.
-          showCustomer={isBuiltTier(item.tierType)}
+          // Shown wherever a customer shipment is POSSIBLE, which since
+          // TRX-001 means every tier — a raw material may be issued to a
+          // customer too, so hiding the column on CR pages left those
+          // shipments with no visible recipient. Only a consumable is
+          // excluded: it is consumed on issue, so it never ships.
+          showCustomer={!item.isConsumable}
           kitUsage={kitUsage}
         />
       </div>
@@ -104,9 +109,14 @@ export function ItemProductsPanel() {
  *  Transfer action (INV-007 / TRX-001). Shown for every tier: a built item
  *  holds real stock too, once a kit close-out has placed its output. */
 export function ItemStockPanel() {
-  const { item, refresh, canSign } = useInventoryDetail();
+  const { item, refresh, canSign, refreshSeq } = useInventoryDetail();
   return (
     <ItemStockLocationsTab
+      // Remounted when a release state changes elsewhere on the page, which is
+      // the house pattern here (see ``AllocationActions`` in the location
+      // panel). Losing the tab's filter selection is the right trade: the lot
+      // has just left whichever state was being filtered on.
+      key={refreshSeq}
       item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
       nearExpiryThresholdDays={item.nearExpiryThresholdDays}
       canSign={canSign}

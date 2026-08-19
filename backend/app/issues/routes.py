@@ -38,6 +38,7 @@ from .schemas import (
     IssueDestinationRead,
     IssuedListResponse,
     IssuedRow,
+    IssuedSummaryRow,
     IssueLine,
     IssueRead,
     IssueRequest,
@@ -118,6 +119,31 @@ async def list_destinations(db: DBSession) -> list[IssueDestinationRead]:
             path=labels.get(n.id, (n.name, n.name))[1] or n.name,
         )
         for n in rows
+    ]
+
+
+@issues_router.get(
+    "/summary",
+    response_model=list[IssuedSummaryRow],
+    summary="What each debit-and-gone location has consumed",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def issued_summary(db: DBSession) -> list[IssuedSummaryRow]:
+    """Totals per destination, for the Storage overview cards.
+
+    Declared ABOVE ``/at/{node_id}``: FastAPI matches in declaration order, and
+    a literal segment registered after a parameterised one at the same depth is
+    unreachable — "summary" would be read as a node id and 422 on the UUID.
+    """
+    totals = await issues_repo.issued_totals_by_node(db)
+    return [
+        IssuedSummaryRow(
+            node_id=str(node_id),
+            issue_count=count,
+            total_qty=qty,
+            last_issued_at=last_at,
+        )
+        for node_id, (count, qty, last_at) in totals.items()
     ]
 
 

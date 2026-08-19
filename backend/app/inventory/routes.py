@@ -38,6 +38,7 @@ from app.inventory.schemas import (
     LotCreate,
     LotNumberAvailability,
     LotRead,
+    LotReleaseStateUpdate,
     LotStatus,
     LotUpdate,
     MovementListResponse,
@@ -97,6 +98,7 @@ def _movement_to_read(
         lot_id=str(m.lot_id) if m.lot_id else None,
         lot_number=m.lot.lot_number if m.lot else None,
         lot_expiration_date=m.lot.expiration_date if m.lot else None,
+        lot_release_state=m.lot.release_state if m.lot else None,
         from_location_node_id=(
             str(m.from_location_node_id) if m.from_location_node_id else None
         ),
@@ -155,6 +157,7 @@ def _lot_to_read(lot: Lot) -> LotRead:
         manufacture_date=lot.manufacture_date,
         expiration_date=lot.expiration_date,
         status=lot.status,  # type: ignore[arg-type]
+        release_state=lot.release_state,  # type: ignore[arg-type]
         notes=lot.notes,
         unit_price_amount=lot.unit_price_amount,
         po_reference=lot.po_reference,
@@ -1043,6 +1046,12 @@ async def item_stock_locations(
             if a.lot_id == lot_id
         ]
 
+    # Release states for the lots on show, in one query rather than threaded
+    # through ``item_stock_by_node_lot`` — that tuple feeds the kitting Issue
+    # picker and the shipment source list too, and widening it would ripple into
+    # both for a field only this view reads.
+    release_states = await inv_repo.lot_release_states(db, {r[0] for r in rows})
+
     out: list[ItemStockLocationRead] = []
     for (lot_id, lot_number, exp, node_id, qty) in rows:
         dims = grid_meta.get(node_id)
@@ -1050,6 +1059,7 @@ async def item_stock_locations(
             ItemStockLocationRead(
                 lot_id=str(lot_id),
                 lot_number=lot_number,
+                release_state=release_states.get(lot_id),
                 expiration_date=exp,
                 node_id=str(node_id),
                 location=_label(node_id),
@@ -1299,6 +1309,102 @@ async def update_lot(
 
     await db.refresh(updated)
     response = _lot_to_read(updated)
+    await db.commit()
+    return response
+
+
+def _require_admin(user) -> None:
+    """Release state is a release decision, not an operator one (client 2026-08-17).
+
+    ``inventory:sign`` is not enough on its own — an operator holds it, and the
+    whole point of STS-002 is that the person who made the batch does not
+    thereby release it. Deciding a release is a job someone does, not a role in
+    this system (client 2026-08-17),
+    so the gate is the two admin roles rather than a fifth role.
+    """
+    if getattr(user, "role", None) not in ("admin", "super_admin"):
+        raise AuthorizationError(
+            "Only an admin or super admin can change a lot's release state",
+            code="permission_denied",
+            details={"required_role": "admin"},
+        )
+
+
+@lots_router.post(
+    "/{lot_id}/release-state",
+    response_model=LotRead,
+    summary="Set a lot's release state (e-signed; admin only)",
+    # ``sign`` is the baseline; ``_require_admin`` below narrows it further.
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def set_lot_release_state(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    lot_id: Annotated[uuid.UUID, Path()],
+    payload: LotReleaseStateUpdate,
+) -> LotRead:
+    """Move a batch between quarantine / QC hold / released / rejected.
+
+    Every transition is legal, including out of ``rejected`` (client
+    2026-08-17): no state is terminal, because a reversal is a normal signed
+    decision and the append-only audit trail is what makes it defensible. The
+    only thing rejected here is a no-op — signing a change that changes nothing
+    would put a meaningless attestation in the record.
+
+    The change is a pure label. It does not block transfers, issues, kitting or
+    shipment, and it touches no LN2 behaviour (STS-003).
+    """
+    _require_admin(current)
+
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+
+    lot = await inv_repo.get_lot(db, lot_id)
+    if lot is None or lot.deleted_at is not None:
+        raise NotFoundError(f"Lot {lot_id} not found")
+
+    if lot.release_state == payload.release_state:
+        raise ValidationError(
+            f"This lot is already {payload.release_state}",
+            code="release_state_unchanged",
+        )
+
+    before = inv_repo.lot_to_audit_snapshot(lot)
+    lot.release_state = payload.release_state
+    lot.updated_by_user_id = current.id
+    await db.flush()
+    after = inv_repo.lot_to_audit_snapshot(lot)
+
+    # STS-002's record: who, when, from → to, and the signature that backs it.
+    # ``audit.audit_events`` is append-only by trigger, which is why this needs
+    # no table of its own (same call ROL-009 made for role grants).
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.lots",
+        subject_id=lot.id,
+        subject_label=lot.lot_number,
+        before=before,
+        after=after,
+        context={"reason": payload.reason},
+        signature_id=evidence_uuid,
+    )
+
+    # Consumed last, so a replayed or expired ticket rolls back the state change
+    # and its audit row together.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="lot.release_state",
+        target_table="app.lots",
+        target_id=lot.id,
+        record_table="app.lots",
+        record_id=lot.id,
+    )
+
+    await db.refresh(lot)
+    response = _lot_to_read(lot)
     await db.commit()
     return response
 

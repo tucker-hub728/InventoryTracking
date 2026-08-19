@@ -38,6 +38,7 @@ import { NumberedPagination } from '@/components/ui/numbered-pagination';
 import { ApiError } from '@/lib/api/client';
 import { issuesApi, type IssuedList } from '@/lib/api/issues';
 import { Button } from '@/components/ui/button';
+import { LocationPath } from './location-path';
 
 const PAGE_SIZES = [10, 25, 50, 100];
 
@@ -140,18 +141,36 @@ export function IssuedMaterialPanel({
 
   return (
     <div className="space-y-3">
-      {/* Says what the table is before the first column name can be misread.
-          "12 issues · 340 units" next to a location would otherwise look like a
-          holding, which is the single most damaging way to read this page. */}
-      <div className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg border border-warning/30 bg-warning-soft px-3 py-2">
-        <p className="text-xs text-warning">
-          <span className="font-medium">
-            {data?.total_qty.toLocaleString()} unit
-            {data?.total_qty === 1 ? '' : 's'}
-          </span>{' '}
-          issued to {locationName} across {total} transaction{total === 1 ? '' : 's'} — all
-          removed from inventory. This is a record of what left, not stock held here.
-        </p>
+      {/* Two figures, stated as figures. The old single sentence buried them
+          mid-paragraph, and they are the first thing anyone opening this page
+          wants. The caption underneath carries the warning that used to colour
+          the whole band: "12 issues · 340 units" beside a location name reads
+          as a HOLDING unless something says otherwise, which is the single most
+          damaging way to misread this page. */}
+      <div className="rounded-lg border border-border bg-bg-elev px-4 py-3">
+        <div className="flex flex-wrap items-end gap-x-8 gap-y-2">
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-text-3">
+              Units issued
+            </div>
+            <div className="mt-0.5 font-mono text-xl tabular-nums text-text">
+              {data?.total_qty.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-wider text-text-3">
+              Transactions
+            </div>
+            <div className="mt-0.5 font-mono text-xl tabular-nums text-text">
+              {total.toLocaleString()}
+            </div>
+          </div>
+          <p className="ml-auto max-w-sm text-xs text-text-3">
+            A record of what <span className="text-warning">left inventory</span> at{' '}
+            {locationName} — not stock held here. Nothing issued can be returned or
+            transferred back.
+          </p>
+        </div>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-border bg-bg-elev">
@@ -169,7 +188,7 @@ export function IssuedMaterialPanel({
           </TableHeader>
           <TableBody>
             {rows.map((r) => (
-              <TableRow key={r.movement_id}>
+              <TableRow key={r.movement_id} className="hover:bg-surface/60">
                 <TableCell className="max-w-[240px]">
                   <ItemLink itemId={r.item_id} itemNumber={r.item_number} />
                   {r.item_description && (
@@ -189,8 +208,10 @@ export function IssuedMaterialPanel({
                 <TableCell className="text-right tabular-nums">
                   {r.qty.toLocaleString()}
                 </TableCell>
-                <TableCell className="max-w-[260px] truncate text-xs text-text-2">
-                  {r.source_path ?? '—'}
+                {/* The place, not its ancestry. The full path is one hover
+                    away — see LocationPath for why the leaf is the useful half. */}
+                <TableCell className="max-w-[180px] text-xs text-text-2">
+                  <LocationPath path={r.source_path} />
                 </TableCell>
                 <TableCell className="text-xs text-text-2">{r.issued_by ?? '—'}</TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-text-2">

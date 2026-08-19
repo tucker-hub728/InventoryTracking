@@ -64,6 +64,17 @@ FlatCategory = Literal["kanban", "lab", "qc", "engineering", "materials", "produ
 MovementType = InventoryMovementType
 
 
+# Largest grid a Box may have, per axis (client 2026-08-17). Ten is the size of
+# the cryoboxes actually in use, and the unit map is drawn at a fixed cell size —
+# past this it stops being a map you can read at a glance and becomes a
+# spreadsheet that scrolls in both directions.
+#
+# A policy, not a data invariant, so it lives here rather than in a CHECK
+# constraint: raising it is a one-line change, not a migration. The DB still
+# enforces the real invariant (>= 1) on its own.
+MAX_GRID_DIM = 10
+
+
 def _trim_nonblank(field: str):
     def _check(v: str | None) -> str | None:
         if v is None:
@@ -98,8 +109,8 @@ class NodeCreate(BaseModel):
     code: Annotated[str, _trim_nonblank("code")] = Field(max_length=64)
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
     parent_id: str | None = None
-    grid_rows: int | None = Field(default=None, ge=1, le=400)
-    grid_cols: int | None = Field(default=None, ge=1, le=400)
+    grid_rows: int | None = Field(default=None, ge=1, le=MAX_GRID_DIM)
+    grid_cols: int | None = Field(default=None, ge=1, le=MAX_GRID_DIM)
     dedicated_customer_id: str | None = None
     dedicated_product_id: str | None = None
     notes: str | None = Field(default=None, max_length=2048)
@@ -226,8 +237,8 @@ class GridUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    grid_rows: int = Field(ge=1, le=400)
-    grid_cols: int = Field(ge=1, le=400)
+    grid_rows: int = Field(ge=1, le=MAX_GRID_DIM)
+    grid_cols: int = Field(ge=1, le=MAX_GRID_DIM)
 
 
 class DedicationUpdateRequest(BaseModel):
@@ -295,6 +306,11 @@ class AllocationRead(BaseModel):
     id: str
     lot_id: str
     lot_number: str | None = None
+    # The lot's release state (STS-001), carried here so an LN2 box view can
+    # badge its cells without a second fetch per lot. Denormalised from the lot
+    # on read only — the lot remains the one place it is stored, because a
+    # release decision is about the batch, not about where a vial happens to sit.
+    release_state: str | None = None
     # The item's UUID — item detail URLs key on it, so the UI can link straight
     # to the canonical page instead of resolving the (derived) number first.
     item_id: str | None = None
@@ -522,6 +538,9 @@ class ItemStockLocationRead(BaseModel):
 
     lot_id: str
     lot_number: str | None
+    # The lot's release state (STS-001), so the drill-down can badge a row
+    # without a fetch per lot. Null where no release workflow applies.
+    release_state: str | None = None
     expiration_date: date | None
     node_id: str
     # Human location path, e.g. "Warehouse One › Shelf B".

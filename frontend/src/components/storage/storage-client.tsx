@@ -18,7 +18,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { Boxes, Plus } from 'lucide-react';
+import { Boxes, Clock, Plus } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
 import { PageHeader } from '@/components/shared/page-header';
@@ -27,6 +27,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ApiError } from '@/lib/api/client';
+import { issuesApi, type IssuedSummary } from '@/lib/api/issues';
 import { locationNodesApi, type NodeTree } from '@/lib/api/location-nodes';
 import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import { cn } from '@/lib/utils';
@@ -53,12 +54,22 @@ export function StorageClient() {
   const [loaded, setLoaded] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
+  /** node id → what has been issued there. Empty for a location with none. */
+  const [issued, setIssued] = React.useState<Map<string, IssuedSummary>>(new Map());
 
   const reload = React.useCallback(async (signal?: AbortSignal) => {
     setLoadError(null);
     try {
-      const rooms = await locationNodesApi.freezerTree({ signal });
+      // Both at once: the tree draws every card, and the debit-and-gone cards
+      // need what they have CONSUMED, which the tree cannot know. A failed
+      // summary must not blank the page — those cards fall back to their
+      // "nothing issued yet" state, which is also what an empty result means.
+      const [rooms, summary] = await Promise.all([
+        locationNodesApi.freezerTree({ signal }),
+        issuesApi.summary({ signal }).catch(() => [] as IssuedSummary[]),
+      ]);
       setRoom(rooms.find((r) => r.code === STORAGE_ROOM_CODE) ?? null);
+      setIssued(new Map(summary.map((r) => [r.node_id, r])));
       setLoaded(true);
     } catch (err) {
       if ((err as DOMException)?.name === 'AbortError') return;
@@ -202,7 +213,7 @@ export function StorageClient() {
             ) : (
               <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {categories.map((cat) => (
-                  <CategoryCard key={cat.id} category={cat} />
+                  <CategoryCard key={cat.id} category={cat} issued={issued.get(cat.id) ?? null} />
                 ))}
               </ul>
             )}
@@ -225,7 +236,34 @@ export function StorageClient() {
 }
 
 /** One location: its name, what it holds, and the sub-types it uses. */
-function CategoryCard({ category }: { category: NodeTree }) {
+/** "3 days ago" — a disposition log is read for recency, not for a timestamp.
+ *  Falls back to the date once the gap stops being something anyone counts. */
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return iso;
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  if (days <= 30) return `${days} day${days === 1 ? '' : 's'} ago`;
+  return new Date(then).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+  });
+}
+
+function CategoryCard({
+  category,
+  issued,
+}: {
+  category: NodeTree;
+  /** Disposition totals — only ever passed for a debit-and-gone location, and
+   *  null there too until something has been issued to it. */
+  issued: IssuedSummary | null;
+}) {
   const groups = category.children ?? [];
   // Open on the location's FIRST group rather than the template's first — a
   // location with Shelf switched off has no `shf` tab to land on.
@@ -291,7 +329,48 @@ function CategoryCard({ category }: { category: NodeTree }) {
           </div>
         </div>
 
-        {groups.length === 0 ? (
+        {category.is_scrap ? (
+          /* A debit-and-gone location holds nothing, so a list of its storage
+             sub-types describes a capability it never uses — three rows reading
+             "—" forever, which is what made these cards look broken. What DOES
+             change about such a place is what it has taken: how much, over how
+             many transactions, and when last. Those are the facts, so those are
+             the card. */
+          <div className="mt-auto border-t border-border px-4 py-3">
+            {issued ? (
+              <>
+                <div className="flex items-end gap-6">
+                  <div>
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-text-3">
+                      Units issued
+                    </div>
+                    <div className="mt-0.5 font-mono text-lg tabular-nums text-text">
+                      {issued.total_qty.toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-text-3">
+                      Transactions
+                    </div>
+                    <div className="mt-0.5 font-mono text-lg tabular-nums text-text-2">
+                      {issued.issue_count.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+                {issued.last_issued_at && (
+                  <p className="mt-2 flex items-center gap-1.5 text-[11px] text-text-3">
+                    <Clock size={11} className="shrink-0" />
+                    Last issued {formatRelative(issued.last_issued_at)}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-text-3">
+                Nothing issued here yet. Material sent here leaves inventory for good.
+              </p>
+            )}
+          </div>
+        ) : groups.length === 0 ? (
           // A location whose sub-types were all switched off. Three "not used"
           // rows would describe it accurately and tell you nothing about what to
           // do, so it says the one thing that matters.

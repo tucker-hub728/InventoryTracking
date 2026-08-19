@@ -15,6 +15,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.core.bounds import MAX_QTY
 
 
+class IssuedSummaryRow(BaseModel):
+    """What one debit-and-gone location has consumed, for the Storage cards.
+
+    A card for such a location cannot show "units held" — it holds none by
+    definition — so it shows what it has TAKEN instead: how much, over how many
+    transactions, and when last. Those are the only facts about it that change.
+    """
+
+    node_id: str
+    issue_count: int
+    total_qty: int
+    last_issued_at: datetime | None = None
+
+
 class IssueDestinationRead(BaseModel):
     """One location material may be issued to — a scrap location.
 
