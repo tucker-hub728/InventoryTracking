@@ -112,15 +112,77 @@ STORAGE_LEVELS: tuple[str, ...] = (
 # The room's seeded code. Every screen resolves a room by code, never by
 # position — ``/location-nodes/freezer-tree`` returns them all.
 STORAGE_ROOM_CODE = "STG"
-# The template's three groups, fixed at three (LOC-001 names exactly these).
-# ``(key, code, default name)`` — the CODE is the stable identity used in URLs
-# and to tell the groups apart after a rename; the NAME is the client's to change.
+# The three KINDS of storage sub-type a location may have —
+# ``(kind, code base, default name)``.
+#
+# REQ-2026-08-04-LOC-001 named exactly these three ("a configurable shelf,
+# refrigerator, and freezer"). The 2026-08-13 amendment made them configurable
+# AFTER creation and allowed MORE THAN ONE of a kind: "an additional freezer
+# (e.g. minus-80 alongside minus-20)". So this is no longer a create-time
+# template — a location is now created with NO sub-types and an admin adds them
+# — and it is not a list of nodes either. It is the CATALOGUE of kinds you can
+# add, and a location may hold any number of each.
+#
+# What distinguishes two freezers is the NAME, which the client gives and may
+# change. The KIND is what the system knows: it decides the code, the icon and
+# the wording of the add-unit dialog, and nothing else.
+#
+# The CODE is the stable identity used in URLs. The first sub-type of a kind
+# takes the bare base (``FRZ``); the next takes ``FRZ-2``, and so on — see
+# ``repository.next_group_code``.
 STORAGE_GROUPS: tuple[tuple[str, str, str], ...] = (
     ("shelf", "SHF", "Shelf"),
     ("refrigerator", "REF", "Refrigerator"),
     ("freezer", "FRZ", "Freezer"),
 )
 STORAGE_GROUP_CODES: tuple[str, ...] = tuple(code for _, code, _ in STORAGE_GROUPS)
+#: The kind keys, in tab order. Drives the API enum and the picker.
+STORAGE_GROUP_KINDS: tuple[str, ...] = tuple(kind for kind, _, _ in STORAGE_GROUPS)
+
+_BASE_BY_KIND: dict[str, str] = {kind: code for kind, code, _ in STORAGE_GROUPS}
+_DEFAULT_NAME_BY_KIND: dict[str, str] = {kind: name for kind, _, name in STORAGE_GROUPS}
+_KIND_BY_BASE: dict[str, str] = {code: kind for kind, code, _ in STORAGE_GROUPS}
+
+# Temperature is deliberately NOT modelled — not a column, not a kind, not a
+# parsed prefix. LOC-001's second sentence is that "freezers are identified by
+# unique equipment number regardless of temperature": a −20 and a −80 are two
+# sub-types of the SAME kind, differing only in the name the client types, which
+# the system never parses (the LOC-006 rule). Their units cannot collide because
+# ``sub_location`` names are unique INSTALLATION-WIDE
+# (``uq_location_nodes_unit_name_active``) whatever sub-type they hang under —
+# which is why that half of the requirement needed no code at all.
+
+
+def group_base_code(kind: str) -> str:
+    """The code base for a kind — ``freezer`` → ``FRZ``."""
+    return _BASE_BY_KIND[kind]
+
+
+def group_default_name(kind: str) -> str:
+    """The name a sub-type of this kind is created with when none is given."""
+    return _DEFAULT_NAME_BY_KIND[kind]
+
+
+def group_kind_for_code(code: str) -> str | None:
+    """The kind a group code belongs to — ``FRZ-2`` → ``freezer``.
+
+    None for anything unrecognised, rather than raising: a code is data, and one
+    odd row must not take out the page it appears on.
+    """
+    return _KIND_BY_BASE.get(code.upper().split("-", 1)[0])
+
+
+def group_code_seq(code: str) -> int:
+    """Which one of its kind this code is — ``FRZ`` → 1, ``FRZ-2`` → 2.
+
+    Orders the tabs within a kind, and picks the next free number. Anything
+    unparseable sorts last (a large sentinel) instead of raising.
+    """
+    parts = code.upper().split("-", 1)
+    if len(parts) == 1:
+        return 1
+    return int(parts[1]) if parts[1].isdigit() else 1 << 30
+
 # Warehouse (LOC-005): Warehouse One → Shelf (A–Z), the free-storage leaf. A
 # shelf holds units freely — no bins, positions or slots below it. Warehouse One
 # is no longer a root: LOC-005 places it INSIDE the Materials Management room,
@@ -215,19 +277,23 @@ STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
 # level the client names "PD" or "QC 1".
 #
 # Debit-and-gone (REQ-2026-08-04-TRX-001/002) is a TRANSACTION, not a location
-# type: the client's rule is that one physical area supports both actions, and
-# which happened is the operator's choice, not the destination's nature —
+# type — ``is_scrap`` is a marker on an ordinary location row, not a node type of
+# its own, and what it decides is whether Issue may target that location:
 #
-#     Transfer → QC 1 › Freezer 1     stock stays tracked at the new node
 #     Issue    → QC 1                 stock leaves controlled inventory
+#     Transfer → Materials Mgmt › Freezer 1     stock stays tracked at the node
 #
-# So a scrap location is an ORDINARY ``storage_category``: same page, same
-# template groups, and it still RECEIVES transfers into its shelves and freezers.
-# ``is_scrap`` decides one thing only — whether Issue may target it.
+# It used to say a scrap location ALSO receives transfers into its own shelves
+# and freezers. The client settled that on 2026-08-19: it does not. A
+# debit-and-gone location is a DISPOSITION, not a place — it takes no sub-types
+# (enforced in ``update_storage_groups``), so it has no storage descendants for a
+# transfer to land in, and its page shows issue history instead of tabs.
 #
 # That the two destination sets are DISJOINT is what makes "issued and stored"
 # unrepresentable rather than merely rejected: a transfer takes a
-# STORAGE_NODE_TYPES node, an issue takes this one, and no node is both.
+# STORAGE_NODE_TYPES node, an issue takes this one, and no node is both. The
+# disposition-only rule strengthens that — a scrap location now has no storage
+# descendants at all, so the two sets cannot even meet under one roof.
 SCRAP_NODE_TYPE = "storage_category"
 
 # Node types that carry a configurable rows×cols grid. Only the Box.

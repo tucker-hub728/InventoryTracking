@@ -27,9 +27,13 @@ export interface PNode {
   nodeType: string;
   canStore: boolean;
   /** Debit-and-gone location (TRX-001/002). Only ever true on a
-   *  `storage_category`, and never on anything selectable in this picker — a
-   *  location is not a storage node. Carried so a LINK to this node can open its
-   *  disposition log rather than a storage tab. */
+   *  `storage_category`.
+   *
+   *  Such a node is HIDDEN by this picker entirely — see ``isHidden`` — because
+   *  it is a destination for material LEAVING inventory, never a place to put
+   *  anything. It is still carried on the node because the forest is shared:
+   *  ``locationHref`` reads it to route a link to the disposition log rather
+   *  than a storage tab. */
   isScrap: boolean;
   isGroup: boolean;
   area: LocationArea | null;
@@ -343,7 +347,32 @@ export function LocationTreePicker({
     [(excludeNodeTypes ?? []).join(',')],
   );
 
-  const isHidden = React.useCallback((n: PNode) => excluded.has(n.nodeType), [excluded]);
+  /**
+   * Rows this picker never renders.
+   *
+   * ``excludeNodeTypes`` is the caller's own list. ``isScrap`` is unconditional:
+   * a debit-and-gone location is where material goes to LEAVE inventory, so it
+   * is never a place to put anything — not a transfer destination, not a receipt
+   * destination, not a parent to hang a sub-type on, not a kit's output.
+   *
+   * It was already unpickable (a ``storage_category`` has ``can_store`` false, so
+   * the default ``selectable`` rejects it), but unpickable is not the same as
+   * absent: it still drew a row under "Storage" in every destination picker,
+   * reading as an option that silently refused to be chosen. Since such a
+   * location now has no sub-types either, that row expands to nothing.
+   *
+   * Hiding the node hides its whole subtree — children are filtered through this
+   * same predicate, and an unrendered parent never renders any.
+   *
+   * No caller needs the opposite. The one flow that DOES target these locations
+   * is Issue, and it uses a flat list from ``issuesApi.destinations`` rather than
+   * this tree; the consumable-issue dialog uses this picker but scoped to
+   * ``areas={['production']}``, which the Storage room is not in.
+   */
+  const isHidden = React.useCallback(
+    (n: PNode) => excluded.has(n.nodeType) || n.isScrap,
+    [excluded],
+  );
 
   const canPick = React.useCallback(
     (n: PNode) =>

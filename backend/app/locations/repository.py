@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select, text, update
@@ -23,10 +22,13 @@ from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
     SCRAP_NODE_TYPE,
-    STORAGE_GROUPS,
+    STORAGE_GROUP_KINDS,
     STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
+    group_base_code,
+    group_code_seq,
+    group_kind_for_code,
 )
 from app.models.products import Customer
 
@@ -293,28 +295,32 @@ async def create_storage_category(
     *,
     room_node_id: uuid.UUID,
     name: str,
-    group_codes: Collection[str],
     created_by_user_id: uuid.UUID,
     is_scrap: bool = False,
-) -> tuple[LocationNode, list[LocationNode]]:
-    """Create one Storage category and its template groups (LOC-001).
+) -> LocationNode:
+    """Create one Storage location, with NO sub-types (LOC-001, 2026-08-13).
 
     The category is the level the client calls a "location" — the thing you name
-    "Materials Management". ``group_codes`` are the sub-types it uses, given as
-    the stable codes from :data:`STORAGE_GROUPS` (``SHF``/``REF``/``FRZ``); each
-    becomes a ``room_location`` child carrying that sub-type's default name,
-    which the client may rename afterwards.
+    "Materials Management". It is created bare: sub-types are added afterwards
+    through ``PATCH /location-nodes/{id}/storage-groups``, which is what "location
+    sub-types shall be configurable after creation" asks for.
 
-    An unused sub-type is simply an absent child — there is no flag to keep in
-    step. Both levels are created together so a category can never exist without
-    the groups it was provisioned with. Caller has already checked the parent is
-    the Storage room and that the caller is a Super Admin. Caller commits.
+    It used to provision three sub-types from a template and ask at create time
+    which of them to switch on. The client dropped that on 2026-08-19: one place
+    decides a location's sub-types, and it is the same place whether the location
+    is a minute old or a year old. A create dialog that also configured them was a
+    second answer to the same question, and the two drifted the moment a location
+    needed a second freezer — something the create form could not express at all.
+
+    Caller has already checked the parent is the Storage room and that the caller
+    is a Super Admin. Caller commits.
 
     ``is_scrap`` marks the category as a debit-and-gone destination
-    (REQ-2026-08-04-TRX-001/002). It lands on the CATEGORY only — the groups stay
-    ordinary storage, because a scrap location still receives transfers into its
-    shelves and freezers; what the flag governs is whether the Issue action may
-    name this location. Set here at creation and never afterwards."""
+    (REQ-2026-08-04-TRX-001/002) — what the flag governs is whether the Issue
+    action may name this location. Set here at creation and never afterwards.
+    Such a location is disposition-only: it takes no sub-types at all (client
+    2026-08-19, enforced in ``update_storage_groups``), so nothing is ever stored
+    at it and no transfer has anywhere inside it to land."""
     base = _slugify_storage_code(name)
     code = base
     n = 2
@@ -322,7 +328,7 @@ async def create_storage_category(
         suffix = f"-{n}"
         code = f"{base[: 64 - len(suffix)]}{suffix}"
         n += 1
-    category = await create_node(
+    return await create_node(
         session,
         node_type="storage_category",
         code=code,
@@ -331,53 +337,6 @@ async def create_storage_category(
         parent_id=room_node_id,
         is_scrap=is_scrap,
     )
-    wanted = set(group_codes)
-    groups = [
-        await create_node(
-            session,
-            node_type="room_location",
-            code=group_code,
-            name=default_name,
-            created_by_user_id=created_by_user_id,
-            parent_id=category.id,
-        )
-        # Iterate STORAGE_GROUPS, not the caller's set, so the tabs always come
-        # back in the template's order regardless of what order they were asked
-        # for.
-        for _key, group_code, default_name in STORAGE_GROUPS
-        if group_code in wanted
-    ]
-    return category, groups
-
-
-async def get_child_by_code(
-    session: AsyncSession, *, parent_id: uuid.UUID, code: str, active_only: bool = True
-) -> LocationNode | None:
-    """One child of ``parent_id`` with this code. Used to find a category's
-    template group by its stable code rather than its renameable name.
-
-    ``active_only=False`` finds a soft-deleted group, so re-enabling a sub-type
-    revives the node it had — and the units still hanging off it — instead of
-    creating a second one.
-
-    That inactive search is why the ordering is explicit. Since ``loccode01``
-    made ``uq_location_nodes_parent_code`` partial on ``is_active``, a code is
-    only unique among LIVE siblings: switch a sub-type off, switch it on (which
-    creates a fresh node if the old one is gone), and off again, and one parent
-    can hold several inactive ``REF`` rows. Unordered, ``.first()`` would then
-    revive whichever the planner happened to return. Live first, then newest —
-    so a revive brings back the group most recently in use, with its units."""
-    stmt = select(LocationNode).where(
-        LocationNode.parent_id == parent_id,
-        func.lower(LocationNode.code) == code.lower(),
-    )
-    if active_only:
-        stmt = stmt.where(LocationNode.is_active.is_(True))
-    stmt = stmt.order_by(
-        LocationNode.is_active.desc(),
-        LocationNode.created_at.desc(),
-    )
-    return (await session.execute(stmt)).scalars().first()
 
 
 async def count_active_children(session: AsyncSession, parent_id: uuid.UUID) -> int:
@@ -400,20 +359,92 @@ async def count_active_children(session: AsyncSession, parent_id: uuid.UUID) -> 
 async def list_storage_groups(
     session: AsyncSession, category_id: uuid.UUID
 ) -> list[LocationNode]:
-    """A Storage category's active groups, in TEMPLATE order — Shelf,
-    Refrigerator, Freezer.
+    """A Storage category's active sub-types, in TAB order.
+
+    Grouped by KIND in the order LOC-001 names them (Shelf, Refrigerator,
+    Freezer), and within a kind by the order they were added — the code sequence.
+    So two freezers always sit together, and adding one never reshuffles the tabs
+    around it.
 
     Not code order: that would sort ``FRZ`` before ``SHF`` and put the tabs in an
-    order the requirement doesn't name. The template's order is the client's, so
-    it is applied in Python against :data:`STORAGE_GROUPS`. Anything unexpected
-    under a category (there shouldn't be) sorts last rather than vanishing."""
+    order the requirement doesn't name. And not ``created_at`` order either — it
+    cannot separate rows written in one transaction, since Postgres ``now()`` is
+    transaction-start time. The ordering is therefore applied in Python, against
+    :data:`STORAGE_GROUPS`. A code matching no kind sorts last, by name, rather
+    than vanishing."""
     stmt = select(LocationNode).where(
         LocationNode.parent_id == category_id,
         LocationNode.is_active.is_(True),
     )
     rows = list((await session.execute(stmt)).scalars().all())
-    order = {code: i for i, (_key, code, _name) in enumerate(STORAGE_GROUPS)}
-    return sorted(rows, key=lambda n: (order.get(n.code.upper(), len(order)), n.name))
+    rank = {kind: i for i, kind in enumerate(STORAGE_GROUP_KINDS)}
+
+    def sort_key(n: LocationNode) -> tuple[int, int, str]:
+        kind = group_kind_for_code(n.code)
+        if kind is None:
+            return (len(rank), 0, n.name.lower())
+        return (rank[kind], group_code_seq(n.code), "")
+
+    return sorted(rows, key=sort_key)
+
+
+async def next_group_code(session: AsyncSession, category_id: uuid.UUID, kind: str) -> str:
+    """The next free code for a sub-type of this kind — ``FRZ``, then ``FRZ-2``…
+
+    Counts INACTIVE sub-types too, and that is the point.
+    ``uq_location_nodes_parent_code`` is partial on ``is_active`` (``loccode01``),
+    so a removed ``FRZ-2`` would not stop a new one taking the same code — and a
+    link to ``/storage/{cat}/frz-2`` minted before the removal would then quietly
+    open a DIFFERENT sub-type. Numbers are cheap; a URL silently changing meaning
+    is not. So the sequence only ever goes up.
+    """
+    base = group_base_code(kind)
+    stmt = select(LocationNode.code).where(LocationNode.parent_id == category_id)
+    codes = [c for c in (await session.execute(stmt)).scalars().all() if c.upper() == base or c.upper().startswith(f"{base}-")]
+    if not codes:
+        return base
+    highest = max(group_code_seq(c) for c in codes)
+    return f"{base}-{highest + 1}"
+
+
+async def get_child_by_name(
+    session: AsyncSession, *, parent_id: uuid.UUID, name: str, active_only: bool = True
+) -> LocationNode | None:
+    """One child of ``parent_id`` with this name, case-insensitively.
+
+    Identity of a sub-type is its NAME here, not its code: one added after
+    creation is named by the client and numbered by the server (LOC-001,
+    2026-08-13), so there is no fixed code to look it up by and "have we seen
+    this one before?" can only be asked this way. This replaced a by-code twin
+    that could only ever find the template's three.
+
+    ``active_only=False`` finds a switched-off sub-type, which is what lets
+    re-adding "Minus-80 Freezer" REVIVE the node that name had instead of minting
+    a second one beside it. The indexes would permit the duplicate (both are
+    partial on ``is_active``), and the result would be a tab that reads
+    identically but carries a different code — breaking every link already built
+    from the old one, and leaving the retired node's ledger history pointing at
+    something the UI no longer shows.
+
+    That inactive search is why the ordering is explicit. Both the name and code
+    sibling indexes are partial on ``is_active`` (``locname01`` / ``loccode01``),
+    so a name is unique only among LIVE siblings: switch a sub-type off, add it
+    again, switch it off again, and one parent legitimately holds several
+    inactive rows with that name. Unordered, ``.first()`` would revive whichever
+    the planner happened to return. Live first, then newest — so a revive brings
+    back the group most recently in use, with its units.
+    """
+    stmt = select(LocationNode).where(
+        LocationNode.parent_id == parent_id,
+        func.lower(LocationNode.name) == name.strip().lower(),
+    )
+    if active_only:
+        stmt = stmt.where(LocationNode.is_active.is_(True))
+    stmt = stmt.order_by(
+        LocationNode.is_active.desc(),
+        LocationNode.created_at.desc(),
+    )
+    return (await session.execute(stmt)).scalars().first()
 
 
 async def set_node_active(

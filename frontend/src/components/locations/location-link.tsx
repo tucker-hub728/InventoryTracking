@@ -38,9 +38,8 @@ import {
 } from '@/components/rooms/room-config';
 import {
   DEFAULT_GROUP_SEGMENT,
-  ISSUED_SEGMENT,
   STORAGE_ROOM_CODE,
-  groupByCode,
+  groupFor,
   storageHref,
 } from '@/components/storage/storage-groups';
 import type { KitStatus } from '@/lib/api/kits';
@@ -143,14 +142,17 @@ export function locationHref(
       // The category itself opens the page; a group opens its tab; a unit opens
       // its tab with the contents panel up.
       const isUnit = node.id !== category.id && node.id !== group?.id;
-      // A link to the LOCATION of a scrap site goes to its disposition log —
-      // that is the ledger row's own subject ("issued to QC 1"), and a storage
-      // tab would answer a question nobody asked. A link to a unit INSIDE it is
-      // still a storage link: those units hold real, transferred stock.
-      if (category.isScrap && !isUnit && !group) {
-        return storageHref(category.id, ISSUED_SEGMENT);
+      // A debit-and-gone location has its own section (2026-08-19) — it stores
+      // nothing, so none of the Storage page applies to it. Checked before the
+      // segment logic below: such a location has no sub-types at all, so there
+      // is no tab to compute and nothing under it to be a unit of.
+      if (category.isScrap) {
+        return `/debit-and-gone/${category.id}`;
       }
-      const segment = groupByCode(group?.code)?.segment ?? DEFAULT_GROUP_SEGMENT;
+      // Any sub-type, not just the template's three: a ledger row naming a unit
+      // inside a sub-type the client added (code ``GRP-1``) still has to link to
+      // the tab that unit is actually on.
+      const segment = group ? groupFor(group).segment : DEFAULT_GROUP_SEGMENT;
       return storageHref(category.id, segment, isUnit ? node.id : undefined);
     }
     default:
