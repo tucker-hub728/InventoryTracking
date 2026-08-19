@@ -234,7 +234,7 @@ export function InventoryDetailShell({
     return () => ctrl.abort();
   }, [item]);
 
-  // The item's release-tracked batches, for the header's Release state control.
+  // The item's release-tracked batches, for the header's Quality status control.
   // Only fetched for admins, since nobody else can act on it, and re-read after
   // a change so the header reflects the new state.
   React.useEffect(() => {
@@ -449,7 +449,7 @@ export function InventoryDetailShell({
             {/* The release decision on a manufactured batch (REQ-2026-07-31-STS-002).
                 Its own header control, not a row action buried in a tab: it is
                 the thing someone comes to this page to do. The dialog asks WHICH
-                batch, because release state belongs to a lot and an item
+                batch, because quality status belongs to a lot and an item
                 usually has several.
 
                 Admin / super admin only, mirroring the backend — an operator
@@ -458,7 +458,7 @@ export function InventoryDetailShell({
                 release-tracked stock at all, so consumable pages are unchanged. */}
             {canDecideRelease && releaseCandidates.length > 0 && (
               <Button onClick={() => setChangingRelease(true)}>
-                <ShieldCheck size={14} /> Release state
+                <ShieldCheck size={14} /> Quality status
               </Button>
             )}
           </>

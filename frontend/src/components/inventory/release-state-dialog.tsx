@@ -138,7 +138,7 @@ export function ReleaseStateDialog({
         evidence_id: evidence.evidence_id,
         reason: evidence.comment ?? null,
       });
-      toast.success('Release state changed', {
+      toast.success('Quality status changed', {
         description: `${lot.lot_number} is now ${RELEASE_STATE_LABEL[choice]}.`,
       });
       onDone();
@@ -151,7 +151,7 @@ export function ReleaseStateDialog({
             : err.message,
         );
       } else {
-        setError('Could not change the release state. Please try again.');
+        setError('Could not change the quality status. Please try again.');
       }
     } finally {
       setSubmitting(false);
@@ -163,7 +163,7 @@ export function ReleaseStateDialog({
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Change release state</DialogTitle>
+            <DialogTitle>Change quality status</DialogTitle>
             <DialogDescription>
               {/* With one candidate the batch is a fact, so state it. With
                   several it is the first thing to choose, and repeating it here
@@ -179,7 +179,7 @@ export function ReleaseStateDialog({
                   .
                 </>
               ) : (
-                'Choose the batch, then the state it moves to.'
+                'Choose the batch, then the status it moves to.'
               )}
             </DialogDescription>
           </DialogHeader>
@@ -187,9 +187,9 @@ export function ReleaseStateDialog({
           <DialogBody className="space-y-3">
             {lots.length === 0 && (
               <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-text-3">
-                Nothing here carries a release state
+                Nothing here carries a quality status
                 {scopeLabel ? ` in ${scopeLabel}` : ''}. Only manufactured product does —
-                consumables and raw materials have no release workflow.
+                consumables and raw materials are not quality-tracked.
               </p>
             )}
 
@@ -225,7 +225,7 @@ export function ReleaseStateDialog({
                 <Label>Move it to</Label>
                 <div
                   role="radiogroup"
-                  aria-label="New release state"
+                  aria-label="New quality status"
                   className="overflow-hidden rounded-md border border-border"
                 >
                   {options.map((o, i) => {
@@ -333,7 +333,7 @@ export function ReleaseStateDialog({
         recordId={lot?.id}
         meaning={
           choice
-            ? `I am changing the release state of lot ${lot?.lot_number} from ${
+            ? `I am changing the quality status of lot ${lot?.lot_number} from ${
                 current ? RELEASE_STATE_LABEL[current] : 'none'
               } to ${RELEASE_STATE_LABEL[choice]}.`
             : ''

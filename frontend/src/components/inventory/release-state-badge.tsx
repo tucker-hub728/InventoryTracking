@@ -30,7 +30,7 @@ export function ReleaseStateBadge({
     <span
       // A tooltip, because in a dense list the badge is often the only hint
       // that a release workflow applies to this row at all.
-      title={`Release state: ${RELEASE_STATE_LABEL[state]}`}
+      title={`Quality status: ${RELEASE_STATE_LABEL[state]}`}
       className={cn(
         'inline-flex shrink-0 items-center gap-1 rounded-full border font-medium',
         size === 'xs' ? 'px-1.5 py-0 text-[10px]' : 'px-2 py-0.5 text-[11px]',

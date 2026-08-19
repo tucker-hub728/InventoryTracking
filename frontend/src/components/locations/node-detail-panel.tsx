@@ -693,27 +693,20 @@ export function NodeDetailPanel({
             </>
           )}
 
-          {/* A release decision about the batches stored here — NOT a structural
-              change, so it carries its own gate rather than riding on
-              ``canManageStructure``: an admin who cannot re-hang a rack can
-              still release a batch. Hidden when nothing here is release-tracked,
-              which is every location holding only consumables (STS-001).
+          {/* No Quality status control in this header (client 2026-08-19).
 
-              Last and primary: it is the action someone opens this page to
-              perform, and this app puts the primary action at the right-hand
-              end of a header (client 2026-08-17). */}
-          {isAdminOrAbove && releaseCandidates.length > 0 && (
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => {
-                setReleaseLot(null);
-                setReleaseOpen(true);
-              }}
-            >
-              <ShieldCheck size={14} /> Release state
-            </Button>
-          )}
+              This page is the LN2 hierarchy — a tank, its quadrants, racks and
+              boxes — and a header button here would have to open by asking
+              "which batch?" about everything stored anywhere below the node you
+              happen to be looking at. On a tank that is hundreds of vials across
+              dozens of boxes: a question the page has not put you in a position
+              to answer.
+
+              Nothing is lost. Every lot row in a box carries its own Change
+              action (see ``canSetReleaseState`` below), where the batch is
+              already named and its current status is on screen beside it — and
+              the item page keeps its header control, where "which batch" is a
+              short list. */}
         </div>
       </div>
 
@@ -930,7 +923,7 @@ export function NodeDetailPanel({
                                 {a.lot_number ?? a.lot_id.slice(0, 8)}
                               </span>
                               {/* Renders nothing unless the lot actually has a
-                                  release state, so consumable rows are unchanged. */}
+                                  quality status, so consumable rows are unchanged. */}
                               <ReleaseStateBadge state={a.release_state} size="xs" />
                             </span>
                           </span>
@@ -1430,13 +1423,17 @@ function AllocationDetailSheet({
                       label="Item"
                       value={<ItemLink itemNumber={lot.item_number} itemId={lot.item_id} />}
                     />
-                    <DetailRow label="Status" value={lot.status} />
+                    {/* "Stock status", not "Status": it sits directly above the
+                        quality row, and two rows both called some kind of status
+                        are only telling you apart if each says WHICH status it
+                        is. This one is procurement — on order, available. */}
+                    <DetailRow label="Stock status" value={lot.status} />
                     {/* Only for batches that carry one. A consumable lot has no
                         release workflow and gets no row at all, rather than an
                         empty one inviting the question. */}
                     {lot.release_state && (
                       <DetailRow
-                        label="Release state"
+                        label="Quality status"
                         value={
                           <span className="flex flex-wrap items-center gap-2">
                             <ReleaseStateBadge state={lot.release_state} />
@@ -1444,7 +1441,7 @@ function AllocationDetailSheet({
                               <Button
                                 size="sm"
                                 onClick={() => onSetReleaseState?.(allocation)}
-                                aria-label="Change this lot's release state"
+                                aria-label="Change this lot's quality status"
                               >
                                 <ShieldCheck size={13} /> Change
                               </Button>
