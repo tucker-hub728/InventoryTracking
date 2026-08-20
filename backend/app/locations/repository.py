@@ -66,6 +66,24 @@ async def node_label_map(
     return {n.id: (n.name, path_for(n)) for n in nodes}
 
 
+async def node_types_by_ids(
+    session: AsyncSession, node_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """``id → node_type`` for the given nodes.
+
+    Exists so a read model can say what KIND of place a row of stock sits in
+    without the client inferring it. The item drill-down needs it for the
+    LOC-003 cold-chain rule: the transfer dialog must know whether a source is
+    in LN2 to offer the right destinations, and the alternative — reading it off
+    ``is_grid`` — is true only by the coincidence that the Box is currently the
+    one grid-bearing type.
+    """
+    if not node_ids:
+        return {}
+    stmt = select(LocationNode.id, LocationNode.node_type).where(LocationNode.id.in_(node_ids))
+    return dict((await session.execute(stmt)).all())  # type: ignore[arg-type]
+
+
 async def get_sibling_by_code(
     session: AsyncSession, *, parent_id: uuid.UUID | None, code: str
 ) -> LocationNode | None:

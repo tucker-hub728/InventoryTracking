@@ -36,6 +36,11 @@ export interface ApiItemStockLocation {
   node_id: string;
   /** Human location path, e.g. "Warehouse One › Shelf B". */
   location: string;
+  /** What kind of place this is. Carried so the transfer dialog can apply the
+   *  LOC-003 cold-chain rule — an LN2 source may only be sent to another LN2
+   *  box — without inferring it from ``is_grid``, which matches only by the
+   *  coincidence that the Box is today the one grid-bearing node type. */
+  node_type: string;
   qty: number;
   is_grid: boolean;
   grid_rows: number | null;

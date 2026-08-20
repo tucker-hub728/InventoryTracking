@@ -599,6 +599,13 @@ class ItemStockLocationRead(BaseModel):
     node_id: str
     # Human location path, e.g. "Warehouse One › Shelf B".
     location: str
+    # What KIND of place this is. Carried so the transfer dialog can apply the
+    # LOC-003 cold-chain rule client-side — an LN2 source may only be sent to
+    # another LN2 box, and the picker should not offer destinations the server
+    # will refuse after the operator has signed. Reading LN2-ness off ``is_grid``
+    # instead would be true only by the coincidence that the Box is today the
+    # single grid-bearing node type.
+    node_type: str
     qty: int
     is_grid: bool = False
     grid_rows: int | None = None

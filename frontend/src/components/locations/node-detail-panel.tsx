@@ -66,6 +66,7 @@ import {
   parentTypesOf,
   subtreeStats,
   CHILD_TYPES_OF,
+  LN2_NODE_TYPES,
   MAX_GRID_DIM,
   NODE_TYPE_LABEL,
   type Allocation,
@@ -1690,6 +1691,9 @@ function AllocationActions({
             {trees ? (
               <LocationLeafPicker
                 trees={trees}
+                // LOC-003: out of LN2, only another LN2 box is a legal
+                // destination — don't offer what the server will refuse.
+                ln2Source={LN2_NODE_TYPES.has(allocation.location_node_type ?? '')}
                 onChange={(leaf) => {
                   setDestNode(leaf);
                   setDestCells(new Set());
@@ -1862,6 +1866,9 @@ function BatchOutPanel({
                 {trees ? (
                   <LocationLeafPicker
                     trees={trees}
+                    // LOC-003. A batch is one lot at ONE node, so any selected
+                    // allocation answers "is the source in LN2?".
+                    ln2Source={LN2_NODE_TYPES.has(selected[0]?.location_node_type ?? '')}
                     onChange={(leaf) => {
                       setDestNode(leaf);
                       setDestCells(new Set());
