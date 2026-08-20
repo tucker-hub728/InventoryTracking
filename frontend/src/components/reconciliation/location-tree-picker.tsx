@@ -54,7 +54,7 @@ export interface Forest {
  * navigation agree. Anything not named here sorts after, by name — a new room
  * appears without a code change.
  */
-const ROOM_CODE_ORDER = ['STG', 'MM', 'CS', 'AL'];
+const ROOM_CODE_ORDER = ['STG'];
 
 // ── Cached forest (fetched once, shared across all picker instances) ─────────
 
@@ -160,8 +160,7 @@ async function buildForest(): Promise<Forest> {
     return g;
   };
 
-  // Rooms, warehouses grafted in ahead of the cold-storage groups so the order
-  // matches the Materials Management page's tabs (Warehouse, then freezers).
+  // Rooms in sidebar order — Storage first, anything else after it by name.
   const roomNodes = [...rooms]
     .sort((a, b) => {
       const ai = ROOM_CODE_ORDER.indexOf(a.code);

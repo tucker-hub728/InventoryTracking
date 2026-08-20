@@ -1,24 +1,31 @@
 """Shared plumbing for the per-area location seeds.
 
-Every storage area in the system is seeded by its OWN script — one file per
-area, so a single area can be re-seeded, edited or dropped without touching the
-others:
+    scripts/seed_production.py   group → the manufacturing areas
 
-    scripts/seed_materials_management.py   room  → Warehouse One + Minus-20 Freezers
-    scripts/seed_cold_storage.py           room  → Minus-20 / Minus-80 Freezers
-    scripts/seed_analytical_lab.py         room  → one Minus-20, one Minus-80
-    scripts/seed_production.py             group → the manufacturing areas
-    scripts/seed_locations.py              runs all four in order
+That is the ONLY seeded area left, and the only caller of this module.
+
+Nothing else is seeded, by design:
+  * **Storage** — the server creates the ``STG`` room when the first location is
+    added, so a missed deploy step cannot strand the screen. Prefer that pattern
+    for any new area whose container the client never names.
+  * **LN2** — tank numbers are the client's, so a tank is always created by a
+    user on the LN2 page (07-22-LOC-004).
+  * **Materials Management / Cold Storage / Analytical Lab** — RETIRED
+    2026-08-19 (client-approved) in favour of Storage's generic template. Their
+    three seed scripts and the ``seed_locations.py`` aggregator that ran them
+    were deleted with the rooms; ``seed_tree`` (the nested room → location →
+    sub-location builder) went with them, since a Production area is flat and
+    only needs ``seed_flat``.
 
 Location rows are NEVER created by a migration. ``created_by_user_id`` is NOT
 NULL, and a fresh database has no users until Cognito seeding runs, so a
 migration cannot honestly own a location row — it would either fail or
 silently seed nothing. Migrations carry the *schema* (the node-type and
-parentage CHECKs); these scripts carry the *rows*.
+parentage CHECKs); this script carries the *rows*.
 
-Both helpers below are idempotent: a node whose ``(parent, code)`` already
-exists is skipped, so re-running never duplicates a node and never clobbers a
-client rename.
+``seed_flat`` is idempotent: a node whose ``(parent, code)`` already exists is
+skipped, so re-running never duplicates a node and never clobbers a client
+rename.
 """
 
 from __future__ import annotations
@@ -34,8 +41,6 @@ from app.locations import repository as loc_repo
 from app.models.identity import User
 from sqlalchemy import select
 
-# (node_type, code, name, children) — one node in a seed plan.
-Node = tuple[str, str, str, list["Node"]]
 # An area's plan: (session, owner_id, apply) → how many nodes it created.
 Plan = Callable[[Any, uuid.UUID, bool], Awaitable[int]]
 
@@ -49,51 +54,6 @@ async def creator_id(session) -> uuid.UUID | None:
         return admin.id
     any_user = (await session.execute(select(User).limit(1))).scalars().first()
     return any_user.id if any_user is not None else None
-
-
-async def seed_tree(
-    session,
-    nodes: Sequence[Node],
-    parent_id: uuid.UUID | None,
-    owner_id: uuid.UUID,
-    *,
-    apply: bool,
-    depth: int = 0,
-) -> int:
-    """Create ``nodes`` (and their children) under ``parent_id``. Returns the count.
-
-    In dry-run mode a would-be node has no id yet, so its children are listed
-    without a parent link — the plan still prints in full.
-    """
-    created = 0
-    pad = "  " + "  " * depth
-    for node_type, code, name, children in nodes:
-        existing = await loc_repo.get_sibling_by_code(
-            session, parent_id=parent_id, code=code
-        )
-        if existing is not None:
-            node_id: uuid.UUID | None = existing.id
-            print(f"{pad}= exists  {node_type:<13} {code:<18} {name}")
-        elif apply:
-            node = await loc_repo.create_node(
-                session,
-                node_type=node_type,
-                code=code,
-                name=name,
-                created_by_user_id=owner_id,
-                parent_id=parent_id,
-            )
-            node_id = node.id
-            created += 1
-            print(f"{pad}+ create  {node_type:<13} {code:<18} {name}")
-        else:
-            node_id = None
-            created += 1
-            print(f"{pad}+ would   {node_type:<13} {code:<18} {name}")
-        created += await seed_tree(
-            session, children, node_id, owner_id, apply=apply, depth=depth + 1
-        )
-    return created
 
 
 async def seed_flat(

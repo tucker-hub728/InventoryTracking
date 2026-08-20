@@ -189,16 +189,6 @@ function SidebarContent({ collapsed }: { collapsed: boolean }) {
                               WIP
                             </span>
                           )}
-                          {/* Being replaced, not switched off — the row stays
-                              clickable and everything inside still works. */}
-                          {item.deprecated && (
-                            <span
-                              aria-label="Deprecated — being replaced"
-                              className="rounded-sm bg-warning/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-warning"
-                            >
-                              Deprecated
-                            </span>
-                          )}
                           {/* Count of things needing attention. Hidden at zero:
                               a "0" pill is visual noise that trains people to
                               ignore the badge that matters. */}
