@@ -397,11 +397,40 @@ def permits_ln2_transfer_to(node_type: str) -> bool:
 
     See :data:`LN2_TRANSFER_DESTINATIONS` for why the permitted set is what it
     is. Callers must apply this only when the SOURCE is LN2 — an ordinary
-    shelf-to-shelf move is not governed by the cold-chain rule, and the
-    requirement constrains transfers OUT of LN2 only. Moves INTO a box (a
-    receipt placement, a kit back-flush of leftovers) are likewise untouched.
+    shelf-to-shelf move is not governed by the cold-chain rule.
     """
     return node_type in LN2_TRANSFER_DESTINATIONS
+
+
+def blocks_transfer_into_ln2(from_type: str, to_type: str) -> bool:
+    """True iff this transfer would carry material INTO liquid nitrogen from
+    outside it — which is refused.
+
+    **This is a client addition of 2026-08-20, beyond LOC-003 as written.** The
+    requirement governs transfers "out of liquid-nitrogen storage" and says
+    nothing about the reverse. The client asked for the mirror so that LN2 is a
+    CLOSED SET: if material cannot be transferred out to a shelf, it cannot be
+    transferred in from one either.
+
+    Kept as its own predicate, taking BOTH ends rather than folding into a
+    single "crosses the boundary" test, precisely because it is the half the
+    requirement does not ask for: if the client withdraws it, this function and
+    the one line that calls it go, and LOC-003 as written is left intact.
+
+    What this does NOT touch, so a tank can still be stocked:
+
+      * ``POST /allocations/place`` / ``place-batch`` — receipt put-away, which
+        is how cryo material properly enters a tank. Not a transfer, no source
+        node, and the LN2 box page drives it directly.
+      * kit back-flush / return of leftovers into a box, which validates through
+        kitting's own ``_require_placeable``.
+
+    Note the consequence, which is real and was accepted: because put-away is
+    capped at the lot's ``ordered_qty``, units that have ALREADY been placed
+    somewhere else can never be moved into LN2 — a transfer was their only route
+    in, and this closes it.
+    """
+    return is_ln2_node(to_type) and not is_ln2_node(from_type)
 
 
 def is_kanban_node(node_type: str) -> bool:

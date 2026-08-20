@@ -46,13 +46,21 @@ Verifies:
     same-node guard and the LN2 page offers the current box as a destination, so
     a literal reading of the word "another" would destroy the only way to
     reorganise a box. Regression guard.
-  * UNAFFECTED — a non-LN2 source (a freezer unit) may still transfer to an
-    ambient shelf. The rule constrains transfers OUT of LN2 only.
-  * UNAFFECTED — moves INTO an LN2 box still work. The requirement is
-    one-directional; a symmetric reading would break receipt put-away and kit
-    back-flush of leftovers.
-  * PER LEG, not per request — one multi-source signature carrying an LN2 leg
-    and a shelf leg is refused for the LN2 leg and names it ("Source N: ...")
+  * BLOCKED with code ``transfer_blocked_ln2_entry`` — a cold-storage unit or an
+    ambient shelf → an LN2 box. **This half is a client addition of 2026-08-20,
+    beyond LOC-003 as written**, making LN2 a CLOSED SET: if material cannot be
+    transferred out to a shelf, it cannot be transferred in from one either. It
+    carries its own error code so the two halves stay separable if the client
+    withdraws it.
+  * UNAFFECTED — put-away into an LN2 box still works. That is how a tank is
+    legitimately stocked, and it is not a transfer. Note the accepted
+    consequence: because put-away is capped at the lot's ``ordered_qty``, units
+    already placed elsewhere can now never reach LN2 at all.
+  * UNAFFECTED — a transfer with neither end in LN2 (freezer → ambient shelf).
+    The rule governs only moves that CROSS the boundary.
+  * PER LEG, not per request — a multi-source signature whose second leg is
+    illegal is refused naming that leg ("Source 2: ..."), and its legal first leg
+    is not applied either: every leg is validated before anything is written
   * NOT A TRANSFER, so untouched — a material issue (debit-and-gone) still
     draws from an LN2 box, proving the guard did not leak into the shared drain
     ``loc_repo.draw_lot_at_node``, which transfer-multi shares with issue and
@@ -61,10 +69,17 @@ Verifies:
     gap. If they extend the rule, this check flips to a blocked case.
 
 NOTE — this script MOVES REAL STOCK in the dev database, like every other smoke
-here. It is idempotent: it reuses the vials it previously parked in a box rather
-than seeding more. Be aware that seeding is a ONE-WAY trip by design — once
-units are in a box, LOC-003 is exactly what stops this script putting them back
-in the freezer. It moves ``SEED_UNITS`` vials the first time it runs.
+here, and each run permanently costs the fixture box two vials: one moved to the
+second box, one issued to a scrap location. It therefore TOPS THE BOX UP to
+``SEED_UNITS`` on every run rather than only seeding when empty, which is what
+keeps it runnable indefinitely.
+
+Topping up is done by PUT-AWAY (``/allocations/place``), because a transfer into
+LN2 is precisely what the closed-set half now refuses — and it is a ONE-WAY trip
+by design: once units are in a box, this rule is exactly what stops the script
+putting them back in the freezer. Put-away is capped at the lot's
+``ordered_qty``, so if every lot is at its cap the script says so and stops
+rather than reporting a false failure.
 """
 
 from __future__ import annotations
@@ -80,6 +95,7 @@ EMAIL = os.environ.get("SMOKE_EMAIL", "admin.user@cellready.dev")
 PASSWORD = os.environ.get("SMOKE_PASSWORD", "DevAdmin_123!")
 TRANSFER_ACTION = "movement.transfer"
 ISSUE_ACTION = "movement.material_issue"
+RECEIPT_ACTION = "movement.receipt"
 
 #: Vials parked in the LN2 box the first time this runs. Kept tiny: the rule
 #: under test is what prevents moving them back out to the freezer.
@@ -91,6 +107,11 @@ SEED_UNITS = 4
 #: also the code smoke_material_issue.py asserts to prove the Issue and Transfer
 #: destination sets are disjoint, and reusing it would destroy that proof.
 COLD_CHAIN_CODE = "transfer_blocked_cold_chain"
+
+#: The mirror half (client 2026-08-20): LN2 is a closed set, so a transfer may
+#: not carry material INTO it from outside either. Its own code, so that if the
+#: client withdraws the addition the two halves stay separable in the tests too.
+LN2_ENTRY_CODE = "transfer_blocked_ln2_entry"
 
 STATS = {"passed": 0}
 FAILED: list[str] = []
@@ -192,6 +213,18 @@ def _node(token: str, node_id: str) -> dict:
     return b
 
 
+def _occupied(token: str, node_id: str) -> list[dict]:
+    """Every occupied cell in a box, ACROSS ALL LOTS.
+
+    A box holds one lot per cell but may hold several lots, so the cells of one
+    ``/stock-locations`` row are not the cells of the box. Reading a single row
+    and calling the rest free picks a cell another lot is sitting in, which the
+    server then rejects with ``cell_occupied`` — a test failure that looks like a
+    rule failure and is not.
+    """
+    return [c for _i, r in _all_stock(token) if r["node_id"] == node_id for c in r.get("cells", [])]
+
+
 def _free_cells(row: dict, want: int, *, avoid: set[tuple[int, int]] = frozenset()) -> list[dict]:
     """``want`` empty (row, col) coordinates in a box, as transfer payload cells."""
     taken = {(c["grid_row"], c["grid_col"]) for c in row.get("cells", [])} | set(avoid)
@@ -234,6 +267,12 @@ def main() -> int:
         print("\nFixtures missing — cannot run. Seed a Storage location with a")
         print("shelf group and a freezer group, and two LN2 boxes, then re-run.")
         return 1
+    # Prefer a box that ALREADY holds stock as the source. Which box comes first
+    # depends on what exists in the environment, and picking an empty one sends
+    # the run down the seeding path for no reason — a path that can legitimately
+    # fail when every lot is already at its ordered cap.
+    stocked_box_ids = {r["node_id"] for _i, r in _all_stock(token) if r["is_grid"] and r["qty"] > 0}
+    boxes.sort(key=lambda n: n["id"] not in stocked_box_ids)
     box_a, box_b = boxes[0], boxes[1]
     shelf_node, shelf_group = ambient
     cold_node, cold_group = cold
@@ -242,53 +281,90 @@ def main() -> int:
     print(f"  ambient    : {shelf_group['name']} › {shelf_node['name']}")
     print(f"  cold       : {cold_group['name']} › {cold_node['name']}")
 
-    print("\n== seed: a move INTO LN2 is unaffected by LOC-003 ==")
-    rows = _all_stock(token)
-    in_box_a = [(i, r) for i, r in rows if r["node_id"] == box_a["id"] and r["qty"] > 0]
-    if in_box_a:
-        item_id, box_row = in_box_a[0]
-        print(f"  reusing {box_row['qty']} unit(s) already in {box_a['code']}")
-        check("seeding is idempotent (reused existing LN2 stock)", True)
+    print("\n== seed LN2 stock ==")
+
+    # Seeded by PUT-AWAY, not by transfer — a transfer INTO LN2 is exactly what
+    # the closed-set half of the rule now refuses. Put-away is the legitimate
+    # way a tank is stocked and is deliberately untouched.
+    #
+    # TOPPED UP, not merely seeded-if-empty. Each run permanently costs the box
+    # two vials — one moved to box B, one issued to a scrap location — so a
+    # "reuse whatever is there" rule drains the fixture after a couple of runs
+    # and then fails on its own leftovers. Bring the box up to SEED_UNITS every
+    # time instead, and it stays runnable indefinitely.
+    def biggest_row_in_box_a():
+        candidates = [
+            (i, r) for i, r in _all_stock(token) if r["node_id"] == box_a["id"] and r["qty"] > 0
+        ]
+        # A box may hold more than one lot; work with whichever holds most cells
+        # so the cell list and the lot id below always agree.
+        return max(candidates, key=lambda t: len(t[1].get("cells", [])), default=None)
+
+    have = biggest_row_in_box_a()
+    short = SEED_UNITS - (len(have[1]["cells"]) if have else 0)
+    if short <= 0:
+        item_id, box_row = have  # type: ignore[misc]
+        print(f"  {box_row['qty']} unit(s) already in {box_a['code']} — no top-up needed")
+        check("the fixture box is stocked", True)
     else:
-        seed_src = next(
-            (
-                (i, r)
-                for i, r in rows
-                if not r["is_grid"] and r["qty"] >= SEED_UNITS and r["node_id"] != box_a["id"]
-            ),
-            None,
-        )
+        # Put-away is capped at the lot's ``ordered_qty``, so pick a lot that
+        # still has headroom. Prefer the lot already in the box, so the box does
+        # not sprout a second lot on every run.
+        rows = _all_stock(token)
+        ordered = ([have] if have else []) + [(i, r) for i, r in rows if not r["is_grid"]]
+        seed_src = None
+        for i, r in ordered:
+            if r["qty"] <= 0:
+                continue
+            s, avail = _req("GET", f"/allocations/lot-availability/{r['lot_id']}", token=token)
+            remaining = avail.get("remaining") if s == 200 else None
+            if remaining is None or remaining >= short:
+                seed_src = (i, r)
+                break
         if seed_src is None:
-            print("  no non-LN2 stock to seed from — cannot run")
+            print(f"  {box_a['code']} is {short} vial(s) short and every lot is at its")
+            print("  ordered cap — receive a lot into an LN2 box, then re-run")
             return 1
         item_id, src_row = seed_src
         box_meta = _node(token, box_a["id"])
+        # Occupied cells across EVERY lot in the box, not just the row being
+        # topped up: a box holds one lot per cell but may hold several lots, and
+        # counting only one row's cells picks a cell another lot is sitting in.
+        occupied = _occupied(token, box_a["id"])
         cells = _free_cells(
-            {"cells": [], "grid_rows": box_meta["grid_rows"], "grid_cols": box_meta["grid_cols"]},
-            SEED_UNITS,
-        )
-        s, b = _req(
-            "POST",
-            "/allocations/transfer-multi",
-            token=token,
-            json_body={
-                "sources": [
-                    {
-                        "node_id": src_row["node_id"],
-                        "lot_id": src_row["lot_id"],
-                        "qty": SEED_UNITS,
-                        "to_node_id": box_a["id"],
-                        "to_cells": cells,
-                    }
-                ],
-                "evidence_id": _sign(token),
-                "notes": "LOC-003 smoke: seed LN2 stock",
+            {
+                "cells": occupied,
+                "grid_rows": box_meta["grid_rows"],
+                "grid_cols": box_meta["grid_cols"],
             },
+            short,
         )
-        check("freezer unit → LN2 box is permitted (into LN2 is unaffected)", s == 201, b)
-        if s != 201:
-            return 1
-        box_row = next(r for _i, r in _all_stock(token) if r["node_id"] == box_a["id"])
+        placed = 0
+        for cell in cells:
+            s, b = _req(
+                "POST",
+                "/allocations/place",
+                token=token,
+                json_body={
+                    "lot_id": src_row["lot_id"],
+                    "node_id": box_a["id"],
+                    "qty": 1,
+                    "grid_row": cell["grid_row"],
+                    "grid_col": cell["grid_col"],
+                    "evidence_id": _sign(token, RECEIPT_ACTION),
+                    "notes": "LOC-003 smoke: top up LN2 stock by put-away",
+                },
+            )
+            if s != 201:
+                print(f"  put-away stopped after {placed}: {b}")
+                break
+            placed += 1
+        check(
+            "put-away into an LN2 box still works (how a tank is stocked)",
+            placed == short,
+            f"placed {placed} of {short}",
+        )
+        item_id = seed_src[0]
 
     box_row = next(r for i, r in _all_stock(token) if r["node_id"] == box_a["id"] and i == item_id)
     check("the LN2 box reports a grid", box_row["is_grid"] is True, box_row)
@@ -389,7 +465,7 @@ def main() -> int:
     fresh_a = next(r for _i, r in _all_stock(token) if r["node_id"] == box_a["id"])
     free_a = _free_cells(
         {
-            "cells": fresh_a.get("cells", []),
+            "cells": _occupied(token, box_a["id"]),
             "grid_rows": a_meta["grid_rows"],
             "grid_cols": a_meta["grid_cols"],
         },
@@ -410,7 +486,57 @@ def main() -> int:
     )
     check("cell → cell inside the same box is permitted", s == 201, b)
 
-    print("\n== UNAFFECTED: a non-LN2 source ==")
+    print("\n== BLOCKED: into LN2 from outside it (closed set) ==")
+    # Client addition 2026-08-20, beyond LOC-003 as written. The mirror of the
+    # rule above: if material cannot be transferred OUT to a shelf, it cannot be
+    # transferred IN from one either.
+    box_b_meta = _node(token, box_b["id"])
+    for label, src_node in (("cold storage unit", cold_node), ("ambient shelf", shelf_node)):
+        src_rows = [r for _i, r in _all_stock(token) if r["node_id"] == src_node["id"]]
+        if not src_rows:
+            check(f"stock exists at the {label} to test with", False)
+            continue
+        s, b = _req(
+            "POST",
+            "/allocations/transfer-multi",
+            token=token,
+            json_body={
+                "sources": [
+                    {
+                        "node_id": src_node["id"],
+                        "lot_id": src_rows[0]["lot_id"],
+                        "qty": 1,
+                        "to_node_id": box_b["id"],
+                        "to_cells": _free_cells(
+                            {
+                                "cells": [],
+                                "grid_rows": box_b_meta["grid_rows"],
+                                "grid_cols": box_b_meta["grid_cols"],
+                            },
+                            1,
+                            avoid={
+                                (c["grid_row"], c["grid_col"])
+                                for r in [
+                                    x for _i, x in _all_stock(token) if x["node_id"] == box_b["id"]
+                                ]
+                                for c in r.get("cells", [])
+                            },
+                        ),
+                    }
+                ],
+                "evidence_id": _sign(token),
+            },
+        )
+        ok = s == 422 and _code(b) == LN2_ENTRY_CODE
+        check(f"{label} → LN2 box is refused", ok, f"{s} {b}")
+        if ok:
+            check(
+                f"the {label} refusal explains how a tank IS stocked",
+                "received" in _message(b) and "kit" in _message(b),
+                _message(b),
+            )
+
+    print("\n== UNAFFECTED: neither end is LN2 ==")
     non_ln2 = next(
         (
             (i, r)
@@ -437,18 +563,27 @@ def main() -> int:
                     }
                 ],
                 "evidence_id": _sign(token),
-                "notes": "LOC-003 smoke: non-LN2 source is not governed",
+                "notes": "LOC-003 smoke: neither end is LN2, so not governed",
             },
         )
-        check("freezer unit → ambient shelf still works (rule is LN2-only)", s == 201, b)
+        check("freezer unit → ambient shelf still works (boundary not crossed)", s == 201, b)
 
     print("\n== PER LEG, not per request ==")
+    # Both legs are drawn from the same box so the request cannot trip
+    # ``mixed_items`` first — a multi-source transfer must be one item, and which
+    # items sit where varies per environment. Leg 1 is legal, leg 2 is not; the
+    # refusal has to name leg 2 specifically rather than rejecting "the request".
     fresh_a = next(r for _i, r in _all_stock(token) if r["node_id"] == box_a["id"])
-    ln2_cell = fresh_a["cells"][0]
-    shelf_rows = [r for _i, r in _all_stock(token) if r["node_id"] == shelf_node["id"]]
-    if not shelf_rows:
-        check("a shelf row exists for the mixed-leg case", False)
+    if len(fresh_a["cells"]) < 2:
+        check("the box holds two vials for the per-leg case", False, len(fresh_a["cells"]))
     else:
+        b_meta = _node(token, box_b["id"])
+        b_taken = {
+            (c["grid_row"], c["grid_col"])
+            for _i, r in _all_stock(token)
+            if r["node_id"] == box_b["id"]
+            for c in r.get("cells", [])
+        }
         s, b = _req(
             "POST",
             "/allocations/transfer-multi",
@@ -456,25 +591,42 @@ def main() -> int:
             json_body={
                 "sources": [
                     {
-                        "node_id": shelf_node["id"],
-                        "lot_id": shelf_rows[0]["lot_id"],
+                        "node_id": box_a["id"],
+                        "lot_id": fresh_a["lot_id"],
                         "qty": 1,
-                        "to_node_id": cold_node["id"],
+                        "to_node_id": box_b["id"],
+                        "to_cells": _free_cells(
+                            {
+                                "cells": [],
+                                "grid_rows": b_meta["grid_rows"],
+                                "grid_cols": b_meta["grid_cols"],
+                            },
+                            1,
+                            avoid=b_taken,
+                        ),
+                        "cell_allocation_ids": [fresh_a["cells"][0]["allocation_id"]],
                     },
                     {
                         "node_id": box_a["id"],
                         "lot_id": fresh_a["lot_id"],
                         "qty": 1,
                         "to_node_id": shelf_node["id"],
-                        "cell_allocation_ids": [ln2_cell["allocation_id"]],
+                        "cell_allocation_ids": [fresh_a["cells"][1]["allocation_id"]],
                     },
                 ],
                 "evidence_id": _sign(token),
             },
         )
         ok = s == 422 and _code(b) == COLD_CHAIN_CODE
-        check("a mixed signature is refused for its LN2 leg", ok, f"{s} {b}")
+        check("a signature carrying one illegal leg is refused", ok, f"{s} {b}")
         check("the refusal names the offending leg", "Source 2" in _message(b), _message(b))
+        # And the legal leg must NOT have been applied — validation runs over
+        # every leg before anything is written.
+        after = next(
+            (r for _i, r in _all_stock(token) if r["node_id"] == box_a["id"]),
+            {"qty": -1},
+        )
+        check("the legal leg was not applied either", after["qty"] == fresh_a["qty"], after["qty"])
 
     print("\n== NOT A TRANSFER, so untouched: material issue out of LN2 ==")
     # The guard must not have leaked into ``loc_repo.draw_lot_at_node``, which

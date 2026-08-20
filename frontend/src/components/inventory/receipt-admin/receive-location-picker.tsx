@@ -28,6 +28,7 @@ import { LocationTreePicker } from '@/components/reconciliation/location-tree-pi
 import type { CellOption } from '@/lib/api/kits';
 import {
   locationNodesApi,
+  LN2_NODE_TYPES,
   type Allocation,
   type NodeTree,
   type NodeType,
@@ -70,6 +71,57 @@ export function collectLeaves(roots: NodeTree[]): StoreLeaf[] {
   };
   roots.forEach((r) => walk(r, []));
   return out;
+}
+
+/**
+ * May a transfer from this side of the LN2 boundary land on this node type?
+ *
+ * LN2 is a closed set (REQ-2026-08-13-LOC-003 plus the client's 2026-08-20
+ * mirror): a transfer may not cross the boundary either way. See the
+ * ``ln2Source`` prop for the tri-state.
+ *
+ * The OUT direction is keyed on node TYPE rather than on "a DIFFERENT box",
+ * which is what the requirement's word "another" literally says: moving vials
+ * between cells of the box they are already in is a legitimate transfer and the
+ * only way to reorganise a box. Removing the source where that IS wanted is
+ * ``excludeNodeId``'s job, not this one's.
+ */
+function ln2BoundaryAllows(ln2Source: boolean | undefined, nodeType: NodeType): boolean {
+  if (ln2Source === undefined) return true;
+  return ln2Source ? nodeType === 'box' : !LN2_NODE_TYPES.has(nodeType);
+}
+
+/** What an empty destination tree means, once the LN2 boundary has pruned it. */
+function ln2EmptyText(ln2Source: boolean | undefined): string {
+  if (ln2Source === undefined) return 'No storage locations are set up yet.';
+  return ln2Source
+    ? 'No other LN2 box is available to move this material to.'
+    : 'No storage location outside liquid nitrogen is set up yet.';
+}
+
+/**
+ * Why most of the tree is missing.
+ *
+ * Without this the picker looks broken — an operator who can see the freezers
+ * on the Storage page and not in this list will read it as a bug, not a rule.
+ * So say which way the boundary is being crossed, and name the action that DOES
+ * do what they are trying to do.
+ */
+function Ln2BoundaryNote({ ln2Source }: { ln2Source: boolean | undefined }) {
+  if (ln2Source === undefined) return null;
+  return ln2Source ? (
+    <p className="text-xs text-text-3">
+      Moving out of liquid nitrogen, so only another LN2 box is offered — to keep the cold chain
+      intact. To begin manufacturing with this material use{' '}
+      <span className="text-text-2">Issue</span> on a kit; to send it to a customer use{' '}
+      <span className="text-text-2">Ship</span>.
+    </p>
+  ) : (
+    <p className="text-xs text-text-3">
+      This material is outside liquid nitrogen, so LN2 isn&apos;t offered — a tank only takes
+      material that is received straight into it, or returned from a kit.
+    </p>
+  );
 }
 
 /** True when a placement is fully specified for a received quantity. */
@@ -134,12 +186,22 @@ export function ReceiveLocationPicker({
   excludeNodeId?: string;
   /** Name of {@link excludeNodeId}, for the note that says why it is missing. */
   excludeLabel?: string;
-  /** REQ-2026-08-13-LOC-003 — the stock being moved is coming OUT of liquid
-   *  nitrogen, so the only destination a transfer may offer is another LN2 box.
+  /** Which side of the liquid-nitrogen boundary the SOURCE sits on, for the
+   *  cold-chain rule (REQ-2026-08-13-LOC-003, plus the client's 2026-08-20
+   *  mirror). LN2 is a closed set: a transfer may not cross the boundary in
+   *  either direction, so this prop is tri-state.
    *
-   *  The server enforces this regardless (``transfer_blocked_cold_chain``); this
-   *  prop is what stops the operator discovering it only AFTER signing, since
-   *  the signature is collected before the request goes out.
+   *    ``true``       source is in LN2  → offer only LN2 boxes
+   *    ``false``      source is outside → offer everything EXCEPT LN2
+   *    ``undefined``  not a transfer    → offer everything (Receive passes this
+   *                                       by omitting the prop; receipt put-away
+   *                                       into a box is how a tank gets stocked
+   *                                       and must stay available)
+   *
+   *  The server enforces this regardless (``transfer_blocked_cold_chain`` /
+   *  ``transfer_blocked_ln2_entry``); the prop is what stops the operator
+   *  discovering it only AFTER signing, since the signature is collected before
+   *  the request goes out.
    *
    *  The other two destinations LOC-003 permits are not transfers and so cannot
    *  appear in this picker at all: a production room is reached through Issue on
@@ -154,16 +216,11 @@ export function ReceiveLocationPicker({
   // them. Null when nothing restricts the tree, so the ordinary whole-tree case
   // is untouched.
   const allowedNodeIds = React.useMemo(() => {
-    if (!excludeNodeId && !ln2Source) return null;
+    if (!excludeNodeId && ln2Source === undefined) return null;
     const ids = new Set<string>();
     for (const area of AREA_ORDER) {
       for (const leaf of collectLeaves(trees[area] ?? [])) {
-        // Keyed on node TYPE, not on "a different box": moving vials between
-        // cells of the box they are already in is a legitimate transfer and the
-        // only way to reorganise a box, so ``box`` stays allowed even when it is
-        // the source. ``excludeNodeId`` still removes the source where the
-        // caller asks for that (a flat source cannot receive its own stock).
-        if (ln2Source && leaf.node.node_type !== 'box') continue;
+        if (!ln2BoundaryAllows(ln2Source, leaf.node.node_type)) continue;
         ids.add(leaf.id);
       }
     }
@@ -199,11 +256,7 @@ export function ReceiveLocationPicker({
         modal
         disabled={disabled}
         placeholder="Choose where these units go…"
-        emptyText={
-          ln2Source
-            ? 'No other LN2 box is available to move this material to.'
-            : 'No storage locations are set up yet.'
-        }
+        emptyText={ln2EmptyText(ln2Source)}
       />
 
       {selected && selected.node.node_type === 'box' ? (
@@ -221,22 +274,8 @@ export function ReceiveLocationPicker({
           All {qty} unit{qty === 1 ? '' : 's'} will be placed at{' '}
           <span className="font-mono text-text-2">{selected.node.name}</span>.
         </p>
-      ) : ln2Source ? (
-        // Most of the tree is missing and the operator did not remove it. Say
-        // why, and name the actions that DO reach the other two destinations
-        // LOC-003 permits — otherwise "the freezers are gone" reads as a bug.
-        <p className="text-xs text-text-3">
-          Moving out of liquid nitrogen
-          {excludeLabel ? (
-            <>
-              {' '}
-              (<span className="font-mono text-text-2">{excludeLabel}</span>)
-            </>
-          ) : null}
-          , so only another LN2 box is offered — to keep the cold chain intact. To begin
-          manufacturing with this material use <span className="text-text-2">Issue</span> on a kit;
-          to send it to a customer use <span className="text-text-2">Ship</span>.
-        </p>
+      ) : ln2Source !== undefined ? (
+        <Ln2BoundaryNote ln2Source={ln2Source} />
       ) : excludeLabel ? (
         // Nothing chosen yet, and one location is missing from the tree. Say
         // which and why — an operator hunting for the box they are standing in
@@ -274,11 +313,11 @@ export function LocationLeafPicker({
   const [nodeId, setNodeId] = React.useState('');
 
   const allowedNodeIds = React.useMemo(() => {
-    if (!ln2Source) return null;
+    if (ln2Source === undefined) return null;
     const ids = new Set<string>();
     for (const area of AREA_ORDER) {
       for (const leaf of collectLeaves(trees[area] ?? [])) {
-        if (leaf.node.node_type === 'box') ids.add(leaf.id);
+        if (ln2BoundaryAllows(ln2Source, leaf.node.node_type)) ids.add(leaf.id);
       }
     }
     return ids;
@@ -299,22 +338,9 @@ export function LocationLeafPicker({
         showPath
         disabled={disabled}
         placeholder="Choose a destination…"
-        emptyText={
-          ln2Source
-            ? 'No other LN2 box is available to move this material to.'
-            : 'No storage locations are set up yet.'
-        }
+        emptyText={ln2EmptyText(ln2Source)}
       />
-      {ln2Source ? (
-        // Say why the freezers and shelves are missing, and name the actions
-        // that DO reach the other two destinations LOC-003 permits.
-        <p className="text-xs text-text-3">
-          Moving out of liquid nitrogen, so only another LN2 box is offered — to keep the cold
-          chain intact. To begin manufacturing with this material use{' '}
-          <span className="text-text-2">Issue</span> on a kit; to send it to a customer use{' '}
-          <span className="text-text-2">Ship</span>.
-        </p>
-      ) : null}
+      <Ln2BoundaryNote ln2Source={ln2Source} />
     </>
   );
 }

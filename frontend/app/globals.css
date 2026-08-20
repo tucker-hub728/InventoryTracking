@@ -257,4 +257,26 @@
   .scroll-strip::-webkit-scrollbar-thumb {
     border: 0;
   }
+
+  /*
+   * The vertical twin of `.scroll-strip`: a short list inside a card that
+   * scrolls once it outgrows the height the card was given, rather than
+   * stretching the card (and, in a CSS grid, every card beside it).
+   *
+   * `overscroll-behavior: contain` matters here — these sit inside clickable
+   * cards, and without it reaching the end of a nine-row list would carry on
+   * and scroll the whole page out from under the pointer.
+   */
+  .scroll-list {
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+  .scroll-list::-webkit-scrollbar {
+    width: 4px;
+  }
+  .scroll-list::-webkit-scrollbar-thumb {
+    border: 0;
+  }
 }
