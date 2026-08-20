@@ -705,6 +705,44 @@ def default_issued_qty(qty_per_unit: Decimal, target_qty: int) -> int:
     return int(needed.to_integral_value(rounding=ROUND_CEILING))
 
 
+#: The movement types that bring material ONTO a production floor for a line.
+#: Both count as an origin for the back-flush cold-chain rule — "issue more"
+#: puts material on the floor exactly as the first issue does, and a rule that
+#: only knew about ``kit_issue`` would let a topped-up line back-flush anywhere.
+KIT_ISSUE_MOVEMENT_TYPES: tuple[str, ...] = ("kit_issue", "kit_additional_issue")
+
+
+async def line_issue_source_types(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, set[str]]:
+    """``kit_line_id → the set of node TYPES its material was issued from``.
+
+    Read off the append-only ledger rather than ``KitLine.source_location_node_id``,
+    which holds only the primary pick: a line may be issued from several
+    locations, and the cold-chain rule on returns has to see all of them.
+
+    A line with no rows here (nothing issued yet, or a kit that predates the
+    per-source movements) yields no entry, and callers treat that as "origin
+    unknown" — unconstrained, because inventing an origin would block a return
+    with nowhere legal to go.
+    """
+    stmt = (
+        select(StockMovement.kit_line_id, LocationNode.node_type)
+        .select_from(StockMovement)
+        .join(LocationNode, LocationNode.id == StockMovement.from_location_node_id)
+        .where(
+            StockMovement.kit_id == kit_id,
+            StockMovement.movement_type.in_(KIT_ISSUE_MOVEMENT_TYPES),
+        )
+        .distinct()
+    )
+    out: dict[uuid.UUID, set[str]] = {}
+    for line_id, node_type in (await session.execute(stmt)).all():
+        if line_id is not None:
+            out.setdefault(line_id, set()).add(node_type)
+    return out
+
+
 async def create_kit_movement(
     session: AsyncSession,
     *,

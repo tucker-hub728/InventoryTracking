@@ -64,6 +64,7 @@ from app.models.locations import (
     STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
+    blocks_transfer_into_ln2,
     can_store,
     group_default_name,
     group_kind_for_code,
@@ -1458,17 +1459,27 @@ def _require_permitted_destination(
     ``prefix`` lets the multi-source endpoint name the offending leg, matching
     the ``Source {i}: ...`` convention its neighbouring errors already use.
     """
-    if not is_ln2_node(from_node.node_type):
+    if is_ln2_node(from_node.node_type):
+        if not permits_ln2_transfer_to(to_node.node_type):
+            raise ValidationError(
+                f"{prefix}'{to_node.name}' is not a permitted destination for material "
+                f"leaving liquid nitrogen — a transfer out of LN2 may only go to another "
+                f"LN2 box, to keep the cold chain intact. To begin manufacturing with "
+                f"this material use Issue on a kit; to send it to a customer use Ship.",
+                code="transfer_blocked_cold_chain",
+            )
         return
-    if permits_ln2_transfer_to(to_node.node_type):
-        return
-    raise ValidationError(
-        f"{prefix}'{to_node.name}' is not a permitted destination for material "
-        f"leaving liquid nitrogen — a transfer out of LN2 may only go to another "
-        f"LN2 box, to keep the cold chain intact. To begin manufacturing with "
-        f"this material use Issue on a kit; to send it to a customer use Ship.",
-        code="transfer_blocked_cold_chain",
-    )
+
+    # The mirror half (client 2026-08-20, beyond LOC-003 as written): LN2 is a
+    # CLOSED SET, so material that is not already in it cannot be transferred in.
+    if blocks_transfer_into_ln2(from_node.node_type, to_node.node_type):
+        raise ValidationError(
+            f"{prefix}'{from_node.name}' is outside liquid nitrogen, so its material "
+            f"cannot be transferred into '{to_node.name}' — LN2 is a closed set. "
+            f"Material enters a tank when it is received (place it straight into the "
+            f"box) or when a kit returns it.",
+            code="transfer_blocked_ln2_entry",
+        )
 
 
 async def _validate_cell_target(

@@ -38,6 +38,7 @@ from app.inventory import repository as inv_repo
 from app.locations import repository as loc_repo
 from app.models.inventory import Item, StockMovement
 from app.models.kitting import Kit, KitLine
+from app.models.locations import LocationNode, is_ln2_node
 from app.security.permissions import RequirePermission
 
 from . import repository as kit_repo
@@ -197,6 +198,7 @@ def _line_read(
     lots_by_item: dict[uuid.UUID, list] | None = None,
     issued_breakdown: dict[uuid.UUID, list] | None = None,
     floor_lots: dict[uuid.UUID, list] | None = None,
+    origins_by_line: dict[uuid.UUID, set[str]] | None = None,
 ) -> KitLineRead:
     item = items.get(line.item_id)
     per_node = stock_by_node.get(line.item_id, {})
@@ -279,9 +281,21 @@ def _line_read(
         (_option(node_id, qty) for node_id, qty in per_node.items()),
         key=lambda o: o.name,
     )
+    # LOC-003 back-flush: which side of the LN2 boundary this line came from.
+    # None for "nothing issued yet" AND for a line that drew from both sides —
+    # the same two cases the server leaves unconstrained.
+    origins = (origins_by_line or {}).get(line.id) or set()
+    ln2_origins = {t for t in origins if is_ln2_node(t)}
+    origin_is_ln2: bool | None = None
+    if origins and len(ln2_origins) == len(origins):
+        origin_is_ln2 = True
+    elif origins and not ln2_origins:
+        origin_is_ln2 = False
+
     return KitLineRead(
         id=str(line.id),
         line_no=line.line_no,
+        origin_is_ln2=origin_is_ln2,
         item_id=str(line.item_id),
         item_number=item.item_number if item else "",
         description=item.description if item else "",
@@ -341,6 +355,9 @@ async def _kit_read(db, kit: Kit) -> KitRead:
     lots_by_item = await kit_repo.item_stock_by_node_lot(db, line_item_ids)
     # What each line was ISSUED from (lot × source), for the post-issue snapshot.
     issued_breakdown = await kit_repo.line_issue_breakdown(db, kit.id)
+    # LOC-003 back-flush: the node types each line was issued from, so the
+    # close-out and return pickers can pre-filter destinations.
+    origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
     # Per-lot WIP on this kit's production floor — the pickable RETURN sources
     # (client 2026-07-24); the operator picks which floor lot's units to hand back.
     floor_lots = await kit_repo.floor_lots_by_item_at_node(
@@ -391,6 +408,7 @@ async def _kit_read(db, kit: Kit) -> KitRead:
                 lots_by_item,
                 issued_breakdown,
                 floor_lots,
+                origins_by_line,
             )
             for ln in kit.lines
         ],
@@ -695,6 +713,53 @@ async def _require_placeable(db, node_id: uuid.UUID, field: str):
     return node
 
 
+def _require_return_matches_origin(
+    *, origin_types: set[str] | None, node: LocationNode, field: str
+) -> None:
+    """Leftovers go back to the kind of place they came from (LOC-003).
+
+    The cold-chain rule on transfers (REQ-2026-08-13-LOC-003, plus the client's
+    2026-08-20 closed-set mirror) is worthless without this. Issue is not a
+    transfer, so material can leave an LN2 box for a production floor perfectly
+    legally — and if the return were unconstrained it could then come to rest on
+    an ambient shelf, moving vials out of liquid nitrogen with no transfer event
+    for the rule to catch. The same hole runs the other way: a shelf-sourced line
+    could back-flush INTO a tank.
+
+    The return destination is already DEFAULTED to the line's source (see
+    ``line.return_location_node_id = line.source_location_node_id`` at close-out
+    prep), so the ordinary flow was always right. This makes the override obey
+    the same rule instead of merely starting there.
+
+    Origins come from the ledger, so a line issued from SEVERAL locations is seen
+    in full. When those span both sides of the boundary the return is left
+    unconstrained (client 2026-08-20): the leftovers are physically
+    indistinguishable, so forcing them either way would be a guess — stranding
+    vials on one side or pushing shelf stock into a tank on the other.
+
+    Deliberately NOT applied to kit OUTPUT placement: produced material is new,
+    it has no origin to match, and its destination is a manufacturing decision.
+    """
+    if not origin_types:
+        return
+    from_ln2 = {t for t in origin_types if is_ln2_node(t)}
+    if len(from_ln2) != len(origin_types) and from_ln2:
+        return  # mixed origins — unattributable, so left to the operator
+    dest_is_ln2 = is_ln2_node(node.node_type)
+    if from_ln2 and not dest_is_ln2:
+        raise ValidationError(
+            f"{field}: this material was issued out of liquid nitrogen, so it must go "
+            f"back to an LN2 box — '{node.name}' would break the cold chain.",
+            code="return_breaks_cold_chain",
+        )
+    if not from_ln2 and dest_is_ln2:
+        raise ValidationError(
+            f"{field}: this material was not issued out of liquid nitrogen, so it "
+            f"cannot be returned into '{node.name}' — LN2 is a closed set.",
+            code="return_blocked_ln2_entry",
+        )
+
+
 async def _validate_return_cells(
     db,
     node,
@@ -825,6 +890,7 @@ async def _resolve_return_destinations(
     fallback_cells: list,
     total: int,
     claimed: dict[uuid.UUID, set[tuple[int, int]]] | None = None,
+    origin_types: set[str] | None = None,
 ) -> list[tuple[uuid.UUID, int, list]]:
     """Normalise + validate a return into placeable ``(node, qty, cells)`` slices.
 
@@ -863,6 +929,9 @@ async def _resolve_return_destinations(
             )
         seen.add(node_uuid)
         node_obj = await _require_placeable(db, node_uuid, "Return location")
+        _require_return_matches_origin(
+            origin_types=origin_types, node=node_obj, field="Return location"
+        )
         await _validate_return_cells(db, node_obj, qty, cells, "Return location", claimed)
         out.append((node_uuid, qty, cells))
     return out
@@ -1983,6 +2052,10 @@ async def return_excess(
     on_floor = _on_floor(line)
     before = _kit_snapshot(kit)
 
+    # LOC-003: leftovers go back to the kind of place they came from, so the
+    # return cannot be the way material leaves (or enters) liquid nitrogen.
+    origin_types = (await kit_repo.line_issue_source_types(db, kit.id)).get(line.id)
+
     # One cell can hold one unit, so every destination in THIS request competes
     # for the same free cells. Accumulated across all of them below.
     claimed_cells: dict[uuid.UUID, set[tuple[int, int]]] = {}
@@ -2016,6 +2089,7 @@ async def return_excess(
                 fallback_cells=s.return_cells,
                 total=s.qty,
                 claimed=claimed_cells,
+                origin_types=origin_types,
             ):
                 picks.append((lot_uuid, q, node_uuid, cells))
             per_lot[lot_uuid] = per_lot.get(lot_uuid, 0) + s.qty
@@ -2083,6 +2157,7 @@ async def return_excess(
             fallback_cells=payload.return_cells,
             total=payload.qty,
             claimed=claimed_cells,
+            origin_types=origin_types,
         )
         note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
         if payload.reason:
@@ -2358,7 +2433,15 @@ async def close_out_kit(
             ret = _parse_uuid_or_422(
                 line_in.return_location_node_id, field="return_location_node_id"
             )
-            await _require_placeable(db, ret, "Return location")
+            node_obj = await _require_placeable(db, ret, "Return location")
+            # Rejected here as well as at back-flush time, so the operator is
+            # told while they are still choosing rather than after the produce
+            # step has already run.
+            _require_return_matches_origin(
+                origin_types=(await kit_repo.line_issue_source_types(db, kit.id)).get(lid),
+                node=node_obj,
+                field=f"Line {lines_by_id[lid].line_no}",
+            )
             lines_by_id[lid].return_location_node_id = ret
 
     # 1. Produce the FINAL batch — consumes the entered used (≥ need, ≤ floor),
@@ -2383,6 +2466,8 @@ async def close_out_kit(
     #    produce batch (``_on_floor`` already nets out cumulative used) — to each
     #    line's return location (REQ-2026-07-09-TRX-003), so the kit's WIP
     #    reaches zero.
+    # LOC-003 origins for every line at once, rather than a query per line.
+    origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
     for line in kit.lines:
         returned = _on_floor(line)
         if returned <= 0:
@@ -2400,6 +2485,7 @@ async def close_out_kit(
             fallback_cells=return_cells_by_line.get(line.id, []),
             total=returned,
             claimed=claimed_cells,
+            origin_types=origins_by_line.get(line.id),
         )
         # One back-flush movement per destination: the leftover may be split
         # across boxes when no single one has enough free cells.
@@ -2506,6 +2592,10 @@ async def cancel_kit(
     # return carries no lot assignment (TRX-008). A draft has moved nothing, so
     # it writes no movements at all.
     if kit.status != "draft":
+        # LOC-003: a cancelled kit's material goes back to the kind of place it
+        # came from, exactly as a close-out back-flush does. Abandoning a kit
+        # must not become the way vials leave liquid nitrogen.
+        origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
         # Per-line destinations (D1). When supplied they must cover every line
         # still holding material, so the dialog can't silently drop a component.
         by_line = {
@@ -2542,6 +2632,7 @@ async def cancel_kit(
                     fallback_cells=line_in.return_cells,
                     total=on_floor,
                     claimed=claimed_cells,
+                    origin_types=origins_by_line.get(line.id),
                 )
             else:
                 fallback = line.return_location_node_id or line.source_location_node_id
@@ -2557,6 +2648,7 @@ async def cancel_kit(
                     fallback_cells=[],
                     total=on_floor,
                     claimed=claimed_cells,
+                    origin_types=origins_by_line.get(line.id),
                 )
             # One return movement per destination — the material may be split
             # across boxes when no single one has enough free cells.

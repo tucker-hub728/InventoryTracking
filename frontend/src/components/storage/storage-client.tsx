@@ -19,6 +19,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { Boxes, Plus } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
 import { PageHeader } from '@/components/shared/page-header';
@@ -33,10 +34,32 @@ import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import { CreateStorageLocationDialog } from './create-storage-location-dialog';
 import {
   DEFAULT_GROUP_SEGMENT,
+  STORAGE_GROUPS,
   STORAGE_ROOM_CODE,
   groupFor,
+  kindForCode,
   storageHref,
 } from './storage-groups';
+
+/**
+ * How many sub-type rows a card shows before its list starts scrolling.
+ *
+ * A location may hold any number of sub-types of a kind since LOC-001 was
+ * amended (2026-08-13), and a location with nine of them made its card three
+ * times the height of its neighbours. CSS grid then stretches every card in that
+ * ROW to match, so one long location left the short ones with a band of dead
+ * space down the middle (the client's screenshot, 2026-08-20).
+ *
+ * Four is where a list stops being read row by row. Past it the roll-up chips
+ * answer "what equipment is in here" at a glance and the rows are there to be
+ * scanned, which a scroll serves as well as height does.
+ */
+const MAX_VISIBLE_ROWS = 4;
+
+/** One sub-type row in px — its 20px line box plus the 4px gap under it. A
+ *  number rather than a class because the list height is computed from the
+ *  longest list on the page, not fixed. */
+const ROW_H = 24;
 
 export function StorageClient() {
   // LOC-004: the template's sub-locations are admin-configurable, on the same
@@ -130,6 +153,22 @@ export function StorageClient() {
     return { units, occupied, stock };
   }, [categories]);
 
+  /**
+   * The height every card's sub-type list is given, in rows — so the grid reads
+   * as one set of cards rather than a ragged skyline.
+   *
+   * It is the LONGEST list on the page, capped at {@link MAX_VISIBLE_ROWS}: a
+   * page of one-sub-type locations stays compact instead of reserving four rows
+   * of white space per card, and a page holding a nine-sub-type location scrolls
+   * that one card instead of dragging every card in its row up to nine rows tall.
+   * Deliberately computed HERE and passed down — a card cannot see its siblings,
+   * and a per-card height is exactly the ragged grid this replaces.
+   */
+  const listRows = React.useMemo(() => {
+    const longest = categories.reduce((most, c) => Math.max(most, (c.children ?? []).length), 0);
+    return Math.min(MAX_VISIBLE_ROWS, Math.max(1, longest));
+  }, [categories]);
+
   return (
     <>
       <PageHeader
@@ -215,14 +254,20 @@ export function StorageClient() {
 
             {loading ? (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                {/* Sized like a real card rather than a flat h-32, so the grid
+                    does not jump a row taller the moment the tree lands. */}
                 {Array.from({ length: 3 }, (_, i) => (
-                  <Skeleton key={i} className="h-32 rounded-lg" />
+                  <Skeleton
+                    key={i}
+                    className="rounded-lg"
+                    style={{ height: 88 + listRows * ROW_H }}
+                  />
                 ))}
               </div>
             ) : (
               <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {categories.map((cat) => (
-                  <CategoryCard key={cat.id} category={cat} />
+                  <CategoryCard key={cat.id} category={cat} rows={listRows} />
                 ))}
               </ul>
             )}
@@ -244,9 +289,26 @@ export function StorageClient() {
   );
 }
 
-/** One location: its name, what it holds, and the sub-types it uses. */
-function CategoryCard({ category }: { category: NodeTree }) {
-  const groups = category.children ?? [];
+/** One kind of equipment a location has, folded down from its sub-types. */
+interface KindRollUp {
+  key: string;
+  icon: LucideIcon;
+  singular: string;
+  plural: string;
+  count: number;
+}
+
+/**
+ * One location: its name, what it holds, and the sub-types it uses.
+ *
+ * `rows` is the shared list height, in rows, that every card on the page gets —
+ * see {@link MAX_VISIBLE_ROWS}. The card never chooses its own: cards that size
+ * themselves are what made the grid ragged.
+ */
+function CategoryCard({ category, rows }: { category: NodeTree; rows: number }) {
+  // Memoised for the `kinds` roll-up below: `?? []` is a fresh array on every
+  // render, which would re-fold the kinds on each one.
+  const groups = React.useMemo(() => category.children ?? [], [category]);
   // Open on the location's FIRST sub-type rather than the first KIND — a
   // location with no shelf has no `shf` tab to land on, and one whose first
   // sub-type is a second freezer (`FRZ-2`) is not found by a kind lookup either.
@@ -258,6 +320,44 @@ function CategoryCard({ category }: { category: NodeTree }) {
     0,
   );
   const units = groups.reduce((sum, g) => sum + (g.children ?? []).length, 0);
+
+  /** Does this location's list outgrow the height every card was given? Only
+   *  then are the roll-up chips worth their line: with three sub-types the rows
+   *  themselves already say which kinds are here, and a chip row repeating them
+   *  is noise on the majority of cards. */
+  const overflows = groups.length > rows;
+
+  /**
+   * The sub-types folded down to their KINDS — "3 freezers", not three names.
+   *
+   * This is the answer a card can still give when the names no longer fit, and
+   * it is the one thing that reads the same on every card however many sub-types
+   * a location has. Ordered by {@link STORAGE_GROUPS}, so two locations with the
+   * same equipment summarise the same way round whatever order they were added
+   * in; an unrecognised code keeps its own bucket at the end rather than being
+   * dropped, on the same reasoning as `groupFor`.
+   */
+  const kinds = React.useMemo<KindRollUp[]>(() => {
+    const order = STORAGE_GROUPS.map((g) => g.key as string);
+    const byKind = new Map<string, KindRollUp>();
+    for (const group of groups) {
+      const kind = kindForCode(group.code);
+      const key = kind?.key ?? 'other';
+      const entry = byKind.get(key) ?? {
+        key,
+        icon: kind?.icon ?? Boxes,
+        singular: (kind?.defaultName ?? 'other sub-type').toLowerCase(),
+        plural: kind?.plural ?? 'other sub-types',
+        count: 0,
+      };
+      entry.count += 1;
+      byKind.set(key, entry);
+    }
+    // Unknown kinds sort last: `indexOf` returns -1, and `?? order.length` on a
+    // -1 would not fire, so the index is normalised rather than defaulted.
+    const rank = (key: string) => (order.indexOf(key) === -1 ? order.length : order.indexOf(key));
+    return [...byKind.values()].sort((a, b) => rank(a.key) - rank(b.key));
+  }, [groups]);
 
   return (
     <li>
@@ -273,8 +373,13 @@ function CategoryCard({ category }: { category: NodeTree }) {
                 stranger form (client, 2026-08-12). Nothing user-facing shows
                 it. */}
             <p className="truncate text-sm font-medium text-text">{category.name}</p>
-            <p className="mt-0.5 text-xs text-text-3">
+            {/* Two counts, because they answer different questions and a card
+                that shows only the units reads as empty for a location that was
+                just set up with nine sub-types and nothing in them yet. */}
+            <p className="mt-0.5 truncate text-xs text-text-3">
               {units === 0 ? 'No units yet' : `${units} ${units === 1 ? 'unit' : 'units'}`}
+              {groups.length > 0 &&
+                ` · ${groups.length} sub-${groups.length === 1 ? 'type' : 'types'}`}
             </p>
           </div>
           {/* What the card is really for: telling a location that holds
@@ -290,47 +395,98 @@ function CategoryCard({ category }: { category: NodeTree }) {
           </div>
         </div>
 
-        {groups.length === 0 ? (
-          // A location whose sub-types were all switched off. Three "not used"
-          // rows would describe it accurately and tell you nothing about what to
-          // do, so it says the one thing that matters.
-          //
-          // This is how every location STARTS now, so it is the first thing seen
-          // after creating one — not a misconfiguration. The debit-and-gone
-          // branch that used to live here is gone with them: they are filtered
-          // out of this grid entirely.
-          <p className="border-t border-border px-4 py-3 text-xs text-text-3">
-            No sub-types yet — add them from the location’s menu.
-          </p>
-        ) : (
-          <dl className="mt-auto space-y-1.5 border-t border-border px-4 py-3">
-            {/* The location's ACTUAL sub-types, one row each.
-                This used to iterate the three kinds and match a group by exact
-                code, which held only while a location had at most one of each.
-                It now can have several ("Minus-20 Freezer", "Minus-80 Freezer",
-                codes FRZ and FRZ-2) or none at all — and the old lookup would
-                have reported a location whose only freezer is FRZ-2 as having no
-                freezer, because it searched for the bare code. */}
-            {groups.length === 0 ? (
-              <div className="text-xs text-text-3/70">No sub-types yet</div>
-            ) : (
-              groups.map((group) => {
-                const Icon = groupFor(group).icon;
-                const count = (group.children ?? []).length;
-                return (
-                  <div key={group.id} className="flex items-center gap-2 text-xs text-text-2">
-                    <Icon size={13} className="shrink-0 text-accent" />
-                    {/* The sub-type's OWN name — the client named it. */}
-                    <span className="truncate">{group.name}</span>
-                    <span className="ml-auto shrink-0 tabular-nums">
-                      {count === 0 ? '—' : count}
-                    </span>
-                  </div>
-                );
-              })
-            )}
-          </dl>
-        )}
+        {/* One band, always the same height on every card on the page — which
+            is the whole point. It used to be two different elements of two
+            different heights (a one-line paragraph, or a list as long as the
+            location happened to be), so no two cards in a row matched. */}
+        <div className="mt-auto border-t border-border px-4 py-3">
+          {groups.length === 0 ? (
+            // A location whose sub-types were all switched off. Three "not used"
+            // rows would describe it accurately and tell you nothing about what
+            // to do, so it says the one thing that matters.
+            //
+            // This is how every location STARTS now, so it is the first thing
+            // seen after creating one — not a misconfiguration. The
+            // debit-and-gone branch that used to live here is gone with them:
+            // they are filtered out of this grid entirely.
+            <p
+              className="flex items-center text-xs text-text-3"
+              style={{ height: rows * ROW_H }}
+            >
+              No sub-types yet — add them from the location’s menu.
+            </p>
+          ) : (
+            <>
+              {/* The roll-up, on the cards that need it. See `kinds`. */}
+              {overflows && (
+                <ul
+                  className="mb-2 flex flex-wrap items-center gap-1"
+                  aria-label={`${category.name} equipment by kind`}
+                >
+                  {kinds.map((kind) => (
+                    <li
+                      key={kind.key}
+                      className="inline-flex items-center gap-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-text-2"
+                    >
+                      <kind.icon size={11} className="shrink-0 text-accent" />
+                      <span className="tabular-nums">{kind.count}</span>
+                      {kind.count === 1 ? kind.singular : kind.plural}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="relative">
+                {/* The location's ACTUAL sub-types, one row each.
+                    This used to iterate the three kinds and match a group by
+                    exact code, which held only while a location had at most one
+                    of each. It now can have several ("Minus-20 Freezer",
+                    "Minus-80 Freezer", codes FRZ and FRZ-2) or none at all — and
+                    the old lookup would have reported a location whose only
+                    freezer is FRZ-2 as having no freezer, because it searched
+                    for the bare code.
+
+                    Tree order, deliberately: this is the order of the tab strip
+                    on the location's own page, so the card is a preview of where
+                    you are about to land rather than a second arrangement of the
+                    same sub-types. */}
+                <dl
+                  className="scroll-list space-y-1 pr-1"
+                  style={{ height: rows * ROW_H }}
+                >
+                  {groups.map((group) => {
+                    const Icon = groupFor(group).icon;
+                    const count = (group.children ?? []).length;
+                    return (
+                      <div
+                        key={group.id}
+                        className="flex h-5 items-center gap-2 text-xs text-text-2"
+                      >
+                        <Icon size={13} className="shrink-0 text-accent" />
+                        {/* The sub-type's OWN name — the client named it. */}
+                        <span className="truncate">{group.name}</span>
+                        <span className="ml-auto shrink-0 tabular-nums">
+                          {count === 0 ? '—' : count}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </dl>
+                {/* The scrollbar is thin and only shows on hover on some
+                    platforms, so the fade is what says "there is more below" at
+                    rest. Only drawn when there IS more — a permanent fade over
+                    the last row of a short list just looks like a rendering
+                    bug. */}
+                {overflows && (
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-0 bottom-0 h-5 rounded-b-lg bg-gradient-to-t from-bg-elev to-transparent"
+                  />
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </Link>
     </li>
   );
