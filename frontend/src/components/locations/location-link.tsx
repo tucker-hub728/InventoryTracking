@@ -7,9 +7,6 @@
  * node belongs to depends on where it hangs, so the href is derived from the
  * node's ancestry rather than from the node itself:
  *
- *   Materials Management  →  /materials-management/{warehouse|cold-storage}/{id}
- *   Cold Storage          →  /cold-storage/{id}
- *   Analytical Lab        →  /analytical-lab/{id}
  *   Storage               →  /storage/{category}/{tab}/{id}
  *   LN2                   →  /ln2/{tank}/{quadrant}/{rack}/{box}
  *   Production            →  /production/{id}
@@ -27,15 +24,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 
-import {
-  MM_ROOM_CODE,
-  mmHref,
-} from '@/components/materials-management/mm-tabs';
 import { DEFAULT_FLOOR_TAB, FLOOR_TABS } from '@/components/production/floor-tabs';
-import {
-  ANALYTICAL_LAB_ROOM,
-  COLD_STORAGE_ROOM,
-} from '@/components/rooms/room-config';
 import {
   DEFAULT_GROUP_SEGMENT,
   STORAGE_ROOM_CODE,
@@ -116,17 +105,6 @@ export function locationHref(
   }
 
   switch (root.code) {
-    case MM_ROOM_CODE:
-      // The room's two locations are tabs, and a warehouse anywhere in the
-      // ancestry means this is a shelf rather than a freezer unit.
-      return mmHref(
-        chain.some((n) => n.nodeType === 'warehouse') ? 'warehouse' : 'cold-storage',
-        node.id,
-      );
-    case COLD_STORAGE_ROOM.code:
-      return `${COLD_STORAGE_ROOM.href}/${node.id}`;
-    case ANALYTICAL_LAB_ROOM.code:
-      return `${ANALYTICAL_LAB_ROOM.href}/${node.id}`;
     case STORAGE_ROOM_CODE: {
       // Storage is the one room four levels deep — room › category › group ›
       // unit (LOC-001) — so its href needs two ids, not one: the category owns
@@ -161,7 +139,7 @@ export function locationHref(
   }
 }
 
-/** The breadcrumb for a node, for a tooltip — "Materials Management › Shelf A". */
+/** The breadcrumb for a node, for a tooltip — "Storage › Lab B › Freezer 2". */
 function chainLabel(chain: PNode[]): string | null {
   const real = chain.filter((n) => !n.isGroup);
   return real.length > 0 ? real.map((n) => n.name).join(' › ') : null;

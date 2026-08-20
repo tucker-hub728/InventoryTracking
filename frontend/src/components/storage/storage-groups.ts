@@ -39,7 +39,7 @@
  * server components and call {@link isStorageSegment} to validate the URL
  * segment. Exporting from a client component hands the server a client
  * *reference*, and calling it throws at request time. Same reasoning as
- * ``materials-management/mm-tabs.ts`` and ``production/floor-tabs.ts``.
+ * ``production/floor-tabs.ts``.
  */
 import { Boxes, Refrigerator, Rows3, Snowflake } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';

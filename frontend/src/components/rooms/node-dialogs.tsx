@@ -3,9 +3,11 @@
 /**
  * Add / rename dialogs for a room's locations and sub-locations.
  *
- * Lifted out of ``materials-management-client.tsx`` when Cold Storage and the
- * Analytical Lab got screens of their own — all three rooms create and rename
- * the same two node types, so the dialogs belong to no one room.
+ * Shared rather than owned by one screen: Storage and Debit-and-gone both
+ * create and rename the same two node types. (Originally lifted out of the
+ * Materials Management screen when Cold Storage and the Analytical Lab got
+ * screens of their own; all three rooms were retired 2026-08-19, and the
+ * dialogs outlived them because they never belonged to any one room.)
  *
  * Both are Super-Admin-only actions (LOC-003 / LOC-006); the API enforces that
  * and the caller decides whether to render the control at all.

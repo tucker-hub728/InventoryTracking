@@ -319,6 +319,57 @@ FLAT_CATEGORIES: tuple[str, ...] = (
 )
 
 
+# REQ-2026-08-13-LOC-003, the cold-chain rule: where material may go when it
+# leaves liquid-nitrogen storage. The requirement names three permitted
+# destinations — "another LN2 location; a production room ...; and customer
+# shipment" — and blocks everything else ("unlisted or ambient") to preserve
+# cold-chain integrity.
+#
+# Only ONE of those three is a TRANSFER, and that is the whole reason this set
+# holds a single member:
+#
+#     another LN2 location   → a transfer, to a box.        ← this set
+#     a production room      → the KITTING ISSUE flow, which relocates stock to
+#                              ``kit.production_location_node_id``. A production
+#                              area is a ``flat`` node and cannot hold an
+#                              allocation (it is not in STORAGE_NODE_TYPES), so
+#                              a transfer cannot reach it and must not learn to:
+#                              kit close-out drains a production node by
+#                              (item, node) FIFO with no kit scoping, so an
+#                              un-kitted allocation parked there would be
+#                              silently consumed by an unrelated kit.
+#     customer shipment      → ``POST /shipments``, which posts a
+#                              ``customer_shipment`` movement with NO
+#                              destination node at all. There is no node to name
+#                              here, so it cannot be a transfer destination.
+#
+# So this set is what a transfer may target, and the other two permitted
+# destinations stay the separate transactions they already are. The refusal
+# message names them, so an operator who picked the wrong action is told which
+# screen to use rather than merely being stopped.
+#
+# The membership test is by node TYPE, deliberately — NOT "a DIFFERENT LN2
+# location", which is what the requirement's word "another" literally says.
+# Rearranging vials between cells of ONE box is posted as a transfer (and
+# ``/transfer-batch`` has no same-node guard), so a different-node rule would
+# destroy the only way to reorganise a box. Cell-level moves stay legal here and
+# are covered by ``ck_location_nodes_grid_presence`` further down: a grid, hence
+# a cell coordinate, exists only on a ``box``.
+#
+# Cold Storage is deliberately NOT here. A −80/−20/2–8 °C unit is a
+# ``sub_location``: not LN2, not a production room, not a customer, therefore
+# "unlisted" — and the requirement blocks "unlisted OR ambient", not merely
+# ambient. Client-confirmed 2026-08-20 as the literal reading. This is the only
+# move the rule actually changes in current data: no ``warehouse``/``shelf`` node
+# exists any more (the three rooms were retired 2026-08-19), so the
+# requirement's own example — "a general warehouse shelf" — is unreachable.
+#
+# The linked REQ-2026-08-13-LOC-004 proposes a material-type exception that is
+# still PENDING. When it lands it keys off the ITEM, not the node, so it belongs
+# in the caller beside this check — not inside this set.
+LN2_TRANSFER_DESTINATIONS: frozenset[str] = frozenset({"box"})
+
+
 def can_store(node_type: str) -> bool:
     """True iff a node of this type may hold a lot allocation."""
     return node_type in STORAGE_NODE_TYPES
@@ -327,6 +378,30 @@ def can_store(node_type: str) -> bool:
 def is_grid_node(node_type: str) -> bool:
     """True iff a node of this type carries a rows×cols grid (the Box)."""
     return node_type in GRID_NODE_TYPES
+
+
+def is_ln2_node(node_type: str) -> bool:
+    """True iff a node of this type lives in the liquid-nitrogen hierarchy.
+
+    Asked of a SOURCE, this is today equivalent to ``node_type == "box"`` — the
+    box is the only LN2 level that can hold an allocation. It is written against
+    ``LN2_LEVELS`` anyway because REQ-2026-07-22-LOC-004's configurable cascade
+    is explicitly designed to add levels back, and the day a second LN2 level
+    becomes storable, a ``== "box"`` spelling would silently stop guarding it.
+    """
+    return node_type in LN2_LEVELS
+
+
+def permits_ln2_transfer_to(node_type: str) -> bool:
+    """True iff a transfer OUT of LN2 may land on a node of this type (LOC-003).
+
+    See :data:`LN2_TRANSFER_DESTINATIONS` for why the permitted set is what it
+    is. Callers must apply this only when the SOURCE is LN2 — an ordinary
+    shelf-to-shelf move is not governed by the cold-chain rule, and the
+    requirement constrains transfers OUT of LN2 only. Moves INTO a box (a
+    receipt placement, a kit back-flush of leftovers) are likewise untouched.
+    """
+    return node_type in LN2_TRANSFER_DESTINATIONS
 
 
 def is_kanban_node(node_type: str) -> bool:

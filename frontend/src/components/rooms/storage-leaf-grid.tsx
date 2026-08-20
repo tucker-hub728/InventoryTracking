@@ -29,8 +29,15 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 
-import { leafAnchorId } from './room-shortcuts';
 import type { NodeTree } from '@/lib/api/location-nodes';
+
+/** Anchor id for one storage leaf, so a caller can scroll to it.
+ *
+ *  Previously lived in ``room-shortcuts.tsx`` beside the A–Z LetterRail and the
+ *  GroupJumpChips. Both were UI-002 shortcuts whose only justification was
+ *  Warehouse One's Shelf A–Z (LOC-005); that room was retired 2026-08-19, so
+ *  they went with it and this was the one export left standing. */
+export const leafAnchorId = (leafId: string) => `loc-leaf-${leafId}`;
 
 /** Search appears once a grid is long enough to need it. 26 shelves do; three
  *  freezer units do not, and an empty search box on three cards is noise. */

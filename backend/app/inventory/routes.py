@@ -1051,6 +1051,9 @@ async def item_stock_locations(
     # picker and the shipment source list too, and widening it would ripple into
     # both for a field only this view reads.
     release_states = await inv_repo.lot_release_states(db, {r[0] for r in rows})
+    # What kind of place each row sits in, for the LOC-003 cold-chain rule in
+    # the transfer dialog. One query for the nodes on show.
+    node_types = await loc_repo.node_types_by_ids(db, {r[3] for r in rows})
 
     out: list[ItemStockLocationRead] = []
     for (lot_id, lot_number, exp, node_id, qty) in rows:
@@ -1063,6 +1066,7 @@ async def item_stock_locations(
                 expiration_date=exp,
                 node_id=str(node_id),
                 location=_label(node_id),
+                node_type=node_types.get(node_id, ""),
                 qty=qty,
                 is_grid=dims is not None,
                 grid_rows=dims[0] if dims else None,

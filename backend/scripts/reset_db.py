@@ -11,8 +11,9 @@ modes below are schema-aware and discover schemas dynamically:
     ``_REFERENCE_TABLES`` (users, suppliers, item tiers + prefixes). Runs
     WITHOUT CASCADE on purpose, so Postgres aborts rather than silently
     emptying a kept table that turns out to depend on a wiped one. Pair it
-    with ``scripts/seed_locations.py`` to rebuild the rooms and production
-    areas; see ``_POST_TRUNCATE_NOTES`` for what no seed rebuilds.
+    with ``scripts/seed_production.py`` to rebuild the clean rooms — the only
+    location seed there is; see ``_POST_TRUNCATE_NOTES`` for what nothing
+    rebuilds (Storage and LN2 are both built in the app, by design).
   * ``--schema``: DROPs the application schemas outright (app/meta/audit) and
     resets ``public`` (clearing ``alembic_version``). Extensions are recreated
     idempotently by the first migration, so pair it with ``--migrate`` (or run
@@ -139,14 +140,13 @@ _IMMUTABLE_TABLES = (
 # both used to be found out days later.
 _POST_TRUNCATE_NOTES = """
 Next steps
-  scripts/seed_locations.py --yes   rebuilds every room and the production areas:
-      Materials Management  Warehouse One (Shelf A-Z) + Minus-20 Freezers
-      Cold Storage          Minus-20 / Minus-80 groups
-      Analytical Lab        one Minus-20, one Minus-80
-      Production            six clean rooms
-    (or one area at a time: seed_cold_storage.py, seed_production.py, ...)
+  scripts/seed_production.py --yes  rebuilds the six clean rooms (07-22-LOC-003).
+    That is the ONLY location seed there is.
 
 NOT rebuilt by any seed - recreate these yourself
+  * Storage locations. Nothing seeds them: the server creates the STG room when
+    a Super Admin adds the first location, and the sub-types are added after
+    that, by kind (LOC-001). Build them in the app.
   * The LN2 tree (tanks, quadrants, racks, boxes). LN2 is NEVER seeded: the tank
     numbers are the client's, so tanks are always created by a user on the LN2
     page. A wipe destroys the whole cascade and nothing brings it back.
