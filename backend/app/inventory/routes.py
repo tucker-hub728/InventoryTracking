@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
+from app.core.bounds import MAX_QTY
 from app.core.exceptions import (
     AuthorizationError,
     ConflictError,
@@ -1201,6 +1202,7 @@ async def update_lot(
     # Quantity may be corrected post-receipt, but never below what is already
     # physically placed in locations — the operator must unplace first.
     new_qty: int | None = None
+    origin_line = None
     if "ordered_qty" in patch:
         new_qty = patch["ordered_qty"]
         placed = int(await loc_repo.sum_active_alloc_qty_for_lot(db, lot.id))
@@ -1211,6 +1213,22 @@ async def update_lot(
                 f"at least {placed}.",
                 code="qty_below_placed",
             )
+        # The lot's quantity is in CONSUME units; the Order line it feeds counts
+        # PACKS (REQ-001). Validate the divide-back HERE, before anything is
+        # mutated — unwinding afterwards would mean rolling back mid-request,
+        # which expires every loaded ORM object and turns the next attribute
+        # read into a MissingGreenlet 500 instead of the 422 the operator needs.
+        origin_line = await inv_repo.get_order_line_for_lot(db, lot.id)
+        if origin_line is not None and origin_line.units_per_pack:
+            try:
+                inv_repo.units_to_packs(new_qty, origin_line.units_per_pack)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"{new_qty} units is not a whole number of "
+                    f"{origin_line.pack_uom}es of {origin_line.units_per_pack}. "
+                    f"Use a multiple of {origin_line.units_per_pack}.",
+                    code="qty_not_whole_packs",
+                ) from exc
 
     if "supplier_id" in patch:
         v = patch["supplier_id"]
@@ -1263,24 +1281,32 @@ async def update_lot(
     if new_qty is not None:
         event_line = await inv_repo.get_event_line_by_lot(db, updated.id)
         if event_line is not None:
-            event_line.qty_received = new_qty
+            order = (
+                await inv_repo.get_order(db, updated.receipt_transaction_id)
+                if updated.receipt_transaction_id is not None
+                else None
+            )
+            # ``new_qty`` is the LOT's quantity, in CONSUME units. The event
+            # line it feeds is in ORDER units (REQ-001), so this must divide
+            # back — writing 300 straight into a column holding boxes would
+            # mark the order 100× over-received, silently and with a signature
+            # on it. Divisibility was already proven above, before any mutation,
+            # so this cannot raise.
+            units_per_pack = origin_line.units_per_pack if origin_line else None
+            event_line.qty_received = inv_repo.units_to_packs(new_qty, units_per_pack)
             await db.flush()
-            if updated.receipt_transaction_id is not None:
-                order = await inv_repo.get_order(db, updated.receipt_transaction_id)
-                if order is not None:
-                    recd = await inv_repo.received_qty_by_line(
-                        db, [ln.id for ln in order.lines]
+            if order is not None:
+                recd = await inv_repo.received_qty_by_line(
+                    db, [ln.id for ln in order.lines]
+                )
+                new_status = inv_repo.derive_order_status(list(order.lines), recd)
+                if new_status != order.status:
+                    await inv_repo.set_order_status(
+                        db,
+                        txn=order,
+                        status=new_status,
+                        received_by_user_id=current.id,
                     )
-                    new_status = inv_repo.derive_order_status(
-                        list(order.lines), recd
-                    )
-                    if new_status != order.status:
-                        await inv_repo.set_order_status(
-                            db,
-                            txn=order,
-                            status=new_status,
-                            received_by_user_id=current.id,
-                        )
 
     await record_entity_change(
         db,
@@ -1599,6 +1625,9 @@ def _order_to_read(
     total_received = 0
     for line in txn.lines:
         recd = received.get(line.id, 0)
+        # All three in ORDER units, so this subtraction is like-for-like and
+        # needs no conversion — that is the whole reason the received quantity
+        # is captured in packs (REQ-001).
         outstanding = max(0, line.ordered_qty - recd)
         total_ordered += line.ordered_qty
         total_received += recd
@@ -1615,6 +1644,17 @@ def _order_to_read(
                 unit_price_amount=line.unit_price_amount,
                 received_qty=recd,
                 outstanding_qty=outstanding,
+                pack_uom=line.pack_uom,
+                units_per_pack=line.units_per_pack,
+                # Served rather than left to the client so the multiplication
+                # exists in one language, not two. Note these are 0 only when
+                # the line itself is 0 — an unpacked line converts 1:1.
+                ordered_units=inv_repo.packs_to_units(
+                    line.ordered_qty, line.units_per_pack
+                ),
+                outstanding_units=inv_repo.packs_to_units(
+                    outstanding, line.units_per_pack
+                ),
             )
         )
 
@@ -1628,6 +1668,15 @@ def _order_to_read(
                 over_receipt_reason=el.over_receipt_reason,
                 lot_id=str(el.lot_id),
                 lot_number=el.lot.lot_number if el.lot else None,
+                # All off the eager-joined lot — no extra queries. ``ordered_qty``
+                # on a lot is the CONSUME units this draw placed (REQ-001), which
+                # is the figure a receiving log has to show: "+148" is Cases,
+                # and 148 Cases of 25 is 3,700 units.
+                units_received=el.lot.ordered_qty if el.lot else None,
+                manufacture_date=el.lot.manufacture_date if el.lot else None,
+                expiration_date=el.lot.expiration_date if el.lot else None,
+                unit_price_amount=el.lot.unit_price_amount if el.lot else None,
+                release_state=el.lot.release_state if el.lot else None,  # type: ignore[arg-type]
             )
             for el in ev.lines
         ]
@@ -1757,6 +1806,13 @@ async def _build_order_lines(
 ) -> list:
     """Resolve item + per-line supplier and insert the Order's lines (1-based
     ``line_no`` in payload order). Used by create + edit.
+
+    The line's pack (REQ-001) comes from the payload and nowhere else — there
+    is no item-level default to inherit, because a pack is a fact about a
+    purchase rather than about the material. Omitting it orders in the item's
+    consume unit, which is how every line behaved before REQ-001. Once written
+    the line owns it, so a supplier changing from Box/100 to Case/500 next year
+    cannot rewrite what this order says it bought.
     """
     created = []
     for idx, line in enumerate(lines_input, start=1):
@@ -1767,6 +1823,19 @@ async def _build_order_lines(
         supplier = await _resolve_item_supplier(
             db, item_id=item_uuid, supplier_id=line.supplier_id
         )
+        pack_uom = line.pack_uom
+        units_per_pack = line.units_per_pack
+        # A line ordered in packs is multiplied out at receive; guard the
+        # product here, at the edge, rather than letting a plausible-looking
+        # 20,000 Box × 500 reach the ledger as ten million units.
+        if units_per_pack is not None:
+            total_units = line.ordered_qty * units_per_pack
+            if total_units > MAX_QTY:
+                raise ValidationError(
+                    f"{line.ordered_qty} × {units_per_pack} is {total_units} "
+                    f"units, above the {MAX_QTY} limit for a single line",
+                    code="ordered_units_exceeds_max",
+                )
         row = await inv_repo.add_order_line(
             db,
             txn_id=txn_id,
@@ -1775,6 +1844,8 @@ async def _build_order_lines(
             supplier_id=supplier.id,
             ordered_qty=line.ordered_qty,
             unit_price_amount=line.unit_price,
+            pack_uom=pack_uom,
+            units_per_pack=units_per_pack,
         )
         await record_entity_change(
             db,
@@ -1782,7 +1853,11 @@ async def _build_order_lines(
             action="created",
             subject_table="app.receipt_transaction_lines",
             subject_id=row.id,
-            subject_label=f"{item.item_number} × {line.ordered_qty}",
+            subject_label=(
+                f"{item.item_number} × {line.ordered_qty} {pack_uom}"
+                if pack_uom
+                else f"{item.item_number} × {line.ordered_qty}"
+            ),
             before=None,
             after=inv_repo.order_line_to_audit_snapshot(row),
             context={"receipt_transaction_id": str(txn_id)},
@@ -2132,17 +2207,23 @@ async def _place_received_lot(
     db: DBSession,
     *,
     lot: Lot,
-    qty_received: int,
+    qty_units: int,
     placement: ReceivePlacement,
     evidence_uuid: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
     """Unit-IN the freshly-received lot into its chosen destination.
 
-    Single destination, exactly ``qty_received`` units — one box (N distinct
+    Single destination, exactly ``qty_units`` units — one box (N distinct
     empty cells) or one free leaf (freezer sub-location / warehouse shelf, N
     units). Writes the allocations + a single ``+N`` receipt movement under the
     receive's e-signature (``evidence_uuid``). Caller commits.
+
+    ``qty_units`` is in CONSUME units and is **not** the quantity the receiver
+    typed: 3 Box of 100 arrives here as 300, and an LN2 box therefore needs 300
+    free cells, not 3. The parameter was renamed from ``qty_received`` when
+    REQ-001 landed precisely because the two numbers stopped being the same and
+    the old name invited the caller to pass the wrong one.
     """
     node_uuid = _parse_uuid_or_422(placement.node_id, field="node_id")
     node = await loc_repo.get_node(db, node_uuid)
@@ -2159,9 +2240,9 @@ async def _place_received_lot(
 
     if is_grid_node(node.node_type):
         cells = placement.cells
-        if len(cells) != qty_received:
+        if len(cells) != qty_units:
             raise ValidationError(
-                f"Select exactly {qty_received} cell(s) for the received quantity "
+                f"Select exactly {qty_units} cell(s) for the received quantity "
                 f"(got {len(cells)})",
                 code="placement_qty_mismatch",
             )
@@ -2202,7 +2283,7 @@ async def _place_received_lot(
             db,
             lot_id=lot.id,
             location_node_id=node.id,
-            qty=Decimal(qty_received),
+            qty=Decimal(qty_units),
             created_by_user_id=user_id,
         )
 
@@ -2212,7 +2293,7 @@ async def _place_received_lot(
         item_id=lot.item_id,
         lot_id=lot.id,
         to_location_node_id=node.id,
-        qty=Decimal(qty_received),
+        qty=Decimal(qty_units),
         performed_by_user_id=user_id,
         reauth_evidence_id=evidence_uuid,
     )
@@ -2279,6 +2360,71 @@ async def receive_order(
             )
         seen_lines.add(line_uuid)
 
+        # ── Resolve the pack, then convert once (REQ-001) ──────────────
+        # ``qty_received`` is in ORDER units. Everything from the lot onward is
+        # in CONSUME units. This block is the entire boundary between the two.
+        #
+        # The receiver may set or correct the pack here, not just supply a
+        # missing one: the PO is a plan, and what turned up on the dock is the
+        # fact. A line raised as a plain count can become "3 Box of 100" at the
+        # moment somebody is holding the boxes, which is the only point anyone
+        # actually knows. Whatever is used is written back to the line so the
+        # order, its audit trail and every later read agree.
+        # Omitted vs. explicitly null are different answers here, and both
+        # arrive as ``None``: omitted means "keep whatever the line has", null
+        # means "this line has no pack", which is the only way to clear one at
+        # receipt. ``model_fields_set`` is what tells them apart.
+        sent = line_in.model_fields_set
+        pack_uom = line_in.pack_uom if "pack_uom" in sent else line.pack_uom
+        units_per_pack = (
+            line_in.units_per_pack
+            if "units_per_pack" in sent
+            else line.units_per_pack
+        )
+        if pack_uom is not None:
+            pack_uom = pack_uom.strip() or None
+        if pack_uom is None:
+            if units_per_pack is not None:
+                raise ValidationError(
+                    f"Line {line_in.line_id}: a pack size needs an order unit "
+                    "(e.g. Box) to be a size of.",
+                    code="pack_factor_without_unit",
+                )
+        elif units_per_pack is None:
+            raise ValidationError(
+                f"Line {line_in.line_id} is ordered in {pack_uom} without a pack "
+                f"size. Enter how many units are in one {pack_uom}.",
+                code="units_per_pack_required",
+            )
+        if (pack_uom, units_per_pack) != (line.pack_uom, line.units_per_pack):
+            # Changing the pack re-labels the line's own totals, which are
+            # reported in packs; the units already placed by earlier draws keep
+            # whatever factor was in force when they landed, since each lot
+            # stored its own resolved quantity.
+            line.pack_uom = pack_uom
+            line.units_per_pack = units_per_pack
+
+        qty_units = inv_repo.packs_to_units(line_in.qty_received, units_per_pack)
+        if qty_units > MAX_QTY:
+            raise ValidationError(
+                f"{line_in.qty_received} × {units_per_pack} is {qty_units} "
+                f"units, above the {MAX_QTY} limit for a single receipt",
+                code="received_units_exceeds_max",
+            )
+        # Per CONSUME unit, because the inventory valuation multiplies the lot
+        # price by movement quantities, which are in consume units. The price
+        # the operator typed is per pack, like the order line's.
+        pack_price = (
+            line_in.unit_price_amount
+            if line_in.unit_price_amount is not None
+            else line.unit_price_amount
+        )
+        unit_price = (
+            pack_price / units_per_pack
+            if pack_price is not None and units_per_pack
+            else pack_price
+        )
+
         # Over-receipt (qty > the line's outstanding) is allowed with no reason.
 
         # Lot number is unique per item (within this request + against the DB).
@@ -2310,14 +2456,12 @@ async def receive_order(
                 manufacture_date=line_in.manufacture_date,
                 expiration_date=line_in.expiration_date,
                 status="available",
-                unit_price_amount=(
-                    line_in.unit_price_amount
-                    if line_in.unit_price_amount is not None
-                    else line.unit_price_amount
-                ),
+                # Per consume unit — see the derivation above.
+                unit_price_amount=unit_price,
                 po_reference=txn.po_reference,
-                # Lot holds the units that arrived in this draw (caps placement).
-                ordered_qty=line_in.qty_received,
+                # Lot holds the units that arrived in this draw (caps placement),
+                # in CONSUME units: 3 Box received stores 300 here.
+                ordered_qty=qty_units,
                 receipt_transaction_id=txn.id,
                 receipt_transaction_line_id=line.id,
             )
@@ -2340,16 +2484,19 @@ async def receive_order(
             db,
             event_id=event.id,
             line_id=line.id,
+            # ORDER units — this is the figure outstanding is measured against.
             qty_received=line_in.qty_received,
             lot_id=lot.id,
             over_receipt_reason=None,
         )
         # Unit-IN the received units into their chosen destination, under this
-        # same receive signature (atomic; unit-in happens only here).
+        # same receive signature (atomic; unit-in happens only here). CONSUME
+        # units: placement is unit-by-unit and always has been, so 3 Box of 100
+        # puts 300 rows' worth of stock into the node, not 3.
         await _place_received_lot(
             db,
             lot=lot,
-            qty_received=line_in.qty_received,
+            qty_units=qty_units,
             placement=line_in.placement,
             evidence_uuid=evidence_uuid,
             user_id=current.id,

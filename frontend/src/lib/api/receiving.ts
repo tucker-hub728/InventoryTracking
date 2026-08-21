@@ -41,22 +41,44 @@ export interface OrderLine {
   item_description: string | null;
   supplier_id: string;
   supplier_name: string | null;
+  /** In ORDER units — 3 means three boxes when `pack_uom` is set (REQ-001). */
   ordered_qty: number;
-  /** Decimal serialised as a string (or null). */
+  /** Decimal serialised as a string (or null). Per ORDER unit. */
   unit_price_amount: string | null;
-  /** Derived — Σ received across all events. */
+  /** Derived — Σ received across all events. In ORDER units. */
   received_qty: number;
-  /** Derived — max(0, ordered − received). */
+  /** Derived — max(0, ordered − received). In ORDER units. */
   outstanding_qty: number;
+  /** The order unit ("Box"), or null when ordered in the consume unit. */
+  pack_uom: string | null;
+  /** Consume units per order unit. Null with a `pack_uom` set means the pack
+   *  size was left for the receiver to confirm. */
+  units_per_pack: number | null;
+  /** Server-computed CONSUME units — what would actually land in a location.
+   *  Use these for anything describing physical stock; never multiply in the
+   *  client, or the arithmetic exists in two languages. */
+  ordered_units: number;
+  outstanding_units: number;
 }
 
 export interface ReceiptEventLine {
   id: string;
   line_id: string;
+  /** In ORDER units — "+148" means 148 Cases when the line has a `pack_uom`.
+   *  Never show this alone; pair it with the unit, or with `units_received`. */
   qty_received: number;
   over_receipt_reason: string | null;
   lot_id: string;
   lot_number: string | null;
+  /** CONSUME units this draw actually placed — 148 Cases of 25 is 3,700. Read
+   *  from the lot, so it is what was stored at receipt even if the line's pack
+   *  size was corrected later. Null only for a lot with no recorded quantity. */
+  units_received: number | null;
+  manufacture_date: string | null;
+  expiration_date: string | null;
+  /** Decimal string, per CONSUME unit (6dp) — the divided figure. */
+  unit_price_amount: string | null;
+  release_state: 'quarantine' | 'qc_hold' | 'released' | 'rejected' | null;
 }
 
 export interface ReceiptEvent {
@@ -121,8 +143,16 @@ export interface OrderLineInput {
   item_id: string;
   /** Must be one of the item's assigned suppliers (``meta.item_suppliers``). */
   supplier_id: string;
+  /** In ORDER units — the number the buyer typed, e.g. 3 (boxes). */
   ordered_qty: number;
+  /** Per ORDER unit — $95.00 per Box, matching the supplier's invoice. */
   unit_price?: number | null;
+  /** Omit both and the line is ordered in the item's consume unit — there is
+   *  no item-level pack to inherit (REQ-001). Send `pack_uom` alone to order
+   *  in packs whose size is confirmed at receive. Sending `units_per_pack`
+   *  without `pack_uom` is rejected. */
+  pack_uom?: string | null;
+  units_per_pack?: number | null;
 }
 
 export interface OrderCreateInput {
@@ -150,8 +180,10 @@ export interface ReceivePlacementCell {
 }
 
 /** Where a received lot is placed (unit-in), sent with the receive. Single
- *  destination, exactly qty_received units: a box takes N distinct cells; a
- *  freezer sub-location / warehouse shelf takes all N (cells empty). */
+ *  destination, exactly `qty_received × units_per_pack` CONSUME units — NOT
+ *  `qty_received` itself (REQ-001). Receiving 3 Box of 100 places 300 units, so
+ *  a box takes 300 distinct cells; a freezer sub-location / warehouse shelf
+ *  takes all 300 (cells empty). */
 export interface ReceivePlacementInput {
   node_id: string;
   cells: ReceivePlacementCell[];
@@ -159,11 +191,21 @@ export interface ReceivePlacementInput {
 
 export interface ReceiveEventLineInput {
   line_id: string;
+  /** In ORDER units — the receiver confirms "3 boxes arrived". The server
+   *  multiplies this to consume units for the lot and the placement. */
   qty_received: number;
   lot_number: string;
   manufacture_date?: string | null;
   expiration_date?: string | null;
+  /** Per ORDER unit, like the order line's. */
   unit_price_amount?: number | null;
+  /** The pack, settable or correctable here (REQ-001). Omit both to keep
+   *  whatever the Order line carries; send them to put a pack on a line that
+   *  has none, or to fix a wrong one — the receiver is the first person who can
+   *  see what a box actually holds. Whatever is sent is written back to the
+   *  line. A unit with no size, or a size with no unit, is a 422. */
+  pack_uom?: string | null;
+  units_per_pack?: number | null;
   placement: ReceivePlacementInput;
 }
 

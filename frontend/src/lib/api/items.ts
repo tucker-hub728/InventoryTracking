@@ -63,7 +63,10 @@ export interface ApiItem {
   id: string;
   item_number: string;
   description: string;
-  /** Free-text unit of measure (each, mL, box …). ``null`` when unset. */
+  /** The CONSUME unit (each, mL …) — what stock is counted in. Null unset.
+   *  The only unit an item has: the ORDER unit ("Box" and its size) lives on
+   *  the Order line (REQ-001), because a pack describes a purchase rather
+   *  than a material. See `OrderLineInput` in `receiving.ts`. */
   uom: string | null;
   /** Blind-consumed (no per-lot traceability) when true. */
   is_consumable: boolean;
@@ -155,7 +158,9 @@ export interface ItemCreateInput {
   /** Required — the item's prefix. The tier is derived from it server-side
    *  (a prefix lives inside one tier) and governs BOM eligibility. */
   prefix_id: string;
-  /** Free-text unit of measure (each, mL, box …). */
+  /** The CONSUME unit (each, mL …) — what stock is counted in. No order unit
+   *  here (REQ-001): the pack is set per Order line. The server `extra:
+   *  forbid`s, so sending one 422s rather than being silently dropped. */
   uom?: string | null;
   /** Blind-consumed with no per-lot traceability when true. */
   is_consumable?: boolean;

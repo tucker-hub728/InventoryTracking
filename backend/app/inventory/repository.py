@@ -492,8 +492,11 @@ async def compute_item_valuations(
         per-lot price) since price is constant per lot. Tracks ``v_item_stock``'s
         *physical* on-hand (expired stock still counts as a held asset).
       * ``po_value``    — Σ over the item's **outstanding** Order lines of
-        (outstanding × line ``unit_price_amount``).
-      * ``qty_on_order``— Σ outstanding over the item's open Order lines.
+        (outstanding × line ``unit_price_amount``). Both factors are in ORDER
+        units, so the product is correct with no conversion.
+      * ``qty_on_order``— Σ outstanding over the item's open Order lines,
+        **converted to CONSUME units** (× ``units_per_pack``, REQ-001) so it is
+        comparable with the on-hand figure it is displayed next to.
 
     "Outstanding" (v3) = ``ordered_qty − Σ received`` on a line, for Orders that
     are not cancelled / soft-deleted. Lots are created at receive, so there are
@@ -546,10 +549,24 @@ async def compute_item_valuations(
     po_stmt = (
         select(
             ReceiptTransactionLine.item_id,
+            # Money needs no conversion: ``outstanding`` is in order units and
+            # ``unit_price_amount`` is per order unit, so 2 Box × $95.00/Box is
+            # already the right $190.00. Converting either half would double-count.
             func.coalesce(
                 func.sum(outstanding * ReceiptTransactionLine.unit_price_amount), 0
             ),
-            func.coalesce(func.sum(outstanding), 0),
+            # The COUNT does need it (REQ-001). ``outstanding`` is in order units
+            # — 2 Box — but this figure is shown beside on-hand, which is in
+            # consume units. Reporting "on order 2 · on hand 300" for one item
+            # would be read as a shortfall. NULL ``units_per_pack`` is a line
+            # ordered in consume units already, hence the coalesce to 1.
+            func.coalesce(
+                func.sum(
+                    outstanding
+                    * func.coalesce(ReceiptTransactionLine.units_per_pack, 1)
+                ),
+                0,
+            ),
         )
         .select_from(ReceiptTransactionLine)
         .join(
@@ -727,7 +744,12 @@ async def create_lot(
     notes: str | None = None,
     unit_price_amount: Decimal | None = None,
     po_reference: str | None = None,
-    ordered_qty: Decimal | None = None,
+    # Integer, not Decimal: the column is ``Integer`` and always was, and the
+    # annotation was simply wrong. It matters more since REQ-001, because this
+    # value is now the product of a conversion — a Decimal or float slipping
+    # through reaches Postgres as a DataError at flush time rather than a 422
+    # at the edge, which is the failure mode app/core/bounds.py exists to avoid.
+    ordered_qty: int | None = None,
     receipt_transaction_id: uuid.UUID | None = None,
     receipt_transaction_line_id: uuid.UUID | None = None,
     parent_lot_id: uuid.UUID | None = None,
@@ -1087,6 +1109,46 @@ async def create_order(
     return txn
 
 
+# ── The order-unit / consume-unit boundary (REQ-001) ──────────────────
+#
+# Exactly two functions convert, and everything that needs to cross the
+# boundary calls one of them. Written out rather than inlined because the two
+# directions are trivially confusable — ``3`` and ``300`` are both plausible
+# values in either column — and a silent × instead of ÷ produces a number that
+# is wrong by two orders of magnitude while looking entirely reasonable.
+
+
+def packs_to_units(qty_packs: int, units_per_pack: int | None) -> int:
+    """Order units → consume units. 3 Box of 100 → 300 Each.
+
+    ``units_per_pack`` of ``None`` means the line was ordered in consume units
+    already (every line predating REQ-001), so the value passes through.
+    """
+    if units_per_pack is None:
+        return qty_packs
+    return qty_packs * units_per_pack
+
+
+def units_to_packs(qty_units: int, units_per_pack: int | None) -> int:
+    """Consume units → order units. 300 Each of 100 → 3 Box.
+
+    Raises when the division is not exact. That is not defensiveness for its own
+    sake: the only caller is the lot-quantity correction, which re-syncs an
+    Order line's received total from a lot's placed quantity. A lot holding 250
+    units of a 100-pack does not correspond to any whole number of boxes, so
+    there is no honest value to write back — and writing 2 (or 3) would quietly
+    move the order's fulfilment state to something nobody chose.
+    """
+    if units_per_pack is None:
+        return qty_units
+    packs, remainder = divmod(qty_units, units_per_pack)
+    if remainder:
+        raise ValueError(
+            f"{qty_units} units is not a whole number of packs of {units_per_pack}"
+        )
+    return packs
+
+
 async def add_order_line(
     session: AsyncSession,
     *,
@@ -1096,8 +1158,18 @@ async def add_order_line(
     supplier_id: uuid.UUID,
     ordered_qty: int,
     unit_price_amount: Decimal | None = None,
+    pack_uom: str | None = None,
+    units_per_pack: int | None = None,
 ) -> ReceiptTransactionLine:
-    """Insert one Order line. Caller commits."""
+    """Insert one Order line. Caller commits.
+
+    ``ordered_qty`` and ``unit_price_amount`` are in ORDER units (3 Box at
+    $95.00 per Box). ``pack_uom`` / ``units_per_pack`` are the line's own record
+    of what a Box is — the item carries no pack to copy from, so this row is the
+    only place the answer lives, and later edits to anything else cannot rewrite
+    it. Nothing is multiplied here: the conversion to consume units happens
+    once, at receive.
+    """
     line = ReceiptTransactionLine(
         receipt_transaction_id=txn_id,
         line_no=line_no,
@@ -1105,6 +1177,8 @@ async def add_order_line(
         supplier_id=supplier_id,
         ordered_qty=ordered_qty,
         unit_price_amount=unit_price_amount,
+        pack_uom=pack_uom,
+        units_per_pack=units_per_pack,
     )
     session.add(line)
     await session.flush()
@@ -1234,6 +1308,27 @@ async def get_event_line_by_lot(
     """The receive-event draw that created a given lot (one-to-one via lot_id)."""
     stmt = select(ReceiptEventLine).where(ReceiptEventLine.lot_id == lot_id)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_order_line_for_lot(
+    session: AsyncSession, lot_id: uuid.UUID
+) -> ReceiptTransactionLine | None:
+    """The Order line a lot was received against, via its receive-event draw.
+
+    Needed to read the line's frozen ``units_per_pack`` when converting a lot's
+    quantity (CONSUME units) back to the packs the line counts (REQ-001).
+    Returns None for a lot with no receipt behind it — a seeded or
+    directly-created lot — in which case there is nothing to convert.
+    """
+    stmt = (
+        select(ReceiptTransactionLine)
+        .join(
+            ReceiptEventLine,
+            ReceiptEventLine.receipt_transaction_line_id == ReceiptTransactionLine.id,
+        )
+        .where(ReceiptEventLine.lot_id == lot_id)
+    )
+    return (await session.execute(stmt)).scalars().unique().one_or_none()
 
 
 async def received_qty_by_line(
@@ -1383,10 +1478,14 @@ def order_line_to_audit_snapshot(
         "line_no": line.line_no,
         "item_id": str(line.item_id),
         "supplier_id": str(line.supplier_id),
+        # Both in ORDER units — recorded alongside the pack below, because
+        # "ordered_qty: 3" in an audit row is unreadable without it.
         "ordered_qty": line.ordered_qty,
         "unit_price_amount": (
             str(line.unit_price_amount)
             if line.unit_price_amount is not None
             else None
         ),
+        "pack_uom": line.pack_uom,
+        "units_per_pack": line.units_per_pack,
     }
