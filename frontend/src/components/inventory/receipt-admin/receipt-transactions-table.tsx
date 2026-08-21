@@ -52,11 +52,15 @@ export function ReceiptTransactionsTable({
           <TableHead>Order #</TableHead>
           <TableHead className="text-right">Items</TableHead>
           {/* The cell below is a fixed three-slot block (counts · meter ·
-              remainder) pinned to the right edge. Matching that width here
-              parks the label over the counts rather than over the whitespace
-              that trails a short remainder like "1 left". */}
+              remainder) pinned to the right edge. The label is parked over the
+              METER, not over the whole block: the counts are right-aligned, so
+              their left edge is ragged and a header sitting there lines up with
+              nothing. The meter is the first edge that is identical on every
+              row, which is what makes the column read as a column.
+
+              9.125rem = meter (3rem) + gap (0.625rem) + remainder (5.5rem). */}
           <TableHead className="text-right">
-            <span className="inline-block w-[13.75rem] text-left">Received</span>
+            <span className="inline-block w-[9.125rem] text-left">Received</span>
           </TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>

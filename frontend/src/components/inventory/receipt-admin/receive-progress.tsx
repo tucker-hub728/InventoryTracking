@@ -75,13 +75,6 @@ export function ReceiveProgress({ order }: Props) {
   const fillPct =
     received > 0 ? Math.max(MIN_VISIBLE_FILL_PCT, Math.min(100, rawPct)) : 0;
 
-  // A line is done when its own receipts cover its own order. An over-received
-  // line counts as complete here, which is what a receiver means by "that one
-  // is handled".
-  const linesDone = order.lines.filter(
-    (line) => line.received_qty >= line.ordered_qty,
-  ).length;
-
   // Dates are plain YYYY-MM-DD, so lexical max is chronological max.
   const lastReceipt = order.events.reduce<string | null>(
     (latest, event) =>
@@ -98,13 +91,25 @@ export function ReceiveProgress({ order }: Props) {
             View, and a control that looks pressable but is not is worse than
             no affordance. tabIndex keeps the detail reachable by keyboard,
             which is the only reason a hover-only panel is acceptable at all. */}
+        {/* A grid, not a flex row of three independently-sized spans. The
+            three slots have to line up as a single column down the page, and
+            with flex that is a coincidence maintained by three width utilities
+            agreeing with each other — one of them changing, or content
+            exceeding its box, and the meters go ragged. A fixed grid template
+            makes the alignment structural: the tracks are the same on every
+            row whatever the content does. Total 13.75rem = 4 + 3 + 5.5 + two
+            0.625rem gaps, which is what the column header is sized against. */}
         <span
           tabIndex={0}
-          className="inline-flex items-center justify-end gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
+          // inline-grid, not grid: a block-level grid stretches to the cell and
+          // the fixed tracks would sit at its LEFT edge, unpinning the block
+          // from the right-aligned column. Inline keeps the box exactly
+          // 13.75rem so the cell's text-right still parks it against the edge.
+          className="inline-grid grid-cols-[4rem_3rem_5.5rem] items-center gap-2.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
         >
           <span
             className={cn(
-              'w-16 shrink-0 text-right font-mono text-xs tabular-nums',
+              'text-right font-mono text-xs tabular-nums',
               phase === 'complete' || phase === 'cancelled'
                 ? 'text-text-3'
                 : 'text-text-2',
@@ -129,7 +134,7 @@ export function ReceiveProgress({ order }: Props) {
               aria-valuemin={0}
               aria-valuemax={ordered}
               aria-label={`${received} of ${ordered} received`}
-              className="h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-border"
+              className="h-1.5 w-full overflow-hidden rounded-full bg-border"
             >
               <span
                 className={cn(
@@ -144,11 +149,12 @@ export function ReceiveProgress({ order }: Props) {
               />
             </span>
           ) : (
-            // Holds the column so the meters above and below stay in line.
-            <span aria-hidden className="h-1.5 w-12 shrink-0" />
+            // The grid track already holds the column open; this just keeps the
+            // row's baseline height identical to a row that has a meter.
+            <span aria-hidden className="h-1.5" />
           )}
 
-          <span className="w-[5.5rem] shrink-0 text-left text-xs">
+          <span className="text-left text-xs">
             {phase === 'partial' && (
               <span className="text-text-2">
                 <span className="font-medium tabular-nums text-text">
@@ -200,11 +206,15 @@ export function ReceiveProgress({ order }: Props) {
               />
             )}
           </dl>
+          {/* No "Lines: 0 of 1 complete" row. It read as a second, contradictory
+              progress figure right under the first: an order 1-of-3 received
+              is genuinely in progress, and "0 of 1 complete" beside it says
+              nothing has happened. Both are true and they answer different
+              questions, which is exactly what makes them confusing stacked
+              together. The quantities above are the ones a receiver acts on;
+              per-line detail belongs in the drawer, where each line is visible
+              on its own. */}
           <dl className="mt-2 space-y-0.5 border-t border-border pt-2 text-xs">
-            <DetailRow
-              label="Lines"
-              value={`${linesDone} of ${order.lines.length} complete`}
-            />
             <DetailRow
               label="Last receipt"
               value={lastReceipt ?? 'None yet'}
