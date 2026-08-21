@@ -388,6 +388,7 @@ async def create_item(
     created_by_user_id: uuid.UUID,
     uom: str | None = None,
     is_consumable: bool = False,
+    is_lot_controlled: bool = True,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
     near_expiry_threshold_days: int = 30,
@@ -405,6 +406,7 @@ async def create_item(
         prefix_id=prefix_id,
         uom=uom,
         is_consumable=is_consumable,
+        is_lot_controlled=is_lot_controlled,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
         near_expiry_threshold_days=near_expiry_threshold_days,
@@ -469,6 +471,9 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
         "description": item.description,
         "uom": item.uom,
         "is_consumable": item.is_consumable,
+        # Lot control is a traceability control — turning it off changes what
+        # receiving demands, so a change to it belongs in the audit trail.
+        "is_lot_controlled": item.is_lot_controlled,
         "prefix_id": str(item.prefix_id),
         "supplier_ids": sorted(str(iv.supplier_id) for iv in item.suppliers),
         "avg_lead_days": item.avg_lead_days,
@@ -715,6 +720,73 @@ async def get_lot_by_item_and_number(
         Lot.deleted_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+# ── Synthesized lot numbers (REQ-003) ─────────────────────────────────
+#
+# A non-lot-controlled item can be received without a lot number, but
+# ``lots.lot_number`` is NOT NULL and ~270 places read it expecting a string, so
+# the server invents one rather than making the column nullable.
+
+SYNTHETIC_LOT_PREFIX = "AUTO-"
+
+
+def is_synthetic_lot_number(lot_number: str | None) -> bool:
+    """True for a number this system generated rather than a human entering it.
+
+    Deliberately a prefix test on stored data and not a stored boolean. A flag
+    would be one more column to keep true, and the prefix is already the thing
+    every reader — operator, auditor, exported spreadsheet — actually sees. The
+    cost is that a human CAN type "AUTO-…" by hand; that is why the receive
+    route refuses to accept one, so the prefix stays honest at the only door
+    that writes it.
+    """
+    return bool(lot_number) and lot_number.startswith(SYNTHETIC_LOT_PREFIX)
+
+
+def uses_reserved_lot_prefix(lot_number: str | None) -> bool:
+    """True for input a human must not be allowed to submit as a lot number.
+
+    Case-INSENSITIVE, unlike ``is_synthetic_lot_number`` above, and the two are
+    deliberately different questions. That one classifies what is already
+    stored: only the exact prefix the generator emits counts, so a vendor lot
+    that happens to read "auto-1" is not mislabelled as machine-made. This one
+    guards the input door, where the stricter reading is correct — "auto-…"
+    accepted by hand would sit one shift key away from an identifier the whole
+    system treats as reserved, and the uniqueness index is case-sensitive, so
+    both spellings could coexist and read identically on a label.
+    """
+    return bool(lot_number) and lot_number.upper().startswith(SYNTHETIC_LOT_PREFIX)
+
+
+async def next_synthetic_lot_number(
+    session: AsyncSession, *, item_id: uuid.UUID, received_on: date
+) -> str:
+    """Mint the next ``AUTO-YYYYMMDD-N`` for one item on one day.
+
+    Readable on purpose. A UUID fragment would be collision-proof and unreadable,
+    and this string ends up in a GxP receiving record, on a label, and in an
+    auditor's spreadsheet — "AUTO-20260821-2" says machine-generated, when, and
+    which delivery of that day at a glance.
+
+    The count is scoped to (item, day), which is the same scope as the
+    partial-unique index it has to satisfy. It is NOT a reservation: two
+    concurrent receives can compute the same N. That race is left to the index —
+    the caller retries — because taking a lock here would serialise every receipt
+    of every non-lot item to remove a collision that needs two receivers booking
+    the same item in the same second.
+    """
+    stamp = received_on.strftime("%Y%m%d")
+    like = f"{SYNTHETIC_LOT_PREFIX}{stamp}-%"
+    # Soft-deleted rows are counted deliberately: the unique index ignores them,
+    # but reusing a number a deleted lot once carried would make two different
+    # receipts share an identifier in the audit trail.
+    stmt = select(func.count()).select_from(Lot).where(
+        Lot.item_id == item_id,
+        Lot.lot_number.like(like),
+    )
+    used = int((await session.execute(stmt)).scalar_one())
+    return f"{SYNTHETIC_LOT_PREFIX}{stamp}-{used + 1}"
 
 
 async def lot_number_exists(session: AsyncSession, *, lot_number: str) -> bool:

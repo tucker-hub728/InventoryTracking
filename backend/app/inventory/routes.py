@@ -219,6 +219,7 @@ def _item_to_read(
         description=item.description,
         uom=item.uom,
         is_consumable=item.is_consumable,
+        is_lot_controlled=item.is_lot_controlled,
         tier_id=str(item.tier_id),
         tier_name=tier.name if tier else "",
         tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
@@ -699,6 +700,7 @@ async def create_item(
             created_by_user_id=current.id,
             uom=payload.uom,
             is_consumable=payload.is_consumable,
+            is_lot_controlled=payload.is_lot_controlled,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
@@ -753,6 +755,22 @@ async def update_item(
     item = await inv_repo.get_item(db, item_id)
     if item is None or item.deleted_at is not None:
         raise NotFoundError(f"Item {item_id} not found")
+
+    # ── Lot control (REQ-003) ─────────────────────────────────────────
+    # Turning it OFF relaxes a traceability control, so it is refused once the
+    # item has lots: the existing stock was received under a rule that every
+    # batch is identified, and flipping the flag afterwards would leave a
+    # history where some receipts demanded a lot number and others did not,
+    # with nothing on the record saying why. Turning it ON is always allowed —
+    # tightening a control needs no permission.
+    if patch.get("is_lot_controlled") is False and item.is_lot_controlled:
+        if await inv_repo.item_has_lots(db, item.id):
+            raise ConflictError(
+                "This item already has received lots, so lot control can't be "
+                "switched off. Lot numbers on existing stock would become "
+                "unexplainable.",
+                code="lot_control_locked_by_lots",
+            )
 
     # Pull supplier_ids out of the scalar patch — it's a relationship, not a
     # column. ``None`` (omitted) leaves the list untouched.
@@ -1638,6 +1656,11 @@ def _order_to_read(
                 item_id=str(line.item_id),
                 item_number=line.item.item_number if line.item else None,
                 item_description=line.item.description if line.item else None,
+                # Defaults to requiring a lot number when the item somehow did
+                # not load — the safe direction for a traceability control.
+                item_is_lot_controlled=(
+                    line.item.is_lot_controlled if line.item else True
+                ),
                 supplier_id=str(line.supplier_id),
                 supplier_name=line.supplier.name if line.supplier else None,
                 ordered_qty=line.ordered_qty,
@@ -2427,22 +2450,56 @@ async def receive_order(
 
         # Over-receipt (qty > the line's outstanding) is allowed with no reason.
 
+        # ── Lot control (REQ-003) ─────────────────────────────────────
+        # The rule lives here rather than in the schema because it depends on
+        # the ITEM behind the line, which the payload does not carry.
+        item = line.item
+        if item is None:
+            item = await inv_repo.get_item(db, line.item_id)
+        lot_controlled = item.is_lot_controlled if item is not None else True
+
+        lot_number = line_in.lot_number
+        if inv_repo.uses_reserved_lot_prefix(lot_number):
+            # The AUTO- prefix is how every later reader tells a machine-made
+            # number from a vendor's. Letting a human type one would make that
+            # signal meaningless, so it is refused at the only door that writes
+            # lot numbers on receipt.
+            raise ValidationError(
+                f"'{lot_number}' uses the reserved "
+                f"'{inv_repo.SYNTHETIC_LOT_PREFIX}' prefix, which is generated "
+                "by the system. Enter the supplier's lot number, or leave it "
+                "blank if this item is not lot-controlled.",
+                code="reserved_lot_prefix",
+            )
+        if lot_number is None:
+            if lot_controlled:
+                raise ValidationError(
+                    f"{item.item_number if item else 'This item'} is lot-controlled — "
+                    "a lot number is required.",
+                    code="lot_number_required",
+                )
+            # Synthesized inside the same transaction, so it lands in the
+            # duplicate checks below exactly like a typed one.
+            lot_number = await inv_repo.next_synthetic_lot_number(
+                db, item_id=line.item_id, received_on=payload.received_at
+            )
+
         # Lot number is unique per item (within this request + against the DB).
-        lot_key = (line.item_id, line_in.lot_number.strip().lower())
+        lot_key = (line.item_id, lot_number.strip().lower())
         if lot_key in seen_lot_numbers:
             raise ValidationError(
-                f"Duplicate lot_number '{line_in.lot_number}' for the same item "
+                f"Duplicate lot_number '{lot_number}' for the same item "
                 "in this receive",
                 code="duplicate_lot_number_in_request",
             )
         seen_lot_numbers.add(lot_key)
         if (
             await inv_repo.get_lot_by_item_and_number(
-                db, item_id=line.item_id, lot_number=line_in.lot_number
+                db, item_id=line.item_id, lot_number=lot_number
             )
         ) is not None:
             raise ConflictError(
-                f"lot_number '{line_in.lot_number}' already exists for this item",
+                f"lot_number '{lot_number}' already exists for this item",
                 code="lot_number_conflict",
             )
 
@@ -2450,7 +2507,8 @@ async def receive_order(
             lot = await inv_repo.create_lot(
                 db,
                 item_id=line.item_id,
-                lot_number=line_in.lot_number,
+                # The resolved number — typed, or synthesized above.
+                lot_number=lot_number,
                 created_by_user_id=current.id,
                 supplier_id=line.supplier_id,
                 manufacture_date=line_in.manufacture_date,
@@ -2469,8 +2527,18 @@ async def receive_order(
             await db.rollback()
             msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
             if "uq_lots_item_lot_number" in msg:
+                # A synthesized number can land here when two receivers book the
+                # same non-lot item in the same instant: the sequence is counted,
+                # not reserved, so the index is what actually decides. The
+                # operator retries and gets the next number.
                 raise ConflictError(
-                    f"lot_number '{line_in.lot_number}' already exists for this item",
+                    f"lot_number '{lot_number}' already exists for this item"
+                    + (
+                        " — a generated number collided with a concurrent "
+                        "receipt. Please submit again."
+                        if inv_repo.is_synthetic_lot_number(lot_number)
+                        else ""
+                    ),
                     code="lot_number_conflict",
                 ) from exc
             if "ck_lots_dates_ordered" in msg:

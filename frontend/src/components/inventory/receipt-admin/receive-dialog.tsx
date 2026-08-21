@@ -38,6 +38,12 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Mirrors ``SYNTHETIC_LOT_PREFIX`` in backend/app/inventory/repository.py.
+ *  A wire-format constant rather than shared code, so it is kept in sync by
+ *  hand; the server rejects the prefix too, so a drift here is a worse error
+ *  message, not a hole. */
+const AUTO_LOT_PREFIX = 'AUTO-';
+
 interface LineDraft {
   include: boolean;
   /** In ORDER units — what the receiver types, e.g. 3 (boxes). NOT the number
@@ -254,23 +260,40 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         };
       }
       const units = placedUnits(d);
+      // ── Lot control (REQ-003) ─────────────────────────────────────
+      // Required only for a lot-controlled item. Left blank on a non-lot line,
+      // the server synthesizes an AUTO- number, so the field is genuinely
+      // optional rather than filled in with a placeholder here — the client
+      // must not invent an identifier that ends up in a GxP record.
       const lotNumber = d.lot_number.trim();
-      if (!lotNumber) {
+      if (!lotNumber && line.item_is_lot_controlled) {
         return {
-          error: `Line ${line.line_no}: a lot number is required.`,
+          error: `Line ${line.line_no}: ${line.item_number ?? 'this item'} is lot-controlled — a lot number is required.`,
           lineId: line.id,
         };
       }
-      const lotKey = lotNumber.toLowerCase();
-      const seen = seenLotsByItem.get(line.item_id);
-      if (seen?.has(lotKey)) {
+      if (lotNumber.toUpperCase().startsWith(AUTO_LOT_PREFIX)) {
+        // Mirrors the server rule. The prefix is how every later reader tells a
+        // generated number from a supplier's; a typed one would break that.
         return {
-          error: `Line ${line.line_no}: lot number "${lotNumber}" is already used for this item on another line. Use a different lot number per item.`,
+          error: `Line ${line.line_no}: "${AUTO_LOT_PREFIX}" is reserved for numbers the system generates. Enter the supplier's lot number, or leave it blank.`,
           lineId: line.id,
         };
       }
-      if (seen) seen.add(lotKey);
-      else seenLotsByItem.set(line.item_id, new Set([lotKey]));
+      // Only a real number can collide — two blanks on the same item become
+      // two different generated numbers, so they are not duplicates.
+      if (lotNumber) {
+        const lotKey = lotNumber.toLowerCase();
+        const seen = seenLotsByItem.get(line.item_id);
+        if (seen?.has(lotKey)) {
+          return {
+            error: `Line ${line.line_no}: lot number "${lotNumber}" is already used for this item on another line. Use a different lot number per item.`,
+            lineId: line.id,
+          };
+        }
+        if (seen) seen.add(lotKey);
+        else seenLotsByItem.set(line.item_id, new Set([lotKey]));
+      }
       if (
         d.manufacture_date &&
         d.expiration_date &&
@@ -308,7 +331,9 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         // ORDER units — the server multiplies. Sending `units` here would
         // record 300 boxes received against a 3-box line.
         qty_received: qty,
-        lot_number: lotNumber,
+        // Blank means "synthesize one" (REQ-003) — send null rather than "",
+        // so the intent is explicit on the wire.
+        lot_number: lotNumber || null,
         manufacture_date: d.manufacture_date || undefined,
         expiration_date: d.expiration_date || undefined,
         unit_price_amount: unitPrice,
@@ -469,16 +494,37 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-1.5">
-                      <Label>Lot number</Label>
+                      <Label>
+                        Lot number
+                        {line.item_is_lot_controlled && (
+                          <span className="text-danger"> *</span>
+                        )}
+                      </Label>
                       <Input
                         className="font-mono"
-                        placeholder="L-20260629-A"
+                        // The placeholder says what happens if you do nothing,
+                        // which on a non-lot line is the whole point — an
+                        // example lot number there would read as a suggestion
+                        // to make one up (REQ-003).
+                        placeholder={
+                          line.item_is_lot_controlled
+                            ? 'L-20260629-A'
+                            : 'Optional — generated if blank'
+                        }
                         value={d.lot_number}
                         disabled={!d.include}
                         onChange={(e) =>
                           patch(line.id, { lot_number: e.target.value })
                         }
                       />
+                      {!line.item_is_lot_controlled &&
+                        !d.lot_number.trim() &&
+                        d.include && (
+                          <p className="text-[11px] text-text-3">
+                            Not lot-controlled — a tracking number will be
+                            generated.
+                          </p>
+                        )}
                     </div>
                     <div className="space-y-1.5">
                       <Label>

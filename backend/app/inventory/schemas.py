@@ -62,6 +62,22 @@ def _trimmed_non_blank(field_name: str):
     return BeforeValidator(_check)
 
 
+def _blank_to_none_check(v: str | None) -> str | None:
+    """Trim, and treat the empty result as absent rather than invalid.
+
+    For fields whose requiredness is decided further in — a receive line's lot
+    number depends on the item behind it (REQ-003), which Pydantic cannot see.
+    Rejecting "" here would 422 before the route can say whether it mattered,
+    and would force every client to omit the key rather than send it empty.
+    """
+    if v is None:
+        return None
+    return v.strip() or None
+
+
+_blank_to_none = BeforeValidator(_blank_to_none_check)
+
+
 # ── Suppliers ────────────────────────────────────────────────────────────
 
 
@@ -179,6 +195,12 @@ class ItemCreate(BaseModel):
     # Consumables are blind-consumed with no per-lot traceability
     # (REQ-2026-07-01-TRX-003). Defaults to a traceable, one-for-one material.
     is_consumable: bool = False
+    # ── Lot control (REQ-003) ─────────────────────────────────────────
+    # True: receiving demands a lot number. False: it may be left blank and the
+    # server synthesizes one. A separate axis from ``is_consumable`` above —
+    # that is about how material is consumed, this is about how it is traced.
+    # Defaults true, which is the status quo and the conservative reading.
+    is_lot_controlled: bool = True
     supplier_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(
@@ -212,6 +234,9 @@ class ItemUpdate(BaseModel):
     # No pack fields — see ``ItemCreate``. An order's pack is edited on the
     # Order line or corrected at receive, never on the item.
     is_consumable: bool | None = None
+    # Turning lot control OFF relaxes a traceability control, so the route
+    # refuses it once the item already has lots — see ``update_item``.
+    is_lot_controlled: bool | None = None
     # Re-assign an item to another prefix. The prefix's tier (derived server-side)
     # still governs BOM eligibility — the route blocks moving a BOM-bearing item
     # to a raw-material prefix, and a stocked item to a built prefix.
@@ -246,6 +271,10 @@ class ItemRead(BaseModel):
     uom: str | None = None
     # Blind-consumed (no per-lot traceability) when true.
     is_consumable: bool = False
+    # Receiving requires a lot number when true; synthesizes one when false
+    # (REQ-003). The receive dialog reads this to decide whether the field is
+    # mandatory, so it must be on the item read model.
+    is_lot_controlled: bool = True
     # Tier (requirements v2 §6). ``tier_type`` drives the UI "Type"
     # column: sub_assembly/finished_good may have a BOM; raw_material is bought as-is.
     tier_id: str
@@ -767,7 +796,17 @@ class ReceiveEventLineInput(BaseModel):
         default=None, max_length=32
     )
     units_per_pack: int | None = Field(default=None, gt=0, le=MAX_QTY)
-    lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
+    # ── Lot control (REQ-003) ─────────────────────────────────────────
+    # Optional at the schema layer, conditionally required at the route: the
+    # rule depends on the ITEM behind this line, which Pydantic cannot see here.
+    # A lot-controlled item with no number is a 422; a non-lot-controlled one
+    # gets a synthesized ``AUTO-…`` number.
+    #
+    # Blank-but-present is normalised to None rather than rejected, so a UI that
+    # always sends the field does not have to special-case the empty string.
+    lot_number: Annotated[str | None, _blank_to_none] = Field(
+        default=None, max_length=64
+    )
     manufacture_date: date | None = None
     expiration_date: date | None = None
     # Optional override of the line's unit price for this lot.
@@ -805,6 +844,10 @@ class OrderLineRead(BaseModel):
     item_description: str | None = None
     supplier_id: str
     supplier_name: str | None = None
+    # Whether receiving must demand a lot number for this line (REQ-003). Off
+    # the eager-joined item, like ``item_number`` above, so the receive dialog
+    # can make the field conditionally required without a second round trip.
+    item_is_lot_controlled: bool = True
     # All three in ORDER units (3 Box), matching ``pack_uom`` below.
     ordered_qty: int
     unit_price_amount: Decimal | None = None

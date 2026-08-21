@@ -191,6 +191,10 @@ function DrawRow({
   const showBoth = packUom != null && units !== el.qty_received;
   const targetUnits = line?.ordered_units ?? null;
 
+  // Prefix test rather than a stored flag — the prefix is what every reader
+  // sees, and the receive route refuses a typed one so it stays honest.
+  const generated = (el.lot_number ?? '').startsWith('AUTO-');
+
   const expiryDays = daysFromNow(el.expiration_date);
   const expired = expiryDays != null && expiryDays < 0;
   const expiringSoon =
@@ -202,9 +206,25 @@ function DrawRow({
         <div className="min-w-0">
           {/* A lot number can be 64 chars; it wraps rather than pushing the
               quantity off the row, because the quantity is the point. */}
-          <span className="break-all font-mono text-xs text-accent">
+          <span
+            className={cn(
+              'break-all font-mono text-xs',
+              // A generated number (REQ-003) is muted rather than accented:
+              // it identifies the receipt, but it is not a supplier's lot and
+              // must not read as traceability the material does not have.
+              generated ? 'text-text-3' : 'text-accent',
+            )}
+          >
             {el.lot_number ?? '—'}
           </span>
+          {generated && (
+            <span
+              className="ml-1.5 text-[10px] text-text-3"
+              title="No lot number was supplied — this item is not lot-controlled, so the system generated one."
+            >
+              generated
+            </span>
+          )}
           {showItem && line && (
             <span className="ml-2 text-xs text-text-3">
               <ItemLink

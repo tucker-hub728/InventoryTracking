@@ -73,6 +73,9 @@ const schema = z.object({
   // purchase and not to the material.
   // Blind-consumed, no per-lot traceability.
   isConsumable: z.boolean().default(false),
+  // REQ-003: receiving demands a lot number when true. Defaults true —
+  // requiring one is the status quo and the conservative choice.
+  isLotControlled: z.boolean().default(true),
   // Assigned suppliers — zero-or-more. The only suppliers this item can later be
   // received against. Optional: an item may start with none and add later.
   supplierIds: z.array(z.string()).default([]),
@@ -155,6 +158,7 @@ export function NewItemDialog({
       prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
       uom: '',
       isConsumable: false,
+      isLotControlled: true,
       supplierIds: [],
       leadDays: 0,
       threshold: 0,
@@ -166,6 +170,7 @@ export function NewItemDialog({
   const tierId = watch('tierId');
   const prefixId = watch('prefixId');
   const isConsumable = watch('isConsumable');
+  const isLotControlled = watch('isLotControlled');
   const suffix = watch('suffix');
   // The tier whose prefixes scope the picker, and the chosen prefix within it.
   // A locked tier is re-resolved from the fetched list so a prefix added from
@@ -274,6 +279,7 @@ export function NewItemDialog({
         prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
         uom: '',
         isConsumable: false,
+        isLotControlled: true,
         supplierIds: [],
         leadDays: 0,
         threshold: 0,
@@ -303,6 +309,7 @@ export function NewItemDialog({
         prefix_id: data.prefixId,
         uom: data.uom ? data.uom : null,
         is_consumable: data.isConsumable,
+        is_lot_controlled: data.isLotControlled,
         supplier_ids: data.supplierIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
@@ -496,6 +503,26 @@ export function NewItemDialog({
                       id="ni-consumable"
                       checked={isConsumable}
                       onCheckedChange={(v) => setValue('isConsumable', v)}
+                    />
+                  </div>
+
+                  {/* A separate switch from Consumable above, deliberately
+                      (REQ-003). That one is about how material is used; this is
+                      about how it is traced, and a consumable reagent can still
+                      need a traceable lot for a deviation investigation. */}
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="ni-lot-controlled">Lot controlled</Label>
+                      <p className="text-xs text-text-3">
+                        {isLotControlled
+                          ? 'Receiving requires a lot number'
+                          : 'Lot number optional — one is generated if left blank'}
+                      </p>
+                    </div>
+                    <Switch
+                      id="ni-lot-controlled"
+                      checked={isLotControlled}
+                      onCheckedChange={(v) => setValue('isLotControlled', v)}
                     />
                   </div>
 
