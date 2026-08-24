@@ -31,6 +31,8 @@ const schema = z.object({
   // named by the dialog title, so it is never a field and never part of the
   // patch.
   uom: z.string().trim().max(32, 'Unit is too long').optional(),
+  // No ORDER unit here (REQ-001) — the pack belongs to the PO line, and is
+  // edited there or corrected at receive.
   supplier_ids: z.array(z.string()).default([]),
   avg_lead_days: z
     .string()
@@ -54,7 +56,7 @@ const schema = z.object({
       'Near-expiry threshold must be a whole number of days (0–3650)',
     ),
   must_order_flag: z.boolean(),
-});
+  });
 
 type FormValues = z.infer<typeof schema>;
 
@@ -285,10 +287,10 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                 time, near-expiry, must-order) live in the block below. */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label htmlFor="it-uom">Unit</Label>
+                <Label htmlFor="it-uom">Consume unit</Label>
                 <Input
                   id="it-uom"
-                  placeholder="each, mL, box…"
+                  placeholder="each, mL, vial…"
                   aria-invalid={Boolean(errors.uom)}
                   {...register('uom')}
                 />

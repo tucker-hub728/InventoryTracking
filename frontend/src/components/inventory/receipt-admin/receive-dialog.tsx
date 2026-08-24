@@ -19,7 +19,6 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { locationNodesApi } from '@/lib/api/location-nodes';
 import {
   receivingApi,
   type Order,
@@ -27,38 +26,74 @@ import {
   type ReceiveEventInput,
   type ReceiveEventLineInput,
 } from '@/lib/api/receiving';
-import {
-  ReceiveLocationPicker,
-  placementComplete,
-  type AreaTrees,
-  type PlacementValue,
-} from './receive-location-picker';
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Mirrors ``SYNTHETIC_LOT_PREFIX`` in backend/app/inventory/repository.py.
+ *  A wire-format constant rather than shared code, so it is kept in sync by
+ *  hand; the server rejects the prefix too, so a drift here is a worse error
+ *  message, not a hole. */
+const AUTO_LOT_PREFIX = 'AUTO-';
+
 interface LineDraft {
   include: boolean;
+  /** In ORDER units — what the receiver types, e.g. 3 (boxes). NOT the number
+   *  of units placed; see `placedUnits` (REQ-001). */
   qty_received: string;
   lot_number: string;
   manufacture_date: string;
   expiration_date: string;
+  /** Per ORDER unit, like the order line's — the price of one box. */
   unit_price: string;
-  /** Where the received units go (unit-in) — chosen in the same signed step. */
-  placement: PlacementValue | null;
+  /** The pack, editable here (REQ-001). Seeded from the Order line, but the
+   *  receiver may set one the PO never had, or correct a wrong one — the dock
+   *  is where anyone actually knows what a box holds. Both blank = the line is
+   *  counted in consume units. */
+  pack_uom: string;
+  units_per_pack: string;
 }
 
 function seedLineDraft(line: OrderLine): LineDraft {
   return {
     include: false,
+    // Already in order units — outstanding_qty and qty_received are the same
+    // unit, which is why this pre-fill needs no conversion.
     qty_received: String(line.outstanding_qty),
     lot_number: '',
     manufacture_date: '',
     expiration_date: '',
     unit_price: line.unit_price_amount ?? '',
-    placement: null,
+    pack_uom: line.pack_uom ?? '',
+    units_per_pack: line.units_per_pack == null ? '' : String(line.units_per_pack),
   };
+}
+
+/** The pack size in force for this draw — whatever is in the draft, since the
+ *  receiver may have set or corrected it. Null when no order unit is named, or
+ *  when the size is not yet a usable number. */
+function effectivePackSize(d: LineDraft): number | null {
+  if (!d.pack_uom.trim()) return null;
+  const typed = Number(d.units_per_pack);
+  return Number.isInteger(typed) && typed > 0 ? typed : null;
+}
+
+/** CONSUME units this draw will actually place — the figure the location
+ *  picker, the cell count and the capacity check all need.
+ *
+ *  This is deliberately a separate function from reading `qty_received`. The
+ *  two were one variable before REQ-001 and were correct that way; now they
+ *  differ by a factor of the pack size, and every site has to say which one it
+ *  means. Returns 0 when the pack size is still unknown, so the UI blocks on
+ *  "enter the units per box" rather than silently placing 3.
+ */
+function placedUnits(d: LineDraft): number {
+  const packs = Number(d.qty_received);
+  if (!Number.isInteger(packs) || packs <= 0) return 0;
+  if (!d.pack_uom.trim()) return packs;
+  const size = effectivePackSize(d);
+  return size == null ? 0 : packs * size;
 }
 
 interface Props {
@@ -83,7 +118,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
   const [errorLineId, setErrorLineId] = React.useState<string | null>(null);
-  const [trees, setTrees] = React.useState<AreaTrees | null>(null);
   const lineRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
   /** Show a validation failure and bring the line that caused it into view. */
@@ -118,24 +152,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     setErrorLineId(null);
   }, [open, order]);
 
-  // Load the placement targets (all three areas) once when the dialog opens.
-  React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    Promise.all([
-      locationNodesApi.ln2Tree({ signal: ctrl.signal }),
-      locationNodesApi.freezerTree({ signal: ctrl.signal }),
-      locationNodesApi.warehouseTree({ signal: ctrl.signal }),
-    ])
-      .then(([ln2, freezer, warehouse]) =>
-        setTrees({ ln2, freezer, warehouse }),
-      )
-      .catch(() => {
-        /* the picker shows an empty state if targets can't load */
-      });
-    return () => ctrl.abort();
-  }, [open]);
-
   const patch = (lineId: string, p: Partial<LineDraft>) => {
     // Editing the line that failed clears the complaint about it.
     if (errorLineId === lineId) {
@@ -147,21 +163,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       if (!existing) return prev;
       return { ...prev, [lineId]: { ...existing, ...p } };
     });
-  };
-
-  /** Cells in ``nodeId`` that OTHER lines of this same receipt already aim at,
-   *  as ``"row:col"`` keys. One delivery routinely puts several lines into one
-   *  LN2 box, and until the receipt is signed no claim exists on the server —
-   *  so without this two lines can both choose A1 and only collide at submit.
-   *  The transfer dialog and kitting close-out both already guard this. */
-  const cellsClaimedByOtherLines = (lineId: string, nodeId: string | undefined) => {
-    const claimed = new Set<string>();
-    if (!nodeId) return claimed;
-    for (const [id, d] of Object.entries(drafts)) {
-      if (id === lineId || !d.include || d.placement?.nodeId !== nodeId) continue;
-      for (const c of d.placement.cells) claimed.add(`${c.grid_row}:${c.grid_col}`);
-    }
-    return claimed;
   };
 
   const buildLines = ():
@@ -176,6 +177,10 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     for (const line of outstandingLines) {
       const d = drafts[line.id];
       if (!d || !d.include) continue;
+      // ORDER units — what the receiver typed, e.g. 3 boxes. Nothing here
+      // converts to consume units any more: arrival does not place anything,
+      // so the only consumer of that figure was the destination picker, which
+      // has moved to the put-away step (REQ-004).
       const qty = Number(d.qty_received);
       if (!Number.isFinite(qty) || qty <= 0) {
         return {
@@ -183,23 +188,61 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
           lineId: line.id,
         };
       }
+      if (!Number.isInteger(qty)) {
+        return {
+          error: `Line ${line.line_no}: received qty must be a whole number.`,
+          lineId: line.id,
+        };
+      }
+      const packUom = d.pack_uom.trim();
+      const packSizeRaw = d.units_per_pack.trim();
+      if (packUom && !packSizeRaw) {
+        return {
+          error: `Line ${line.line_no}: enter how many units are in one ${packUom}.`,
+          lineId: line.id,
+        };
+      }
+      if (packSizeRaw && !packUom) {
+        return {
+          error: `Line ${line.line_no}: enter an order unit (e.g. Box), or clear the units per unit.`,
+          lineId: line.id,
+        };
+      }
+      const packSize = effectivePackSize(d);
+      if (packUom && packSize == null) {
+        return {
+          error: `Line ${line.line_no}: units per ${packUom} must be a whole number above 0.`,
+          lineId: line.id,
+        };
+      }
+      // ── Lot control (REQ-003) ─────────────────────────────────────
+      // Never required (REQ-003): any item may be received without a lot
+      // number, and the server synthesizes one when it is blank. Deliberately
+      // left empty rather than pre-filled here — the client must not invent an
+      // identifier that ends up in a GxP record.
       const lotNumber = d.lot_number.trim();
-      if (!lotNumber) {
+      if (lotNumber.toUpperCase().startsWith(AUTO_LOT_PREFIX)) {
+        // Mirrors the server rule. The prefix is how every later reader tells a
+        // generated number from a supplier's; a typed one would break that.
         return {
-          error: `Line ${line.line_no}: a lot number is required.`,
+          error: `Line ${line.line_no}: "${AUTO_LOT_PREFIX}" is reserved for numbers the system generates. Enter the supplier's lot number, or leave it blank.`,
           lineId: line.id,
         };
       }
-      const lotKey = lotNumber.toLowerCase();
-      const seen = seenLotsByItem.get(line.item_id);
-      if (seen?.has(lotKey)) {
-        return {
-          error: `Line ${line.line_no}: lot number "${lotNumber}" is already used for this item on another line. Use a different lot number per item.`,
-          lineId: line.id,
-        };
+      // Only a real number can collide — two blanks on the same item become
+      // two different generated numbers, so they are not duplicates.
+      if (lotNumber) {
+        const lotKey = lotNumber.toLowerCase();
+        const seen = seenLotsByItem.get(line.item_id);
+        if (seen?.has(lotKey)) {
+          return {
+            error: `Line ${line.line_no}: lot number "${lotNumber}" is already used for this item on another line. Use a different lot number per item.`,
+            lineId: line.id,
+          };
+        }
+        if (seen) seen.add(lotKey);
+        else seenLotsByItem.set(line.item_id, new Set([lotKey]));
       }
-      if (seen) seen.add(lotKey);
-      else seenLotsByItem.set(line.item_id, new Set([lotKey]));
       if (
         d.manufacture_date &&
         d.expiration_date &&
@@ -221,26 +264,24 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         }
         unitPrice = p;
       }
-      if (!placementComplete(d.placement, qty)) {
-        return {
-          error:
-            d.placement?.nodeType === 'box'
-              ? `Line ${line.line_no}: select exactly ${qty} cell(s) in the chosen box.`
-              : `Line ${line.line_no}: choose a destination location for the received units.`,
-          lineId: line.id,
-        };
-      }
+      // Placement is unit-by-unit, so this is measured in CONSUME units: a box
+      // receiving 3 packs of 100 needs 300 free cells, not 3.
       out.push({
         line_id: line.id,
+        // ORDER units — the server multiplies. Sending `units` here would
+        // record 300 boxes received against a 3-box line.
         qty_received: qty,
-        lot_number: lotNumber,
+        // Blank means "synthesize one" (REQ-003) — send null rather than "",
+        // so the intent is explicit on the wire.
+        lot_number: lotNumber || null,
         manufacture_date: d.manufacture_date || undefined,
         expiration_date: d.expiration_date || undefined,
         unit_price_amount: unitPrice,
-        placement: {
-          node_id: d.placement!.nodeId,
-          cells: d.placement!.cells,
-        },
+        // Sent whenever it differs from the line, so the receiver can set a
+        // pack the PO never had or correct a wrong one. The server writes it
+        // back to the line.
+        pack_uom: packUom || null,
+        units_per_pack: packSize ?? null,
       });
     }
     if (out.length === 0) {
@@ -376,7 +417,14 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       </span>
                     </label>
                     <span className="text-xs text-text-3">
-                      outstanding {line.outstanding_qty} · {line.supplier_name ?? '—'}
+                      outstanding {line.outstanding_qty}
+                      {line.pack_uom ? ` ${line.pack_uom}` : ''}
+                      {/* The units figure is server-computed; it is null-safe to
+                          show only when the pack size is actually known. */}
+                      {line.pack_uom && line.units_per_pack != null
+                        ? ` (${line.outstanding_units.toLocaleString()} units)`
+                        : ''}{' '}
+                      · {line.supplier_name ?? '—'}
                     </span>
                   </div>
 
@@ -385,16 +433,28 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       <Label>Lot number</Label>
                       <Input
                         className="font-mono"
-                        placeholder="L-20260629-A"
+                        // No asterisk and no example lot number: the field is
+                        // optional for every item (REQ-003), and an example
+                        // here would read as an instruction to make one up.
+                        // The placeholder says what happens if you do nothing.
+                        placeholder="Optional — generated if blank"
                         value={d.lot_number}
                         disabled={!d.include}
                         onChange={(e) =>
                           patch(line.id, { lot_number: e.target.value })
                         }
                       />
+                      {!d.lot_number.trim() && d.include && (
+                        <p className="text-[11px] text-text-3">
+                          A tracking number will be generated.
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-1.5">
-                      <Label>Qty received</Label>
+                      <Label>
+                        Qty received
+                        {d.pack_uom.trim() ? ` (${d.pack_uom.trim()})` : ''}
+                      </Label>
                       <Input
                         type="number"
                         min={0}
@@ -407,7 +467,50 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       />
                     </div>
                     <div className="space-y-1.5">
-                      <Label>Unit price</Label>
+                      <Label>Order unit</Label>
+                      <Input
+                        placeholder="Each"
+                        value={d.pack_uom}
+                        disabled={!d.include}
+                        onChange={(e) =>
+                          patch(line.id, { pack_uom: e.target.value })
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  {/* The pack and its price. Always shown and always editable:
+                      the PO is a plan, and the receiver is the first person who
+                      can see what a box actually holds. What they enter is
+                      written back to the order line. */}
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>
+                        {d.pack_uom.trim()
+                          ? `Units per ${d.pack_uom.trim()}`
+                          : 'Units per unit'}
+                        {d.pack_uom.trim() && (
+                          <span className="text-danger"> *</span>
+                        )}
+                      </Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        step="1"
+                        placeholder={d.pack_uom.trim() ? '100' : '—'}
+                        value={d.units_per_pack}
+                        // Meaningless until there is a unit to be a count OF.
+                        disabled={!d.include || !d.pack_uom.trim()}
+                        onChange={(e) =>
+                          patch(line.id, { units_per_pack: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>
+                        Unit price
+                        {d.pack_uom.trim() ? ` per ${d.pack_uom.trim()}` : ''}
+                      </Label>
                       <Input
                         type="number"
                         min={0}
@@ -421,6 +524,30 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       />
                     </div>
                   </div>
+
+                  {/* Restates the arithmetic in the operator's terms, right
+                      above the destination picker that consumes it. */}
+                  {d.pack_uom.trim() && placedUnits(d) > 0 && (
+                    <p className="mt-2 text-xs text-text-3">
+                      {d.qty_received} {d.pack_uom.trim()} ×{' '}
+                      {effectivePackSize(d)} ={' '}
+                      <span className="font-medium text-text-2">
+                        {placedUnits(d).toLocaleString()} units
+                      </span>{' '}
+                      to place
+                      {d.unit_price.trim() !== '' &&
+                        Number(d.unit_price) >= 0 &&
+                        effectivePackSize(d) && (
+                          <>
+                            {' · $'}
+                            {(Number(d.unit_price) / effectivePackSize(d)!)
+                              .toFixed(6)
+                              .replace(/\.?0+$/, '')}{' '}
+                            per unit
+                          </>
+                        )}
+                    </p>
+                  )}
 
                   <div className="mt-3 grid grid-cols-2 gap-3">
                     <div className="space-y-1.5">
@@ -446,28 +573,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       />
                     </div>
                   </div>
-
-                  {d.include && (
-                    <div className="mt-3 space-y-1.5 border-t border-border pt-3">
-                      <Label>
-                        Destination — unit in <span className="text-danger">*</span>
-                      </Label>
-                      {trees ? (
-                        <ReceiveLocationPicker
-                          qty={Number(d.qty_received) || 0}
-                          trees={trees}
-                          value={d.placement}
-                          onChange={(v) => patch(line.id, { placement: v })}
-                          reservedCells={cellsClaimedByOtherLines(
-                            line.id,
-                            d.placement?.nodeId,
-                          )}
-                        />
-                      ) : (
-                        <p className="text-xs text-text-3">Loading locations…</p>
-                      )}
-                    </div>
-                  )}
                 </div>
               );
             })}

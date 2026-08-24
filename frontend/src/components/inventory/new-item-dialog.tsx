@@ -66,8 +66,11 @@ const schema = z.object({
   // Required prefix — assigned to the item (REQ-2026-07-09-ITM-001). Lives
   // inside the selected tier; pre-filled with that tier's default.
   prefixId: z.string().min(1, 'Prefix is required'),
-  // Free-text unit of measure (each, mL, box …). Optional.
+  // The CONSUME unit (each, mL …) — what stock is counted in. Optional.
   uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
+  // No ORDER unit here (REQ-001) — the pack an item is bought in is captured
+  // on the PO line and confirmed at receive, because it belongs to the
+  // purchase and not to the material.
   // Blind-consumed, no per-lot traceability.
   isConsumable: z.boolean().default(false),
   // Assigned suppliers — zero-or-more. The only suppliers this item can later be
@@ -80,7 +83,7 @@ const schema = z.object({
     .int()
     .nonnegative('Must be ≥ 0')
     .max(3650, 'Must be ≤ 3650'),
-});
+  });
 
 type Values = z.infer<typeof schema>;
 
@@ -164,7 +167,6 @@ export function NewItemDialog({
   const prefixId = watch('prefixId');
   const isConsumable = watch('isConsumable');
   const suffix = watch('suffix');
-
   // The tier whose prefixes scope the picker, and the chosen prefix within it.
   // A locked tier is re-resolved from the fetched list so a prefix added from
   // this dialog shows up immediately (the prop itself is a stale snapshot).
@@ -459,10 +461,14 @@ export function NewItemDialog({
                 they pair up here. The purchasing-only fields (consumable flag,
                 suppliers, lead time, near-expiry) live in the block below. */}
               <div className="grid gap-4 sm:grid-cols-2">
-                <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
+                <Field
+                  id="ni-uom"
+                  label="Consume unit"
+                  error={errors.uom?.message}
+                >
                   <Input
                     id="ni-uom"
-                    placeholder="each, mL, box…"
+                    placeholder="each, mL, vial…"
                     aria-invalid={Boolean(errors.uom)}
                     {...register('uom')}
                   />

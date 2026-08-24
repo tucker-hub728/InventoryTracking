@@ -62,6 +62,22 @@ def _trimmed_non_blank(field_name: str):
     return BeforeValidator(_check)
 
 
+def _blank_to_none_check(v: str | None) -> str | None:
+    """Trim, and treat the empty result as absent rather than invalid.
+
+    For a genuinely optional string where blank and missing mean the same
+    thing — a receive line's lot number (REQ-003), which the server fills in
+    when it is not supplied. Rejecting "" would force every client to omit the
+    key rather than send an empty field, which is not how forms work.
+    """
+    if v is None:
+        return None
+    return v.strip() or None
+
+
+_blank_to_none = BeforeValidator(_blank_to_none_check)
+
+
 # ── Suppliers ────────────────────────────────────────────────────────────
 
 
@@ -169,13 +185,18 @@ class ItemCreate(BaseModel):
     # The tier is derived from the prefix (a prefix lives inside one tier), and the
     # tier's type (raw_material/sub_assembly/finished_good) decides BOM eligibility.
     prefix_id: str = Field(min_length=1)
-    # Free-text unit of measure (each, mL, box …). Optional.
+    # The CONSUME unit (each, mL …) — what inventory is counted in. Optional.
     uom: Annotated[str | None, _trimmed_non_blank("uom")] = Field(
         default=None, max_length=32
     )
+    # No pack fields here on purpose (REQ-001): the ORDER unit belongs to a
+    # purchase, not to the material, so it is captured per Order line and
+    # confirmed at receive. See ``OrderLineInput``.
     # Consumables are blind-consumed with no per-lot traceability
     # (REQ-2026-07-01-TRX-003). Defaults to a traceable, one-for-one material.
     is_consumable: bool = False
+    # No lot-control flag (REQ-003): every item may be received without a lot
+    # number, so there is nothing per-item to decide.
     supplier_ids: list[str] = Field(default_factory=list, max_length=100)
     avg_lead_days: int | None = Field(default=None, ge=0, le=3650)
     reorder_threshold: Decimal = Field(
@@ -206,6 +227,8 @@ class ItemUpdate(BaseModel):
     uom: Annotated[str | None, _trimmed_non_blank("uom")] = Field(
         default=None, max_length=32
     )
+    # No pack fields — see ``ItemCreate``. An order's pack is edited on the
+    # Order line or corrected at receive, never on the item.
     is_consumable: bool | None = None
     # Re-assign an item to another prefix. The prefix's tier (derived server-side)
     # still governs BOM eligibility — the route blocks moving a BOM-bearing item
@@ -235,7 +258,9 @@ class ItemRead(BaseModel):
     item_number: str
     sku_suffix: str
     description: str
-    # Free-text unit of measure (each, mL, box …). ``None`` when unset.
+    # The CONSUME unit (each, mL …) — what stock is counted in. ``None`` unset.
+    # The only unit an item has: the ORDER unit lives on the Order line
+    # (REQ-001), because a pack is a fact about a purchase, not a material.
     uom: str | None = None
     # Blind-consumed (no per-lot traceability) when true.
     is_consumable: bool = False
@@ -404,6 +429,10 @@ class LotRead(BaseModel):
     parent_lot_id: str | None = None
     # Ordered quantity captured at intake (planning data; the received
     # quantity stays ledger-derived, not this). Whole units only.
+    #
+    # In CONSUME units (REQ-001), and so **not** the number the receiver typed:
+    # a draw of 3 Box of 100 produces 300 here. It is the cap on how much of
+    # this lot may be placed into locations, and placement is unit-by-unit.
     ordered_qty: int | None = None
     created_at: datetime
     updated_at: datetime
@@ -567,7 +596,16 @@ class OrderLineInput(BaseModel):
 
     Supplier is **mandatory** and must be one of the item's assigned suppliers
     (``meta.item_suppliers``). No lot / manufacture / expiry here — those are
-    captured at receive. ``ordered_qty`` is planning data (whole units).
+    captured at receive.
+
+    **Units (REQ-001).** ``ordered_qty`` and ``unit_price`` are both in ORDER
+    units: 3 Box at $95.00 per Box. ``pack_uom`` / ``units_per_pack`` say what a
+    Box *is*; omit both and the line is ordered in the item's consume unit, as
+    every line was before REQ-001. The pack is only ever what the client sends
+    here — there is no item-level default to inherit, because a pack describes
+    a purchase and not a material: the same glove is bought by the Box from one
+    supplier and by the Case from another. An old client that knows nothing
+    about packs therefore keeps ordering in consume units, unchanged.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -576,6 +614,23 @@ class OrderLineInput(BaseModel):
     supplier_id: str
     ordered_qty: int = Field(gt=0, le=MAX_QTY)
     unit_price: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
+    # ── Tiered unit of measure (REQ-001) ──────────────────────────────
+    # ``units_per_pack`` is optional even when ``pack_uom`` is given: a PO can be
+    # raised for "3 Box" before the pack size is known, and receive then requires
+    # it. The reverse is not allowed — a factor needs a unit to be a factor *of*.
+    pack_uom: Annotated[str | None, _trimmed_non_blank("pack_uom")] = Field(
+        default=None, max_length=32
+    )
+    units_per_pack: int | None = Field(default=None, gt=0, le=MAX_QTY)
+
+    @model_validator(mode="after")
+    def _validate_line_pack(self) -> OrderLineInput:
+        if self.units_per_pack is not None and self.pack_uom is None:
+            raise ValueError(
+                "units_per_pack needs a pack_uom — a factor with no unit would "
+                "silently multiply an order placed in consume units"
+            )
+        return self
 
 
 class ArchivePolicyRead(BaseModel):
@@ -672,15 +727,42 @@ class PlacementCell(BaseModel):
     grid_col: int = Field(ge=1, le=400)
 
 
+class AwaitingPutAwayRead(BaseModel):
+    """One lot that has arrived but has not been received to inventory (REQ-004).
+
+    The item page's put-away queue. Everything here is derived from the lot and
+    the receipt ledger — there is no "pending" table, because a second copy of
+    "how much is still to place" would disagree with the ledger the first time
+    anyone placed a lot by another route.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    lot_id: str
+    lot_number: str
+    # CONSUME units still to put away. Less than ``received_units`` when an
+    # earlier partial put-away already placed some of it.
+    remaining_units: int
+    received_units: int
+    expiration_date: date | None = None
+    manufacture_date: date | None = None
+    # Where it came from, so the queue can link back to the receipt.
+    po_reference: str | None = None
+    received_at: date | None = None
+    supplier_name: str | None = None
+
+
 class ReceivePlacement(BaseModel):
     """Where a received lot is placed (unit-in) — the destination for this draw.
 
-    Single destination, exactly ``qty_received`` units:
+    Single destination, exactly ``qty_received × units_per_pack`` **consume**
+    units. Note this is not ``qty_received`` itself (REQ-001): receiving 3 Box
+    of 100 places 300 units, so an LN2 box needs 300 free cells, not 3.
 
-    * **Box** (LN2 grid): ``cells`` lists exactly ``qty_received`` distinct empty
+    * **Box** (LN2 grid): ``cells`` lists exactly that many distinct empty
       cells, one unit each.
     * **Free leaf** (freezer sub-location / warehouse shelf): ``cells`` is empty;
-      all ``qty_received`` units land on the node.
+      all of the units land on the node.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -705,20 +787,52 @@ class ReceiveEventLineInput(BaseModel):
 
     ``placement`` puts the received units into a location in the same signed
     step (unit-in happens only here, from Receipt Admin).
+
+    **Units (REQ-001).** ``qty_received`` is in ORDER units — the receiver
+    confirms "3 Box arrived" — so that outstanding stays a like-for-like
+    subtraction against the line. The lot created here holds ``qty_received ×
+    units_per_pack`` CONSUME units, and that is the figure placed into the
+    location. Likewise ``unit_price_amount`` is per ORDER unit; the lot stores
+    the divided per-consume-unit price.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     line_id: str
     qty_received: int = Field(gt=0, le=MAX_QTY)
-    lot_number: Annotated[str, _trimmed_non_blank("lot_number")] = Field(max_length=64)
+    # ── The pack, settable or correctable at receipt (REQ-001) ────────
+    # Omit both to use whatever the Order line carries. Send them to set a pack
+    # on a line that has none, or to correct one — the PO is a plan, and the
+    # dock is where anyone actually knows what a box holds. Whatever is used is
+    # written back to the line. A unit with no size (or a size with no unit) is
+    # a 422 either way, here as everywhere else.
+    pack_uom: Annotated[str | None, _trimmed_non_blank("pack_uom")] = Field(
+        default=None, max_length=32
+    )
+    units_per_pack: int | None = Field(default=None, gt=0, le=MAX_QTY)
+    # ── Lot control (REQ-003) ─────────────────────────────────────────
+    # Optional at the schema layer, conditionally required at the route: the
+    # rule depends on the ITEM behind this line, which Pydantic cannot see here.
+    # A lot-controlled item with no number is a 422; a non-lot-controlled one
+    # gets a synthesized ``AUTO-…`` number.
+    #
+    # Blank-but-present is normalised to None rather than rejected, so a UI that
+    # always sends the field does not have to special-case the empty string.
+    lot_number: Annotated[str | None, _blank_to_none] = Field(
+        default=None, max_length=64
+    )
     manufacture_date: date | None = None
     expiration_date: date | None = None
     # Optional override of the line's unit price for this lot.
     unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
-    # Destination for the received units (unit-in), placed under the receive's
-    # single e-signature.
-    placement: ReceivePlacement
+    # No destination here (REQ-004). Arrival records what turned up; it does
+    # not put it anywhere. The location is chosen later, at the receive-to-
+    # inventory step, which is also where the lot moves out of quarantine.
+    #
+    # The field is gone rather than made optional: a client that still sends
+    # one is a client that thinks it is placing stock, and ``extra="forbid"``
+    # turns that into a 422 instead of silently ignoring a destination the
+    # operator chose.
 
 
 class ReceiveEventRequest(BaseModel):
@@ -749,11 +863,23 @@ class OrderLineRead(BaseModel):
     item_description: str | None = None
     supplier_id: str
     supplier_name: str | None = None
+    # All three in ORDER units (3 Box), matching ``pack_uom`` below.
     ordered_qty: int
     unit_price_amount: Decimal | None = None
     # Derived (summed from receipt_event_lines) — never stored on the line.
     received_qty: int = 0
     outstanding_qty: int = 0
+    # ── Tiered unit of measure (REQ-001) ──────────────────────────────
+    # ``pack_uom`` None = this line is in consume units and the three counts
+    # above are already what will be placed. ``units_per_pack`` None with a
+    # ``pack_uom`` set means the pack size is still to be confirmed at receive.
+    pack_uom: str | None = None
+    units_per_pack: int | None = None
+    # Convenience for the UI so it never has to do this multiplication itself
+    # (and never has to guess a factor of 1). In CONSUME units — what would
+    # actually land in a location if the whole line were received.
+    ordered_units: int = 0
+    outstanding_units: int = 0
 
 
 class ReceiptEventLineRead(BaseModel):
@@ -763,10 +889,33 @@ class ReceiptEventLineRead(BaseModel):
 
     id: str
     line_id: str
+    # In ORDER units (3 Box) — the same unit as the Order line's ordered_qty,
+    # which is what makes outstanding a like-for-like subtraction. The lot this
+    # draw created holds the multiplied figure; see ``units_received`` below.
     qty_received: int
     over_receipt_reason: str | None = None
     lot_id: str
     lot_number: str | None = None
+    # ── From the lot this draw created (REQ-001) ──────────────────────
+    # All free: ``ReceiptEventLine.lot`` is eager-joined (``lazy="joined"``),
+    # so none of these cost a query.
+    #
+    # ``units_received`` is the whole reason this block exists. A receiving log
+    # showing only "+148" is unreadable once an item is ordered in Cases and
+    # stocked in units — 148 Cases of 25 is 3,700 units, and the figure the
+    # reader actually needs is the one that was missing. Read from the lot
+    # rather than recomputed, so it is what was actually stored at receipt even
+    # if the line's pack size was corrected afterwards.
+    units_received: int | None = None
+    # Dates and price come from the same already-loaded row. A receiving record
+    # that cannot answer "when does it expire" sends the reader to another
+    # screen for the one fact that decides whether the material is usable.
+    manufacture_date: date | None = None
+    expiration_date: date | None = None
+    # Per CONSUME unit (6dp) — the divided figure, not the per-pack price.
+    unit_price_amount: Decimal | None = None
+    # NULL for anything with no release workflow (consumables, raw materials).
+    release_state: LotReleaseState | None = None
 
 
 class ReceiptEventRead(BaseModel):
