@@ -56,8 +56,6 @@ const schema = z.object({
       'Near-expiry threshold must be a whole number of days (0–3650)',
     ),
   must_order_flag: z.boolean(),
-  // REQ-003 — see the checkbox for why this is editable.
-  is_lot_controlled: z.boolean(),
   });
 
 type FormValues = z.infer<typeof schema>;
@@ -123,13 +121,11 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       reorder_threshold: '',
       near_expiry_threshold_days: '',
       must_order_flag: false,
-      is_lot_controlled: true,
     },
   });
 
   const supplierIds = watch('supplier_ids');
   const mustOrder = watch('must_order_flag');
-  const lotControlled = watch('is_lot_controlled');
 
   // Supplier-side fields apply only to the raw-material tier (a built AY/FG is
   // manufactured, not bought) — suppliers, lead time, must-order. Near-expiry
@@ -178,7 +174,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               ? String(freshItem.near_expiry_threshold_days)
               : '',
           must_order_flag: freshItem.must_order_flag,
-          is_lot_controlled: freshItem.is_lot_controlled,
         });
         setSubmitError(null);
       })
@@ -213,8 +208,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
         : 0;
     }
     if (dirtyFields.must_order_flag) patch.must_order_flag = values.must_order_flag;
-    if (dirtyFields.is_lot_controlled)
-      patch.is_lot_controlled = values.is_lot_controlled;
 
     if (Object.keys(patch).length === 0) {
       setSubmitError('No changes to save.');
@@ -395,33 +388,6 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                     className="size-4"
                   />
                   <span>Flag as must-order for next PO</span>
-                </label>
-
-                {/* REQ-003. Editable here because every item predating lot01
-                    defaults to lot-controlled; without this, marking gloves as
-                    non-lot-controlled would mean re-creating the item. The
-                    server refuses to switch it OFF once the item has lots, so
-                    the failure arrives as a clear 409 rather than being
-                    pre-empted with a disabled control whose reason is invisible. */}
-                <label className="flex cursor-pointer items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={lotControlled}
-                    onChange={(e) =>
-                      setValue('is_lot_controlled', e.target.checked, {
-                        shouldDirty: true,
-                      })
-                    }
-                    className="size-4"
-                  />
-                  <span>
-                    Lot controlled
-                    <span className="ml-1 text-xs text-text-3">
-                      {lotControlled
-                        ? '— receiving requires a lot number'
-                        : '— lot number optional, generated if blank'}
-                    </span>
-                  </span>
                 </label>
               </>
             )}

@@ -261,17 +261,11 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       }
       const units = placedUnits(d);
       // ── Lot control (REQ-003) ─────────────────────────────────────
-      // Required only for a lot-controlled item. Left blank on a non-lot line,
-      // the server synthesizes an AUTO- number, so the field is genuinely
-      // optional rather than filled in with a placeholder here — the client
-      // must not invent an identifier that ends up in a GxP record.
+      // Never required (REQ-003): any item may be received without a lot
+      // number, and the server synthesizes one when it is blank. Deliberately
+      // left empty rather than pre-filled here — the client must not invent an
+      // identifier that ends up in a GxP record.
       const lotNumber = d.lot_number.trim();
-      if (!lotNumber && line.item_is_lot_controlled) {
-        return {
-          error: `Line ${line.line_no}: ${line.item_number ?? 'this item'} is lot-controlled — a lot number is required.`,
-          lineId: line.id,
-        };
-      }
       if (lotNumber.toUpperCase().startsWith(AUTO_LOT_PREFIX)) {
         // Mirrors the server rule. The prefix is how every later reader tells a
         // generated number from a supplier's; a typed one would break that.
@@ -494,37 +488,25 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
 
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-1.5">
-                      <Label>
-                        Lot number
-                        {line.item_is_lot_controlled && (
-                          <span className="text-danger"> *</span>
-                        )}
-                      </Label>
+                      <Label>Lot number</Label>
                       <Input
                         className="font-mono"
-                        // The placeholder says what happens if you do nothing,
-                        // which on a non-lot line is the whole point — an
-                        // example lot number there would read as a suggestion
-                        // to make one up (REQ-003).
-                        placeholder={
-                          line.item_is_lot_controlled
-                            ? 'L-20260629-A'
-                            : 'Optional — generated if blank'
-                        }
+                        // No asterisk and no example lot number: the field is
+                        // optional for every item (REQ-003), and an example
+                        // here would read as an instruction to make one up.
+                        // The placeholder says what happens if you do nothing.
+                        placeholder="Optional — generated if blank"
                         value={d.lot_number}
                         disabled={!d.include}
                         onChange={(e) =>
                           patch(line.id, { lot_number: e.target.value })
                         }
                       />
-                      {!line.item_is_lot_controlled &&
-                        !d.lot_number.trim() &&
-                        d.include && (
-                          <p className="text-[11px] text-text-3">
-                            Not lot-controlled — a tracking number will be
-                            generated.
-                          </p>
-                        )}
+                      {!d.lot_number.trim() && d.include && (
+                        <p className="text-[11px] text-text-3">
+                          A tracking number will be generated.
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-1.5">
                       <Label>

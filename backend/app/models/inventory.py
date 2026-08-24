@@ -357,25 +357,13 @@ class Item(Base):
         nullable=False,
         server_default=text("FALSE"),
     )
-    # ── Lot control (REQ-003, migration lot01) ────────────────────────
-    # True: receiving demands a lot number, because this material has to be
-    # traceable back to its batch. False: the receiver may leave it blank and
-    # the server synthesizes one (``AUTO-…``), because ``lots.lot_number`` is
-    # NOT NULL and every unit of stock hangs off a lot.
-    #
-    # Deliberately NOT the same flag as ``is_consumable`` above. That one says
-    # what happens to material when it LEAVES stock; this says how it is traced
-    # while it is IN stock. They usually agree and are free not to — a
-    # consumable reagent can still need a traceable lot for a deviation
-    # investigation, which is precisely the case an auditor asks about.
-    #
-    # Defaults true: requiring a lot number is the status quo, so no existing
-    # item changes behaviour until somebody deliberately opts it out.
-    is_lot_controlled: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("TRUE"),
-    )
+    # No lot-control flag here, deliberately (REQ-003). One was built and then
+    # removed: the client confirmed 2026-08-21 that ANY item may be received
+    # without a lot number, so there is no item for which one is mandatory and
+    # nothing for a per-item flag to decide. A lot number is optional at
+    # receipt for everything; when it is omitted the server synthesizes one,
+    # because ``lots.lot_number`` is NOT NULL and every unit of stock hangs off
+    # a lot. See ``next_synthetic_lot_number`` in the repository.
     # The item's type prefix (REQ-2026-07-09-ITM-001) — mandatory. The tier is
     # derived from it (a prefix lives inside exactly one tier), so there is no
     # separate ``tier_id`` column; the tier's ``type`` still governs BOM

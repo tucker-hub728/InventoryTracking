@@ -41,9 +41,6 @@ export interface OrderLine {
   item_description: string | null;
   supplier_id: string;
   supplier_name: string | null;
-  /** Whether receiving must demand a lot number for this line (REQ-003). When
-   *  false the field may be left blank and the server synthesizes `AUTO-…`. */
-  item_is_lot_controlled: boolean;
   /** In ORDER units — 3 means three boxes when `pack_uom` is set (REQ-001). */
   ordered_qty: number;
   /** Decimal serialised as a string (or null). Per ORDER unit. */
@@ -197,9 +194,9 @@ export interface ReceiveEventLineInput {
   /** In ORDER units — the receiver confirms "3 boxes arrived". The server
    *  multiplies this to consume units for the lot and the placement. */
   qty_received: number;
-  /** Omit or send blank for a line whose item is not lot-controlled — the
-   *  server synthesizes an `AUTO-…` number (REQ-003). Required otherwise, and
-   *  a value that itself starts with `AUTO-` is refused. */
+  /** Always optional (REQ-003) — omit or send blank and the server
+   *  synthesizes an `AUTO-…` number. A value that itself starts with `AUTO-`
+   *  is refused, so the generated prefix stays meaningful. */
   lot_number?: string | null;
   manufacture_date?: string | null;
   expiration_date?: string | null;

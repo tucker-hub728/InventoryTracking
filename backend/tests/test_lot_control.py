@@ -1,24 +1,25 @@
-"""Lot control — required, skipped, or synthesized (REQ-003).
+"""Lot numbers — always optional, synthesized when absent (REQ-003).
 
-"Shall require lot number where the item is lot-controlled; lot may be
-skipped/synthesized for non-lot items."
+The written requirement says "shall require lot number where the item is
+lot-controlled; lot may be skipped/synthesized for non-lot items", which reads
+as a per-item rule. The client settled it on 2026-08-21: **any** item may be
+received without a lot number. So there is no lot-controlled category, no
+per-item flag, and no case where receiving refuses a blank one.
 
-Two things carry the feature, and both are tested here rather than through
-HTTP because the thing under test is the rule, not the transport:
+What is left is two rules, both tested here rather than through HTTP because
+the thing under test is the rule, not the transport:
 
-  * ``lot_number`` is optional at the schema layer and conditionally required
-    at the route, because the rule depends on the ITEM behind the line — which
-    the payload does not carry. A schema that made it required would make the
-    non-lot case unreachable; one that made blank *invalid* would 422 before
-    the route could decide whether blank mattered.
+  * ``lot_number`` is optional everywhere, and blank means absent rather than
+    invalid — a form that always sends the field must not have to omit the key
+    to mean "nothing".
   * A synthesized number is told apart from a vendor's by its ``AUTO-`` prefix,
     for the rest of its life, in every screen and export. That only holds if
-    nothing else can produce one — hence the reserved-prefix rule, tested here
-    and enforced at the one door that writes lot numbers on receipt.
+    nothing else can produce one — hence the reserved-prefix rule, enforced at
+    the one door that writes lot numbers on receipt.
 
-The end-to-end rules (422 without a lot on a controlled item, a generated
-number on an uncontrolled one, the 409 when switching control off over
-existing stock) live in ``smoke_lot_control.py``, which needs a live API.
+The end-to-end behaviour (a blank lot producing ``AUTO-YYYYMMDD-N``, two blanks
+producing distinct numbers, a typed ``AUTO-`` being refused) lives in
+``smoke_tiered_uom.py``, which needs a live API.
 """
 
 from __future__ import annotations
@@ -43,45 +44,39 @@ def _line(**kw) -> ReceiveEventLineInput:
     return ReceiveEventLineInput(**{**base, **kw})
 
 
-# ── The item flag ─────────────────────────────────────────────────────
+# ── No item-level lot flag ────────────────────────────────────────────
 
 
-class TestItemLotControlFlag:
-    def test_defaults_to_lot_controlled(self) -> None:
-        # Requiring a lot number is the status quo, so an item created by a
-        # client that has never heard of REQ-003 keeps today's behaviour. The
-        # migration's server_default makes the same promise for existing rows.
+class TestNoItemLotFlag:
+    """There is deliberately no per-item lot-control setting.
+
+    One was built and removed. The client confirmed on 2026-08-21 that ANY
+    item may be received without a lot number, which leaves nothing for a
+    per-item flag to decide — a switch whose two positions behave identically
+    is worse than no switch, because it implies a control that is not there.
+
+    Asserted rather than merely deleted: the flag reaching the schema again
+    would silently re-introduce a rule the client explicitly rejected.
+    """
+
+    def test_item_create_rejects_a_lot_control_flag(self) -> None:
+        # ItemCreate forbids extra fields, so this is a 422 rather than a
+        # value that is quietly ignored.
+        with pytest.raises(PydanticValidationError):
+            ItemCreate(
+                sku_suffix="001",
+                description="x",
+                prefix_id="p",
+                is_lot_controlled=True,
+            )
+
+    def test_item_update_rejects_it_too(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            ItemUpdate(is_lot_controlled=False)
+
+    def test_a_plain_item_still_creates(self) -> None:
         item = ItemCreate(sku_suffix="001", description="x", prefix_id="p")
-        assert item.is_lot_controlled is True
-
-    def test_can_be_turned_off_explicitly(self) -> None:
-        item = ItemCreate(
-            sku_suffix="001", description="x", prefix_id="p", is_lot_controlled=False
-        )
-        assert item.is_lot_controlled is False
-
-    def test_is_independent_of_is_consumable(self) -> None:
-        # The two were nearly collapsed into one flag. They are not the same
-        # fact: consumable is how material LEAVES stock, lot control is how it
-        # is traced while IN stock. A consumable that still needs a traceable
-        # lot for a deviation investigation must remain expressible.
-        item = ItemCreate(
-            sku_suffix="001",
-            description="reagent",
-            prefix_id="p",
-            is_consumable=True,
-            is_lot_controlled=True,
-        )
-        assert (item.is_consumable, item.is_lot_controlled) == (True, True)
-
-    def test_patch_omits_it_unless_sent(self) -> None:
-        # An unrelated PATCH must not silently restate a traceability control.
-        patch = ItemUpdate(description="x")
-        assert "is_lot_controlled" not in patch.model_dump(exclude_unset=True)
-
-    def test_patch_carries_an_explicit_false(self) -> None:
-        patch = ItemUpdate(is_lot_controlled=False)
-        assert patch.model_dump(exclude_unset=True) == {"is_lot_controlled": False}
+        assert not hasattr(item, "is_lot_controlled")
 
 
 # ── The lot number on a receive line ──────────────────────────────────
@@ -89,14 +84,13 @@ class TestItemLotControlFlag:
 
 class TestReceiveLineLotNumber:
     def test_may_be_omitted(self) -> None:
-        # The whole point: a non-lot item is received without one. If this
-        # field were required the feature would be unreachable.
+        # The whole point: any item can be received without one. If this field
+        # were required the feature would be unreachable.
         assert _line().lot_number is None
 
     def test_blank_becomes_none_rather_than_a_422(self) -> None:
         # A UI that always sends the field must not have to special-case "".
-        # Rejecting blank here would also fire before the route can decide
-        # whether blank was allowed for this item.
+        # Blank and missing mean the same thing here — generate one.
         assert _line(lot_number="").lot_number is None
         assert _line(lot_number="   ").lot_number is None
 

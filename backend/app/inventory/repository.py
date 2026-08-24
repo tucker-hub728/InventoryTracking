@@ -388,7 +388,6 @@ async def create_item(
     created_by_user_id: uuid.UUID,
     uom: str | None = None,
     is_consumable: bool = False,
-    is_lot_controlled: bool = True,
     avg_lead_days: int | None = None,
     reorder_threshold: Decimal = Decimal("0"),
     near_expiry_threshold_days: int = 30,
@@ -406,7 +405,6 @@ async def create_item(
         prefix_id=prefix_id,
         uom=uom,
         is_consumable=is_consumable,
-        is_lot_controlled=is_lot_controlled,
         avg_lead_days=avg_lead_days,
         reorder_threshold=reorder_threshold,
         near_expiry_threshold_days=near_expiry_threshold_days,
@@ -471,9 +469,6 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
         "description": item.description,
         "uom": item.uom,
         "is_consumable": item.is_consumable,
-        # Lot control is a traceability control — turning it off changes what
-        # receiving demands, so a change to it belongs in the audit trail.
-        "is_lot_controlled": item.is_lot_controlled,
         "prefix_id": str(item.prefix_id),
         "supplier_ids": sorted(str(iv.supplier_id) for iv in item.suppliers),
         "avg_lead_days": item.avg_lead_days,
@@ -775,6 +770,20 @@ async def next_synthetic_lot_number(
     the caller retries — because taking a lock here would serialise every receipt
     of every non-lot item to remove a collision that needs two receivers booking
     the same item in the same second.
+
+    **Two known limits, kept deliberately** (client call, 2026-08-24 — the format
+    was reviewed and left as it is):
+
+    * The item is not in the string, and uniqueness is only enforced per item, so
+      two different items received on the same day both read "AUTO-20260821-1".
+      They are distinct rows; they are indistinguishable on a label or in an
+      export that does not carry the item beside them.
+    * The sequence is unpadded, so lot numbers sort as text differently than as
+      numbers: ``-10`` lands between ``-1`` and ``-2``.
+
+    Both are fixed by putting the item number in and zero-padding, which is a
+    change to this function alone — no migration, and existing lots keep their
+    numbers. Do not "tidy" either of these without asking; they were chosen.
     """
     stamp = received_on.strftime("%Y%m%d")
     like = f"{SYNTHETIC_LOT_PREFIX}{stamp}-%"
