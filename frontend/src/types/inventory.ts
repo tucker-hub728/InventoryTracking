@@ -42,6 +42,8 @@ export interface InventoryItem {
   qtyAvailable: number;
   months: number | null;
   onOrder: number;
+  /** Arrived, not yet received to inventory. Drives the "Awaiting release" badge. */
+  qtyAwaitingRelease: number;
   mustOrder: number;
   /** Per-item near-expiry window (days) driving the ledger expiry colours. */
   nearExpiryThresholdDays: number;

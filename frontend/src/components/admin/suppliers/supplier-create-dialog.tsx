@@ -31,6 +31,15 @@ const schema = z.object({
     .or(z.literal('')),
   phone: z.string().max(64).optional(),
   notes: z.string().max(2048).optional(),
+  // Kept as a string so "not recorded" (empty) stays distinct from 0. Bounds
+  // match the API's 0..3650 and the DB CHECK.
+  lead_time_days: z
+    .string()
+    .optional()
+    .refine(
+      (v) => !v || (/^\d+$/.test(v) && Number(v) >= 0 && Number(v) <= 3650),
+      'Whole number of days, 0–3650',
+    ),
 });
 
 type FormValues = z.infer<typeof schema>;
@@ -55,7 +64,7 @@ export function SupplierCreateDialog({
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { name: '', contact_email: '', phone: '', notes: '' },
+    defaultValues: { name: '', contact_email: '', phone: '', notes: '', lead_time_days: '' },
   });
 
   React.useEffect(() => {
@@ -72,6 +81,10 @@ export function SupplierCreateDialog({
       contact_email: values.contact_email?.trim() || null,
       phone: values.phone?.trim() || null,
       notes: values.notes?.trim() || null,
+      // Empty means "not recorded", which is null — deliberately not 0.
+      lead_time_days: values.lead_time_days?.trim()
+        ? Number(values.lead_time_days)
+        : null,
     };
     try {
       const created = await suppliersApi.create(payload);
@@ -139,6 +152,21 @@ export function SupplierCreateDialog({
               </Field>
             </div>
 
+            <Field
+              id="supplier-lead"
+              label="Lead time (days)"
+              error={errors.lead_time_days?.message}
+              hint="Order to delivery. Leave empty if you haven't confirmed it — that reads as unknown on the reorder screen, whereas 0 would read as same-day."
+            >
+              <Input
+                id="supplier-lead"
+                inputMode="numeric"
+                placeholder="e.g. 30"
+                aria-invalid={Boolean(errors.lead_time_days)}
+                {...register('lead_time_days')}
+              />
+            </Field>
+
             <Field id="supplier-notes" label="Notes">
               <Textarea
                 id="supplier-notes"
@@ -182,12 +210,14 @@ function Field({
   label,
   required,
   error,
+  hint,
   children,
 }: {
   id: string;
   label: string;
   required?: boolean;
   error?: string;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -196,6 +226,7 @@ function Field({
         {label} {required && <span className="text-danger">*</span>}
       </Label>
       {children}
+      {hint && !error && <p className="text-xs text-text-3">{hint}</p>}
       {error && (
         <p role="alert" className="text-xs text-danger">
           {error}

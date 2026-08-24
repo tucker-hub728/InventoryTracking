@@ -180,7 +180,7 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       // ORDER units — what the receiver typed, e.g. 3 boxes. Nothing here
       // converts to consume units any more: arrival does not place anything,
       // so the only consumer of that figure was the destination picker, which
-      // has moved to the put-away step (REQ-004).
+      // has moved to the receive-to-inventory step (REQ-004).
       const qty = Number(d.qty_received);
       if (!Number.isFinite(qty) || qty <= 0) {
         return {

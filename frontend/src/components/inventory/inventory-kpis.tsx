@@ -2,8 +2,20 @@
 
 import * as React from 'react';
 
+import { STOCK_STATUS_META } from '@/config/inventory';
 import { cn } from '@/lib/utils';
 import type { InventoryItem } from '@/types/inventory';
+import type { BadgeTone } from '@/types/ui';
+
+/** Tone → text colour, mirroring the Badge tones so a tile and a badge for the
+ *  same thing read the same. */
+const TONE_TEXT: Record<BadgeTone, string> = {
+  neutral: '',
+  accent: 'text-accent',
+  success: 'text-success',
+  warning: 'text-warning',
+  danger: 'text-danger',
+};
 
 interface InventoryKPIsProps {
   /** Items on the *current page*. Used for page-scoped sums. */
@@ -58,7 +70,14 @@ export const InventoryKPIs = React.memo(function InventoryKPIs({
         label="Out of stock"
         value={m.outOfStockTotal.toLocaleString()}
         hint="Needs reorder"
-        tone={m.outOfStockTotal > 0 ? 'warning' : 'success'}
+        // Same tone the badge uses, from the shared config. This tile said
+        // amber while the table badge said grey and the reorder row said red —
+        // three colours for one status (client-reported 2026-08-24).
+        tone={
+          m.outOfStockTotal > 0
+            ? STOCK_STATUS_META.out_of_stock.tone
+            : STOCK_STATUS_META.available.tone
+        }
       />
       <Metric
         label="Expiring soon"
@@ -78,7 +97,10 @@ function Metric({
   label: string;
   value: string;
   hint: string;
-  tone?: 'neutral' | 'warning' | 'success';
+  /** Accepts the full ``BadgeTone`` set so a tile can carry the same tone as
+   *  the badge for the thing it counts — it could not express ``danger``
+   *  before, which is part of why the out-of-stock tile drifted to amber. */
+  tone?: BadgeTone;
 }) {
   return (
     <li className="rounded-md border border-border bg-bg-elev p-3.5 shadow-elev-sm">
@@ -88,8 +110,7 @@ function Metric({
       <div
         className={cn(
           'mt-1 font-mono text-xl font-semibold leading-none tracking-tight',
-          tone === 'warning' && 'text-warning',
-          tone === 'success' && 'text-success',
+          TONE_TEXT[tone],
         )}
       >
         {value}

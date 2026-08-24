@@ -301,7 +301,7 @@ export function ItemStockLocationsTab({
 
                 {/* Material that has arrived but is not placed (REQ-004).
                     This tab answers "where is this item", and "in receiving,
-                    not put away yet" is a true answer to that — leaving it out
+                    not received to inventory yet" is a true answer to that — leaving it out
                     would let the tab imply the arrived units do not exist.
                     It is deliberately NOT a location: no link, an em-dash name,
                     and muted, so it never reads as somewhere you could pick

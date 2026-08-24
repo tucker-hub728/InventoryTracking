@@ -15,6 +15,7 @@ import {
   Tags,
   Truck,
   Users,
+  ShoppingCart,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -46,7 +47,7 @@ export interface NavItem {
 }
 
 /** Counts the sidebar knows how to fetch and render. */
-export type NavBadgeKey = 'expiringConsumables';
+export type NavBadgeKey = 'expiringConsumables' | 'reorderItems';
 
 export interface NavSection {
   title: string;
@@ -104,6 +105,20 @@ export const navSections: readonly NavSection[] = [
         // looks rather than only on the page itself.
         badge: 'expiringConsumables',
       },
+      // Items that have reached their reorder threshold (PLN-001). Labelled
+      // "Reorder", not "Planning", because the row below already carries that
+      // word for the forecast screen and two identical labels in one section
+      // is a coin toss for the user. This one names what it lists.
+      {
+        id: 'planning',
+        label: 'Reorder',
+        href: '/planning',
+        icon: ShoppingCart,
+        resource: 'inventory',
+        // Same reasoning as the expiry badge: a warning nobody sees isn't one,
+        // and the whole point of PLN-001 is catching the breach early.
+        badge: 'reorderItems',
+      },
       {
         id: 'forecast',
         label: 'Planning',
@@ -112,7 +127,7 @@ export const navSections: readonly NavSection[] = [
         resource: 'inventory',
         disabled: true,
         disabledReason:
-          'Planning is a work in progress — demand projections and reorder signals are not yet wired to the backend.',
+          'Planning is a work in progress — demand projections are not yet wired to the backend. Reorder signals now live on their own screen above.',
       },
     ],
   },

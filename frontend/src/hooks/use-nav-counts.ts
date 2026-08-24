@@ -4,6 +4,7 @@ import * as React from 'react';
 import { usePathname } from 'next/navigation';
 
 import { consumablesApi } from '@/lib/api/consumables';
+import { planningApi } from '@/lib/api/planning';
 import type { NavBadgeKey } from '@/config/nav';
 
 export type NavCounts = Partial<Record<NavBadgeKey, number>>;
@@ -56,6 +57,21 @@ export function useNavCounts(enabled: boolean): NavCounts {
       .then((page) => setCounts((c) => ({ ...c, expiringConsumables: page.total })))
       // A badge is decoration: a failed count leaves the row bare rather than
       // breaking the navigation everything else depends on.
+      .catch(() => {});
+    // Separate call, not Promise.all: one badge failing should not blank the
+    // other, and neither blocks the sidebar from rendering.
+    planningApi
+      .reorder({ limit: 1, offset: 0 }, { signal: ctrl.signal })
+      .then((page) =>
+        setCounts((c) => ({
+          ...c,
+          // All three stages: the badge counts rows on the screen that need
+          // someone to act, and chasing an order or receiving a delivery is as
+          // much a job as raising a purchase order.
+          reorderItems:
+            (page.order_total ?? 0) + (page.on_order_total ?? 0) + (page.awaiting_total ?? 0),
+        })),
+      )
       .catch(() => {});
     return () => ctrl.abort();
   }, [enabled, pathname, tick]);

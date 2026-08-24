@@ -8,7 +8,7 @@ import { Plus, Search } from 'lucide-react';
 import { PageHeader } from '@/components/shared/page-header';
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -363,7 +363,15 @@ export function TierListClient({ config }: { config: TierConfig }) {
                         {row.uom ? <span className="ml-1 text-text-3">{row.uom}</span> : null}
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={row.status} />
+                        {/* Awaiting-release aware, same as the item page and
+                            the all-items table: a delivery sitting in the
+                            receiving bay must not read as "go buy more". */}
+                        <StockStatusBadge
+                          status={row.status}
+                          qtyAvailable={row.qtyAvailable}
+                          reorderThreshold={row.threshold}
+                          qtyAwaitingRelease={row.qtyAwaitingRelease}
+                        />
                       </TableCell>
                       <TableCell className="text-text-3">
                         {row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}

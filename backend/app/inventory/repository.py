@@ -109,6 +109,7 @@ async def create_supplier(
     phone: str | None = None,
     notes: str | None = None,
     is_active: bool = True,
+    lead_time_days: int | None = None,
 ) -> Supplier:
     """Insert a supplier row. Caller commits."""
     supplier = Supplier(
@@ -117,6 +118,7 @@ async def create_supplier(
         phone=phone,
         notes=notes,
         is_active=is_active,
+        lead_time_days=lead_time_days,
     )
     session.add(supplier)
     await session.flush()
@@ -154,6 +156,10 @@ def supplier_to_audit_snapshot(supplier: Supplier) -> dict[str, object | None]:
         "phone": supplier.phone,
         "notes": supplier.notes,
         "is_active": supplier.is_active,
+        # Audited because it moves a reorder signal: raising a lead time from
+        # 7 to 60 days changes when every item this supplier stocks is flagged,
+        # and "who widened the buffer?" is a question the log should answer.
+        "lead_time_days": supplier.lead_time_days,
     }
 
 
@@ -1391,28 +1397,14 @@ async def get_event_line_by_lot(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def lots_awaiting_put_away(
-    session: AsyncSession, item_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, list[tuple[Lot, int]]]:
-    """``{item_id: [(lot, units still to place), …]}`` — the put-away queue.
+def _placed_units_subquery():
+    """Units already shelved per lot — the ``receipt`` side of the ledger.
 
-    Material that has ARRIVED but has not been received to inventory yet
-    (REQ-004): quarantined, received against a purchase order, and with units
-    left over the append-only receipt ledger.
-
-    Derived rather than stored. A "pending put-away" column would be a second
-    copy of a fact the ledger already holds, and the two would disagree the
-    first time anyone placed a lot by another route. The predicate rides the
-    existing partial index on ``release_state``.
-
-    Deliberately excludes manufactured output: a kit-produced lot is also
-    quarantined, but it was placed at close-out and its release is a quality
-    decision rather than a put-away. ``receipt_transaction_line_id`` is what
-    tells the two apart.
+    Shared by the receive-to-inventory queue and the awaiting-release total below so the
+    two cannot drift: a lot is "still waiting" precisely to the extent that its
+    ordered quantity exceeds what has been placed.
     """
-    if not item_ids:
-        return {}
-    placed = (
+    return (
         select(
             StockMovement.lot_id.label("lot_id"),
             func.coalesce(func.sum(StockMovement.qty_delta), 0).label("qty"),
@@ -1421,6 +1413,162 @@ async def lots_awaiting_put_away(
         .group_by(StockMovement.lot_id)
         .subquery()
     )
+
+
+def awaiting_release_units_subquery():
+    """Correlated scalar: CONSUME units that have ARRIVED but are not placed.
+
+    The same predicate as :func:`lots_awaiting_put_away`, expressed as a number
+    per item so a list query can carry it without loading every lot. **Both must
+    stay in step** — the banner on the item page and the Reorder screen would
+    otherwise disagree about the same material, which is worse than either being
+    wrong alone.
+
+    Why this number matters to planning (PLN-001): stock in this state is on
+    site and paid for. Counting it as missing sends a planner to raise a second
+    order for material already in the building, which is the one mistake a
+    reorder screen must not cause. Ordinary on-order quantity is deliberately
+    NOT netted off (client, 2026-08-24) because it has not arrived and may be
+    late; this HAS arrived, so the client's own "until stock physically
+    arrives" rule puts it on the other side of the line.
+
+    Manufactured output is excluded for the same reason it is excluded from the
+    receive-to-inventory queue: a kit-produced lot is quarantined too, but releasing it is a
+    quality decision, not a shelving task, and no amount of it means "do not
+    order".
+    """
+    placed = _placed_units_subquery()
+    remaining = Lot.ordered_qty - func.coalesce(placed.c.qty, 0)
+    return (
+        select(func.coalesce(func.sum(remaining), 0))
+        .select_from(Lot)
+        .outerjoin(placed, placed.c.lot_id == Lot.id)
+        .where(
+            Lot.item_id == Item.id,
+            Lot.deleted_at.is_(None),
+            Lot.release_state == "quarantine",
+            Lot.receipt_transaction_line_id.is_not(None),
+            Lot.ordered_qty.is_not(None),
+            Lot.ordered_qty > func.coalesce(placed.c.qty, 0),
+        )
+        .correlate(Item)
+        .scalar_subquery()
+    )
+
+
+async def awaiting_release_units(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    """``{item_id: units awaiting release}`` for a page of items.
+
+    Bulk, so the items list costs one extra query rather than one per row.
+    Items with nothing waiting are absent from the mapping; callers default
+    to zero.
+    """
+    if not item_ids:
+        return {}
+    placed = _placed_units_subquery()
+    remaining = Lot.ordered_qty - func.coalesce(placed.c.qty, 0)
+    stmt = (
+        select(Lot.item_id, func.coalesce(func.sum(remaining), 0))
+        .select_from(Lot)
+        .outerjoin(placed, placed.c.lot_id == Lot.id)
+        .where(
+            Lot.item_id.in_(item_ids),
+            Lot.deleted_at.is_(None),
+            Lot.release_state == "quarantine",
+            Lot.receipt_transaction_line_id.is_not(None),
+            Lot.ordered_qty.is_not(None),
+            Lot.ordered_qty > func.coalesce(placed.c.qty, 0),
+        )
+        .group_by(Lot.item_id)
+    )
+    return {row[0]: int(row[1]) for row in (await session.execute(stmt)).all()}
+
+
+def on_order_units_subquery():
+    """Correlated scalar: units on open purchase orders, in CONSUME units.
+
+    Same definition of "outstanding" as :func:`compute_item_valuations` —
+    ``ordered_qty − Σ received``, clamped at zero, over Orders that are neither
+    cancelled nor soft-deleted — and the same REQ-001 conversion by
+    ``units_per_pack``, so the figure is comparable with ``qty_available`` and
+    ``reorder_threshold`` rather than being a count of boxes sitting next to a
+    count of millilitres.
+
+    Planning needs this to tell two very different situations apart: an item
+    nobody has ordered, and an item whose delivery is simply not here yet.
+    Before the split, both said "order this", so the Reorder screen was
+    recommending a second purchase order for material already bought — on every
+    row it was showing (client-reported 2026-08-24).
+
+    Note this does NOT net the quantity off the shortfall. The client's rule
+    stands: an item stays visible until stock physically arrives, because an
+    order can be late or never come. What changes is the heading it appears
+    under, not whether it appears.
+    """
+    received = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = func.greatest(
+        ReceiptTransactionLine.ordered_qty - func.coalesce(received.c.recd, 0),
+        0,
+    )
+    return (
+        select(
+            func.coalesce(
+                func.sum(
+                    outstanding
+                    * func.coalesce(ReceiptTransactionLine.units_per_pack, 1)
+                ),
+                0,
+            )
+        )
+        .select_from(ReceiptTransactionLine)
+        .join(
+            ReceiptTransaction,
+            ReceiptTransaction.id == ReceiptTransactionLine.receipt_transaction_id,
+        )
+        .outerjoin(received, received.c.line_id == ReceiptTransactionLine.id)
+        .where(
+            ReceiptTransactionLine.item_id == Item.id,
+            ReceiptTransaction.deleted_at.is_(None),
+            ReceiptTransaction.status != "cancelled",
+        )
+        .correlate(Item)
+        .scalar_subquery()
+    )
+
+
+async def lots_awaiting_put_away(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[Lot, int]]]:
+    """``{item_id: [(lot, units still to place), …]}`` — the receive-to-inventory queue.
+
+    Material that has ARRIVED but has not been received to inventory yet
+    (REQ-004): quarantined, received against a purchase order, and with units
+    left over the append-only receipt ledger.
+
+    Derived rather than stored. A "pending receipt" column would be a second
+    copy of a fact the ledger already holds, and the two would disagree the
+    first time anyone placed a lot by another route. The predicate rides the
+    existing partial index on ``release_state``.
+
+    Deliberately excludes manufactured output: a kit-produced lot is also
+    quarantined, but it was placed at close-out and its release is a quality
+    decision rather than a receive-to-inventory. ``receipt_transaction_line_id`` is what
+    tells the two apart.
+    """
+    if not item_ids:
+        return {}
+    # Same subquery the awaiting-release total uses — one definition of
+    # "already placed", so the banner and the Reorder screen agree.
+    placed = _placed_units_subquery()
     stmt = (
         select(Lot, func.coalesce(placed.c.qty, 0))
         .outerjoin(placed, placed.c.lot_id == Lot.id)

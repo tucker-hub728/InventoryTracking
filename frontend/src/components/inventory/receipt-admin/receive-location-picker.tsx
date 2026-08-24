@@ -194,7 +194,7 @@ export function ReceiveLocationPicker({
    *    ``true``       source is in LN2  → offer only LN2 boxes
    *    ``false``      source is outside → offer everything EXCEPT LN2
    *    ``undefined``  not a transfer    → offer everything (Receive passes this
-   *                                       by omitting the prop; receipt put-away
+   *                                       by omitting the prop; receipt receive-to-inventory
    *                                       into a box is how a tank gets stocked
    *                                       and must stay available)
    *

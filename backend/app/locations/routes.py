@@ -1642,7 +1642,7 @@ async def receive_to_inventory(
     Deliberately narrow: it only accepts a lot that ARRIVED against a purchase
     order and is still quarantined. Manufactured output is quarantined too and
     is placed by kitting under its own signature — releasing that is a quality
-    decision made on ``/lots/{id}/release-state``, not a put-away.
+    decision made on ``/lots/{id}/release-state``, not a receive-to-inventory step.
     """
     lot_uuid = _parse_uuid(payload.lot_id, field="lot_id")
     evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
@@ -1652,12 +1652,12 @@ async def receive_to_inventory(
         raise NotFoundError(f"Lot {payload.lot_id} not found")
 
     # Received material only. A kit-produced lot reaching this endpoint means a
-    # caller has confused put-away with quality release; say so rather than
+    # caller has confused receiving to inventory with quality release; say so rather than
     # quietly placing it.
     if lot.receipt_transaction_line_id is None:
         raise ValidationError(
             "This lot was not received against a purchase order. Only received "
-            "material is put away this way; manufactured output is placed at "
+            "material is received to inventory this way; manufactured output is placed at "
             "close-out and released from the lot's release-state action.",
             code="lot_not_received",
         )
@@ -1712,7 +1712,7 @@ async def receive_to_inventory(
         )
 
     # Lifetime cap — total placed for the lot may not exceed what arrived.
-    # Measured against the append-only receipt ledger, so a partial put-away
+    # Measured against the append-only receipt ledger, so a partial receipt
     # followed by another still adds up correctly.
     if lot.ordered_qty is not None:
         already = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
@@ -1751,7 +1751,7 @@ async def receive_to_inventory(
         )
         allocs.append(_alloc_to_read(alloc))
 
-    # A single +N receipt for the whole put-away — one logical, singly-signed
+    # A single +N receipt for the whole receive-to-inventory — one logical, singly-signed
     # event. This is also the row that makes the material on-hand and puts it in
     # the Unit Ledger for the first time.
     movement = await loc_repo.create_node_receipt_movement(
@@ -1768,7 +1768,7 @@ async def receive_to_inventory(
     if payload.expiration_date is not None:
         lot.expiration_date = payload.expiration_date
 
-    # Released only once everything is placed. A partial put-away leaves the lot
+    # Released only once everything is placed. A partial receipt leaves the lot
     # quarantined so the remainder stays visible as outstanding work — and so
     # the label never says "accepted" while material is still on the dock.
     placed_after = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))

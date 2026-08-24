@@ -192,6 +192,7 @@ def _supplier_to_read(v: Supplier) -> SupplierRead:
         phone=v.phone,
         is_active=v.is_active,
         notes=v.notes,
+        lead_time_days=v.lead_time_days,
         created_at=v.created_at,
         updated_at=v.updated_at,
     )
@@ -201,6 +202,7 @@ def _item_to_read(
     item: Item,
     valuation: tuple[Decimal, Decimal, Decimal] | None = None,
     bom_line_count: int = 0,
+    awaiting_release: int = 0,
 ) -> ItemRead:
     # The eager ``Item.stock`` relationship joins ``app.v_item_stock``,
     # which is LEFT-joined on the items query so newly-created items
@@ -256,6 +258,7 @@ def _item_to_read(
         qty_on_hand=qty_on_hand,
         qty_available=qty_available,
         qty_on_order=qty_on_order,
+        qty_awaiting_release=Decimal(awaiting_release),
         inv_value_amount=inv_value_amount,
         po_value_amount=po_value_amount,
         status_code=status_code,  # type: ignore[arg-type]
@@ -268,7 +271,10 @@ async def _item_read_with_valuation(db: DBSession, item: Item) -> ItemRead:
     """Serialise a single item, computing its lot-derived valuation."""
     valuations = await inv_repo.compute_item_valuations(db, [item.id])
     counts = await inv_repo.bom_line_counts(db, [item.id])
-    return _item_to_read(item, valuations.get(item.id), counts.get(item.id, 0))
+    awaiting = await inv_repo.awaiting_release_units(db, [item.id])
+    return _item_to_read(
+        item, valuations.get(item.id), counts.get(item.id, 0), awaiting.get(item.id, 0)
+    )
 
 
 async def _resolve_item_supplier_ids(
@@ -388,6 +394,7 @@ async def create_supplier(
             phone=payload.phone,
             notes=payload.notes,
             is_active=payload.is_active,
+            lead_time_days=payload.lead_time_days,
         )
     except IntegrityError as exc:
         await db.rollback()
@@ -619,9 +626,12 @@ async def list_items(
     valuations = await inv_repo.compute_item_valuations(db, ids)
     # One grouped count for the page, not one query per row.
     bom_counts = await inv_repo.bom_line_counts(db, ids)
+    awaiting = await inv_repo.awaiting_release_units(db, ids)
     return ItemListResponse(
         items=[
-            _item_to_read(i, valuations.get(i.id), bom_counts.get(i.id, 0))
+            _item_to_read(
+                i, valuations.get(i.id), bom_counts.get(i.id, 0), awaiting.get(i.id, 0)
+            )
             for i in items
         ],
         total=total,
@@ -735,6 +745,10 @@ async def create_item(
         # the response carries the just-assigned suppliers.
         await db.refresh(item, attribute_names=["suppliers"])
 
+    # Valuation, BOM count and awaiting-release all default to zero, which is
+    # exactly right for an item created a moment ago: it has no lots, no recipe
+    # and nothing in the receiving bay. Querying for them would be three round
+    # trips guaranteed to return nothing.
     return _item_to_read(item)
 
 
@@ -1014,12 +1028,12 @@ async def item_awaiting_put_away(
     db: DBSession,
     item_id: Annotated[uuid.UUID, Path()],
 ) -> list[AwaitingPutAwayRead]:
-    """The put-away queue for one item.
+    """The receive-to-inventory queue for one item.
 
     Separate from ``/stock-locations`` on purpose: that endpoint answers "where
     is this item", and it is allocation-derived, so material with no allocation
     is invisible to it by construction. This answers the different question
-    "what has arrived that nobody has put away yet" — which is exactly the
+    "what has arrived that nobody has received to inventory yet" — which is exactly the
     material the other endpoint cannot see.
     """
     if (await inv_repo.get_item(db, item_id)) is None:

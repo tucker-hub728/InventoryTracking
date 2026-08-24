@@ -12,7 +12,7 @@ import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { Skeleton } from '@/components/ui/skeleton';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
@@ -446,7 +446,12 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                             {formatNumber(Number(l.child_qty_available))}
                           </td>
                           <td className={cellBase}>
-                            <StatusBadge status={statusLabel(l.child_status_code)} />
+                            <StockStatusBadge
+                              status={statusLabel(l.child_status_code)}
+                              qtyAvailable={Number(l.child_qty_available)}
+                              reorderThreshold={Number(l.child_reorder_threshold)}
+                              qtyAwaitingRelease={Number(l.child_qty_awaiting_release)}
+                            />
                           </td>
                           <td className={cn(cellBase, 'text-right')}>
                             {isRemoved ? (
@@ -522,7 +527,14 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
                             {child ? formatNumber(Number(child.qty_available)) : '—'}
                           </td>
                           <td className={cellBase}>
-                            {child && <StatusBadge status={statusLabel(child.status_code)} />}
+                            {child && (
+                              <StockStatusBadge
+                                status={statusLabel(child.status_code)}
+                                qtyAvailable={Number(child.qty_available)}
+                                reorderThreshold={Number(child.reorder_threshold)}
+                                qtyAwaitingRelease={Number(child.qty_awaiting_release)}
+                              />
+                            )}
                           </td>
                           <td className={cn(cellBase, 'text-right')}>
                             <Button

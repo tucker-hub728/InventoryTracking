@@ -31,6 +31,15 @@ const schema = z.object({
     .or(z.literal('')),
   phone: z.string().max(64).optional(),
   notes: z.string().max(2048).optional(),
+  // A string, so clearing the box (→ null, "not recorded") stays distinct from
+  // typing 0 (→ same-day delivery). Bounds match the API and the DB CHECK.
+  lead_time_days: z
+    .string()
+    .optional()
+    .refine(
+      (v) => !v || (/^\d+$/.test(v) && Number(v) >= 0 && Number(v) <= 3650),
+      'Whole number of days, 0–3650',
+    ),
 });
 
 type FormValues = z.infer<typeof schema>;
@@ -57,6 +66,7 @@ export function SupplierEditDialog({ open, onOpenChange, supplier, onUpdated }: 
       contact_email: '',
       phone: '',
       notes: '',
+      lead_time_days: '',
     },
   });
 
@@ -67,6 +77,9 @@ export function SupplierEditDialog({ open, onOpenChange, supplier, onUpdated }: 
         contact_email: supplier.contact_email ?? '',
         phone: supplier.phone ?? '',
         notes: supplier.notes ?? '',
+        // `?? ''` not `|| ''` — a stored 0 is a real lead time and must show
+        // as "0", not as an empty (unrecorded) box.
+        lead_time_days: supplier.lead_time_days != null ? String(supplier.lead_time_days) : '',
       });
       setSubmitError(null);
     }
@@ -83,6 +96,12 @@ export function SupplierEditDialog({ open, onOpenChange, supplier, onUpdated }: 
     if (dirtyFields.contact_email) patch.contact_email = values.contact_email?.trim() || null;
     if (dirtyFields.phone) patch.phone = values.phone?.trim() || null;
     if (dirtyFields.notes) patch.notes = values.notes?.trim() || null;
+    if (dirtyFields.lead_time_days) {
+      // Cleared → null ("not recorded"). Typed 0 → 0 (same-day). The trim-then-
+      // check keeps those two apart; `|| null` would collapse "0" into null.
+      const raw = values.lead_time_days?.trim() ?? '';
+      patch.lead_time_days = raw === '' ? null : Number(raw);
+    }
 
     if (Object.keys(patch).length === 0) {
       setSubmitError('No changes to save.');
@@ -147,6 +166,21 @@ export function SupplierEditDialog({ open, onOpenChange, supplier, onUpdated }: 
               </Field>
             </div>
 
+            <Field
+              id="supplier-lead"
+              label="Lead time (days)"
+              error={errors.lead_time_days?.message}
+              hint="Order to delivery. Empty means not confirmed yet — the reorder screen shows that as unknown rather than assuming no wait."
+            >
+              <Input
+                id="supplier-lead"
+                inputMode="numeric"
+                placeholder="e.g. 30"
+                aria-invalid={Boolean(errors.lead_time_days)}
+                {...register('lead_time_days')}
+              />
+            </Field>
+
             <Field id="supplier-notes" label="Notes">
               <Textarea id="supplier-notes" rows={3} {...register('notes')} />
             </Field>
@@ -179,12 +213,14 @@ function Field({
   label,
   required,
   error,
+  hint,
   children,
 }: {
   id: string;
   label: string;
   required?: boolean;
   error?: string;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -193,6 +229,7 @@ function Field({
         {label} {required && <span className="text-danger">*</span>}
       </Label>
       {children}
+      {hint && !error && <p className="text-xs text-text-3">{hint}</p>}
       {error && (
         <p role="alert" className="text-xs text-danger">
           {error}
