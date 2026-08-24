@@ -133,6 +133,21 @@ def _raw_material_prefix(token: str) -> str | None:
     return None
 
 
+def _put_away(token: str, lot_id: str, node_id: str, qty: int) -> tuple:
+    """Step two (REQ-004): place the lot and release it, in one signed call."""
+    return _req(
+        "POST",
+        "/allocations/receive-to-inventory",
+        token=token,
+        json_body={
+            "lot_id": lot_id,
+            "node_id": node_id,
+            "qty": qty,
+            "evidence_id": _reauth(token, "receipt.release"),
+        },
+    )
+
+
 def _storable_leaf(token: str) -> dict | None:
     """A non-grid destination. Grid boxes need one free cell PER UNIT, which for
     a 100-pack means 200 empty cells — not something a smoke run should assume.
@@ -289,7 +304,6 @@ def _run() -> None:
                     "line_id": line_id,
                     "qty_received": RECEIVE_PACKS,
                     "lot_number": lot_no,
-                    "placement": {"node_id": node["id"], "cells": []},
                 }
             ],
         },
@@ -342,17 +356,85 @@ def _run() -> None:
         lot["unit_price_amount"],
     )
 
-    s, locs = _req("GET", f"/allocations/by-lot/{lot['id']}", token=sa)
-    if s == 200:
-        alloc_rows = locs if isinstance(locs, list) else locs.get("items", [])
-        placed = sum(int(float(x.get("qty", 0))) for x in alloc_rows)
+    # ── Arrival is not acceptance (REQ-004) ───────────────────────────
+    print("\n-- after arrival: quarantined, nowhere, invisible to stock")
+    check(
+        "REQ-004 arrival leaves the lot quarantined",
+        lot.get("release_state") == "quarantine",
+        lot.get("release_state"),
+    )
+
+    def _placed_units() -> int:
+        s, locs = _req("GET", f"/allocations/by-lot/{lot['id']}", token=sa)
+        if s != 200:
+            return -1
+        rows = locs if isinstance(locs, list) else locs.get("items", [])
+        return sum(int(float(x.get("qty", 0))) for x in rows)
+
+    check("REQ-004 nothing is placed at arrival", _placed_units() == 0, _placed_units())
+
+    # The real guarantee: unplaced material cannot be picked for ANY
+    # transaction, because every picker reads allocations. This asserts the
+    # mechanism rather than trusting it.
+    s, stock = _req("GET", f"/items/{item_id}/stock-locations", token=sa)
+    stock_rows = stock if isinstance(stock, list) else stock.get("items", [])
+    check(
+        "REQ-004 arrived material is invisible to the transfer/kit picker",
+        s == 200 and not any(r.get("lot_id") == lot["id"] for r in stock_rows),
+        stock_rows,
+    )
+
+    s, queue = _req("GET", f"/items/{item_id}/awaiting-put-away", token=sa)
+    q_rows = queue if isinstance(queue, list) else []
+    mine = next((r for r in q_rows if r["lot_id"] == lot["id"]), None)
+    check("REQ-004 it appears in the put-away queue instead", mine is not None, q_rows)
+    if mine:
         check(
-            "REQ-001 the placement is in CONSUME units",
-            placed == expected_units,
-            placed,
+            "REQ-004 the queue reports the units still to place",
+            mine["remaining_units"] == expected_units,
+            mine["remaining_units"],
         )
-    else:
-        print(f"  SKIP  could not read allocations ({s})")
+
+    # ── Receive to inventory: place it, and release it ────────────────
+    print("\n-- receive to inventory (place + release, one signature)")
+    s, r = _put_away(sa, lot["id"], node["id"], expected_units)
+    check("REQ-004 put-away succeeds", s == 201, (s, r))
+    check(
+        "REQ-001 the placement is in CONSUME units",
+        _placed_units() == expected_units,
+        _placed_units(),
+    )
+
+    s, lot2 = _req("GET", f"/lots/{lot['id']}", token=sa)
+    check(
+        "REQ-004 put-away releases the lot",
+        s == 200 and lot2.get("release_state") == "released",
+        lot2.get("release_state"),
+    )
+
+    s, stock2 = _req("GET", f"/items/{item_id}/stock-locations", token=sa)
+    rows2 = stock2 if isinstance(stock2, list) else []
+    check(
+        "REQ-004 released material becomes pickable",
+        any(r.get("lot_id") == lot["id"] for r in rows2),
+        rows2,
+    )
+
+    s, queue2 = _req("GET", f"/items/{item_id}/awaiting-put-away", token=sa)
+    q2 = queue2 if isinstance(queue2, list) else []
+    check(
+        "REQ-004 it leaves the put-away queue once placed",
+        not any(r["lot_id"] == lot["id"] for r in q2),
+        q2,
+    )
+
+    # Double-submit must not place the units twice.
+    s, again = _put_away(sa, lot["id"], node["id"], expected_units)
+    check(
+        "REQ-004 putting the same lot away twice is refused",
+        s == 409,
+        (s, again.get("code")),
+    )
 
     # ── The correction that used to be 100x wrong ─────────────────────
     print("\n-- correcting the lot's quantity")
@@ -457,8 +539,7 @@ def _run() -> None:
                             "lot_number": f"L-SMK-{tag}-P",
                             "pack_uom": "Case",
                             "units_per_pack": 25,
-                            "placement": {"node_id": node["id"], "cells": []},
-                        }
+                                }
                     ],
                 },
             )
@@ -497,8 +578,7 @@ def _run() -> None:
                             "lot_number": f"L-SMK-{tag}-Q",
                             "units_per_pack": 25,
                             "pack_uom": None,
-                            "placement": {"node_id": node["id"], "cells": []},
-                        }
+                                }
                     ],
                 },
             )

@@ -727,6 +727,31 @@ class PlacementCell(BaseModel):
     grid_col: int = Field(ge=1, le=400)
 
 
+class AwaitingPutAwayRead(BaseModel):
+    """One lot that has arrived but has not been received to inventory (REQ-004).
+
+    The item page's put-away queue. Everything here is derived from the lot and
+    the receipt ledger — there is no "pending" table, because a second copy of
+    "how much is still to place" would disagree with the ledger the first time
+    anyone placed a lot by another route.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    lot_id: str
+    lot_number: str
+    # CONSUME units still to put away. Less than ``received_units`` when an
+    # earlier partial put-away already placed some of it.
+    remaining_units: int
+    received_units: int
+    expiration_date: date | None = None
+    manufacture_date: date | None = None
+    # Where it came from, so the queue can link back to the receipt.
+    po_reference: str | None = None
+    received_at: date | None = None
+    supplier_name: str | None = None
+
+
 class ReceivePlacement(BaseModel):
     """Where a received lot is placed (unit-in) — the destination for this draw.
 
@@ -800,9 +825,14 @@ class ReceiveEventLineInput(BaseModel):
     expiration_date: date | None = None
     # Optional override of the line's unit price for this lot.
     unit_price_amount: Decimal | None = Field(default=None, ge=Decimal("0"), le=MAX_MONEY)
-    # Destination for the received units (unit-in), placed under the receive's
-    # single e-signature.
-    placement: ReceivePlacement
+    # No destination here (REQ-004). Arrival records what turned up; it does
+    # not put it anywhere. The location is chosen later, at the receive-to-
+    # inventory step, which is also where the lot moves out of quarantine.
+    #
+    # The field is gone rather than made optional: a client that still sends
+    # one is a client that thinks it is placing stock, and ``extra="forbid"``
+    # turns that into a 422 instead of silently ignoring a destination the
+    # operator chose.
 
 
 class ReceiveEventRequest(BaseModel):

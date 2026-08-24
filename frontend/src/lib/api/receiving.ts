@@ -174,19 +174,11 @@ export interface OrderUpdateInput {
   lines?: OrderLineInput[];
 }
 
+/** A box cell. Receiving no longer chooses a destination (REQ-004), but the
+ *  put-away step does, and it speaks the same shape. */
 export interface ReceivePlacementCell {
   grid_row: number;
   grid_col: number;
-}
-
-/** Where a received lot is placed (unit-in), sent with the receive. Single
- *  destination, exactly `qty_received × units_per_pack` CONSUME units — NOT
- *  `qty_received` itself (REQ-001). Receiving 3 Box of 100 places 300 units, so
- *  a box takes 300 distinct cells; a freezer sub-location / warehouse shelf
- *  takes all 300 (cells empty). */
-export interface ReceivePlacementInput {
-  node_id: string;
-  cells: ReceivePlacementCell[];
 }
 
 export interface ReceiveEventLineInput {
@@ -209,7 +201,6 @@ export interface ReceiveEventLineInput {
    *  line. A unit with no size, or a size with no unit, is a 422. */
   pack_uom?: string | null;
   units_per_pack?: number | null;
-  placement: ReceivePlacementInput;
 }
 
 export interface ReceiveEventInput {

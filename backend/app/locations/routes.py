@@ -50,6 +50,7 @@ from app.locations.schemas import (
     PlaceBatchRequest,
     PlaceRequest,
     ProductionAreaCreate,
+    ReceiveToInventoryRequest,
     StorageCategoryCreate,
     StorageGroupsUpdate,
     TransferBatchRequest,
@@ -1615,6 +1616,196 @@ async def place_lot(
     response = _alloc_to_read(alloc)
     await db.commit()
     return response
+
+
+@alloc_router.post(
+    "/receive-to-inventory",
+    response_model=list[AllocationRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="Put received material away and release it, in one e-signed action (REQ-004)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def receive_to_inventory(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: ReceiveToInventoryRequest,
+) -> list[AllocationRead]:
+    """Step two of receiving: choose the location, sign, and release.
+
+    Lives here rather than in the inventory module because everything it needs
+    already does — cell validation with the override path, the lifetime cap
+    against ``ordered_qty``, allocation writing and the single ``+N`` receipt
+    movement. Re-implementing that next to the receive route is how the two
+    copies drift; ``_place_received_lot`` used to be exactly that copy, and had
+    quietly lost both the cap and the override.
+
+    Deliberately narrow: it only accepts a lot that ARRIVED against a purchase
+    order and is still quarantined. Manufactured output is quarantined too and
+    is placed by kitting under its own signature — releasing that is a quality
+    decision made on ``/lots/{id}/release-state``, not a put-away.
+    """
+    lot_uuid = _parse_uuid(payload.lot_id, field="lot_id")
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+
+    lot = await inv_repo.get_lot(db, lot_uuid)
+    if lot is None:
+        raise NotFoundError(f"Lot {payload.lot_id} not found")
+
+    # Received material only. A kit-produced lot reaching this endpoint means a
+    # caller has confused put-away with quality release; say so rather than
+    # quietly placing it.
+    if lot.receipt_transaction_line_id is None:
+        raise ValidationError(
+            "This lot was not received against a purchase order. Only received "
+            "material is put away this way; manufactured output is placed at "
+            "close-out and released from the lot's release-state action.",
+            code="lot_not_received",
+        )
+    if lot.release_state != "quarantine":
+        # Covers the double-submit (already released) and the material that has
+        # since been rejected — neither should silently place stock.
+        raise ConflictError(
+            f"Lot {lot.lot_number} is '{lot.release_state or 'not quarantined'}', "
+            "so it is not awaiting receive-to-inventory.",
+            code="lot_not_quarantined",
+        )
+
+    node = await _resolve_storage_node(db, payload.node_id)
+    grid = is_grid_node(node.node_type)
+
+    # One unit per cell for a box; a single N-unit allocation for a flat leaf.
+    # Rejecting the wrong shape here beats accepting it and placing the wrong
+    # amount — the two carry the quantity in different fields.
+    if grid:
+        if not payload.cells:
+            raise ValidationError(
+                f"{node.name} is a box — select one cell per unit.",
+                code="cells_required",
+            )
+        if payload.qty is not None:
+            raise ValidationError(
+                "A box takes cells, not a quantity — the cell count is the quantity.",
+                code="qty_not_allowed_for_box",
+            )
+        qty = len(payload.cells)
+    else:
+        if payload.cells:
+            raise ValidationError(
+                f"{node.name} has no grid; don't send cells.",
+                code="cells_not_allowed",
+            )
+        if payload.qty is None:
+            raise ValidationError(
+                "Enter how many units go to this location.", code="qty_required"
+            )
+        qty = payload.qty
+
+    for cell in payload.cells:
+        await _validate_cell_target(
+            db,
+            node=node,
+            grid_row=cell.grid_row,
+            grid_col=cell.grid_col,
+            qty=Decimal("1"),
+            override=payload.override,
+            role=current.role,
+        )
+
+    # Lifetime cap — total placed for the lot may not exceed what arrived.
+    # Measured against the append-only receipt ledger, so a partial put-away
+    # followed by another still adds up correctly.
+    if lot.ordered_qty is not None:
+        already = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
+        if already + qty > lot.ordered_qty:
+            remaining = max(0, lot.ordered_qty - already)
+            raise ValidationError(
+                f"Placing {qty} would exceed the {lot.ordered_qty} unit(s) "
+                f"received for this lot — {remaining} still to place.",
+                code="place_exceeds_ordered",
+            )
+
+    before = inv_repo.lot_to_audit_snapshot(lot)
+
+    allocs: list[AllocationRead] = []
+    if grid:
+        for cell in payload.cells:
+            alloc = await loc_repo.create_allocation(
+                db,
+                lot_id=lot_uuid,
+                location_node_id=node.id,
+                qty=Decimal("1"),
+                grid_row=cell.grid_row,
+                grid_col=cell.grid_col,
+                created_by_user_id=current.id,
+                notes=payload.notes,
+            )
+            allocs.append(_alloc_to_read(alloc))
+    else:
+        alloc = await loc_repo.create_allocation(
+            db,
+            lot_id=lot_uuid,
+            location_node_id=node.id,
+            qty=Decimal(qty),
+            created_by_user_id=current.id,
+            notes=payload.notes,
+        )
+        allocs.append(_alloc_to_read(alloc))
+
+    # A single +N receipt for the whole put-away — one logical, singly-signed
+    # event. This is also the row that makes the material on-hand and puts it in
+    # the Unit Ledger for the first time.
+    movement = await loc_repo.create_node_receipt_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot_uuid,
+        to_location_node_id=node.id,
+        qty=Decimal(qty),
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=payload.notes,
+    )
+
+    if payload.expiration_date is not None:
+        lot.expiration_date = payload.expiration_date
+
+    # Released only once everything is placed. A partial put-away leaves the lot
+    # quarantined so the remainder stays visible as outstanding work — and so
+    # the label never says "accepted" while material is still on the dock.
+    placed_after = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
+    fully_placed = lot.ordered_qty is None or placed_after >= lot.ordered_qty
+    if fully_placed:
+        lot.release_state = "released"
+    await db.flush()
+
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="receipt.release",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+        # The signature is about the LOT — the movement is what it produced.
+        record_table="app.lots",
+        record_id=lot_uuid,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.lots",
+        subject_id=lot_uuid,
+        subject_label=lot.lot_number,
+        before=before,
+        after=inv_repo.lot_to_audit_snapshot(lot),
+        context={
+            "placed_qty": qty,
+            "node_id": str(node.id),
+            "fully_placed": fully_placed,
+        },
+        signature_id=evidence_uuid,
+    )
+    await db.commit()
+    return allocs
 
 
 @alloc_router.post(

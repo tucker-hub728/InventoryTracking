@@ -31,6 +31,7 @@ from app.inventory.schemas import (
     ArchivePolicyRead,
     ArchivePolicyUpdate,
     ArchiveSweepResult,
+    AwaitingPutAwayRead,
     ItemCreate,
     ItemListResponse,
     ItemRead,
@@ -164,6 +165,15 @@ def _lot_to_read(lot: Lot) -> LotRead:
         po_reference=lot.po_reference,
         receipt_transaction_id=(
             str(lot.receipt_transaction_id) if lot.receipt_transaction_id else None
+        ),
+        # Declared on ``LotRead`` since the v3 Order redesign but never set, so
+        # it always serialised as null. It matters from REQ-004 onward: it is
+        # what distinguishes a RECEIVED lot from kit output, and both now carry
+        # ``quarantine``, so the client cannot tell them apart without it.
+        receipt_transaction_line_id=(
+            str(lot.receipt_transaction_line_id)
+            if lot.receipt_transaction_line_id
+            else None
         ),
         parent_lot_id=str(lot.parent_lot_id) if lot.parent_lot_id else None,
         ordered_qty=lot.ordered_qty,
@@ -992,6 +1002,43 @@ async def list_item_lots(
         raise NotFoundError(f"Item {item_id} not found")
     rows, _ = await inv_repo.list_lots(db, item_id=item_id, status=status_filter)
     return [_lot_to_read(r) for r in rows]
+
+
+@items_router.get(
+    "/{item_id}/awaiting-put-away",
+    response_model=list[AwaitingPutAwayRead],
+    summary="Lots that have arrived but are not yet received to inventory (REQ-004)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def item_awaiting_put_away(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+) -> list[AwaitingPutAwayRead]:
+    """The put-away queue for one item.
+
+    Separate from ``/stock-locations`` on purpose: that endpoint answers "where
+    is this item", and it is allocation-derived, so material with no allocation
+    is invisible to it by construction. This answers the different question
+    "what has arrived that nobody has put away yet" — which is exactly the
+    material the other endpoint cannot see.
+    """
+    if (await inv_repo.get_item(db, item_id)) is None:
+        raise NotFoundError(f"Item {item_id} not found")
+    rows = (await inv_repo.lots_awaiting_put_away(db, [item_id])).get(item_id, [])
+    return [
+        AwaitingPutAwayRead(
+            lot_id=str(lot.id),
+            lot_number=lot.lot_number,
+            remaining_units=remaining,
+            received_units=int(lot.ordered_qty or 0),
+            expiration_date=lot.expiration_date,
+            manufacture_date=lot.manufacture_date,
+            po_reference=lot.po_reference,
+            received_at=lot.created_at.date() if lot.created_at else None,
+            supplier_name=lot.supplier.name if lot.supplier else None,
+        )
+        for lot, remaining in rows
+    ]
 
 
 @items_router.get(
@@ -2482,6 +2529,19 @@ async def receive_order(
                 manufacture_date=line_in.manufacture_date,
                 expiration_date=line_in.expiration_date,
                 status="available",
+                # ── Arrival, not acceptance (REQ-004) ─────────────────
+                # The material is in the building; nobody has said it may be
+                # used. It leaves quarantine at the receive-to-inventory step,
+                # which is the same action that places it.
+                #
+                # This does NOT make ``release_state`` a gate — STS-003's "the
+                # state is a label, a quarantined lot still transfers" stands
+                # untouched. A lot that has just arrived is unusable because it
+                # has no allocations, not because of its label: every picker in
+                # the system (transfer, kitting, issue, shipment) reads
+                # ``lot_allocations``, so unplaced material is simply not there
+                # to choose. Placement is the control; the label is the record.
+                release_state="quarantine",
                 # Per consume unit — see the derivation above.
                 unit_price_amount=unit_price,
                 po_reference=txn.po_reference,
@@ -2525,18 +2585,11 @@ async def receive_order(
             lot_id=lot.id,
             over_receipt_reason=None,
         )
-        # Unit-IN the received units into their chosen destination, under this
-        # same receive signature (atomic; unit-in happens only here). CONSUME
-        # units: placement is unit-by-unit and always has been, so 3 Box of 100
-        # puts 300 rows' worth of stock into the node, not 3.
-        await _place_received_lot(
-            db,
-            lot=lot,
-            qty_units=qty_units,
-            placement=line_in.placement,
-            evidence_uuid=evidence_uuid,
-            user_id=current.id,
-        )
+        # Nothing is placed here (REQ-004). No allocation, no stock movement,
+        # so the material is not on hand and does not appear in the Unit Ledger
+        # — both are derived from ``app.stock_movements``, so deferring the
+        # movement excludes it from both without a flag to keep in sync.
+        # Placement happens at receive-to-inventory; see ``receive_lot_to_inventory``.
         await record_entity_change(
             db,
             actor_user_id=current.id,

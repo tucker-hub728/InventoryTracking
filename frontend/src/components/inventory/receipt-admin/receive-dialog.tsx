@@ -19,7 +19,6 @@ import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { locationNodesApi } from '@/lib/api/location-nodes';
 import {
   receivingApi,
   type Order,
@@ -27,12 +26,6 @@ import {
   type ReceiveEventInput,
   type ReceiveEventLineInput,
 } from '@/lib/api/receiving';
-import {
-  ReceiveLocationPicker,
-  placementComplete,
-  type AreaTrees,
-  type PlacementValue,
-} from './receive-location-picker';
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -60,8 +53,6 @@ interface LineDraft {
    *  counted in consume units. */
   pack_uom: string;
   units_per_pack: string;
-  /** Where the received units go (unit-in) — chosen in the same signed step. */
-  placement: PlacementValue | null;
 }
 
 function seedLineDraft(line: OrderLine): LineDraft {
@@ -76,7 +67,6 @@ function seedLineDraft(line: OrderLine): LineDraft {
     unit_price: line.unit_price_amount ?? '',
     pack_uom: line.pack_uom ?? '',
     units_per_pack: line.units_per_pack == null ? '' : String(line.units_per_pack),
-    placement: null,
   };
 }
 
@@ -128,7 +118,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
   const [submitting, setSubmitting] = React.useState(false);
   const [formError, setFormError] = React.useState<string | null>(null);
   const [errorLineId, setErrorLineId] = React.useState<string | null>(null);
-  const [trees, setTrees] = React.useState<AreaTrees | null>(null);
   const lineRefs = React.useRef<Record<string, HTMLDivElement | null>>({});
 
   /** Show a validation failure and bring the line that caused it into view. */
@@ -163,24 +152,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     setErrorLineId(null);
   }, [open, order]);
 
-  // Load the placement targets (all three areas) once when the dialog opens.
-  React.useEffect(() => {
-    if (!open) return;
-    const ctrl = new AbortController();
-    Promise.all([
-      locationNodesApi.ln2Tree({ signal: ctrl.signal }),
-      locationNodesApi.freezerTree({ signal: ctrl.signal }),
-      locationNodesApi.warehouseTree({ signal: ctrl.signal }),
-    ])
-      .then(([ln2, freezer, warehouse]) =>
-        setTrees({ ln2, freezer, warehouse }),
-      )
-      .catch(() => {
-        /* the picker shows an empty state if targets can't load */
-      });
-    return () => ctrl.abort();
-  }, [open]);
-
   const patch = (lineId: string, p: Partial<LineDraft>) => {
     // Editing the line that failed clears the complaint about it.
     if (errorLineId === lineId) {
@@ -192,21 +163,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       if (!existing) return prev;
       return { ...prev, [lineId]: { ...existing, ...p } };
     });
-  };
-
-  /** Cells in ``nodeId`` that OTHER lines of this same receipt already aim at,
-   *  as ``"row:col"`` keys. One delivery routinely puts several lines into one
-   *  LN2 box, and until the receipt is signed no claim exists on the server —
-   *  so without this two lines can both choose A1 and only collide at submit.
-   *  The transfer dialog and kitting close-out both already guard this. */
-  const cellsClaimedByOtherLines = (lineId: string, nodeId: string | undefined) => {
-    const claimed = new Set<string>();
-    if (!nodeId) return claimed;
-    for (const [id, d] of Object.entries(drafts)) {
-      if (id === lineId || !d.include || d.placement?.nodeId !== nodeId) continue;
-      for (const c of d.placement.cells) claimed.add(`${c.grid_row}:${c.grid_col}`);
-    }
-    return claimed;
   };
 
   const buildLines = ():
@@ -221,10 +177,10 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
     for (const line of outstandingLines) {
       const d = drafts[line.id];
       if (!d || !d.include) continue;
-      // `qty` is what the receiver typed (ORDER units, e.g. 3 boxes).
-      // `units` is what physically lands in the location (CONSUME units, 300).
-      // They differ by the pack size and are NOT interchangeable — the payload
-      // wants the first, every placement check wants the second.
+      // ORDER units — what the receiver typed, e.g. 3 boxes. Nothing here
+      // converts to consume units any more: arrival does not place anything,
+      // so the only consumer of that figure was the destination picker, which
+      // has moved to the put-away step (REQ-004).
       const qty = Number(d.qty_received);
       if (!Number.isFinite(qty) || qty <= 0) {
         return {
@@ -259,7 +215,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
           lineId: line.id,
         };
       }
-      const units = placedUnits(d);
       // ── Lot control (REQ-003) ─────────────────────────────────────
       // Never required (REQ-003): any item may be received without a lot
       // number, and the server synthesizes one when it is blank. Deliberately
@@ -311,15 +266,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
       }
       // Placement is unit-by-unit, so this is measured in CONSUME units: a box
       // receiving 3 packs of 100 needs 300 free cells, not 3.
-      if (!placementComplete(d.placement, units)) {
-        return {
-          error:
-            d.placement?.nodeType === 'box'
-              ? `Line ${line.line_no}: select exactly ${units} cell(s) in the chosen box.`
-              : `Line ${line.line_no}: choose a destination location for the received units.`,
-          lineId: line.id,
-        };
-      }
       out.push({
         line_id: line.id,
         // ORDER units — the server multiplies. Sending `units` here would
@@ -336,10 +282,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
         // back to the line.
         pack_uom: packUom || null,
         units_per_pack: packSize ?? null,
-        placement: {
-          node_id: d.placement!.nodeId,
-          cells: d.placement!.cells,
-        },
       });
     }
     if (out.length === 0) {
@@ -631,31 +573,6 @@ export function ReceiveDialog({ open, onOpenChange, order, onReceived }: Props) 
                       />
                     </div>
                   </div>
-
-                  {d.include && (
-                    <div className="mt-3 space-y-1.5 border-t border-border pt-3">
-                      <Label>
-                        Destination — unit in <span className="text-danger">*</span>
-                      </Label>
-                      {trees ? (
-                        <ReceiveLocationPicker
-                          // CONSUME units, not the typed pack count — this
-                          // drives the cell grid, the capacity check and the
-                          // "All N units will be placed" copy.
-                          qty={placedUnits(d)}
-                          trees={trees}
-                          value={d.placement}
-                          onChange={(v) => patch(line.id, { placement: v })}
-                          reservedCells={cellsClaimedByOtherLines(
-                            line.id,
-                            d.placement?.nodeId,
-                          )}
-                        />
-                      ) : (
-                        <p className="text-xs text-text-3">Loading locations…</p>
-                      )}
-                    </div>
-                  )}
                 </div>
               );
             })}

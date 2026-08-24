@@ -48,6 +48,28 @@ export interface ApiItemStockLocation {
   cells: CellOption[];
 }
 
+/**
+ * One lot that has arrived but has not been received to inventory (REQ-004).
+ *
+ * It exists, it is in the building, and it is deliberately NOT stock yet: no
+ * allocation, no ledger movement, so it is absent from on-hand, from the Unit
+ * Ledger, and from every transfer / kit / issue / ship picker — all of which
+ * read allocations. This is the only surface that shows it.
+ */
+export interface ApiAwaitingPutAway {
+  lot_id: string;
+  lot_number: string;
+  /** CONSUME units still to place — less than `received_units` when an earlier
+   *  partial put-away already shelved some of it. */
+  remaining_units: number;
+  received_units: number;
+  expiration_date: string | null;
+  manufacture_date: string | null;
+  po_reference: string | null;
+  received_at: string | null;
+  supplier_name: string | null;
+}
+
 /** One supplier assigned to an item (part of ``ApiItem.suppliers``). */
 export interface ApiItemSupplier {
   supplier_id: string;
@@ -225,6 +247,20 @@ export const itemsApi = {
    */
   stockLocations: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiItemStockLocation[]>(`/items/${id}/stock-locations`, {
+      signal: opts?.signal,
+    }),
+
+  /**
+   * What has ARRIVED for this item but has not been put away yet (REQ-004).
+   *
+   * Deliberately a second call rather than a field on `stockLocations`: that
+   * one is allocation-derived and answers "where is this item", so material
+   * with no allocation is invisible to it by construction. This answers the
+   * different question — "what turned up that nobody has shelved" — which is
+   * exactly the material the other endpoint cannot see.
+   */
+  awaitingPutAway: (id: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiAwaitingPutAway[]>(`/items/${id}/awaiting-put-away`, {
       signal: opts?.signal,
     }),
 

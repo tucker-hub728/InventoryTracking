@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { AlertTriangle, Pencil } from 'lucide-react';
+import { AlertTriangle, PackageCheck, Pencil } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
@@ -276,7 +276,25 @@ function DrawRow({
           </span>
         )}
 
-        <ReleaseStateBadge state={el.release_state} size="xs" />
+        {/* Quarantine means something specific on a RECEIVED lot (REQ-004):
+            it arrived, and nobody has put it away yet. The generic quality
+            badge would say "Quarantine", which is true but not the thing the
+            reader needs — that the units are not on a shelf and not usable.
+            Every other state falls through to the normal badge. */}
+        {el.release_state === 'quarantine' ? (
+          // Muted rather than amber: this is where every receipt starts, so
+          // colouring it as an exception would mark most rows and mean nothing.
+          // Warning colour on this row is reserved for over-receipt and expiry.
+          <span
+            className="inline-flex items-center gap-1 text-text-3"
+            title="Arrived but not yet received to inventory — these units are not on hand and cannot be transferred, kitted or issued until they are."
+          >
+            <PackageCheck size={11} aria-hidden />
+            Awaiting release
+          </span>
+        ) : (
+          <ReleaseStateBadge state={el.release_state} size="xs" />
+        )}
 
         {el.over_receipt_reason != null && (
           <span className="inline-flex items-center gap-1 font-medium text-warning">

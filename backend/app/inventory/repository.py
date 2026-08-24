@@ -1391,6 +1391,56 @@ async def get_event_line_by_lot(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def lots_awaiting_put_away(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[Lot, int]]]:
+    """``{item_id: [(lot, units still to place), …]}`` — the put-away queue.
+
+    Material that has ARRIVED but has not been received to inventory yet
+    (REQ-004): quarantined, received against a purchase order, and with units
+    left over the append-only receipt ledger.
+
+    Derived rather than stored. A "pending put-away" column would be a second
+    copy of a fact the ledger already holds, and the two would disagree the
+    first time anyone placed a lot by another route. The predicate rides the
+    existing partial index on ``release_state``.
+
+    Deliberately excludes manufactured output: a kit-produced lot is also
+    quarantined, but it was placed at close-out and its release is a quality
+    decision rather than a put-away. ``receipt_transaction_line_id`` is what
+    tells the two apart.
+    """
+    if not item_ids:
+        return {}
+    placed = (
+        select(
+            StockMovement.lot_id.label("lot_id"),
+            func.coalesce(func.sum(StockMovement.qty_delta), 0).label("qty"),
+        )
+        .where(StockMovement.movement_type == "receipt")
+        .group_by(StockMovement.lot_id)
+        .subquery()
+    )
+    stmt = (
+        select(Lot, func.coalesce(placed.c.qty, 0))
+        .outerjoin(placed, placed.c.lot_id == Lot.id)
+        .where(
+            Lot.item_id.in_(item_ids),
+            Lot.deleted_at.is_(None),
+            Lot.release_state == "quarantine",
+            Lot.receipt_transaction_line_id.is_not(None),
+            Lot.ordered_qty.is_not(None),
+            Lot.ordered_qty > func.coalesce(placed.c.qty, 0),
+        )
+        .order_by(Lot.created_at)
+    )
+    out: dict[uuid.UUID, list[tuple[Lot, int]]] = {}
+    for lot, already in (await session.execute(stmt)).unique().all():
+        remaining = int(lot.ordered_qty or 0) - int(already)
+        out.setdefault(lot.item_id, []).append((lot, remaining))
+    return out
+
+
 async def get_order_line_for_lot(
     session: AsyncSession, lot_id: uuid.UUID
 ) -> ReceiptTransactionLine | None:

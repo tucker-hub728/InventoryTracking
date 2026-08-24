@@ -415,6 +415,46 @@ class BatchCell(BaseModel):
     grid_col: int = Field(ge=1, le=400)
 
 
+class ReceiveToInventoryRequest(BaseModel):
+    """Put received material away and release it, in one signed action (REQ-004).
+
+    Receiving is two steps. Arrival records what turned up and leaves the lot in
+    quarantine with no location; **this** is the second step — "the receive-to-
+    inventory step (setting location, expiration, sign-off) represents the move
+    from quarantine to accepted/released material and occurs at release, not at
+    physical arrival."
+
+    One request, one signature, because it is one decision: the person putting
+    the material on the shelf is attesting that it may be used. Splitting it
+    into place-then-release would take two signatures for one act, and would
+    leave a window where stock is on hand but still labelled quarantine.
+
+    ``cells`` is required for a Box (one unit per cell) and must be empty for a
+    flat location, where ``qty`` carries the whole amount — the same rule the
+    existing placement endpoints apply, and the same lifetime cap against the
+    lot's ``ordered_qty``.
+
+    ``expiration_date`` is confirmed rather than introduced here: it is usually
+    captured at arrival off the carton. Sending it overwrites what arrival
+    recorded; omitting it leaves that value alone. It cannot be *cleared* here —
+    dropping an expiry is a lot correction, which is separately signed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    node_id: str
+    # Box placement: exactly one unit per listed cell. Empty for a flat node.
+    cells: list[BatchCell] = Field(default_factory=list, max_length=400)
+    # Flat placement: how many units go to the node. Ignored for a Box, where
+    # the cell count is the quantity.
+    qty: int | None = Field(default=None, gt=0)
+    override: bool = False
+    expiration_date: date | None = None
+    evidence_id: str
+    notes: str | None = Field(default=None, max_length=2048)
+
+
 class PlaceBatchRequest(BaseModel):
     """Place one lot into several Box cells in a single e-signed action (§3).
 

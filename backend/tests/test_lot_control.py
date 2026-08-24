@@ -35,12 +35,12 @@ from pydantic import ValidationError as PydanticValidationError
 
 
 def _line(**kw) -> ReceiveEventLineInput:
-    """A receive line with the required non-lot fields already filled."""
-    base = {
-        "line_id": "l1",
-        "qty_received": 1,
-        "placement": {"node_id": "n1", "cells": []},
-    }
+    """A receive line with the required non-lot fields already filled.
+
+    No ``placement`` — arrival does not choose a location (REQ-004), and the
+    schema forbids extra fields, so sending one is now a 422.
+    """
+    base = {"line_id": "l1", "qty_received": 1}
     return ReceiveEventLineInput(**{**base, **kw})
 
 

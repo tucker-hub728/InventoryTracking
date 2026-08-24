@@ -21,6 +21,7 @@ import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
+import { AwaitingPutAwayBanner } from '@/components/inventory/awaiting-put-away-banner';
 import { IssueToKanbanDialog } from '@/components/inventory/issue-to-kanban-dialog';
 import { ItemEditDialog } from './item-edit-dialog';
 import { IssueToLocationDialog } from './issue-to-location-dialog';
@@ -466,6 +467,42 @@ export function InventoryDetailShell({
       />
 
       <div className="px-6 py-5 sm:px-8">
+        {/* OUTSIDE the grid below, deliberately. Dropped inside it, this becomes
+            a third grid child: it takes column two and stretches to the row's
+            height, and the tab card wraps into the 280px sidebar column. It
+            spans the full width here, above everything, because it is a
+            page-level notice — material that has arrived but is not placed has
+            no allocation and no movement, so on-hand, the Unit Ledger and every
+            picker are blind to it, and this is the only surface that shows it
+            (REQ-004). Renders nothing when there is nothing waiting. */}
+        {item && (
+          <AwaitingPutAwayBanner
+            // ``uuid`` is the backend id; ``id`` is the human item number that
+            // URLs key on — the endpoint takes the former.
+            itemId={item.uuid}
+            itemNumber={item.id}
+            itemDescription={item.desc}
+            // The same pair every other write on this page uses (see
+            // ReleaseStateDialog below), and both halves are needed.
+            //
+            // ``refresh`` re-fetches the item and its movements, which updates
+            // the Snapshot, the Ledger totals and the Unit Ledger — a put-away
+            // is the first time this material becomes on-hand, so all three
+            // change at once.
+            //
+            // ``setReleaseSeq`` re-keys "Stock by location", which deliberately
+            // keys its own fetch on ``item.uuid`` so it does NOT reload on every
+            // parent render; without the bump it keeps showing the pre-put-away
+            // rows. ``router.refresh()`` was here and did neither: these tabs
+            // are client components fetching in an effect, so re-rendering the
+            // server tree leaves them untouched.
+            onPlaced={() => {
+              setReleaseSeq((s) => s + 1);
+              refresh();
+            }}
+          />
+        )}
+
         <div className={cn('grid gap-5', !built && 'lg:grid-cols-[280px_1fr]')}>
           {!built && (
             <aside className="space-y-3">

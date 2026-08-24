@@ -100,10 +100,25 @@ export function ItemStockLocationsTab({
   // the batch they just made (STS-002).
   const canDecide = useAuthStore(selectIsAdminOrAbove);
 
+  // Arrived-but-unplaced units (REQ-004). A second call rather than a field on
+  // the row set, because the two answer different questions from different
+  // sources: stock locations are allocation-derived, and this material has no
+  // allocation. Failing to load it must not break the tab, so it degrades to
+  // showing nothing rather than an error.
+  const [awaiting, setAwaiting] = React.useState<
+    { remaining_units: number }[]
+  >([]);
+  const awaitingUnits = awaiting.reduce((n, r) => n + r.remaining_units, 0);
+  const awaitingLots = awaiting.length;
+
   const load = React.useCallback(
     (signal?: AbortSignal) => {
       setLoading(true);
       setError(null);
+      itemsApi
+        .awaitingPutAway(item.uuid, { signal })
+        .then(setAwaiting)
+        .catch(() => setAwaiting([]));
       return itemsApi
         .stockLocations(item.uuid, { signal })
         .then(setRows)
@@ -283,6 +298,33 @@ export function ItemStockLocationsTab({
                     </tr>
                   );
                 })}
+
+                {/* Material that has arrived but is not placed (REQ-004).
+                    This tab answers "where is this item", and "in receiving,
+                    not put away yet" is a true answer to that — leaving it out
+                    would let the tab imply the arrived units do not exist.
+                    It is deliberately NOT a location: no link, an em-dash name,
+                    and muted, so it never reads as somewhere you could pick
+                    stock from. The banner above the tabs carries the action. */}
+                {awaitingUnits > 0 && (
+                  // Neutral, like the banner: awaiting release is the ordinary
+                  // path for received material, not a fault. The muted text and
+                  // em-dash name already say "this is not a location".
+                  <tr className="border-t border-border bg-surface-2">
+                    <td className="px-4 py-2.5 text-text-3">
+                      — not yet placed —
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-text-3">
+                      {awaitingLots} lot{awaitingLots === 1 ? '' : 's'} awaiting
+                      release
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-text-2">
+                      {awaitingUnits.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-text-3">—</td>
+                    {canSign && <td className="px-4 py-2.5" />}
+                  </tr>
+                )}
               </tbody>
               <tfoot>
                 <tr className="border-t border-border bg-surface/60">

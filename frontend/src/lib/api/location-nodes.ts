@@ -391,6 +391,33 @@ export interface PlaceBatchInput {
   notes: string;
 }
 
+/**
+ * Step two of receiving (REQ-004): put arrived material away and release it,
+ * in one signed action.
+ *
+ * Separate from `PlaceBatchInput` even though both end in an allocation,
+ * because they are different acts. `place` moves stock that the business has
+ * already accepted; this one IS the acceptance — it takes a quarantined lot
+ * that has never been anywhere and makes it usable stock. It signs a different
+ * verb (`receipt.release`), it refuses anything that did not arrive on a
+ * purchase order, and it flips the lot's release state.
+ */
+export interface ReceiveToInventoryInput {
+  lot_id: string;
+  node_id: string;
+  /** Box only — one unit per cell. Omit for a flat location. */
+  cells?: { grid_row: number; grid_col: number }[];
+  /** Flat location only — the whole quantity. Omit for a box. */
+  qty?: number;
+  override?: boolean;
+  /** Confirms or corrects what arrival recorded. Omitting leaves it alone;
+   *  it cannot be cleared here (that is a signed lot correction). */
+  expiration_date?: string | null;
+  /** E-signed once for the whole put-away — action `receipt.release`. */
+  evidence_id: string;
+  notes?: string | null;
+}
+
 export interface TransferInput {
   allocation_id: string;
   to_node_id: string;
@@ -573,6 +600,10 @@ export const locationNodesApi = {
 
   placeBatch: (input: PlaceBatchInput) =>
     api.post<Allocation[]>('/allocations/place-batch', { json: input }),
+
+  /** Put arrived material away and release it in one signed step (REQ-004). */
+  receiveToInventory: (input: ReceiveToInventoryInput) =>
+    api.post<Allocation[]>('/allocations/receive-to-inventory', { json: input }),
 
   transfer: (input: TransferInput) =>
     api.post<Allocation>('/allocations/transfer', { json: input }),
