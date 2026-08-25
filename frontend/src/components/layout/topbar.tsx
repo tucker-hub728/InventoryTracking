@@ -15,7 +15,6 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { NotificationsPanel } from './notifications-panel';
-import { useNotificationsFeed } from '@/hooks/use-notifications-feed';
 import { useAuthStore } from '@/stores/auth.store';
 import { useNotificationsStore, selectUnreadCount } from '@/stores/notifications.store';
 import { useUIStore } from '@/stores/ui.store';
@@ -28,12 +27,15 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
   const user = useAuthStore((s) => s.user);
   const clearSession = useAuthStore((s) => s.clear);
 
-  // Restored 2026-08-24 with PLN-001: the bell was hidden because the feed was
-  // mock-data-backed and showed a fabricated unread count. It now reads
-  // /planning/reorder and /consumables/expiring, so the count is real.
-  useNotificationsFeed();
+  // NOTIF-001 (2026-08-25): the feed is no longer assembled here. Notifications
+  // are real per-user rows pushed over SSE by `RealtimeProvider`, which owns the
+  // connection at the route-group layout — a header component is the wrong place
+  // to own a connection's lifetime. This just reads the store.
+  //
+  // `unread` is the server's count over the whole feed, so the badge is a true
+  // number rather than the size of the page the panel happens to hold.
   const unread = useNotificationsStore(selectUnreadCount);
-  const notificationCount = useNotificationsStore((s) => s.items.length);
+  const [bellOpen, setBellOpen] = React.useState(false);
 
   const handleSignOut = React.useCallback(async () => {
     try {
@@ -103,8 +105,11 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
           log out.
         */}
 
-        {/* Notifications (PLN-001 + LOC-008) */}
-        <Popover>
+        {/* Notifications (PLN-001 + LOC-008 + NOTIF-001).
+            Controlled rather than uncontrolled so selecting a notification can
+            close the panel on its way to the target page — leaving a popover
+            hanging over the screen you just navigated to is disorienting. */}
+        <Popover open={bellOpen} onOpenChange={setBellOpen}>
           <PopoverTrigger asChild>
             <Button
               size="icon"
@@ -124,7 +129,7 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-[380px]">
-            <NotificationsPanel total={notificationCount} />
+            <NotificationsPanel total={unread} onNavigate={() => setBellOpen(false)} />
           </PopoverContent>
         </Popover>
 

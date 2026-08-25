@@ -32,6 +32,7 @@ from app.models.inventory import (
     StockMovement,
     Supplier,
 )
+from app.notifications.pending import mark_item
 
 # Whitelist for the ``status`` query filter. Aligned with the
 # ``status_code`` values produced by ``app.v_item_stock``.
@@ -419,6 +420,10 @@ async def create_item(
     )
     session.add(item)
     await session.flush()
+    # An item can be created already below its own threshold — somebody typing
+    # in a reagent they know is short. No stock moves, so nothing else would
+    # ever notice.
+    mark_item(session, item.id)
     # Re-read so eager relationships (suppliers, stock) populate. The naive
     # ORM returns a half-hydrated instance after flush.
     refreshed = await get_item(session, item.id)
@@ -441,6 +446,12 @@ async def apply_item_patch(
         setattr(item, col, value)
     item.updated_by_user_id = updated_by_user_id
     await session.flush()
+    # Raising a threshold breaches it without a single unit moving, and is
+    # exactly how a planner reacts to a near-miss. Marked unconditionally
+    # rather than only when ``reorder_threshold`` is in the patch: an item can
+    # also leave the alerting set by being restored, and the evaluation is a
+    # no-op when nothing crossed a line.
+    mark_item(session, item.id)
     refreshed = await get_item(session, item.id)
     assert refreshed is not None
     return refreshed

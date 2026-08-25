@@ -20,6 +20,7 @@ from app.models.audit import AuditEvent
 from app.models.inventory import BomLine, Item, ItemPrefix, ItemTier, Lot, StockMovement
 from app.models.kitting import Kit, KitLine
 from app.models.locations import LocationNode, LotAllocation
+from app.notifications.pending import mark_item
 
 # Flat-category marking a production/lab floor. Allocations here are WIP held
 # by an open kit, never available stock (§0.3a).
@@ -781,6 +782,7 @@ async def create_kit_movement(
         performed_by_user_id=performed_by_user_id,
         notes=notes,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement

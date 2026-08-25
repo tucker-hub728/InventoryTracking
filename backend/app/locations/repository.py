@@ -31,6 +31,7 @@ from app.models.locations import (
     group_kind_for_code,
 )
 from app.models.products import Customer
+from app.notifications.pending import mark_item
 
 # ── Nodes ───────────────────────────────────────────────────────────────
 
@@ -1366,6 +1367,7 @@ async def create_node_receipt_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -1402,6 +1404,7 @@ async def create_node_dispense_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -1442,6 +1445,7 @@ async def create_node_shipment_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -1488,6 +1492,7 @@ async def create_node_issue_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -1525,6 +1530,7 @@ async def create_node_transfer_pair(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(out_leg)
     await session.flush()
 
