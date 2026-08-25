@@ -10,7 +10,7 @@ import { usePermission } from '@/hooks/use-permission';
 import { cn, formatDate, formatNumber } from '@/lib/utils';
 
 /**
- * Material that has arrived for this item but has not been put away (REQ-004).
+ * Material that has arrived for this item but has not been received to inventory (REQ-004).
  *
  * A banner rather than a tab, deliberately. This is a **to-do**, not a
  * category: a tab would sit there empty most of the time, making a temporary
@@ -35,7 +35,7 @@ export function AwaitingPutAwayBanner({
   itemId: string;
   itemNumber?: string | null;
   itemDescription?: string | null;
-  /** Fired after a put-away so the host can refetch stock, ledger and totals. */
+  /** Fired after a receive-to-inventory so the host can refetch stock, ledger and totals. */
   onPlaced?: () => void;
 }) {
   const canSign = usePermission('inventory', 'sign');
@@ -125,7 +125,7 @@ export function AwaitingPutAwayBanner({
                 <span className="flex shrink-0 items-center gap-2">
                   <span className="tabular-nums text-text-2">
                     {formatNumber(r.remaining_units)}
-                    {/* Only worth saying when an earlier partial put-away
+                    {/* Only worth saying when an earlier partial receipt
                         already shelved some of it. */}
                     {r.remaining_units !== r.received_units && (
                       <span className="text-text-3">

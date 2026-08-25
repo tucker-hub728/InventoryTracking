@@ -60,7 +60,7 @@ export interface ApiAwaitingPutAway {
   lot_id: string;
   lot_number: string;
   /** CONSUME units still to place — less than `received_units` when an earlier
-   *  partial put-away already shelved some of it. */
+   *  earlier partial receipt already shelved some of it. */
   remaining_units: number;
   received_units: number;
   expiration_date: string | null;
@@ -119,6 +119,9 @@ export interface ApiItem {
   updated_by_user_id: string;
   qty_on_hand: string;
   qty_on_order: string;
+  /** Units arrived but not yet placed on a shelf (REQ-004). Neither available
+   *  nor on-order: on site, but not pickable. */
+  qty_awaiting_release: string;
   /** Inventory $ — Σ(on-hand units × their lot's unit price). Lot-derived. */
   inv_value_amount: string;
   /** On-order $ — Σ(ordered qty × unit price) over ON_ORDER lots. Lot-derived. */
@@ -251,7 +254,7 @@ export const itemsApi = {
     }),
 
   /**
-   * What has ARRIVED for this item but has not been put away yet (REQ-004).
+   * What has ARRIVED for this item but has not been received to inventory yet (REQ-004).
    *
    * Deliberately a second call rather than a field on `stockLocations`: that
    * one is allocation-derived and answers "where is this item", so material

@@ -419,13 +419,13 @@ def blocks_transfer_into_ln2(from_type: str, to_type: str) -> bool:
 
     What this does NOT touch, so a tank can still be stocked:
 
-      * ``POST /allocations/place`` / ``place-batch`` — receipt put-away, which
+      * ``POST /allocations/place`` / ``place-batch`` — receipt receive-to-inventory, which
         is how cryo material properly enters a tank. Not a transfer, no source
         node, and the LN2 box page drives it directly.
       * kit back-flush / return of leftovers into a box, which validates through
         kitting's own ``_require_placeable``.
 
-    Note the consequence, which is real and was accepted: because put-away is
+    Note the consequence, which is real and was accepted: because receiving to inventory is
     capped at the lot's ``ordered_qty``, units that have ALREADY been placed
     somewhere else can never be moved into LN2 — a transfer was their only route
     in, and this closes it.

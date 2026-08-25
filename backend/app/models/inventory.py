@@ -41,6 +41,10 @@ class Supplier(Base):
     __table_args__ = (
         Index("uq_suppliers_name", func.lower(text("name")), unique=True),
         Index("ix_suppliers_active", "is_active"),
+        CheckConstraint(
+            "lead_time_days IS NULL OR (lead_time_days >= 0 AND lead_time_days <= 3650)",
+            name="ck_suppliers_lead_time_days_range",
+        ),
         {"schema": "meta"},
     )
 
@@ -64,6 +68,15 @@ class Supplier(Base):
         server_default=text("TRUE"),
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Days from placing an order with this supplier to the goods arriving
+    # (PLN-001). NULL means "not asked yet" — deliberately NOT 0, which would
+    # read as same-day delivery and suppress the early warning the requirement
+    # exists to give. Planning shows an unknown lead time as unknown.
+    #
+    # This is the supplier-level answer; ``Item.avg_lead_days`` is a separate,
+    # independently-edited number that planning does not read. Migration
+    # ``pln01`` records why the item-level one was not folded into this.
+    lead_time_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -3,12 +3,12 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Plus, Search } from 'lucide-react';
+import { Download, Loader2, Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -24,7 +24,10 @@ import {
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Skeleton } from '@/components/ui/skeleton';
 import { usePermission } from '@/hooks/use-permission';
+import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
+import { exportsApi } from '@/lib/api/exports';
+import { saveBlob, timestampedFilename } from '@/lib/download';
 import { itemsApi, type ListItemsParams } from '@/lib/api/items';
 import { tiersApi, isBuiltTier, type ApiTier, type TierType } from '@/lib/api/tiers';
 import { apiItemToInventoryItem } from '@/lib/api/items-adapter';
@@ -91,6 +94,10 @@ function findTier(tiers: ApiTier[], cfg: TierConfig): ApiTier | null {
 
 export function TierListClient({ config }: { config: TierConfig }) {
   const canCreate = usePermission('inventory', 'create');
+  // RPT-001 is for finance, who hold the ``read_only`` role — so the export is
+  // gated on view, not create. Everyone who can reach this page can take a
+  // copy of it, which is the point.
+  const canExport = usePermission('inventory', 'view');
   const router = useRouter();
 
   // The consumable flag is CR-only — Transaction Spec §1.1: "A CR item may be
@@ -111,6 +118,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
   const [hasLoaded, setHasLoaded] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
+  const [exporting, setExporting] = React.useState(false);
   // Held briefly — the list returns in ~20ms locally, too fast to see.
   const showSkeleton = useMinDuration(!hasLoaded && !loadError);
 
@@ -192,6 +200,60 @@ export function TierListClient({ config }: { config: TierConfig }) {
     return () => ctrl.abort();
   }, [fetchRows]);
 
+  /**
+   * RPT-001 — download the finance CSV for this tier.
+   *
+   * Scoped to the tier and the current search, so the file matches the screen
+   * it was taken from. It is NOT scoped by the filter pill: the pills narrow
+   * to a subset ("Below reorder"), and a "full data dump" that silently
+   * dropped rows because a pill was active is the kind of thing finance finds
+   * out about a quarter later.
+   */
+  /**
+   * RPT-001 — download this tier as an Excel workbook.
+   *
+   * Scoped to the tier and the current search, so the file matches the screen
+   * it was taken from. It is NOT scoped by the filter pill: the pills narrow
+   * to a subset ("Below reorder"), and a "full data dump" that silently
+   * dropped rows because a pill was active is the kind of thing finance finds
+   * out about a quarter later.
+   */
+  const handleExport = React.useCallback(async () => {
+    setExporting(true);
+    try {
+      const { blob, filename } = await exportsApi.inventoryXlsx({
+        tierId: tier?.id,
+        q: query || undefined,
+        title: config.title,
+      });
+      const name = filename ?? timestampedFilename('cellready-inventory', 'xlsx');
+      saveBlob(blob, name);
+      toast.success('Export downloaded', { description: name });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : 'Failed to export. Please try again.',
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [tier, query, config.title]);
+
+  const exportButton = (
+    <Button
+      variant="default"
+      onClick={() => void handleExport()}
+      disabled={exporting || !tier}
+      title={`Excel workbook — a ${config.title} summary tab, then one tab per item`}
+    >
+      {exporting ? (
+        <Loader2 size={14} className="animate-spin" />
+      ) : (
+        <Download size={14} />
+      )}
+      {exporting ? 'Exporting…' : 'Export'}
+    </Button>
+  );
+
   const newButton = (
     <Button variant="primary" onClick={() => setCreating(true)} disabled={!tier}>
       <Plus size={14} /> {config.newLabel}
@@ -243,17 +305,20 @@ export function TierListClient({ config }: { config: TierConfig }) {
               aria-label={`Search ${config.plural}`}
             />
           </div>
-          {config.filters.length > 1 && (
-            <SegmentedControl
-              aria-label={`Filter ${config.plural}`}
-              options={config.filters.map((f) => ({
-                value: f.id,
-                label: f.label,
-              }))}
-              value={filterId}
-              onChange={setFilterId}
-            />
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {config.filters.length > 1 && (
+              <SegmentedControl
+                aria-label={`Filter ${config.plural}`}
+                options={config.filters.map((f) => ({
+                  value: f.id,
+                  label: f.label,
+                }))}
+                value={filterId}
+                onChange={setFilterId}
+              />
+            )}
+            {canExport && exportButton}
+          </div>
         </div>
 
         <Card className="overflow-hidden">
@@ -363,7 +428,15 @@ export function TierListClient({ config }: { config: TierConfig }) {
                         {row.uom ? <span className="ml-1 text-text-3">{row.uom}</span> : null}
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={row.status} />
+                        {/* Awaiting-release aware, same as the item page and
+                            the all-items table: a delivery sitting in the
+                            receiving bay must not read as "go buy more". */}
+                        <StockStatusBadge
+                          status={row.status}
+                          qtyAvailable={row.qtyAvailable}
+                          reorderThreshold={row.threshold}
+                          qtyAwaitingRelease={row.qtyAwaitingRelease}
+                        />
                       </TableCell>
                       <TableCell className="text-text-3">
                         {row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}

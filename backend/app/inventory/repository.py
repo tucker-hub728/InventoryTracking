@@ -10,9 +10,9 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, NamedTuple
 
-from sqlalchemy import Select, asc, desc, func, or_, select
+from sqlalchemy import Date, Select, asc, cast, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,6 +32,7 @@ from app.models.inventory import (
     StockMovement,
     Supplier,
 )
+from app.notifications.pending import mark_item
 
 # Whitelist for the ``status`` query filter. Aligned with the
 # ``status_code`` values produced by ``app.v_item_stock``.
@@ -109,6 +110,7 @@ async def create_supplier(
     phone: str | None = None,
     notes: str | None = None,
     is_active: bool = True,
+    lead_time_days: int | None = None,
 ) -> Supplier:
     """Insert a supplier row. Caller commits."""
     supplier = Supplier(
@@ -117,6 +119,7 @@ async def create_supplier(
         phone=phone,
         notes=notes,
         is_active=is_active,
+        lead_time_days=lead_time_days,
     )
     session.add(supplier)
     await session.flush()
@@ -154,6 +157,10 @@ def supplier_to_audit_snapshot(supplier: Supplier) -> dict[str, object | None]:
         "phone": supplier.phone,
         "notes": supplier.notes,
         "is_active": supplier.is_active,
+        # Audited because it moves a reorder signal: raising a lead time from
+        # 7 to 60 days changes when every item this supplier stocks is flagged,
+        # and "who widened the buffer?" is a question the log should answer.
+        "lead_time_days": supplier.lead_time_days,
     }
 
 
@@ -413,6 +420,10 @@ async def create_item(
     )
     session.add(item)
     await session.flush()
+    # An item can be created already below its own threshold — somebody typing
+    # in a reagent they know is short. No stock moves, so nothing else would
+    # ever notice.
+    mark_item(session, item.id)
     # Re-read so eager relationships (suppliers, stock) populate. The naive
     # ORM returns a half-hydrated instance after flush.
     refreshed = await get_item(session, item.id)
@@ -435,6 +446,12 @@ async def apply_item_patch(
         setattr(item, col, value)
     item.updated_by_user_id = updated_by_user_id
     await session.flush()
+    # Raising a threshold breaches it without a single unit moving, and is
+    # exactly how a planner reacts to a near-miss. Marked unconditionally
+    # rather than only when ``reorder_threshold`` is in the patch: an item can
+    # also leave the alerting set by being restored, and the evaluation is a
+    # no-op when nothing crossed a line.
+    mark_item(session, item.id)
     refreshed = await get_item(session, item.id)
     assert refreshed is not None
     return refreshed
@@ -477,6 +494,38 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
         "must_order_flag": item.must_order_flag,
         "deleted_at": item.deleted_at.isoformat() if item.deleted_at else None,
     }
+
+
+def outstanding_order_units_expr():
+    """``(received_subquery, outstanding_expr)`` — what an Order line still owes.
+
+    Outstanding (v3) = ``ordered_qty − Σ received`` on a line, clamped at 0, in
+    ORDER units. Lots are created at receive, so there are no ON_ORDER lots any
+    more and on-order is line-derived.
+
+    Extracted so :func:`compute_item_valuations` (which feeds the item page's
+    "On-PO $") and the finance export's on-order rows share ONE definition.
+    They have to agree exactly: the export publishes a per-line breakdown next
+    to the item-level total, and finance reconciles the two. A copied
+    expression would tie out today and drift the first time either side gained
+    a filter.
+
+    Returns a fresh subquery each call — the caller joins it into their own
+    statement, so handing back a shared object would alias two queries.
+    """
+    received_sub = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = func.greatest(
+        ReceiptTransactionLine.ordered_qty - func.coalesce(received_sub.c.recd, 0),
+        0,
+    )
+    return received_sub, outstanding
 
 
 async def compute_item_valuations(
@@ -533,19 +582,10 @@ async def compute_item_valuations(
     for item_id, inv_value in (await session.execute(inv_stmt)).all():
         _row(item_id)[0] = Decimal(inv_value)
 
-    # Outstanding per Order line = ordered − Σ received (clamped at 0).
-    received_sub = (
-        select(
-            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
-            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
-        )
-        .group_by(ReceiptEventLine.receipt_transaction_line_id)
-        .subquery()
-    )
-    outstanding = func.greatest(
-        ReceiptTransactionLine.ordered_qty - func.coalesce(received_sub.c.recd, 0),
-        0,
-    )
+    # Outstanding per Order line = ordered − Σ received (clamped at 0). Shared
+    # with the finance export so the per-line breakdown it publishes sums to
+    # the ``po_value`` computed here.
+    received_sub, outstanding = outstanding_order_units_expr()
     po_stmt = (
         select(
             ReceiptTransactionLine.item_id,
@@ -1391,28 +1431,14 @@ async def get_event_line_by_lot(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def lots_awaiting_put_away(
-    session: AsyncSession, item_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, list[tuple[Lot, int]]]:
-    """``{item_id: [(lot, units still to place), …]}`` — the put-away queue.
+def _placed_units_subquery():
+    """Units already shelved per lot — the ``receipt`` side of the ledger.
 
-    Material that has ARRIVED but has not been received to inventory yet
-    (REQ-004): quarantined, received against a purchase order, and with units
-    left over the append-only receipt ledger.
-
-    Derived rather than stored. A "pending put-away" column would be a second
-    copy of a fact the ledger already holds, and the two would disagree the
-    first time anyone placed a lot by another route. The predicate rides the
-    existing partial index on ``release_state``.
-
-    Deliberately excludes manufactured output: a kit-produced lot is also
-    quarantined, but it was placed at close-out and its release is a quality
-    decision rather than a put-away. ``receipt_transaction_line_id`` is what
-    tells the two apart.
+    Shared by the receive-to-inventory queue and the awaiting-release total below so the
+    two cannot drift: a lot is "still waiting" precisely to the extent that its
+    ordered quantity exceeds what has been placed.
     """
-    if not item_ids:
-        return {}
-    placed = (
+    return (
         select(
             StockMovement.lot_id.label("lot_id"),
             func.coalesce(func.sum(StockMovement.qty_delta), 0).label("qty"),
@@ -1421,6 +1447,269 @@ async def lots_awaiting_put_away(
         .group_by(StockMovement.lot_id)
         .subquery()
     )
+
+
+def awaiting_release_units_subquery():
+    """Correlated scalar: CONSUME units that have ARRIVED but are not placed.
+
+    The same predicate as :func:`lots_awaiting_put_away`, expressed as a number
+    per item so a list query can carry it without loading every lot. **Both must
+    stay in step** — the banner on the item page and the Reorder screen would
+    otherwise disagree about the same material, which is worse than either being
+    wrong alone.
+
+    Why this number matters to planning (PLN-001): stock in this state is on
+    site and paid for. Counting it as missing sends a planner to raise a second
+    order for material already in the building, which is the one mistake a
+    reorder screen must not cause. Ordinary on-order quantity is deliberately
+    NOT netted off (client, 2026-08-24) because it has not arrived and may be
+    late; this HAS arrived, so the client's own "until stock physically
+    arrives" rule puts it on the other side of the line.
+
+    Manufactured output is excluded for the same reason it is excluded from the
+    receive-to-inventory queue: a kit-produced lot is quarantined too, but releasing it is a
+    quality decision, not a shelving task, and no amount of it means "do not
+    order".
+    """
+    placed = _placed_units_subquery()
+    remaining = Lot.ordered_qty - func.coalesce(placed.c.qty, 0)
+    return (
+        select(func.coalesce(func.sum(remaining), 0))
+        .select_from(Lot)
+        .outerjoin(placed, placed.c.lot_id == Lot.id)
+        .where(
+            Lot.item_id == Item.id,
+            Lot.deleted_at.is_(None),
+            Lot.release_state == "quarantine",
+            Lot.receipt_transaction_line_id.is_not(None),
+            Lot.ordered_qty.is_not(None),
+            Lot.ordered_qty > func.coalesce(placed.c.qty, 0),
+        )
+        .correlate(Item)
+        .scalar_subquery()
+    )
+
+
+async def awaiting_release_units(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    """``{item_id: units awaiting release}`` for a page of items.
+
+    Bulk, so the items list costs one extra query rather than one per row.
+    Items with nothing waiting are absent from the mapping; callers default
+    to zero.
+    """
+    if not item_ids:
+        return {}
+    placed = _placed_units_subquery()
+    remaining = Lot.ordered_qty - func.coalesce(placed.c.qty, 0)
+    stmt = (
+        select(Lot.item_id, func.coalesce(func.sum(remaining), 0))
+        .select_from(Lot)
+        .outerjoin(placed, placed.c.lot_id == Lot.id)
+        .where(
+            Lot.item_id.in_(item_ids),
+            Lot.deleted_at.is_(None),
+            Lot.release_state == "quarantine",
+            Lot.receipt_transaction_line_id.is_not(None),
+            Lot.ordered_qty.is_not(None),
+            Lot.ordered_qty > func.coalesce(placed.c.qty, 0),
+        )
+        .group_by(Lot.item_id)
+    )
+    return {row[0]: int(row[1]) for row in (await session.execute(stmt)).all()}
+
+
+def on_order_units_subquery():
+    """Correlated scalar: units on open purchase orders, in CONSUME units.
+
+    Same definition of "outstanding" as :func:`compute_item_valuations` —
+    ``ordered_qty − Σ received``, clamped at zero, over Orders that are neither
+    cancelled nor soft-deleted — and the same REQ-001 conversion by
+    ``units_per_pack``, so the figure is comparable with ``qty_available`` and
+    ``reorder_threshold`` rather than being a count of boxes sitting next to a
+    count of millilitres.
+
+    Planning needs this to tell two very different situations apart: an item
+    nobody has ordered, and an item whose delivery is simply not here yet.
+    Before the split, both said "order this", so the Reorder screen was
+    recommending a second purchase order for material already bought — on every
+    row it was showing (client-reported 2026-08-24).
+
+    Note this does NOT net the quantity off the shortfall. The client's rule
+    stands: an item stays visible until stock physically arrives, because an
+    order can be late or never come. What changes is the heading it appears
+    under, not whether it appears.
+    """
+    received = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = func.greatest(
+        ReceiptTransactionLine.ordered_qty - func.coalesce(received.c.recd, 0),
+        0,
+    )
+    return (
+        select(
+            func.coalesce(
+                func.sum(
+                    outstanding
+                    * func.coalesce(ReceiptTransactionLine.units_per_pack, 1)
+                ),
+                0,
+            )
+        )
+        .select_from(ReceiptTransactionLine)
+        .join(
+            ReceiptTransaction,
+            ReceiptTransaction.id == ReceiptTransactionLine.receipt_transaction_id,
+        )
+        .outerjoin(received, received.c.line_id == ReceiptTransactionLine.id)
+        .where(
+            ReceiptTransactionLine.item_id == Item.id,
+            ReceiptTransaction.deleted_at.is_(None),
+            ReceiptTransaction.status != "cancelled",
+        )
+        .correlate(Item)
+        .scalar_subquery()
+    )
+
+
+class NextOpenOrder(NamedTuple):
+    """The open purchase order an item is next expecting stock from."""
+
+    order_id: uuid.UUID
+    po_reference: str
+    #: ``order date + that line's supplier's lead time``. None when that
+    #: supplier has no lead time recorded — the order is still real and still
+    #: linked, there is just no date to project.
+    expected_arrival: date | None
+    #: How many open orders the item has in total, so a row can say the date
+    #: it shows is the first of several rather than the only one.
+    open_order_count: int
+
+
+async def next_open_orders(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, NextOpenOrder]:
+    """``{item_id: NextOpenOrder}`` — the soonest-landing open order per item.
+
+    One bulk query rather than a correlated subquery per fact, because the date
+    and the purchase order it came from must agree. Sourcing them separately
+    invites the row to show one order's reference beside another order's date
+    the moment two are open.
+
+    "Soonest" is by projected arrival, with undated orders last: an order whose
+    supplier has no lead time cannot be compared, so it only wins when nothing
+    else is open. Ties break on order date, oldest first — the one that has been
+    waiting longest is the one to chase.
+
+    The projection uses the line's OWN supplier rather than the item-level worst
+    case ``_lead_time_subquery`` uses. Those answer different questions: a
+    planner deciding whether to buy needs the slowest supplier they might end up
+    using; an order already placed has one actual supplier and one actual date,
+    so there is nothing to guess.
+
+    **The order date is ``created_at``** — there is no separate "ordered on"
+    column; the row is created when the order is raised. For a blanket order
+    ``valid_from`` is the better anchor (the delivery window can open long after
+    the paperwork), so it wins when set.
+    """
+    if not item_ids:
+        return {}
+    received = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = ReceiptTransactionLine.ordered_qty - func.coalesce(received.c.recd, 0)
+    anchor = func.coalesce(
+        ReceiptTransaction.valid_from,
+        cast(ReceiptTransaction.created_at, Date),
+    )
+    expected = (anchor + Supplier.lead_time_days).label("expected")
+    stmt = (
+        select(
+            ReceiptTransactionLine.item_id,
+            ReceiptTransaction.id,
+            ReceiptTransaction.po_reference,
+            expected,
+            ReceiptTransaction.created_at,
+        )
+        .select_from(ReceiptTransactionLine)
+        .join(
+            ReceiptTransaction,
+            ReceiptTransaction.id == ReceiptTransactionLine.receipt_transaction_id,
+        )
+        .join(Supplier, Supplier.id == ReceiptTransactionLine.supplier_id)
+        .outerjoin(received, received.c.line_id == ReceiptTransactionLine.id)
+        .where(
+            ReceiptTransactionLine.item_id.in_(item_ids),
+            ReceiptTransaction.deleted_at.is_(None),
+            ReceiptTransaction.status != "cancelled",
+            outstanding > 0,
+        )
+    )
+    out: dict[uuid.UUID, NextOpenOrder] = {}
+    seen_orders: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for item_id, order_id, po_ref, eta, _created in (await session.execute(stmt)).all():
+        seen_orders.setdefault(item_id, set()).add(order_id)
+        best = out.get(item_id)
+        # Rows arrive unordered; keep the soonest, undated last. Done in Python
+        # rather than DISTINCT ON so the per-item order count comes from the
+        # same pass instead of a second query that could disagree.
+        if best is None or _sooner(eta, best.expected_arrival):
+            out[item_id] = NextOpenOrder(order_id, po_ref, eta, 0)
+    return {
+        item_id: row._replace(open_order_count=len(seen_orders[item_id]))
+        for item_id, row in out.items()
+    }
+
+
+def _sooner(candidate: date | None, current: date | None) -> bool:
+    """Is ``candidate`` a better "next arrival" than ``current``?
+
+    A dated order always beats an undated one — an unknown arrival is not
+    evidence of an early one.
+    """
+    if candidate is None:
+        return False
+    if current is None:
+        return True
+    return candidate < current
+
+
+async def lots_awaiting_put_away(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[Lot, int]]]:
+    """``{item_id: [(lot, units still to place), …]}`` — the receive-to-inventory queue.
+
+    Material that has ARRIVED but has not been received to inventory yet
+    (REQ-004): quarantined, received against a purchase order, and with units
+    left over the append-only receipt ledger.
+
+    Derived rather than stored. A "pending receipt" column would be a second
+    copy of a fact the ledger already holds, and the two would disagree the
+    first time anyone placed a lot by another route. The predicate rides the
+    existing partial index on ``release_state``.
+
+    Deliberately excludes manufactured output: a kit-produced lot is also
+    quarantined, but it was placed at close-out and its release is a quality
+    decision rather than a receive-to-inventory. ``receipt_transaction_line_id`` is what
+    tells the two apart.
+    """
+    if not item_ids:
+        return {}
+    # Same subquery the awaiting-release total uses — one definition of
+    # "already placed", so the banner and the Reorder screen agree.
+    placed = _placed_units_subquery()
     stmt = (
         select(Lot, func.coalesce(placed.c.qty, 0))
         .outerjoin(placed, placed.c.lot_id == Lot.id)

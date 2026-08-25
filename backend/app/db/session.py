@@ -67,11 +67,29 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 
     Commits on success, rolls back on any exception, and always closes.
     Use via the ``DBSession`` annotation in ``app.api.deps``.
+
+    Just before the commit it drains any notification work the request queued
+    (NOTIF-001). This is the only place in the codebase where "this transaction
+    is about to become durable" is known, which is exactly what the notification
+    emitter needs: the ledger helpers tag the items they touched onto
+    ``session.info``, and evaluating them here — rather than inside each helper —
+    means a multi-line issue is judged on its finished state instead of a
+    half-applied one. The ``pg_notify`` the emitter issues is queued by Postgres
+    and delivered only if this commit succeeds, so a rollback takes the
+    notification with it.
+
+    ``flush_pending`` never raises. A notification is a courtesy; the receipt it
+    rides along with is not.
     """
+    # Local import: the emitter reaches into the inventory and consumables
+    # packages, which reach back here for their own session types.
+    from app.notifications.emitter import flush_pending
+
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         try:
             yield session
+            await flush_pending(session)
             await session.commit()
         except Exception:
             await session.rollback()

@@ -92,6 +92,9 @@ class SupplierRead(BaseModel):
     phone: str | None = None
     is_active: bool
     notes: str | None = None
+    #: Order-to-delivery days for this supplier (PLN-001). ``None`` means the
+    #: lead time has not been recorded, which is distinct from zero.
+    lead_time_days: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -131,6 +134,8 @@ class SupplierCreate(BaseModel):
     phone: str | None = Field(default=None, max_length=64)
     notes: str | None = Field(default=None, max_length=2048)
     is_active: bool = True
+    # Bounds match the DB CHECK (pln01) and the item-level field's 0..3650.
+    lead_time_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 class SupplierUpdate(BaseModel):
@@ -150,6 +155,8 @@ class SupplierUpdate(BaseModel):
     phone: str | None = Field(default=None, max_length=64)
     notes: str | None = Field(default=None, max_length=2048)
     is_active: bool | None = None
+    # Explicit ``null`` clears it back to "not recorded", per the class docstring.
+    lead_time_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 # ── Items ──────────────────────────────────────────────────────────────
@@ -292,8 +299,21 @@ class ItemRead(BaseModel):
     # for reorder + forecasting). ``qty_on_hand`` stays for visibility.
     qty_available: Decimal = Decimal("0")
     qty_on_order: Decimal = Decimal("0")
+    #: Units that have ARRIVED but are not yet placed on a shelf (REQ-004).
+    #:
+    #: Deliberately separate from both ``qty_available`` and ``qty_on_order``,
+    #: because it is neither: the material is on site (unlike on-order) but
+    #: cannot be picked (unlike available). It is the number that tells a
+    #: planner "do not raise another order — release this instead", which is why
+    #: it travels with every item read rather than living only on the item
+    #: page's receive-to-inventory banner.
+    qty_awaiting_release: Decimal = Decimal("0")
     inv_value_amount: Decimal = Decimal("0")
     po_value_amount: Decimal = Decimal("0")
+    # NOTE: this stays a pure statement about *availability* — what a picker can
+    # take today. It does not know about ``qty_awaiting_release``; the UI
+    # combines the two, so the filter (``?status=low_stock``), which runs in SQL
+    # against ``app.v_item_stock``, keeps meaning exactly what it always meant.
     status_code: Literal["available", "low_stock", "out_of_stock"] = "out_of_stock"
     last_movement_at: datetime | None = None
     # Direct BOM components. Always 0 for a raw material (it's bought, not
@@ -730,7 +750,7 @@ class PlacementCell(BaseModel):
 class AwaitingPutAwayRead(BaseModel):
     """One lot that has arrived but has not been received to inventory (REQ-004).
 
-    The item page's put-away queue. Everything here is derived from the lot and
+    The item page's receive-to-inventory queue. Everything here is derived from the lot and
     the receipt ledger — there is no "pending" table, because a second copy of
     "how much is still to place" would disagree with the ledger the first time
     anyone placed a lot by another route.
@@ -740,8 +760,8 @@ class AwaitingPutAwayRead(BaseModel):
 
     lot_id: str
     lot_number: str
-    # CONSUME units still to put away. Less than ``received_units`` when an
-    # earlier partial put-away already placed some of it.
+    # CONSUME units still to receive. Less than ``received_units`` when an
+    # earlier partial receipt already placed some of it.
     remaining_units: int
     received_units: int
     expiration_date: date | None = None

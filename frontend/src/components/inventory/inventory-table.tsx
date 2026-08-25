@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
 import { STICKY_CELL, STICKY_HEAD } from '@/components/ui/sticky-column';
@@ -203,7 +203,12 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                 {isBuilt ? (
                   <span className="text-text-3">—</span>
                 ) : (
-                  <StatusBadge status={item.status} />
+                  <StockStatusBadge
+                    status={item.status}
+                    qtyAvailable={item.qtyAvailable}
+                    reorderThreshold={item.threshold}
+                    qtyAwaitingRelease={item.qtyAwaitingRelease}
+                  />
                 )}
               </TableCell>
               <TableCell className="font-mono text-xs text-text-2">

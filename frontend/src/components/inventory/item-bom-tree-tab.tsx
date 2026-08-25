@@ -7,7 +7,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { bomApi, type ApiBomLine } from '@/lib/api/bom';
 import { TIER_TYPE_LABELS } from '@/lib/api/tiers';
 import { ApiError } from '@/lib/api/client';
@@ -27,6 +27,23 @@ interface Props {
  * visible on load; every line shows the child's tier, qty/unit, in-stock and
  * stock status, and sub-assemblies can still be collapsed by hand.
  */
+/**
+ * Column widths, declared once and used by both the header and every row.
+ *
+ * They were duplicated as literals before, which is how the status column came
+ * to be too narrow for its own content: "Awaiting release" is a wider badge
+ * than any status that existed when ``w-28`` was chosen, so it overflowed left
+ * and sat on top of the Available figure. Fixed widths in a flex row do not
+ * grow to fit — they have to be sized for the widest thing that can land in
+ * them, and shared so the header moves with the row.
+ */
+const COL = {
+  qty: 'w-20',
+  available: 'w-24',
+  // Fits "Awaiting release" with its icon; the other statuses are shorter.
+  status: 'w-36',
+} as const;
+
 export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
   const [lines, setLines] = React.useState<ApiBomLine[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -68,13 +85,19 @@ export function ItemBomTreeTab({ itemId, itemNumber }: Props) {
     <div className="space-y-3 p-4">
       <h3 className="text-sm font-semibold">{itemNumber} · structure</h3>
 
-      {/* Column header — mirrors the BomNode row's right-aligned columns so
-          labels line up: Qty / run, Available, Stock status. */}
-      <div className="flex items-center gap-2 pr-2 text-[11px] uppercase tracking-wider text-text-3">
-        <span className="flex-1">Item #</span>
-        <span className="w-20 text-right">qty / run</span>
-        <span className="w-20 text-right">available</span>
-        <span className="w-28 text-right">stock status</span>
+      {/* Column header — uses the SAME width constants as the row below, so
+          the two cannot drift apart the way they did when a wider status badge
+          landed and only the row grew. */}
+      <div
+        className={cn(
+          'flex items-center gap-2 border-b border-border pb-1.5 pr-2',
+          'text-[11px] uppercase tracking-wider text-text-3',
+        )}
+      >
+        <span className="min-w-0 flex-1">Item #</span>
+        <span className={cn(COL.qty, 'text-right')}>qty / run</span>
+        <span className={cn(COL.available, 'text-right')}>available</span>
+        <span className={cn(COL.status, 'text-right')}>stock status</span>
       </div>
 
       <ul className="space-y-0.5">
@@ -109,7 +132,12 @@ function BomNode({ line, depth }: { line: ApiBomLine; depth: number }) {
   return (
     <li>
       <div
-        className="flex items-center gap-2 rounded-md py-1.5 pr-2 text-sm"
+        className={cn(
+          'flex items-center gap-2 rounded-md py-1.5 pr-2 text-sm',
+          // A dense tree with no row affordance is hard to read across; the
+          // hover tint ties an item number to its numbers on the far right.
+          'transition-colors hover:bg-surface-2',
+        )}
         style={{ paddingLeft: `${depth * 18 + 8}px` }}
       >
         {hasChildren ? (
@@ -143,17 +171,30 @@ function BomNode({ line, depth }: { line: ApiBomLine; depth: number }) {
           </span>
         </span>
 
-        <span className="w-20 text-right font-mono text-xs text-text-2">
+        <span className={cn(COL.qty, 'shrink-0 text-right font-mono text-xs text-text-2')}>
           ×{formatNumber(Number(line.qty_per_unit))}
         </span>
         {/* Shown for every component, sub-assemblies included: a sub-assembly
             "shall itself be stockable as inventory" (REQ-2026-07-01-INV-003),
             so it has a real on-hand balance that kitting reads. */}
-        <span className="w-20 text-right font-mono text-xs text-text-2">
+        <span
+          className={cn(
+            COL.available,
+            'shrink-0 text-right font-mono text-xs',
+            // Zero reads as a problem, not as data. The badge beside it says
+            // what kind of problem.
+            Number(line.child_qty_available) <= 0 ? 'text-danger' : 'text-text-2',
+          )}
+        >
           {formatNumber(Number(line.child_qty_available))}
         </span>
-        <span className="flex w-28 justify-end">
-          <StatusBadge status={status} />
+        <span className={cn(COL.status, 'flex shrink-0 justify-end')}>
+          <StockStatusBadge
+            status={status}
+            qtyAvailable={Number(line.child_qty_available)}
+            reorderThreshold={Number(line.child_reorder_threshold)}
+            qtyAwaitingRelease={Number(line.child_qty_awaiting_release)}
+          />
         </span>
       </div>
 

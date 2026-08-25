@@ -15,6 +15,10 @@ export interface Supplier {
   phone: string | null;
   is_active: boolean;
   notes: string | null;
+  /** Order-to-delivery days (PLN-001). `null` means it has not been recorded —
+   *  which is NOT zero. The reorder screen treats it as unknown and says so;
+   *  zero would read as same-day delivery and suppress the early warning. */
+  lead_time_days: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -25,6 +29,7 @@ export interface SupplierCreateInput {
   phone?: string | null;
   notes?: string | null;
   is_active?: boolean;
+  lead_time_days?: number | null;
 }
 
 /**
@@ -38,6 +43,7 @@ export interface SupplierUpdateInput {
   phone?: string | null;
   notes?: string | null;
   is_active?: boolean;
+  lead_time_days?: number | null;
 }
 
 export interface ListSuppliersParams {

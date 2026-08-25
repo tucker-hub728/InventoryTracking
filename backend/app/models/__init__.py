@@ -34,6 +34,7 @@ from app.models.locations import (
     LocationNode,
     LotAllocation,
 )
+from app.models.notifications import NotificationAlertState, NotificationDelivery
 from app.models.products import Customer
 
 __all__ = [
@@ -52,6 +53,8 @@ __all__ = [
     "LocationNode",
     "Lot",
     "LotAllocation",
+    "NotificationAlertState",
+    "NotificationDelivery",
     "ReauthConsumption",
     "ReauthEvent",
     "ReceiptEvent",

@@ -24,6 +24,7 @@ from app.models.settings import (
     DEFAULT_CONSUMABLE_EXPIRY_WARN_DAYS,
     AppSetting,
 )
+from app.notifications.pending import mark_issue, mark_item
 
 #: Bounds on the lead time. Zero is legal and means "warn only once expired",
 #: which is the main SRS's literal LOC-008 reading; ten years is a ceiling that
@@ -117,6 +118,7 @@ async def create_issue_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -130,6 +132,10 @@ async def record_issue(session: AsyncSession, *, movement_id: uuid.UUID) -> Cons
     row = ConsumableIssue(movement_id=movement_id)
     session.add(row)
     await session.flush()
+    # A consumable can be issued already inside its warning window — the flag
+    # is a function of the lot's date, not of when it was issued — so this row
+    # may need to alert the moment it exists, rather than at the next sweep.
+    mark_issue(session, row.id)
     return row
 
 
@@ -272,4 +278,8 @@ async def clear_flag(
     issue.disposition = disposition
     issue.clear_note = note
     await session.flush()
+    # Acknowledging is what makes the alert stop being true, so it is also what
+    # resolves the notification. Without this the bell would keep the expiry
+    # warning after somebody had physically checked and signed for it.
+    mark_issue(session, issue.id)
     return issue

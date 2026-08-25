@@ -89,11 +89,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.inventory import archive_job
 
     archive_job.start(app)
+
+    # The notification bell (NOTIF-001). Two tasks, for two different jobs:
+    #
+    #   * ``stream`` holds one dedicated LISTEN connection so a notification
+    #     written by ANY backend process reaches browsers connected to THIS
+    #     one. Production runs 2–3 instances × 2 gunicorn workers, so without
+    #     it the bell would only ever update for whoever happened to land on
+    #     the process that handled the write — and would look perfect in dev.
+    #   * ``job`` re-scans hourly. Not merely a safety net: a consumable
+    #     crossing its expiry date, and an item falling below threshold because
+    #     a lot expired out of ``qty_available``, both happen with no write
+    #     anywhere for a request-time hook to catch.
+    from app.notifications import job as notifications_job
+    from app.notifications import stream as notifications_stream
+
+    notifications_stream.start(app)
+    notifications_job.start(app)
+
     log.info("app.started")
     try:
         yield
     finally:
         log.info("app.stopping")
+        await notifications_job.stop(app)
+        await notifications_stream.stop(app)
         await archive_job.stop(app)
         await dispose_engine()
         log.info("app.stopped")

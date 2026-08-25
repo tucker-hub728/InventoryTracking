@@ -413,7 +413,7 @@ export interface ReceiveToInventoryInput {
   /** Confirms or corrects what arrival recorded. Omitting leaves it alone;
    *  it cannot be cleared here (that is a signed lot correction). */
   expiration_date?: string | null;
-  /** E-signed once for the whole put-away — action `receipt.release`. */
+  /** E-signed once for the whole receive-to-inventory — action `receipt.release`. */
   evidence_id: string;
   notes?: string | null;
 }

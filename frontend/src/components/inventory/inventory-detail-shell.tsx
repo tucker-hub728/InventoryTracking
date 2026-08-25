@@ -19,7 +19,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { AwaitingPutAwayBanner } from '@/components/inventory/awaiting-put-away-banner';
 import { IssueToKanbanDialog } from '@/components/inventory/issue-to-kanban-dialog';
@@ -391,7 +391,14 @@ export function InventoryDetailShell({
                 <span aria-hidden>·</span>
                 <span>{item.supplier || '— No supplier —'}</span>
                 <span aria-hidden>·</span>
-                <StatusBadge status={item.status} />
+                {/* Awaiting-release aware: a delivery sitting in quarantine
+                    must not read as "go buy more". */}
+                <StockStatusBadge
+                  status={item.status}
+                  qtyAvailable={item.qtyAvailable}
+                  reorderThreshold={item.threshold}
+                  qtyAwaitingRelease={item.qtyAwaitingRelease}
+                />
               </>
             )}
           </span>
@@ -486,13 +493,13 @@ export function InventoryDetailShell({
             // ReleaseStateDialog below), and both halves are needed.
             //
             // ``refresh`` re-fetches the item and its movements, which updates
-            // the Snapshot, the Ledger totals and the Unit Ledger — a put-away
+            // the Snapshot, the Ledger totals and the Unit Ledger — a receive-to-inventory
             // is the first time this material becomes on-hand, so all three
             // change at once.
             //
             // ``setReleaseSeq`` re-keys "Stock by location", which deliberately
             // keys its own fetch on ``item.uuid`` so it does NOT reload on every
-            // parent render; without the bump it keeps showing the pre-put-away
+            // parent render; without the bump it keeps showing the pre-receipt
             // rows. ``router.refresh()`` was here and did neither: these tabs
             // are client components fetching in an effect, so re-rendering the
             // server tree leaves them untouched.

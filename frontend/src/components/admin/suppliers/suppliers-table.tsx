@@ -39,6 +39,7 @@ function formatDate(iso: string): string {
 const SKELETON_COLUMNS: readonly SkeletonColumn[] = [
   { width: 'w-40', subWidth: 'w-24' },
   { width: 'w-44', subWidth: 'w-20' },
+  { width: 'w-14' },
   { width: 'w-16', pill: true },
   { width: 'w-20' },
   { width: 'w-40', align: 'right' },
@@ -61,6 +62,9 @@ export function SuppliersTable({
           <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
             <th className="px-3 py-2 font-medium">Name</th>
             <th className="px-3 py-2 font-medium">Contact</th>
+            {/* PLN-001 — drives the reorder warning for every item this
+                supplier stocks. */}
+            <th className="px-3 py-2 font-medium">Lead time</th>
             <th className="px-3 py-2 font-medium">Status</th>
             <th className="px-3 py-2 font-medium">Added</th>
             {showActions && <th className="px-3 py-2 font-medium" />}
@@ -71,7 +75,7 @@ export function SuppliersTable({
             // Inside the real table so the columns keep their final widths and
             // nothing shifts when the rows land.
             <TableRowsSkeleton
-              columns={showActions ? SKELETON_COLUMNS : SKELETON_COLUMNS.slice(0, 4)}
+              columns={showActions ? SKELETON_COLUMNS : SKELETON_COLUMNS.slice(0, 5)}
               rows={8}
               cellClassName="border-b border-border/60 px-3 py-2.5 align-middle"
               label="Loading suppliers…"
@@ -105,6 +109,18 @@ export function SuppliersTable({
                   <span className="text-text-3">—</span>
                 )}
                 {v.phone && <div className="text-[11px] text-text-3">{v.phone}</div>}
+              </td>
+              {/* "Not set" rather than a dash or a 0: an unrecorded lead time
+                  is a supplier nobody has asked, and reading it as no wait is
+                  the mistake PLN-001 exists to prevent. */}
+              <td className="px-3 py-2.5 whitespace-nowrap">
+                {v.lead_time_days == null ? (
+                  <span className="text-text-3">Not set</span>
+                ) : (
+                  <span className="text-text-2">
+                    {v.lead_time_days} day{v.lead_time_days === 1 ? '' : 's'}
+                  </span>
+                )}
               </td>
               <td className="px-3 py-2.5">
                 <span

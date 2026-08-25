@@ -42,6 +42,10 @@ SubjectTable = Literal[
     "app.lots",
     "app.users",
     "app.stock_movements",
+    # Not a real table — the logical subject the finance export (RPT-001)
+    # audits itself against, so "who took a copy of the valuation" is one
+    # filter away in the audit viewer.
+    "app.inventory_exports",
 ]
 
 # Mirrors ``AuditAction`` in the recorder. Filtering by action is the

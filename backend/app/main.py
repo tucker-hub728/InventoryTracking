@@ -24,6 +24,7 @@ from app.api.v1.router import api_router as api_v1_router
 from app.core.config import get_settings
 from app.core.lifespan import lifespan
 from app.core.logging import configure_logging, get_logger
+from app.middlewares.no_compress import NoCompressPathsMiddleware
 from app.middlewares.request_context import RequestContextMiddleware
 
 
@@ -57,6 +58,16 @@ def create_app() -> FastAPI:
         )
 
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+    # MUST be registered after GZip to take effect. ``add_middleware`` inserts
+    # at position 0 and the stack is built outermost-first, so the last one
+    # added is the outermost — this strips ``accept-encoding`` before GZip ever
+    # reads it. Registered the other way round it would sit inside GZip and do
+    # nothing, with no error to show for it. See the module docstring for what
+    # gzip does to a server-sent-events stream.
+    app.add_middleware(
+        NoCompressPathsMiddleware,
+        prefixes=(f"{settings.api_v1_prefix}/notifications/stream",),
+    )
     app.add_middleware(RequestContextMiddleware)
 
     # ── Exception handlers ──────────────────────────────────────────────

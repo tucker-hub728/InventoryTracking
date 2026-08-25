@@ -13,6 +13,7 @@ from app.api.v1.routes import auth, health
 from app.audit.routes import audit_router
 from app.catalog.routes import bom_router, tiers_router
 from app.consumables.routes import consumables_router
+from app.exports.routes import exports_router
 from app.forecast.routes import forecasts_router
 from app.inventory.routes import (
     items_router,
@@ -25,6 +26,8 @@ from app.invitations.routes import router as invitations_router
 from app.issues.routes import issues_router
 from app.kitting.routes import kits_router
 from app.locations.routes import alloc_router, nodes_router
+from app.notifications.routes import notifications_router
+from app.planning.routes import planning_router
 from app.products.routes import customers_router
 from app.shipments.routes import shipments_router
 from app.users.routes import router as users_router
@@ -49,4 +52,7 @@ api_router.include_router(shipments_router)
 api_router.include_router(issues_router)
 api_router.include_router(consumables_router)
 api_router.include_router(forecasts_router)
+api_router.include_router(planning_router)
+api_router.include_router(notifications_router)
 api_router.include_router(audit_router)
+api_router.include_router(exports_router)

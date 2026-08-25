@@ -175,7 +175,7 @@ export interface OrderUpdateInput {
 }
 
 /** A box cell. Receiving no longer chooses a destination (REQ-004), but the
- *  put-away step does, and it speaks the same shape. */
+ *  receive-to-inventory step does, and it speaks the same shape. */
 export interface ReceivePlacementCell {
   grid_row: number;
   grid_col: number;
