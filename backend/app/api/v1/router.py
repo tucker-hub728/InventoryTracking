@@ -13,6 +13,7 @@ from app.api.v1.routes import auth, health
 from app.audit.routes import audit_router
 from app.catalog.routes import bom_router, tiers_router
 from app.consumables.routes import consumables_router
+from app.exports.routes import exports_router
 from app.forecast.routes import forecasts_router
 from app.inventory.routes import (
     items_router,
@@ -54,3 +55,4 @@ api_router.include_router(forecasts_router)
 api_router.include_router(planning_router)
 api_router.include_router(notifications_router)
 api_router.include_router(audit_router)
+api_router.include_router(exports_router)

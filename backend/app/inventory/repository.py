@@ -496,6 +496,38 @@ def item_to_audit_snapshot(item: Item) -> dict[str, object | None]:
     }
 
 
+def outstanding_order_units_expr():
+    """``(received_subquery, outstanding_expr)`` — what an Order line still owes.
+
+    Outstanding (v3) = ``ordered_qty − Σ received`` on a line, clamped at 0, in
+    ORDER units. Lots are created at receive, so there are no ON_ORDER lots any
+    more and on-order is line-derived.
+
+    Extracted so :func:`compute_item_valuations` (which feeds the item page's
+    "On-PO $") and the finance export's on-order rows share ONE definition.
+    They have to agree exactly: the export publishes a per-line breakdown next
+    to the item-level total, and finance reconciles the two. A copied
+    expression would tie out today and drift the first time either side gained
+    a filter.
+
+    Returns a fresh subquery each call — the caller joins it into their own
+    statement, so handing back a shared object would alias two queries.
+    """
+    received_sub = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = func.greatest(
+        ReceiptTransactionLine.ordered_qty - func.coalesce(received_sub.c.recd, 0),
+        0,
+    )
+    return received_sub, outstanding
+
+
 async def compute_item_valuations(
     session: AsyncSession, item_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, tuple[Decimal, Decimal, Decimal]]:
@@ -550,19 +582,10 @@ async def compute_item_valuations(
     for item_id, inv_value in (await session.execute(inv_stmt)).all():
         _row(item_id)[0] = Decimal(inv_value)
 
-    # Outstanding per Order line = ordered − Σ received (clamped at 0).
-    received_sub = (
-        select(
-            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
-            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
-        )
-        .group_by(ReceiptEventLine.receipt_transaction_line_id)
-        .subquery()
-    )
-    outstanding = func.greatest(
-        ReceiptTransactionLine.ordered_qty - func.coalesce(received_sub.c.recd, 0),
-        0,
-    )
+    # Outstanding per Order line = ordered − Σ received (clamped at 0). Shared
+    # with the finance export so the per-line breakdown it publishes sums to
+    # the ``po_value`` computed here.
+    received_sub, outstanding = outstanding_order_units_expr()
     po_stmt = (
         select(
             ReceiptTransactionLine.item_id,

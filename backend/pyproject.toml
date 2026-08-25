@@ -42,6 +42,7 @@ dependencies = [
     # Misc
     "python-multipart>=0.0.20,<0.1.0",  # form parsing (file uploads later)
     "orjson>=3.10.0,<4.0.0",            # faster JSON serialiser
+    "openpyxl>=3.1.0,<4.0.0",           # .xlsx workbook writer (finance export tabs)
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
