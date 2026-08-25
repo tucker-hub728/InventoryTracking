@@ -41,6 +41,20 @@ export interface ReorderRow {
    *  shortfall the row sits under `on_order` — already bought, do not buy
    *  again. */
   qty_on_order: string;
+  /** ISO date the earliest open order should land — its order date plus that
+   *  line's own supplier's lead time. `null` when nothing is outstanding or
+   *  that supplier has no lead time recorded; render as unknown, never as
+   *  "arriving today". */
+  expected_arrival: string | null;
+  /** The purchase order that date belongs to, so a row can link straight to
+   *  the screen where it is received. Paired with the date on purpose — an item
+   *  with two open orders must not show one order's reference beside the
+   *  other's date. */
+  next_order_id: string | null;
+  next_po_reference: string | null;
+  /** Total open orders. Above 1, the date and reference are the soonest of
+   *  several rather than the only one. */
+  open_order_count: number;
 }
 
 /**

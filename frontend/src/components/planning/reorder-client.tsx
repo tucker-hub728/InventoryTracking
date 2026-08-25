@@ -15,14 +15,15 @@ import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { usePlanningShell } from '@/components/planning/planning-shell';
 import { ApiError } from '@/lib/api/client';
 import { planningApi, type ReorderGroup, type ReorderRow } from '@/lib/api/planning';
-import { cn, formatNumber } from '@/lib/utils';
+import { cn, daysFromNow, formatDate, formatNumber } from '@/lib/utils';
 
 /** Column widths, shared by the header and every row so the two cannot drift. */
 const COL = {
   status: 'w-40',
   stock: 'w-32',
   short: 'w-24',
-  lead: 'w-44',
+  lead: 'w-40',
+  po: 'w-36',
   supplier: 'w-40',
 } as const;
 
@@ -103,7 +104,7 @@ export function ReorderClient({ group }: { group: ReorderGroup }) {
         {/* One horizontal scroller around header + rows together, so the two
             can never slide out of alignment on a narrow screen. */}
         <div className="overflow-x-auto">
-          <div className="min-w-[860px]">
+          <div className="min-w-[1000px]">
             <ColumnHeader group={group} />
 
             {loadError ? (
@@ -167,13 +168,19 @@ export function ReorderClient({ group }: { group: ReorderGroup }) {
   );
 }
 
-/** The lead column heading per group, or null to omit the column. */
+/**
+ * The lead column heading per group, or null to omit the column.
+ *
+ * The two tabs ask the same thing in different tenses, so they get different
+ * headings. Nothing is ordered yet on "to order", so the only honest answer is
+ * a duration — "how long will this take". Once an order exists, the useful
+ * answer is a date: "is it late?" is a glance at a calendar, not arithmetic on
+ * a lead time. On "to receive" the material has landed and the question is
+ * already answered.
+ */
 function leadHeading(group: ReorderGroup): string | null {
-  // On the receive tab the material is already here, so "how long until it
-  // arrives" is answered and the column would be dead space. It stays on the
-  // other two: on "to order" it says how long a purchase will take, and on
-  // "on order" it says how long the open one should have taken.
-  return group === 'awaiting' ? null : 'Lead time';
+  if (group === 'awaiting') return null;
+  return group === 'on_order' ? 'Expected' : 'Lead time';
 }
 
 function ColumnHeader({ group }: { group: ReorderGroup }) {
@@ -190,6 +197,8 @@ function ColumnHeader({ group }: { group: ReorderGroup }) {
       <span className={cn(COL.stock, 'shrink-0 text-right')}>available / threshold</span>
       <span className={cn(COL.short, 'shrink-0 text-right')}>short</span>
       {lead && <span className={cn(COL.lead, 'shrink-0')}>{lead}</span>}
+      {/* The order behind the date, on the one tab where an order exists. */}
+      {group === 'on_order' && <span className={cn(COL.po, 'shrink-0')}>PO</span>}
       <span className={cn(COL.supplier, 'shrink-0 truncate')}>Supplier</span>
     </div>
   );
@@ -279,9 +288,19 @@ function ReorderRowLine({ row, group }: { row: ReorderRow; group: ReorderGroup }
           it takes to arrive is a question that has been answered. */}
       {leadHeading(group) && (
         <span className={cn(COL.lead, 'shrink-0 truncate text-[11px]')}>
-          {/* Only the to-order tab needs the "already arrived" hint, since only
-              there is someone deciding a quantity to buy. */}
-          <LeadTime row={row} arrived={group === 'order' ? arrived : 0} />
+          {group === 'on_order' ? (
+            <ExpectedArrival row={row} />
+          ) : (
+            /* Only the to-order tab needs the "already arrived" hint, since
+               only there is someone deciding a quantity to buy. */
+            <LeadTime row={row} arrived={arrived} />
+          )}
+        </span>
+      )}
+
+      {group === 'on_order' && (
+        <span className={cn(COL.po, 'shrink-0 truncate text-[11px]')}>
+          <NextOrderLink row={row} />
         </span>
       )}
 
@@ -295,6 +314,86 @@ function ReorderRowLine({ row, group }: { row: ReorderRow; group: ReorderGroup }
         )}
       </span>
     </div>
+  );
+}
+
+/**
+ * The purchase order this row is waiting on, linking to where it is received.
+ *
+ * `/receiving/{id}` opens that order's own panel, which already carries the
+ * Receive action and its signature — so the shortest path from "this is late"
+ * to "book the delivery" is one click, and this screen stays read-only.
+ *
+ * When more than one order is open the link is the soonest, matching the date
+ * beside it; the count says there are others rather than pretending this is the
+ * whole picture.
+ */
+function NextOrderLink({ row }: { row: ReorderRow }) {
+  if (!row.next_order_id || !row.next_po_reference) {
+    return <span className="text-text-3">—</span>;
+  }
+  const more = row.open_order_count - 1;
+  return (
+    <span className="flex min-w-0 items-baseline gap-1">
+      <Link
+        href={`/receiving/${row.next_order_id}`}
+        title={
+          more > 0
+            ? `Open ${row.next_po_reference} to receive against it — ${more} other open order${more === 1 ? '' : 's'} for this item`
+            : `Open ${row.next_po_reference} to receive against it`
+        }
+        className="truncate font-mono text-accent underline-offset-2 hover:underline"
+      >
+        {row.next_po_reference}
+      </Link>
+      {more > 0 && <span className="shrink-0 text-text-3">+{more}</span>}
+    </span>
+  );
+}
+
+/**
+ * When the earliest open order should land.
+ *
+ * A date rather than a duration, because the question changes once an order
+ * exists. "30d" answers "how long will this take" — useful when deciding to
+ * buy, useless afterwards, since knowing whether the order is late means
+ * mentally adding thirty days to a date the row does not show. "23 Sep" answers
+ * it at a glance, and **an overdue order becomes visible**, which is the case
+ * the client's "a late order must not go quiet" rule was actually about.
+ *
+ * The lead time it was derived from moves to the tooltip — still there when
+ * someone wants to check the arithmetic, out of the way when they do not.
+ *
+ * Unknown stays unknown: no date is shown when the supplier on the open line
+ * has no lead time recorded, rather than implying it lands today.
+ */
+function ExpectedArrival({ row }: { row: ReorderRow }) {
+  if (!row.expected_arrival) {
+    return (
+      <span className="flex items-center gap-1 text-text-3" title="The supplier on this order has no lead time recorded, so there is no date to project.">
+        <Clock size={11} /> unknown
+      </span>
+    );
+  }
+  const days = daysFromNow(row.expected_arrival);
+  const overdue = days !== null && days < 0;
+  const lead =
+    row.lead_time_days === null ? 'lead time not recorded' : `${row.lead_time_days}-day lead time`;
+  return (
+    <span
+      className={cn('flex min-w-0 items-center gap-1', overdue ? 'text-danger' : 'text-text-3')}
+      title={
+        overdue
+          ? `Expected ${formatDate(row.expected_arrival)} — ${Math.abs(days)} days late. Based on the order date and a ${lead}.`
+          : `Based on the order date and a ${lead}.`
+      }
+    >
+      <Clock size={11} className="shrink-0" />
+      <span className="truncate">
+        {formatDate(row.expected_arrival)}
+        {overdue && <span className="ml-1 font-medium">overdue</span>}
+      </span>
+    </span>
   );
 }
 

@@ -23,6 +23,8 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import DBSession
+from app.inventory import repository as inv_repo
+from app.inventory.repository import NextOpenOrder
 from app.inventory.schemas import ItemSupplierRead
 from app.planning import repository as plan_repo
 from app.security.permissions import RequirePermission
@@ -73,8 +75,11 @@ async def list_reorder(
         for g in ("order", "on_order", "awaiting")
     }
     unplanned = await plan_repo.count_items_without_threshold(db)
+    # One bulk lookup for the page, so the purchase order on a row and the
+    # arrival date beside it always describe the same order.
+    next_orders = await inv_repo.next_open_orders(db, [item.id for item, *_ in rows])
 
-    items = [_to_row(item, lead, arrived, ordered) for item, lead, arrived, ordered in rows]
+    items = [_to_row(*r, next_orders.get(r[0].id)) for r in rows]
     return ReorderListResponse(
         items=items,
         total=totals[group],
@@ -95,10 +100,14 @@ async def list_reorder(
 
 
 def _to_row(
-    item, lead: int | None, awaiting_units: int, on_order_units: int
+    item,
+    lead: int | None,
+    awaiting_units: int,
+    on_order_units: int,
+    next_order: NextOpenOrder | None,
 ) -> ReorderRow:
-    """Serialise one at-or-below item. Shared by both groups so a row means the
-    same thing wherever it is shown."""
+    """Serialise one at-or-below item. Shared by all three groups so a row means
+    the same thing wherever it is shown."""
     return ReorderRow(
         item_id=str(item.id),
         item_number=item.item_number,
@@ -128,4 +137,8 @@ def _to_row(
         lead_time_supplier_name=plan_repo.longest_lead_supplier_name(item, lead),
         qty_awaiting_release=Decimal(awaiting_units),
         qty_on_order=Decimal(on_order_units),
+        expected_arrival=next_order.expected_arrival if next_order else None,
+        next_order_id=str(next_order.order_id) if next_order else None,
+        next_po_reference=next_order.po_reference if next_order else None,
+        open_order_count=next_order.open_order_count if next_order else 0,
     )

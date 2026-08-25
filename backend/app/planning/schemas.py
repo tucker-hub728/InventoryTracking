@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Literal
 
@@ -61,6 +62,24 @@ class ReorderRow(BaseModel):
     #: decides the group when it covers the shortfall, and informs the order
     #: quantity when it only covers part.
     qty_on_order: Decimal = Decimal("0")
+    #: When the earliest open order should land — its order date plus that
+    #: line's own supplier's lead time. A date is what a planner actually wants
+    #: on an order already placed ("is it late?"); a duration only answers that
+    #: after mental arithmetic.
+    #:
+    #: ``None`` when nothing is outstanding, or when the supplier on the open
+    #: line has no lead time recorded. Render that as unknown — never as
+    #: "arriving today".
+    expected_arrival: date | None = None
+    #: The purchase order that date belongs to, so the row can link straight to
+    #: the screen where it is received. Both come from one query: shown apart,
+    #: a row with two open orders could pair one order's reference with the
+    #: other's date.
+    next_order_id: str | None = None
+    next_po_reference: str | None = None
+    #: Total open orders for this item. Above 1, the date and reference are the
+    #: soonest of several rather than the only one.
+    open_order_count: int = 0
 
 
 class ReorderListResponse(BaseModel):

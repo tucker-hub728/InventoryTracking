@@ -174,6 +174,11 @@ async def list_reorder_rows(
     """Return ``(item, longest_supplier_lead_days, units_awaiting_release,
     units_on_order)`` for one group, most urgent first.
 
+    The next open order (and the date it is expected) is NOT here — it is a
+    separate bulk lookup in the route, so the purchase order shown on a row and
+    the arrival date shown beside it always come from the same query and cannot
+    describe two different orders.
+
     Every group is paged, because any of them can be long — a bulk delivery day
     fills the third, and a big purchasing round fills the second.
 

@@ -22,21 +22,59 @@ const DATE_FMT = new Intl.DateTimeFormat('en-US', {
   day: 'numeric',
 });
 
+/** Matches a bare calendar date, "2026-09-23", with no time part. */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Parse an ISO string, treating a bare calendar date as LOCAL midnight.
+ *
+ * ``new Date("2026-09-23")`` is defined to parse as UTC midnight, so west of
+ * Greenwich it formats as the 22nd — a date-only value silently rendering as
+ * the day before. Every Postgres ``DATE`` column arrives in exactly this shape
+ * (expiry dates, an order's valid-from, a projected arrival), so the fix
+ * belongs here rather than at each call site.
+ *
+ * Strings that carry a time are left alone: those are real instants and their
+ * timezone conversion is correct.
+ */
+function parseIso(iso: string): Date {
+  if (DATE_ONLY.test(iso)) {
+    // Indexed rather than destructured: the regex guarantees three parts, but
+    // `noUncheckedIndexedAccess` cannot know that, and Number() on a substring
+    // keeps the intent obvious without a non-null assertion.
+    return new Date(
+      Number(iso.slice(0, 4)),
+      Number(iso.slice(5, 7)) - 1,
+      Number(iso.slice(8, 10)),
+    );
+  }
+  return new Date(iso);
+}
+
 /** Format an ISO date as "May 25, 2026". Returns input unchanged if unparseable. */
 export function formatDate(iso: string | null | undefined): string {
   if (!iso || iso === '—') return '—';
-  const d = new Date(iso);
+  const d = parseIso(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return DATE_FMT.format(d);
 }
 
-/** Days from today to the given ISO date. Negative = past. */
+/**
+ * Whole days from today to the given ISO date. Negative = past.
+ *
+ * Both sides are flattened to local midnight before subtracting, so the answer
+ * counts calendar days rather than 24-hour blocks. Without that, "due today"
+ * reads as −1 for most of the working day and an item tips to "overdue" at an
+ * arbitrary hour rather than at midnight.
+ */
 export function daysFromNow(iso: string | null | undefined): number | null {
   if (!iso || iso === '—') return null;
-  const d = new Date(iso);
+  const d = parseIso(iso);
   if (Number.isNaN(d.getTime())) return null;
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const now = new Date();
-  return Math.round((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 /** Format a number with thousands separators. */

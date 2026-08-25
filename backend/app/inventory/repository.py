@@ -10,9 +10,9 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, NamedTuple
 
-from sqlalchemy import Select, asc, desc, func, or_, select
+from sqlalchemy import Date, Select, asc, cast, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1543,6 +1543,113 @@ def on_order_units_subquery():
         .correlate(Item)
         .scalar_subquery()
     )
+
+
+class NextOpenOrder(NamedTuple):
+    """The open purchase order an item is next expecting stock from."""
+
+    order_id: uuid.UUID
+    po_reference: str
+    #: ``order date + that line's supplier's lead time``. None when that
+    #: supplier has no lead time recorded — the order is still real and still
+    #: linked, there is just no date to project.
+    expected_arrival: date | None
+    #: How many open orders the item has in total, so a row can say the date
+    #: it shows is the first of several rather than the only one.
+    open_order_count: int
+
+
+async def next_open_orders(
+    session: AsyncSession, item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, NextOpenOrder]:
+    """``{item_id: NextOpenOrder}`` — the soonest-landing open order per item.
+
+    One bulk query rather than a correlated subquery per fact, because the date
+    and the purchase order it came from must agree. Sourcing them separately
+    invites the row to show one order's reference beside another order's date
+    the moment two are open.
+
+    "Soonest" is by projected arrival, with undated orders last: an order whose
+    supplier has no lead time cannot be compared, so it only wins when nothing
+    else is open. Ties break on order date, oldest first — the one that has been
+    waiting longest is the one to chase.
+
+    The projection uses the line's OWN supplier rather than the item-level worst
+    case ``_lead_time_subquery`` uses. Those answer different questions: a
+    planner deciding whether to buy needs the slowest supplier they might end up
+    using; an order already placed has one actual supplier and one actual date,
+    so there is nothing to guess.
+
+    **The order date is ``created_at``** — there is no separate "ordered on"
+    column; the row is created when the order is raised. For a blanket order
+    ``valid_from`` is the better anchor (the delivery window can open long after
+    the paperwork), so it wins when set.
+    """
+    if not item_ids:
+        return {}
+    received = (
+        select(
+            ReceiptEventLine.receipt_transaction_line_id.label("line_id"),
+            func.coalesce(func.sum(ReceiptEventLine.qty_received), 0).label("recd"),
+        )
+        .group_by(ReceiptEventLine.receipt_transaction_line_id)
+        .subquery()
+    )
+    outstanding = ReceiptTransactionLine.ordered_qty - func.coalesce(received.c.recd, 0)
+    anchor = func.coalesce(
+        ReceiptTransaction.valid_from,
+        cast(ReceiptTransaction.created_at, Date),
+    )
+    expected = (anchor + Supplier.lead_time_days).label("expected")
+    stmt = (
+        select(
+            ReceiptTransactionLine.item_id,
+            ReceiptTransaction.id,
+            ReceiptTransaction.po_reference,
+            expected,
+            ReceiptTransaction.created_at,
+        )
+        .select_from(ReceiptTransactionLine)
+        .join(
+            ReceiptTransaction,
+            ReceiptTransaction.id == ReceiptTransactionLine.receipt_transaction_id,
+        )
+        .join(Supplier, Supplier.id == ReceiptTransactionLine.supplier_id)
+        .outerjoin(received, received.c.line_id == ReceiptTransactionLine.id)
+        .where(
+            ReceiptTransactionLine.item_id.in_(item_ids),
+            ReceiptTransaction.deleted_at.is_(None),
+            ReceiptTransaction.status != "cancelled",
+            outstanding > 0,
+        )
+    )
+    out: dict[uuid.UUID, NextOpenOrder] = {}
+    seen_orders: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for item_id, order_id, po_ref, eta, _created in (await session.execute(stmt)).all():
+        seen_orders.setdefault(item_id, set()).add(order_id)
+        best = out.get(item_id)
+        # Rows arrive unordered; keep the soonest, undated last. Done in Python
+        # rather than DISTINCT ON so the per-item order count comes from the
+        # same pass instead of a second query that could disagree.
+        if best is None or _sooner(eta, best.expected_arrival):
+            out[item_id] = NextOpenOrder(order_id, po_ref, eta, 0)
+    return {
+        item_id: row._replace(open_order_count=len(seen_orders[item_id]))
+        for item_id, row in out.items()
+    }
+
+
+def _sooner(candidate: date | None, current: date | None) -> bool:
+    """Is ``candidate`` a better "next arrival" than ``current``?
+
+    A dated order always beats an undated one — an unknown arrival is not
+    evidence of an early one.
+    """
+    if candidate is None:
+        return False
+    if current is None:
+        return True
+    return candidate < current
 
 
 async def lots_awaiting_put_away(
