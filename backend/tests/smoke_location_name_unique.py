@@ -8,7 +8,7 @@ create two identically named shelves, and dev had three such pairs.
 Enforced in the application on BOTH create and rename; migration ``locname01``
 adds the matching partial unique index for non-root nodes.
 
-    SMOKE_EMAIL=admin.user@cellready.dev SMOKE_PASSWORD='DevAdmin_123!' \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_location_name_unique.py
 
 Verifies:
@@ -28,9 +28,10 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin.user@cellready.dev")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "DevAdmin_123!")
+EMAIL, PASSWORD = require_credentials()
 
 STATS = {"passed": 0}
 FAILED: list[str] = []
@@ -194,7 +195,7 @@ def main() -> int:
     # Creating a Cold Storage unit is Super-Admin-only (LOC-006), and that check
     # runs before the name check — so with an ordinary admin this case gets a
     # 403 and proves nothing. Supply a super admin to exercise it:
-    #   SMOKE_SA_EMAIL=… SMOKE_SA_PASSWORD=… python …
+    #   SMOKE_SA_EMAIL=super@example SMOKE_SA_PASSWORD='…' python …
     sa_email = os.environ.get("SMOKE_SA_EMAIL")
     sa_password = os.environ.get("SMOKE_SA_PASSWORD")
     sa_token = None

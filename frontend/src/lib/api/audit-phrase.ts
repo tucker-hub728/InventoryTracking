@@ -72,6 +72,8 @@ const MOVEMENT_VERB: Partial<Record<MovementType, string>> = {
   kit_cancel_return: 'returned from a cancelled kit',
   customer_shipment: 'shipped',
   consumable_issue: 'issued',
+  // `Partial`, so these two would have fallen back to "updated" rather than
+  // failing to compile — the one map in this set the union does not police.
   material_issue: 'issued out',
 };
 

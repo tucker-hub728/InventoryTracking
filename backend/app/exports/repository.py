@@ -19,7 +19,7 @@ from sqlalchemy import Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.inventory import repository as inv_repo
-from app.kitting.repository import PRODUCTION_CATEGORY
+from app.kitting.repository import not_floor_stock
 from app.models.inventory import (
     Item,
     Lot,
@@ -115,7 +115,16 @@ async def allocation_rows_by_item(
             Lot.item_id.in_(item_ids),
             LotAllocation.is_active.is_(True),
             LotAllocation.qty > 0,
-            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
+            # Kanban stock is excluded along with production WIP — see
+            # ``not_floor_stock``. **This is a deliberate hold, not an
+            # oversight.** KAN-001 gave a Kanban a real balance, so there is a
+            # defensible argument that finance should now see those units as
+            # on-hand value; before kan01 they had already been expensed at
+            # issue and this export never counted them. Changing that silently
+            # would move a finance number without anyone asking for it, so the
+            # export keeps behaving exactly as it did and the question goes to
+            # the client as a decision of its own.
+            not_floor_stock(),
         )
         .group_by(*grouped)
         # FIFO within an item, same ordering the pickers use, so a reader

@@ -52,9 +52,10 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin.user@cellready.dev")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "DevAdmin_123!")
+EMAIL, PASSWORD = require_credentials()
 
 COLD_CHAIN_CODE = "return_breaks_cold_chain"
 LN2_ENTRY_CODE = "return_blocked_ln2_entry"

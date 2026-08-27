@@ -183,3 +183,101 @@ class ExpiryPolicyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     warn_days: int = Field(ge=0, le=3650)
+
+
+# ── Kanban balance + restock (KAN-001) ──────────────────────────────────
+
+RequestState = Literal["open", "fulfilled", "cancelled"]
+
+
+class RestockRequestCreate(BaseModel):
+    """"We are low on this in this bin." (KAN-001's "on a restock request".)
+
+    Not e-signed: asking for more moves no stock and states nothing about
+    material. The two acts that DO — acknowledging what was consumed, and
+    issuing the replenishment — are both signed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kanban_node_id: str
+    item_id: str
+    #: Optional — "we're low" is a legitimate request. See the column comment in
+    #: ``app/models/consumables.py``.
+    requested_qty: int | None = Field(default=None, gt=0, le=MAX_QTY)
+    note: str | None = Field(default=None, max_length=2048)
+
+
+class RestockRequestRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kanban_node_id: str
+    kanban_path: str
+    item_id: str
+    item_number: str
+    description: str | None = None
+    requested_qty: int | None
+    note: str | None
+    state: RequestState
+    requested_at: datetime
+    requested_by: str | None = None
+    closed_at: datetime | None = None
+    closed_by: str | None = None
+    #: What the operator confirmed was used, recorded when the request was
+    #: fulfilled. Null while open or cancelled. Stored on the row: no stock
+    #: moves at acknowledgment, so no ledger row carries this figure.
+    consumed_qty: int | None = None
+    #: How much has been issued INTO this Kanban since the request was raised —
+    #: "has my restock arrived yet". Not a bin balance: a Kanban holds none.
+    issued_since_qty: int = 0
+
+
+class RestockRequestListResponse(BaseModel):
+    """A page of requests. Same envelope as every other paged list here, so the
+    shared paginator drives it unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[RestockRequestRead]
+    #: Rows matching the FILTERS, not rows on this page.
+    total: int
+    limit: int = 50
+    offset: int = 0
+
+
+class AcknowledgeConsumptionRequest(BaseModel):
+    """Close a restock request (KAN-001), e-signed.
+
+    **The signature IS the acknowledgment.** No quantity is asked for, and
+    that is a decision worth recording rather than an omission.
+
+    It was collected at first, reading KAN-001's "marks the depleted quantity
+    consumed" as wanting a figure. Two things undid that. The stock was already
+    debited at issue (07-09 ``TRX-001``), so no balance, report or
+    reconciliation anywhere consumes the number — it is written and never read.
+    And a request may legitimately carry no quantity at all ("we're low"), so
+    the attestation above the signature came out as "I confirm that 0 of CR-001
+    was used", which is a false sentence over a Part 11 signature. A signature
+    is worth exactly what the sentence above it says.
+
+    So what is signed is what actually happened: this request has been actioned
+    and is closed, by a named person, at a known time.
+
+    ``qty`` remains OPTIONAL on the wire rather than being deleted — an
+    integration with a real consumption figure (a floor scale, a scanner) has
+    somewhere to put it, and ``consumed_qty`` is nullable precisely so its
+    absence is a legible state rather than a zero nobody meant.
+
+    E-signed under its own verb ``consumable.consumption`` — deliberately not
+    the issue verb and not the expiry-check verb. A signature minted to issue
+    stock to a bin must not be spendable on closing out the request for it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    qty: int | None = Field(default=None, ge=0, le=MAX_QTY)
+    note: str | None = Field(default=None, max_length=2048)
+    evidence_id: str
+
+

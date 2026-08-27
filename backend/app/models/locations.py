@@ -194,11 +194,16 @@ WAREHOUSE_LEVELS: tuple[str, ...] = ("warehouse", "shelf")
 # one clean room can hold "Kanban 1" and "Kanban 2" as separate places. Its
 # parent is the ``flat``/``production`` area — see PARENT_OF below.
 #
-# Not a storage node: under the client's consume-at-issue model (Option A) a
-# Kanban holds no lot allocations. It is the ADDRESS a ``consumable_issue``
-# movement and its ``app.consumable_issues`` register row point at, not a
-# balance. Adding it to STORAGE_NODE_TYPES is the whole of the Option B switch
-# if the client ever wants live Kanban on-hand.
+# **NOT a storage node**, and adding it to ``STORAGE_NODE_TYPES`` is the whole
+# of the switch if anyone is ever tempted. A Kanban holds no ``lot_allocations``:
+# issuing to one DEBITS the units out of inventory there and then, and the
+# Kanban is the ADDRESS the ``consumable_issue`` movement points at, not a
+# balance.
+#
+# KAN-001's restock loop does not change that — it records what was used
+# rather than drawing a balance down. The version that DID give the bin a live
+# count was built and rejected (client, 2026-08-27); the kan01 migration
+# docstring records why, and it is worth reading before proposing it again.
 #
 # NB the ``kanban`` entry in FLAT_CATEGORIES below is a DIFFERENT, legacy thing
 # and must stay unused — a ``flat`` node is forced to be a root by
@@ -271,7 +276,18 @@ MAX_QUADRANTS_PER_TANK = 4
 
 # Node types that can hold a lot allocation. The Box is the LN2 grid leaf;
 # freezer sub-locations and warehouse shelves are free (qty) storage leaves.
+# A Kanban is deliberately absent — see the note above KANBAN_LEVELS.
 STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
+
+# Named because two places still have to reason about Kanbans specifically: the
+# issue destination check, and ``kit_repo.not_floor_stock``.
+#
+# That second one matters even though a Kanban can no longer hold an
+# allocation. kan01 briefly allowed it, so a database that ran that migration
+# can still carry allocation rows at a Kanban node, and an unfiltered picker
+# would offer those units as issuable stock. The filter is what keeps a
+# reverted schema from resurrecting stock that is physically on the floor.
+KANBAN_NODE_TYPE = "kanban"
 
 # The only node type that may carry ``is_scrap`` (issue01) — a LOCATION, the
 # level the client names "PD" or "QC 1".

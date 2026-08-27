@@ -142,27 +142,72 @@ The signature's optional comment IS `clear_note`, the same trade the issue
 dialog makes — one place to explain yourself, not two free-text boxes back to
 back. Evidence is consumed last, so a replay rolls the clearing back with it.
 
-## 5. Open requirement conflict — read before changing behaviour
+## 5. The LOC-006 conflict, and how KAN-001 settled it
+
+**Resolved 2026-08-27 in favour of Option B (`kan01`). This section used to
+describe the opposite behaviour; the history is kept because the reversal is the
+kind a future reader will otherwise assume was a mistake.**
 
 `REQ-2026-07-01-LOC-006` says Kanban stock "shall remain visible in inventory
 (not immediately consumed)" and be "written off only when a restock card is
 returned". `REQ-2026-07-09-TRX-001/004` say issue is terminal and consumables
-are never quantity-adjusted afterwards. **These contradict each other**, and
-LOC-006 was never listed in any amendment's §2 modification table, so by the
-documents' own change-control rule (`PRC-001`) it is still a live Must.
+are never quantity-adjusted afterwards. These contradict each other, and LOC-006
+was never listed in any amendment's §2 modification table, so by the documents'
+own change-control rule (`PRC-001`) it never stopped being a live Must.
 
-The client chose the July 9 behaviour on 2026-08-10 (**Option A**). This belongs
-on the beta cover page as a deviation, not buried here.
+The client chose the July 9 behaviour on 2026-08-10 (**Option A**, consume at
+issue). `KAN-001` (SRS Consolidated Amendment 9+10, 2026-08-13) reverses that:
 
-**Option B**, if the client later wants live Kanban on-hand, is a contained
-change and the code is shaped for it:
+> Kanban locations shall hold area consumables in production/lab areas; on a
+> restock request, the operator acknowledges consumption (marks the depleted
+> quantity consumed) and reissues replenishment, keeping inventory accurate
+> without per-unit tracking inside the Kanban.
 
-1. add `kanban` to `STORAGE_NODE_TYPES`;
-2. write a unit-IN allocation at the Kanban alongside the existing movement;
-3. wire a count → variance → adjustment path.
+"Without per-unit tracking" is read as *no tracking of each individual unit
+inside the bin*, not *no quantity at all* — the same sentence asks for a
+depleted quantity to be marked consumed, which presupposes a count. The bin
+holds one merged bulk allocation per lot, with no cells and no positions, which
+is what that qualifier buys.
 
-The issue transaction, the register and the expiration engine are unchanged
-either way. That is why Kanbans are real nodes rather than a UI grouping.
+### What that changed
+
+1. `kanban` joined `STORAGE_NODE_TYPES`, so a bin holds real `lot_allocations`;
+2. the issue became **net-zero** — `consumable_issue` keeps its negative row and
+   gains a paired `consumable_stock_in`, so the units *move* instead of being
+   spent;
+3. `consumable_consumption` is the new terminal event, and **the row that
+   carries the acknowledged quantity**. `app.consumable_issues` still has no
+   quantity column and still does not need one;
+4. `app.kanban_restock_requests` records the ask that KAN-001 names.
+
+### Two traps this created, both now guarded
+
+**Availability vs on-hand.** `app.v_item_stock` derived both numbers from
+`SUM(qty_delta)`. Making the issue net-zero would therefore have moved the
+reorder trigger from the issue to the acknowledgment — exactly the timing
+`PLN-002` forbids. The view now subtracts Kanban allocations from
+`qty_available` only: on-hand keeps counting the bin (LOC-006's "remain
+visible"), availability falls at issue (PLN-002). Guarded by
+`tests/test_planning_issue_trigger.py`.
+
+**The NULL `flat_category`.** Every picker excluded floor stock with
+`flat_category != 'production'`, and a *Kanban's own* category is NULL — the
+category is on its parent area. Harmless while a bin held nothing; a
+double-spend the moment it holds a balance. All four such queries now share
+`kit_repo.not_floor_stock`. Guarded by `tests/test_kanban_restock.py`.
+
+### Still open
+
+* **The client's 2026-08-10 decision #3 is reversed by this.** That belongs on
+  the beta cover page as a deviation — the declared deviation flips from "built
+  Option A against LOC-006" to "built Option B against 07-09 TRX-001".
+* **The Aug-13 amendment is not in this repo** (`temp/` stops at 2026-08-04), so
+  its §2 modification table cannot be checked. Under `PRC-001` that table is the
+  only official supersession channel; recency alone does not supersede. Obtain
+  it and confirm `TRX-001` is named there.
+* **The finance export still excludes Kanban stock** — deliberately held so no
+  finance number moves without being asked for. See the comment on the predicate
+  in `exports/repository.py`; it is a client decision of its own.
 
 ## 6. What is deliberately absent
 
@@ -196,11 +241,27 @@ both the issue dialog's destination picker and the floor's Kanban tab.
 
 | Surface | File | Notes |
 |---|---|---|
-| Issue to Kanban | `components/inventory/issue-to-kanban-dialog.tsx` | On the CR drill-down, next to Transfer. Only for `is_consumable`; reuses `LotSourcePicker` for multi-lot |
+| Issue to Kanban | `components/inventory/issue-to-location-dialog.tsx` | **A destination kind inside the one Issue dialog since 2026-08-27** — not its own button. Offered only for `is_consumable`; reuses `LotSourcePicker` for multi-lot. The old `issue-to-kanban-dialog.tsx` was merged in and deleted |
 | Kanban tab | `components/production/kanban-panel.tsx` | Fourth tab on a production floor, grouped apart from the three kit-state tabs |
-| Add kanban | same file | Super-admin only, mirrors the "Add area" button |
-| Acknowledge | `components/consumables/acknowledge-dialog.tsx`, used by both | Restates where/when issued (TRX-006), then `PasswordReauthDialog` |
+| Bin balance + restock | `components/production/kanban-restock-panel.tsx` | KAN-001: what the bin holds, request restock, acknowledge consumption |
+| Add kanban | `kanban-panel.tsx` | Super-admin only, mirrors the "Add area" button |
+| Acknowledge (expiry) | `components/consumables/acknowledge-dialog.tsx`, used by both | Restates where/when issued (TRX-006), then `PasswordReauthDialog` |
 | Expiring feed | `app/(app)/consumables/page.tsx` | Cross-area alert list + the warning-period setting |
+
+**One Issue button (client 2026-08-27).** A consumable used to carry a second
+primary "Issue to Kanban" button beside "Issue". Both meant *issue*, so the
+operator had to classify the transaction from two labels before opening
+anything. Kanban is now the first destination card inside the Issue dialog,
+where each option's consequence is written next to it — and where the one that
+does **not** end the material's life can say so.
+
+**No Quality status control on a raw material (client 2026-08-27).** Release is
+not a decision on a purchased CR item: REQ-004 splits receiving into arrival
+(quarantine, unplaced) and receive-to-inventory, and that second step places and
+releases under one signature. Placement is the real gate — every picker reads
+`lot_allocations`, so unplaced stock is already invisible. The header control is
+gated on `isBuiltTier` and appears only on AY / FG, which are produced here and
+so genuinely need somebody to say they passed.
 
 Two UI notes worth keeping:
 

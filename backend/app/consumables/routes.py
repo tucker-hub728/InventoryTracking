@@ -10,14 +10,28 @@ about, so they are stated once:
   for consumables". The units leave inventory at issue; nothing later returns
   them. There is deliberately no de-issue endpoint.
 * **Never back-flushed.** 07-09 TRX-004 — "consumables are never
-  quantity-adjusted after issue". This resolves the older §4.3 wording, which
-  reads as if a reconciliation function should adjust Kanban quantities. The
-  client chose the July 9 behaviour on 2026-08-10; REQ-2026-07-01-LOC-006
-  ("written off only when a restock card is returned") is the requirement this
-  contradicts and is flagged on the beta cover page rather than quietly dropped.
+  quantity-adjusted after issue".
 * **Expiration outlives the quantity.** §4.3 — "once issued to a location, the
   quantity is considered consumed, but the expiration date must continue to be
   tracked". That is what ``app.consumable_issues`` is for.
+
+**KAN-001's restock loop sits on top of those, without contradicting them**
+(client 2026-08-27):
+
+    request restock  →  acknowledge the request  →  issue the replenishment
+
+Only the third step touches stock, and it is an ordinary e-signed issue. The
+first two are RECORDS: an intent, and a statement about material already
+expensed. That is what lets "on a restock request, the operator acknowledges
+consumption (marks the depleted quantity consumed) and reissues replenishment"
+be satisfied while an issue stays a single unit-out row.
+
+``kan01`` briefly read it the other way — the Kanban held a live balance, the
+issue became a net-zero pair, and the acknowledgment wrote the units off. The
+client reversed it the same day: on the item's Unit Ledger a plain issue read as
+"50 out, then 50 in", which is a confusing way to describe handing gloves to a
+clean room. The rejected design is documented in the kan01 migration; the loop
+above is what the requirement actually asked for.
 """
 
 from __future__ import annotations
@@ -41,6 +55,7 @@ from app.models.locations import is_kanban_node
 from app.security.permissions import RequirePermission
 
 from .schemas import (
+    AcknowledgeConsumptionRequest,
     AcknowledgeRequest,
     ConsumableIssueRead,
     ConsumableIssueRequest,
@@ -50,6 +65,10 @@ from .schemas import (
     IssuedConsumableListResponse,
     IssuedConsumableRead,
     IssueResultLine,
+    RequestState,
+    RestockRequestCreate,
+    RestockRequestListResponse,
+    RestockRequestRead,
 )
 
 consumables_router = APIRouter(prefix="/consumables", tags=["consumables"])
@@ -62,6 +81,12 @@ ISSUE_ACTION = "movement.consumable_issue"
 #: signature minted to move stock into a Kanban must not be spendable on the
 #: statement that the same stock was later discarded.
 ACK_ACTION = "consumable.expiry_check"
+
+#: The verb for acknowledging a depletion (KAN-001). A THIRD verb, for the same
+#: reason there is a second: this signature authorises writing stock off the
+#: books, and a ticket minted to move gloves into a bin — or to close an expiry
+#: check on them — must not be spendable on the claim that they were used up.
+CONSUMPTION_ACTION = "consumable.consumption"
 
 
 def _parse_uuid(value: str, *, field: str) -> uuid.UUID:
@@ -472,6 +497,11 @@ async def issue_to_kanban(
             reauth_evidence_id=evidence_uuid,
             notes=payload.notes,
         )
+        # NO allocation at the Kanban. The units are debited and gone; the bin
+        # is the ADDRESS on the movement, not a place that holds a balance.
+        # A balance here was built and rejected — see the kan01 migration
+        # docstring for why.
+        #
         # ONE FLAG PER SOURCE LOT — deliberate. TRX-003 drops per-lot
         # traceability for consumables, but §4.2 tracks the expiration of a
         # specific issued quantity, and two lots issued together can carry two
@@ -515,6 +545,264 @@ async def issue_to_kanban(
     )
     await db.commit()
     return response
+
+
+# ── Kanban balance + restock (KAN-001) ──────────────────────────────────
+#
+# Declared ABOVE ``/{issue_id}/…`` — see the ordering note near the top. These
+# are literal paths and FastAPI matches in declaration order.
+
+
+async def _request_read(db: DBSession, req) -> RestockRequestRead:
+    _, path = await loc_repo.node_paths(
+        db, from_node_id=req.kanban_node_id, to_node_id=req.kanban_node_id
+    )
+    # No ``on_hand_qty``: a Kanban carries no balance to report. What the floor
+    # can usefully be told instead is how much has been ISSUED into this bin
+    # since the request was raised — the replenishment against the ask.
+    issued = await cons_repo.issued_qty_since(
+        db,
+        kanban_node_id=req.kanban_node_id,
+        item_id=req.item_id,
+        since=req.requested_at,
+    )
+    return RestockRequestRead(
+        id=str(req.id),
+        kanban_node_id=str(req.kanban_node_id),
+        kanban_path=path or (req.kanban.name if req.kanban else ""),
+        item_id=str(req.item_id),
+        item_number=req.item.item_number if req.item else "",
+        description=req.item.description if req.item else None,
+        requested_qty=req.requested_qty,
+        note=req.note,
+        state=req.state,  # type: ignore[arg-type]
+        requested_at=req.requested_at,
+        requested_by=req.requested_by.full_name if req.requested_by else None,
+        closed_at=req.closed_at,
+        closed_by=req.closed_by.full_name if req.closed_by else None,
+        consumed_qty=req.consumed_qty,
+        issued_since_qty=issued,
+    )
+
+
+@consumables_router.post(
+    "/restock-requests",
+    response_model=RestockRequestRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Raise a restock request for a Kanban (KAN-001)",
+    dependencies=[Depends(RequirePermission("inventory", "edit"))],
+)
+async def create_restock_request(
+    db: DBSession, current: CurrentDbUserDep, payload: RestockRequestCreate
+) -> RestockRequestRead:
+    """"We are low on this." Not e-signed — see :class:`RestockRequestCreate`.
+
+    A duplicate is refused rather than queued: the partial unique index allows
+    one open request per (bin, item), and asking twice is the same ask.
+    """
+    kanban = await _require_kanban_node(db, payload.kanban_node_id)
+    item_uuid = _parse_uuid(payload.item_id, field="item_id")
+    item = await _require_consumable_item(db, item_uuid)
+
+    existing = await cons_repo.open_request_for(
+        db, kanban_node_id=kanban.id, item_id=item_uuid
+    )
+    if existing is not None:
+        raise ValidationError(
+            "There is already an open restock request for this item in this Kanban.",
+            code="restock_request_open",
+            details={"existing_id": str(existing.id)},
+        )
+
+    req = await cons_repo.create_restock_request(
+        db,
+        kanban_node_id=kanban.id,
+        item_id=item_uuid,
+        requested_qty=payload.requested_qty,
+        note=payload.note,
+        requested_by_user_id=current.id,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="app.kanban_restock_requests",
+        subject_id=req.id,
+        subject_label=f"Restock {kanban.name}",
+        # Explicitly None, not omitted: the parameter is keyword-only and
+        # REQUIRED, so leaving it out is a TypeError at call time rather than a
+        # type error at import. A creation has no prior state to record.
+        before=None,
+        after={
+            "item": item.item_number,
+            "requested_qty": payload.requested_qty,
+            "note": payload.note,
+        },
+    )
+    await db.refresh(req, ["kanban", "item", "requested_by"])
+    read = await _request_read(db, req)
+    await db.commit()
+    return read
+
+
+@consumables_router.get(
+    "/restock-requests",
+    response_model=RestockRequestListResponse,
+    summary="Restock requests, newest first (KAN-001)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_restock_requests(
+    db: DBSession,
+    kanban_node_id: Annotated[str | None, Query()] = None,
+    # By ITEM, across every Kanban — the question the item page asks. A request
+    # is raised on the floor by whoever notices the bin is low, and answered in
+    # stores by whoever issues the replenishment; those are different people
+    # looking at different screens, so the ask has to be findable from both
+    # ends.
+    item_id: Annotated[str | None, Query()] = None,
+    state: Annotated[RequestState | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> RestockRequestListResponse:
+    node_uuid = _parse_uuid(kanban_node_id, field="kanban_node_id") if kanban_node_id else None
+    item_uuid = _parse_uuid(item_id, field="item_id") if item_id else None
+    rows = await cons_repo.list_restock_requests(
+        db,
+        kanban_node_id=node_uuid,
+        item_id=item_uuid,
+        state=state,
+        limit=limit,
+        offset=offset,
+    )
+    # The matching count, NOT ``len(rows)``. That is the page size, so a second
+    # page would report a total equal to what is already on screen and the
+    # paginator would never offer one.
+    total = await cons_repo.count_restock_requests(
+        db, kanban_node_id=node_uuid, item_id=item_uuid, state=state
+    )
+    return RestockRequestListResponse(
+        items=[await _request_read(db, r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@consumables_router.post(
+    "/restock-requests/{request_id}/cancel",
+    response_model=RestockRequestRead,
+    summary="Withdraw a restock request (KAN-001)",
+    dependencies=[Depends(RequirePermission("inventory", "edit"))],
+)
+async def cancel_restock_request(
+    db: DBSession, current: CurrentDbUserDep, request_id: Annotated[uuid.UUID, Path()]
+) -> RestockRequestRead:
+    """The bin was filled by hand, the line stopped, the item was swapped.
+
+    Not e-signed and it writes no ledger row: withdrawing an ask states nothing
+    about material. It closes with no ``consumption_movement_id``, which is why
+    that column is nullable.
+    """
+    req = await cons_repo.get_restock_request(db, request_id)
+    if req is None:
+        raise NotFoundError(f"Restock request {request_id} not found", code="request_not_found")
+    if req.state != "open":
+        raise ValidationError(
+            f"That request is already {req.state}.", code="request_not_open"
+        )
+    await cons_repo.close_restock_request(
+        db, request=req, state="cancelled", user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kanban_restock_requests",
+        subject_id=req.id,
+        subject_label="Restock request cancelled",
+        before={"state": "open"},
+        after={"state": "cancelled"},
+    )
+    await db.refresh(req, ["kanban", "item", "requested_by", "closed_by"])
+    read = await _request_read(db, req)
+    await db.commit()
+    return read
+
+
+@consumables_router.post(
+    "/restock-requests/{request_id}/acknowledge",
+    response_model=RestockRequestRead,
+    summary="Acknowledge and close a restock request (KAN-001, e-signed)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def acknowledge_consumption(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    request_id: Annotated[uuid.UUID, Path()],
+    payload: AcknowledgeConsumptionRequest,
+) -> RestockRequestRead:
+    """KAN-001's "acknowledges consumption" — the signed closure of a request.
+
+    **This moves no stock, and that is the point.** The units were debited when
+    they were issued to the Kanban (07-09 TRX-001) — there is no bin balance
+    left to draw down. What is being recorded is that somebody dealt with the
+    ask: a statement about material, not a transaction against it. No ledger
+    row is written.
+
+    **No quantity is required** (client 2026-08-27), and ``qty`` is optional.
+    The requirement's "marks the depleted quantity consumed" was first read as
+    wanting a figure; nothing anywhere consumes it — the stock left at issue, so
+    no balance, report or reconciliation reads ``consumed_qty`` — and a request
+    that carried no requested quantity produced an attestation reading "0 was
+    used", a false sentence over a Part 11 signature. What is signed now is what
+    is true: this request was actioned and is closed. See the request schema.
+
+    **Still e-signed**, for the reason the expiry check is: an attributable
+    statement about what became of material falls under Part 11 §11.200 whether
+    or not a quantity moves. Its own verb (``consumable.consumption``), bound to
+    the request row (VR-006) — several bins can have requests open at once, and
+    an unbound ticket would close whichever one the next call named.
+    """
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+    req = await cons_repo.get_restock_request(db, request_id)
+    if req is None:
+        raise NotFoundError(f"Restock request {request_id} not found", code="request_not_found")
+    if req.state != "open":
+        raise ValidationError(f"That request is already {req.state}.", code="request_not_open")
+
+    await cons_repo.close_restock_request(
+        db,
+        request=req,
+        state="fulfilled",
+        user_id=current.id,
+        consumed_qty=payload.qty,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.kanban_restock_requests",
+        subject_id=req.id,
+        subject_label=f"{req.item.item_number if req.item else ''} restock acknowledged",
+        before={"state": "open", "consumed_qty": None},
+        after={"state": "fulfilled", "consumed_qty": payload.qty, "note": payload.note},
+        signature_id=evidence_uuid,
+    )
+    # Consumed LAST, so a replayed signature rolls the closure back with it.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action=CONSUMPTION_ACTION,
+        target_table="app.kanban_restock_requests",
+        target_id=req.id,
+        record_table="app.kanban_restock_requests",
+        record_id=req.id,
+    )
+    await db.refresh(req, ["kanban", "item", "requested_by", "closed_by"])
+    read = await _request_read(db, req)
+    await db.commit()
+    return read
 
 
 @consumables_router.post(

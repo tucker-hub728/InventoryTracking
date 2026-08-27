@@ -306,24 +306,69 @@ class TestIssueMovesTheTrigger:
         assert item.id not in listed
 
 
-# ── There is nowhere later for the trigger to fire ─────────────────────
+# ── Nothing may soften the debit at issue ──────────────────────────────
 
 
-class TestNoConsumptionEvent:
-    """PLN-002's "not at final consumption" is guaranteed by absence: the
-    ledger has no consumption event, so nothing later *can* fire."""
+class TestTheIssueIsASingleDebit:
+    """PLN-002 holds because the issue IS the debit — one unit-out row, nothing
+    beside it.
 
-    def test_the_ledger_has_no_consumption_movement(self) -> None:
+    This class replaces an older guard that asserted the ledger contained no
+    consumption-shaped movement type at all. Absence is a weak thing to lean
+    on: it fails only when somebody adds a NAME to a tuple, and passes happily
+    while the behaviour rots underneath it.
+
+    The property is asserted directly instead — the issue writes one row, and
+    that row moves availability — which fails on the behaviour going wrong
+    whatever the ledger ends up being called.
+    """
+
+    async def test_issuing_to_a_kanban_writes_exactly_one_row(self, stocked_item) -> None:
+        """The regression this exists for, reported from the UI on 2026-08-27.
+
+        ``kan01`` paired the issue with a ``consumable_stock_in`` arrival so a
+        Kanban could carry a balance. On the item's Unit Ledger that read as
+        "50 out, then 50 in" for what the operator experienced as one action,
+        and — because the pair nets to zero — it stopped the debit moving
+        availability at all, which is exactly what PLN-002 forbids.
+        """
+        s, make_item, issuer = stocked_item
+        item = await make_item(is_consumable=True)
+        before = await _stock(s, item)
+
+        await _issue(s, item, issuer, "consumable_issue", qty=ISSUE_QTY)
+
+        rows = (
+            await s.execute(
+                select(StockMovement.movement_type).where(StockMovement.item_id == item.id)
+            )
+        ).scalars().all()
+        assert sorted(rows) == ["consumable_issue", "receipt"], (
+            "an issue to a Kanban must write ONE unit-out row — no paired "
+            "arrival, no balance at the far end"
+        )
+
+        after = await _stock(s, item)
+        assert after.qty_available == before.qty_available - ISSUE_QTY, (
+            "the issue is the debit (PLN-002); anything that nets it back out "
+            "moves the reorder trigger to a later event"
+        )
+
+    def test_the_restock_loop_adds_no_movement_type(self) -> None:
+        """KAN-001 is satisfied without touching the ledger vocabulary.
+
+        A restock request is an intent and an acknowledgment is a statement
+        about material already debited at issue. Neither moves stock, so
+        neither may mint a movement type — and a type that exists is a type
+        somebody will eventually write, which is how the debit stops being the
+        issue.
+        """
         from app.models.inventory import MOVEMENT_TYPES
 
-        # Issue is terminal for a consumable's quantity (07-09 TRX-001). If a
-        # consumption event is ever added, PLN-002 has to be re-argued: the
-        # question becomes which of the two debits the stock, and the answer
-        # must still be the issue.
         offenders = [m for m in MOVEMENT_TYPES if "consum" in m and m != "consumable_issue"]
         assert offenders == [], (
-            f"new consumption-shaped movement type(s) {offenders} — PLN-002 requires "
-            "the reorder trigger to stay on issue"
+            f"new consumption-shaped movement type(s) {offenders} — PLN-002 "
+            "requires the reorder trigger to stay on the issue"
         )
 
     def test_the_wire_contract_matches_the_ledger(self) -> None:

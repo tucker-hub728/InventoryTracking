@@ -38,12 +38,13 @@ import urllib.request
 from collections import Counter, defaultdict
 from decimal import Decimal
 
+from _smoke_creds import require_credentials
+
 BASE = "http://localhost:8000/v1"
 
 # Dev credentials. If login fails, check cognito-local is healthy —
 # ``docker logs cellready-cognito`` — before assuming this feature is broken.
-EMAIL = "admin@cellready.local"
-PASSWORD = "ChangeMe!Now123"
+EMAIL, PASSWORD = require_credentials()
 
 failures: list[str] = []
 

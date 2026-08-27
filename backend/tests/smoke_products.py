@@ -23,10 +23,10 @@ import urllib.error
 import urllib.request
 import uuid
 
-BASE = "http://localhost:8000/v1"
-EMAIL = "admin@cellready.local"
-PASSWORD = "ChangeMe!Now123"
+from _smoke_creds import require_credentials
 
+BASE = "http://localhost:8000/v1"
+EMAIL, PASSWORD = require_credentials()
 
 def _req(
     method: str,
