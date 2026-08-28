@@ -19,12 +19,39 @@ from app.core.search import like_contains
 from app.models.audit import AuditEvent
 from app.models.inventory import BomLine, Item, ItemPrefix, ItemTier, Lot, StockMovement
 from app.models.kitting import Kit, KitLine
-from app.models.locations import LocationNode, LotAllocation
+from app.models.locations import KANBAN_NODE_TYPE, LocationNode, LotAllocation
 from app.notifications.pending import mark_item
 
 # Flat-category marking a production/lab floor. Allocations here are WIP held
 # by an open kit, never available stock (§0.3a).
 PRODUCTION_CATEGORY = "production"
+
+
+def not_floor_stock():
+    """SQL predicate: this allocation is back-office stock somebody may draw on.
+
+    Two things are on the production floor and neither is available:
+
+    * an allocation at a production/lab node — WIP held by an open kit (§0.3a);
+    * an allocation in a **Kanban** — area consumables handed to the floor
+      (KAN-001). New since kan01, and the reason this stopped being a one-line
+      filter.
+
+    The Kanban arm is NOT redundant with the first, and that is the whole point
+    of extracting this. A Kanban's own ``flat_category`` is NULL — it is the
+    *parent* production area that carries the category — so a plain
+    ``flat_category != 'production'`` test lets Kanban rows straight through.
+    Before kan01 that was harmless because a Kanban held no allocations at all;
+    the moment it holds a balance, every picker filtered that way would offer
+    the floor's gloves as issuable stock and the same units could be spent
+    twice — once on the floor, once back in stores.
+
+    Callers: the kit issue picker, the consumable issue picker, and the finance
+    export. Keep them on this helper rather than re-deriving the predicate.
+    """
+    return (func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY) & (
+        LocationNode.node_type != KANBAN_NODE_TYPE
+    )
 
 # ── Reads / lookups ─────────────────────────────────────────────────────
 
@@ -96,7 +123,7 @@ async def item_stock_by_node(
             Lot.item_id.in_(item_ids),
             LotAllocation.is_active.is_(True),
             LotAllocation.qty > 0,
-            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
+            not_floor_stock(),
         )
         .group_by(Lot.item_id, LotAllocation.location_node_id)
     )
@@ -136,7 +163,7 @@ async def item_stock_by_node_lot(
             Lot.item_id.in_(item_ids),
             LotAllocation.is_active.is_(True),
             LotAllocation.qty > 0,
-            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
+            not_floor_stock(),
         )
         .group_by(
             Lot.item_id,
@@ -179,7 +206,7 @@ async def item_cells_by_node(
             LotAllocation.is_active.is_(True),
             LotAllocation.qty > 0,
             LotAllocation.grid_row.is_not(None),
-            func.coalesce(LocationNode.flat_category, "") != PRODUCTION_CATEGORY,
+            not_floor_stock(),
         )
         .order_by(LotAllocation.grid_row, LotAllocation.grid_col)
     )

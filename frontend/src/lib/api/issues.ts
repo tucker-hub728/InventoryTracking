@@ -97,6 +97,8 @@ export interface IssuedRow {
   /** Where it was drawn FROM — a snapshot taken when the row was written, so it
    *  survives that shelf being renamed or removed. */
   source_path: string | null;
+  /** The source shelf itself, so the row links back to it. */
+  source_node_id: string | null;
   issued_at: string;
   issued_by: string | null;
   notes: string | null;

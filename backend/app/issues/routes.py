@@ -194,6 +194,9 @@ async def list_issued_at(
                 # lookup: it must keep saying where the material came from even
                 # after that shelf is renamed or removed.
                 source_path=m.from_location_path,
+                source_node_id=(
+                    str(m.from_location_node_id) if m.from_location_node_id else None
+                ),
                 issued_at=m.performed_at,
                 issued_by=getattr(m.performed_by, "full_name", None),
                 notes=m.notes,

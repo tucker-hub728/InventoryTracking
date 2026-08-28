@@ -34,7 +34,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Text, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -108,3 +108,120 @@ class ConsumableIssue(Base):
     #: performed_at · performed_by.
     movement = relationship("StockMovement", lazy="joined")
     cleared_by = relationship("User", lazy="joined", foreign_keys=[cleared_by_user_id])
+
+
+#: Lifecycle of a restock request. ``fulfilled`` is set by the acknowledgment
+#: that closes it; ``cancelled`` is the operator withdrawing the ask (the bin
+#: was restocked by hand, the line stopped running, the item was swapped).
+REQUEST_STATES: tuple[str, ...] = ("open", "fulfilled", "cancelled")
+
+
+class KanbanRestockRequest(Base):
+    """An open ask for more of one consumable in one Kanban (KAN-001).
+
+    Neither end of this row is derivable from the ledger, and that is the whole
+    reason it exists:
+
+    * "Clean Room 2 is low on gloves" is an *intent*. No stock moves when it is
+      formed, so no movement records it;
+    * "we got through 40 of them" is a *statement about material already
+      debited*. The units left inventory at issue (07-09 TRX-001), so the
+      acknowledgment writes no movement either — ``consumed_qty`` below is the
+      only place that number exists.
+
+    The one thing that IS an ordinary ledger write is the replenishment that
+    follows: a normal e-signed issue, which this row does not model.
+
+    Deliberately NOT a balance. A Kanban holds no ``lot_allocations`` — asking
+    for more, and saying how much went, neither of them changes a stock figure.
+    """
+
+    __tablename__ = "kanban_restock_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN (" + ", ".join(f"'{s}'" for s in REQUEST_STATES) + ")",
+            name="ck_kanban_restock_requests_state",
+        ),
+        CheckConstraint(
+            "(requested_qty IS NULL OR requested_qty > 0) "
+            # Zero is legal here and not for a request: "we used none of it"
+            # is a real answer at restock time (the line never ran), whereas
+            # asking for zero more is not a request.
+            "AND (consumed_qty IS NULL OR consumed_qty >= 0)",
+            name="ck_kanban_restock_requests_qty_positive",
+        ),
+        # Open means not closed, on every row. Without this, "open" could be
+        # read two ways (state, or a null closed_at) and they could disagree.
+        CheckConstraint(
+            "(state = 'open') = (closed_at IS NULL)",
+            name="ck_kanban_restock_requests_closed_pairing",
+        ),
+        # A second "we're low on gloves" for the same bin is the SAME request,
+        # not a queue of two. Partial, so closed rows accumulate freely as
+        # history.
+        Index(
+            "uq_kanban_restock_open",
+            "kanban_node_id",
+            "item_id",
+            unique=True,
+            postgresql_where=text("state = 'open'"),
+        ),
+        Index(
+            "ix_kanban_restock_open_by_node",
+            "kanban_node_id",
+            postgresql_where=text("state = 'open'"),
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    kanban_node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("meta.location_nodes.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    #: Optional: "we are low on gloves" is a legitimate request. The number that
+    #: matters — what was actually consumed — is captured at acknowledgment, on
+    #: the ledger row, not guessed here.
+    requested_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'open'"))
+
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    #: What the operator confirmed was used, set when the request is fulfilled.
+    #: Nullable: an open or cancelled request has no figure.
+    #:
+    #: **Stored, not derived** — the one place in this module that copies rather
+    #: than reads through. Everywhere else a quantity lives on a ledger row and
+    #: is read back from it; this acknowledgment writes no ledger row, because
+    #: the stock was already debited at issue. There is nothing to derive from,
+    #: so the column IS the record.
+    consumed_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    kanban = relationship("LocationNode", lazy="joined")
+    item = relationship("Item", lazy="joined")
+    requested_by = relationship("User", lazy="joined", foreign_keys=[requested_by_user_id])
+    closed_by = relationship("User", lazy="joined", foreign_keys=[closed_by_user_id])

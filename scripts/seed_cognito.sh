@@ -25,9 +25,18 @@ NETWORK_NAME="${COMPOSE_PROJECT_NAME}_ims"
 POOL_NAME="cellready-local"
 CLIENT_NAME="cellready-backend-local"
 
-# Defaults — overrideable via env so this can be reused in CI/staging.
-TEST_EMAIL="${SUPERADMIN_EMAIL:-admin@cellready.local}"
-TEST_PASSWORD="${SUPERADMIN_PASSWORD:-ChangeMe!Now123}"
+# Credentials come from the environment and have NO defaults. A default here is
+# a working login committed to the repository — public on clone, and identical
+# on every machine that ever ran this script.
+TEST_EMAIL="${SUPERADMIN_EMAIL:-}"
+TEST_PASSWORD="${SUPERADMIN_PASSWORD:-}"
+if [ -z "$TEST_EMAIL" ] || [ -z "$TEST_PASSWORD" ]; then
+  echo "REFUSING: SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD must both be set." >&2
+  echo >&2
+  echo "  SUPERADMIN_EMAIL=you@example SUPERADMIN_PASSWORD='…' \\" >&2
+  echo "      scripts/seed_cognito.sh" >&2
+  exit 2
+fi
 TEST_NAME="Super Admin"
 TEST_INITIALS="SAD"
 TEST_ROLE="super_admin"

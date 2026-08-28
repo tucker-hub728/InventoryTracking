@@ -817,10 +817,15 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     "customer_shipment",
     # Consumable issue to a Kanban (TRX-003, Transaction Spec §4, consum01).
     # Unit-OUT from a storage node INTO a Kanban node, so the ledger says which
-    # room the gloves went to. Terminal for QUANTITY purposes — 07-09 TRX-001
-    # ("kitting is terminal only for consumables") — and never reversed by a
-    # back-flush, per 07-09 TRX-004. Expiration keeps being tracked afterwards
-    # through ``app.consumable_issues`` (Transaction Spec §4.3).
+    # room the gloves went to. Terminal for QUANTITY — 07-09 TRX-001 ("kitting
+    # is terminal only for consumables") — and never reversed by a back-flush,
+    # per 07-09 TRX-004. Expiration keeps being tracked afterwards through
+    # ``app.consumable_issues`` (Transaction Spec §4.3).
+    #
+    # KAN-001's restock loop does NOT add a movement type. A restock request is
+    # an intent and an acknowledgment is a statement about material already
+    # debited here; neither moves stock, so neither belongs in this ledger. See
+    # the kan01 migration for the version that did add two, and why it went.
     "consumable_issue",
     # Debit-and-gone issue to a scrap location (REQ-2026-08-04-TRX-001/002,
     # issue01). Unit-OUT from a storage node INTO the LOCATION it was issued to —

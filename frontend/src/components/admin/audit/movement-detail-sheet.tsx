@@ -18,9 +18,10 @@ import {
   type ApiMovement,
   type MovementType,
 } from '@/lib/api/movements';
+import { CustomerLink } from '@/components/customers/customer-link';
 import { ItemLink } from '@/components/inventory/item-link';
 import { LotLink } from '@/components/inventory/lot-link';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -208,7 +209,7 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           <KV
             label="Made in"
             value={
-              <LocationLink
+              <LocationPath
                 nodeId={movement.kit_production_location_node_id}
                 name={movement.kit_production_location_name}
               />
@@ -221,7 +222,7 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           label="From"
           value={
             movement.from_location_node_name ? (
-              <LocationLink
+              <LocationPath
                 nodeId={movement.from_location_node_id}
                 name={movement.from_location_node_name}
                 path={movement.from_location_node_path}
@@ -243,7 +244,7 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           value={
             movement.to_location_node_name ? (
               <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
-                <LocationLink
+                <LocationPath
                   nodeId={movement.to_location_node_id}
                   name={movement.to_location_node_name}
                   path={movement.to_location_node_path}
@@ -263,7 +264,14 @@ function MovementBody({ movement }: { movement: ApiMovement }) {
           <KV
             label="Customer"
             value={
-              movement.customer_name ?? (
+              movement.customer_name ? (
+                // Links through to that customer's shipping history, the same
+                // way this sheet's other references reach what they name.
+                <CustomerLink
+                  customerName={movement.customer_name}
+                  customerId={movement.customer_id}
+                />
+              ) : (
                 <span className="italic text-text-3">Catalog (no customer)</span>
               )
             }

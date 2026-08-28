@@ -41,6 +41,11 @@ PERM_MATRIX: dict[str, dict[str, frozenset[str]]] = {
 # an operator for write purposes — only the role can.
 ADMIN_ROLES: frozenset[str] = frozenset({"super_admin", "admin"})
 
+# The single highest role, under its own name. Spelled out here rather than
+# inline at each gate so a route reads as a policy statement, and so one grep
+# finds every super-admin-only door — the CTL-001 kitting controls included.
+SUPER_ADMIN_ROLE: str = "super_admin"
+
 
 class RequireRole:
     """FastAPI dependency — gate a route on the DB role itself.
@@ -59,14 +64,22 @@ class RequireRole:
         ]
     """
 
-    def __init__(self, *roles: str, what: str = "this") -> None:
+    def __init__(
+        self, *roles: str, what: str = "this", message: str | None = None
+    ) -> None:
         self.roles = frozenset(roles)
         self.what = what
+        # The default names "an admin", which is right for the ``ADMIN_ROLES``
+        # gates this class was written for and actively misleading for a
+        # narrower one: an operator refused a super-admin-only action would be
+        # sent to an admin who cannot do it either. A single-role gate supplies
+        # its own sentence.
+        self.message = message or f"Only an admin can manage {what}"
 
     async def __call__(self, db_user: CurrentDbUserDep) -> None:  # type: ignore[name-defined]
         if db_user.role not in self.roles:
             raise AuthorizationError(
-                f"Only an admin can manage {self.what}",
+                self.message,
                 code="permission_denied",
                 details={"required_roles": sorted(self.roles)},
             )
@@ -128,4 +141,11 @@ _bind_currentdbuser()
 # Convenience type alias for routes that need the DB user themselves
 # (e.g. to stamp ``created_by_user_id``). Imported by routes via
 # ``from app.api.deps import CurrentDbUserDep``.
-__all__ = ["ADMIN_ROLES", "PERM_MATRIX", "RequirePermission", "RequireRole", "has_permission"]
+__all__ = [
+    "ADMIN_ROLES",
+    "PERM_MATRIX",
+    "SUPER_ADMIN_ROLE",
+    "RequirePermission",
+    "RequireRole",
+    "has_permission",
+]

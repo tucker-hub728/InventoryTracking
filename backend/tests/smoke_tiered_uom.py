@@ -3,7 +3,7 @@
 Run from the project root after ``docker compose up`` and AFTER applying the
 ``uom01`` migration:
 
-    SMOKE_SA_EMAIL=superadmin@cellready.dev SMOKE_SA_PASSWORD='...' \
+    SMOKE_SA_EMAIL=super@example SMOKE_SA_PASSWORD='…' \
         python backend/tests/smoke_tiered_uom.py
 
 An item may be ordered in Box and consumed in Each. The rule the whole feature

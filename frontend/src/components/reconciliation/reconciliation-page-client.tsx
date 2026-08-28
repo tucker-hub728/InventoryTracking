@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import { usePermission } from '@/hooks/use-permission';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
@@ -270,17 +270,15 @@ export function ReconciliationPageClient() {
                         {/* ``kitStatus`` so a production floor opens on the tab
                             that actually holds this kit — a closed kit is not
                             on the In-production tab. */}
-                        <LocationLink
+                        <LocationPath
                           nodeId={kit.production_location_node_id}
-                          name={kit.production_location}
                           path={kit.production_location}
                           kitStatus={kit.status}
                         />
                       </td>
                       <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
-                        <LocationLink
+                        <LocationPath
                           nodeId={kit.output_location_node_id}
-                          name={kit.output_location}
                           path={kit.output_location}
                         />
                       </td>

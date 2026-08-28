@@ -22,7 +22,7 @@ No migration — this exercises code only.
 
 Run from the project root after ``docker compose up``:
 
-    SMOKE_EMAIL=admin.user@cellready.dev SMOKE_PASSWORD='DevAdmin_123!' \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_ln2_destinations.py
 
 or, with no Python on the host:
@@ -90,9 +90,11 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin.user@cellready.dev")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "DevAdmin_123!")
+EMAIL, PASSWORD = require_credentials()
+
 TRANSFER_ACTION = "movement.transfer"
 ISSUE_ACTION = "movement.material_issue"
 RECEIPT_ACTION = "movement.receipt"

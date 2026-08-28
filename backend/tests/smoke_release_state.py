@@ -3,7 +3,7 @@
 Run from the project root after ``docker compose up`` and AFTER applying the
 ``relstate01`` migration:
 
-    SMOKE_SA_EMAIL=super.admin@cellready.dev SMOKE_SA_PASSWORD='DevSuper_123!' \
+    SMOKE_SA_EMAIL=super@example SMOKE_SA_PASSWORD='…' \
         SMOKE_OP_EMAIL=... SMOKE_OP_PASSWORD=... \
         python backend/tests/smoke_release_state.py
 
@@ -39,11 +39,11 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
-SA_EMAIL = os.environ.get("SMOKE_SA_EMAIL", "super.admin@cellready.dev")
-SA_PASSWORD = os.environ.get("SMOKE_SA_PASSWORD", "DevSuper_123!")
-OP_EMAIL = os.environ.get("SMOKE_OP_EMAIL", "operator.user@cellready.dev")
-OP_PASSWORD = os.environ.get("SMOKE_OP_PASSWORD", "DevOperator_123!")
+SA_EMAIL, SA_PASSWORD = require_credentials("SMOKE_SA")
+OP_EMAIL, OP_PASSWORD = require_credentials("SMOKE_OP")
 
 ACTION = "lot.release_state"
 WRONG_ACTION = "lot.update"

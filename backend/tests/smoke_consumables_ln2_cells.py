@@ -2,7 +2,7 @@
 
 Run from the project root after ``docker compose up``:
 
-    SMOKE_EMAIL=admin@cellready.dev SMOKE_PASSWORD=... \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_consumables_ln2_cells.py
 
 The bug (client 2026-08-11): the Issue-to-Kanban dialog assumed a consumable
@@ -30,16 +30,16 @@ Verifies:
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 import uuid
 from datetime import date, timedelta
 
+from _smoke_creds import require_credentials
+
 BASE = "http://localhost:8000/v1"
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin@cellready.local")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "ChangeMe!Now123")
+EMAIL, PASSWORD = require_credentials()
 
 ISSUE_ACTION = "movement.consumable_issue"
 

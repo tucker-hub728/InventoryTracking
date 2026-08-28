@@ -18,6 +18,10 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { EmptyState } from '@/components/shared/empty-state';
 import { ItemLink } from '@/components/inventory/item-link';
 import { AcknowledgeDialog } from '@/components/consumables/acknowledge-dialog';
+import {
+  KanbanRestockSection,
+  RequestRestockButton,
+} from '@/components/production/kanban-restock-panel';
 import { ApiError } from '@/lib/api/client';
 import {
   consumablesApi,
@@ -27,19 +31,41 @@ import {
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { invalidateLocationForest } from '@/components/reconciliation/location-tree-picker';
 import { useAuthStore, selectIsSuperAdmin } from '@/stores/auth.store';
+import { usePermission } from '@/hooks/use-permission';
 
 /**
- * The Kanban tab of a production floor (REQ-2026-07-01-LOC-006/008).
+ * The Kanban tab of a production floor (REQ-2026-07-01-LOC-006/008, KAN-001).
  *
- * Shows the consumables issued into this room, grouped by Kanban station, with
- * their expiration flags. It is deliberately NOT a stock list: under the
- * client's consume-at-issue model (2026-08-10, per 07-09 TRX-001) the quantity
- * left inventory at issue, so what is tracked here is the EXPIRATION, not a
- * balance — see docs/modules/consumables.md §5 for the LOC-006 conflict this
- * resolves and how Option B would change it.
+ * Each station shows two things, and they are different questions about the
+ * same material:
+ *
+ *   * **what needs restocking** — open requests for that station
+ *     (`KanbanRestockSection`), shown only when there are any;
+ *   * **what is still somebody's problem** — the expiration register, one row
+ *     per issued quantity, which outlives the stock itself (TX Spec §4.3).
+ *
+ * RAISING a request is a room-level button up in the header, not a per-station
+ * one: the dialog's first question is which station, so repeating the control
+ * on every bin only asked it twice.
+ *
+ * **Deliberately NOT a stock list.** A Kanban holds no balance: the quantity
+ * leaves inventory at the moment of issue (07-09 TRX-001), so there is nothing
+ * to count here. A build on 2026-08-27 briefly drew one — `kan01` gave the bin
+ * real allocations — and the client reversed it the same day; see the kan01
+ * migration and docs/modules/consumables.md §5.
+ *
+ * That reversal is why the restock action is a BUTTON rather than a row action
+ * on a list of contents. There is no list, and there does not need to be: an
+ * operator can raise an ask for any consumable, including one this station has
+ * never held.
  */
 export function KanbanPanel({ areaId }: { areaId: string }) {
   const canManage = useAuthStore(selectIsSuperAdmin);
+  // Raising a restock request changes no stock, so it sits on `edit`; writing
+  // off what was consumed does, so it sits on `sign` — the same split every
+  // other pair of read-and-commit actions in the app uses.
+  const canEdit = usePermission('inventory', 'edit');
+  const canSign = usePermission('inventory', 'sign');
 
   const [kanbans, setKanbans] = React.useState<LocationNode[] | null>(null);
   const [rows, setRows] = React.useState<IssuedConsumable[] | null>(null);
@@ -123,6 +149,13 @@ export function KanbanPanel({ areaId }: { areaId: string }) {
               ]}
             />
           )}
+          {/* Room-level, beside Add kanban: "which station" is the dialog's
+              first question, so one button covers every Kanban here. It used to
+              repeat on each station, which showed the same control once per bin
+              and dead-ended when a bin had nothing to hang it on. */}
+          {canEdit && kanbans.length > 0 && (
+            <RequestRestockButton kanbans={kanbans} onDone={reload} />
+          )}
           {canManage && (
             <Button variant="primary" onClick={() => setAddOpen(true)}>
               <Plus size={15} /> Add kanban
@@ -153,6 +186,10 @@ export function KanbanPanel({ areaId }: { areaId: string }) {
                 : 'Nothing issued here yet.'
             }
             onAcknowledge={setAck}
+            canEdit={canEdit}
+            canSign={canSign}
+            reloadKey={reloadKey}
+            onChanged={reload}
           />
         ))
       )}
@@ -185,6 +222,10 @@ function KanbanStation({
   rows,
   emptyText,
   onAcknowledge,
+  canEdit,
+  canSign,
+  reloadKey,
+  onChanged,
 }: {
   station: LocationNode;
   rows: IssuedConsumable[];
@@ -192,6 +233,10 @@ function KanbanStation({
    *  different facts, and the Open filter makes the second one common. */
   emptyText: string;
   onAcknowledge: (row: IssuedConsumable) => void;
+  canEdit: boolean;
+  canSign: boolean;
+  reloadKey: number;
+  onChanged: () => void;
 }) {
   return (
     <div className="overflow-hidden rounded-lg border border-border">
@@ -201,6 +246,21 @@ function KanbanStation({
           still searchable in the issue picker. */}
       <div className="border-b border-border bg-surface-2 px-3 py-2">
         <span className="text-sm font-medium text-text">{station.name}</span>
+      </div>
+
+      {/* Open restock requests (KAN-001) — first, because they are the thing
+          waiting on someone. Renders NOTHING when there are none, so a quiet
+          station stays quiet instead of carrying a row saying so. */}
+      <KanbanRestockSection
+        kanbanNodeId={station.id}
+        canEdit={canEdit}
+        canSign={canSign}
+        reloadKey={reloadKey}
+        onChanged={onChanged}
+      />
+
+      <div className="border-b border-border bg-surface-2 px-3 py-1.5">
+        <span className="text-xs font-medium text-text-3">Expiration checks</span>
       </div>
       {rows.length === 0 ? (
         <p className="px-3 py-4 text-center text-xs text-text-3">{emptyText}</p>

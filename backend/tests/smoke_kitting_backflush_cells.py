@@ -2,7 +2,7 @@
 
 Run from the project root against a running dev stack:
 
-    SMOKE_EMAIL=admin@cellready.dev SMOKE_PASSWORD=... \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_kitting_backflush_cells.py
 
 The bug (found 2026-07-28, reported from the UI): the close-out back-flush
@@ -28,14 +28,14 @@ Covers:
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = "http://localhost:8000/v1"
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin@cellready.local")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "ChangeMe!Now123")
+EMAIL, PASSWORD = require_credentials()
 
 # Same dev-seed ids as smoke_kitting.py — a well-stocked 2-child sub-assembly,
 # the production node, and a shelf for the produced output.

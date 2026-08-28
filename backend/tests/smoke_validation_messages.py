@@ -9,7 +9,7 @@ front of them.
 The handler now phrases the failure (``app/api/errors.py``), which fixes every
 form at once rather than per dialog.
 
-    SMOKE_EMAIL=admin.user@cellready.dev SMOKE_PASSWORD='DevAdmin_123!' \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_validation_messages.py
 """
 
@@ -21,9 +21,10 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin.user@cellready.dev")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "DevAdmin_123!")
+EMAIL, PASSWORD = require_credentials()
 
 STATS = {"passed": 0}
 FAILED: list[str] = []

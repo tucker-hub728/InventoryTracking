@@ -227,7 +227,27 @@ New partial index: `ix_movements_kit_id` on `kit_id` where `kit_id IS NOT NULL`.
 - **Status transitions** are enforced in the service layer (draft→issued→in_production→closed / any-active→cancelled). Editing `issued_qty`/`source` is allowed only while `draft`; `used_qty`/`return` only while `issued`/`in_production`.
 - **Close-out atomicity** (§0.6) — production output rows, back-flush rows, and the `kits` status/good_qty/scrap_qty/output update happen in **one transaction**, under **one e-signature**.
 - **Cancel — draft-only** (client, 2026-07-20). Cancel is allowed **only while `status = 'draft'`**: it sets `status='cancelled'` and writes **no movements** (nothing has been issued). Cancelling an issued/in-production kit (which would back-flush everything, §0.4) is **deferred** — see §99.8. The API rejects cancel on a non-draft kit.
-- **E-signature — close-out only** (client, 2026-07-20). Only the **Close-Out** transaction is e-signed: its `production_output` + `backflush` movement rows carry a `reauth_evidence_id`, consumed single-use via `audit.reauth_consumptions`. **Issue, Additional Issue, and Cancel are NOT e-signed** — their movement rows have `reauth_evidence_id = NULL`. (This relaxes the app-wide "sign every stock move" convention specifically for kitting, per client direction.)
+- **E-signature — close-out only** (client, 2026-07-20). Only the **Close-Out** transaction is e-signed: its `production_output` + `backflush` movement rows carry a `reauth_evidence_id`, consumed single-use via `audit.reauth_consumptions`. **Issue, Additional Issue, and Cancel are NOT e-signed** — their movement rows have `reauth_evidence_id = NULL`. (This relaxes the app-wide "sign every stock move" convention specifically for kitting, per client direction.) *(Later reversed for Cancel — it is e-signed now; see the `CANCEL_ACTION` verb in `app/kitting/routes.py`.)*
+
+- **Returning material to inventory is Super-Admin-only** — REQ-2026-08-13-**CTL-001**, scoped to kitting by the client on 2026-08-27. Every route that *credits stock back* is gated on the `super_admin` role **in addition to** its existing permission check:
+
+  | Route | Permission | Role | Why |
+  |--|--|--|--|
+  | `POST /kits/{id}/close-out` | `inventory:sign` | `super_admin` | the automatic back-flush returns the leftover |
+  | `POST /kits/{id}/lines/{lid}/return` | `inventory:create` | `super_admin` | the manual TRX-008 return |
+  | `POST /kits/{id}/cancel` | `inventory:create` | `super_admin` | a post-issue cancel returns the whole floor |
+  | `POST /kits/{id}/produce` | `inventory:sign` | *(any)* | consumes and mints — nothing comes back |
+  | `POST /kits/{id}/issue`, `…/additional-issue` | `inventory:create` | *(any)* | material goes **out** to the floor |
+
+  Both checks are needed: `operator` holds `inventory:create` **and** `inventory:sign`, so the permission matrix cannot tell an operator from an admin for write purposes — only the role can. Note `admin` is refused too; CTL-001 says Super Admin, and `admin` passes every other role gate in the codebase (`ADMIN_ROLES`).
+
+  **Produce is deliberately left open** so the floor is never blocked waiting on an admin — the split is "material coming back", not "the kit is important".
+
+  The gate is a route **dependency**, not a check inside the handler, so a refused close-out or cancel is rejected *before* `consume_reauth_evidence` runs and the operator's single-use signature ticket is not burned on a 403.
+
+  "…and recorded" needed no new code: all three already write an `app.kits` audit row (`operation` = `close_out` / `early_return` / `cancel`) alongside the ledger movement, and close-out and cancel additionally carry `signature_id`. The **manual return stays unsigned**, matching issue / additional issue (§6, e-signature scope) — it is recorded, not signed.
+
+  Guarded by `backend/tests/test_kit_super_admin_control.py`, which also fails if a *new* return-shaped route under `/kits` is mounted without the gate.
 
 ---
 

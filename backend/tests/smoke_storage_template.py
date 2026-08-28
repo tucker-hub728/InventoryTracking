@@ -18,7 +18,7 @@ revives that same node.
 Storage is the only room with four levels (room → location → sub-type → unit), so
 the parentage rules get exercised here too.
 
-    SMOKE_SA_EMAIL=… SMOKE_SA_PASSWORD=… python backend/tests/smoke_storage_template.py
+    SMOKE_SA_EMAIL=super@example SMOKE_SA_PASSWORD='…' python backend/tests/smoke_storage_template.py
 
 Verifies:
   * a new location is created with NO sub-types
@@ -51,13 +51,13 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
 # The template is super-admin-only (LOC-004), so the SUPER admin is the primary
 # credential here — unlike most smoke tests, where it is the optional extra.
-SA_EMAIL = os.environ.get("SMOKE_SA_EMAIL", "super.admin@cellready.dev")
-SA_PASSWORD = os.environ.get("SMOKE_SA_PASSWORD", "DevSuper_123!")
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin.user@cellready.dev")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "DevAdmin_123!")
+SA_EMAIL, SA_PASSWORD = require_credentials("SMOKE_SA")
+EMAIL, PASSWORD = require_credentials()
 
 STATS = {"passed": 0}
 FAILED: list[str] = []

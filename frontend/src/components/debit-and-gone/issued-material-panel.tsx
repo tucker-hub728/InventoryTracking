@@ -38,7 +38,7 @@ import { NumberedPagination } from '@/components/ui/numbered-pagination';
 import { ApiError } from '@/lib/api/client';
 import { issuesApi, type IssuedList } from '@/lib/api/issues';
 import { Button } from '@/components/ui/button';
-import { LocationPath } from './location-path';
+import { LocationPath } from '@/components/locations/location-path';
 
 const PAGE_SIZES = [10, 25, 50, 100];
 
@@ -211,7 +211,7 @@ export function IssuedMaterialPanel({
                 {/* The place, not its ancestry. The full path is one hover
                     away — see LocationPath for why the leaf is the useful half. */}
                 <TableCell className="max-w-[180px] text-xs text-text-2">
-                  <LocationPath path={r.source_path} />
+                  <LocationPath path={r.source_path} nodeId={r.source_node_id} />
                 </TableCell>
                 <TableCell className="text-xs text-text-2">{r.issued_by ?? '—'}</TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-text-2">

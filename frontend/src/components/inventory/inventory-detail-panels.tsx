@@ -11,6 +11,7 @@ import { EntityAuditTimeline } from '@/components/admin/audit/entity-audit-timel
 import { LedgerExpiryToolbar, LedgerTable, useLedgerExpiryControls } from './ledger-table';
 import { ForecastImpactTab } from './forecast-impact-tab';
 import { ItemBomTab } from './item-bom-tab';
+import { ItemRestockRequestsTab } from './item-restock-requests-tab';
 import { ItemStockLocationsTab } from './item-stock-locations-tab';
 import { ItemWhereUsedTab } from './item-where-used-tab';
 import { ItemBomTreeTab } from './item-bom-tree-tab';
@@ -156,6 +157,31 @@ export function ItemAuditPanel() {
       subjectTable="app.items"
       subjectId={item.uuid}
       kitAuditItemId={item.uuid}
+    />
+  );
+}
+
+/** "Restock requests" tab — every ask raised against this consumable (KAN-001).
+ *
+ *  Consumables only; a non-consumable cannot be issued to a Kanban, so the tab
+ *  could never fill. See ``tabsForItem``.
+ *
+ *  ``openIssue`` reaches back to the header's dialog rather than mounting a
+ *  second one here — see the context field's own note for why a duplicate
+ *  e-signed flow is the wrong trade. */
+export function ItemRestockRequestsPanel() {
+  const { item, canSign, openIssue, onRestockChanged, refreshSeq } = useInventoryDetail();
+  return (
+    <ItemRestockRequestsTab
+      // A PROP, not ``key``. Re-keying would remount the tab and throw the
+      // operator back to page 1 with the filter reset — after acknowledging a
+      // row on page 3, which is exactly when that hurts. The tab refetches in
+      // place and keeps where they were.
+      reloadKey={refreshSeq}
+      itemId={item.uuid}
+      canSign={canSign}
+      onIssue={openIssue}
+      onChanged={onRestockChanged}
     />
   );
 }

@@ -3,7 +3,7 @@
 Run from the project root after ``docker compose up`` and after applying the
 ``issue01`` migration:
 
-    SMOKE_EMAIL=admin@cellready.dev SMOKE_PASSWORD=... \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_material_issue.py
 
 Verifies REQ-2026-08-04-TRX-001/002 and, just as importantly, the line between
@@ -41,12 +41,14 @@ import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = os.environ.get("SMOKE_BASE", "http://localhost:8000/v1")
 # Creating a Storage location is super-admin-only (LOC-004), and this smoke
 # creates its own, so the SUPER admin is the primary credential — same choice
 # ``smoke_storage_template.py`` makes for the same reason.
-EMAIL = os.environ.get("SMOKE_SA_EMAIL", "super.admin@cellready.dev")
-PASSWORD = os.environ.get("SMOKE_SA_PASSWORD", "DevSuper_123!")
+EMAIL, PASSWORD = require_credentials()
+
 ISSUE_ACTION = "movement.material_issue"
 TRANSFER_ACTION = "movement.transfer"
 

@@ -29,6 +29,29 @@ export interface InventoryDetailContextValue {
    * parent render, and would otherwise sit on stale badges.
    */
   refreshSeq: number;
+  /**
+   * Open the header's Issue dialog, optionally aimed at a Kanban that asked for
+   * a restock (KAN-001).
+   *
+   * A tab reaching back into the header looks odd until you consider the
+   * alternative: a second Issue dialog mounted inside the tab. That is a second
+   * copy of an e-signed flow — its own source picker, its own signature
+   * binding, its own grid handling — and the two would drift, which in this
+   * codebase has already meant emptying the wrong LN2 vials. One dialog, one
+   * place, reachable from both.
+   */
+  openIssue?: (prefill: { kanbanNodeId: string; qty: number | null } | null) => void;
+  /**
+   * Tell the page a restock request changed, so surfaces OUTSIDE the tab
+   * re-read — chiefly the banner above the tabs.
+   *
+   * Needed because the two surfaces refresh in opposite directions: an issue
+   * starts at the header and has to reach the tab, an acknowledgment starts in
+   * the tab and has to reach the banner. Each used to bump its own counter, so
+   * each updated itself and left the other showing a request that had already
+   * been answered.
+   */
+  onRestockChanged?: () => void;
 }
 
 const InventoryDetailContext = React.createContext<InventoryDetailContextValue | null>(null);

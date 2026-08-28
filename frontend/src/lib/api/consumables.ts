@@ -5,14 +5,19 @@
  * Three rules from the requirements shape this surface, and they explain why
  * some obvious endpoints are missing:
  *
- *  * an issue is TERMINAL for quantity (07-09 TRX-001) — there is no de-issue;
- *  * consumables are NEVER back-flushed (07-09 TRX-004) — there is no return;
+ *  * a Kanban HOLDS a balance (KAN-001, 2026-08-27) — issuing moves stock onto
+ *    the floor, it no longer spends it, and `kanbanBalance` is what it holds.
+ *    This reverses the old "an issue is terminal for quantity" rule that stood
+ *    here; see the module docstring in `app/consumables/routes.py` for why;
+ *  * consumables are STILL never back-flushed (07-09 TRX-004) — there is no
+ *    de-issue and no return. Acknowledging a depletion is not a return: stock
+ *    only ever moves forward, stores → Kanban → consumed;
  *  * expiration keeps being tracked after the quantity is gone (TX Spec §4.3) —
  *    which is what the register below is.
  *
- * Both writes are e-signed (`evidence_id`): the issue, and — since 2026-08-12 —
- * closing out an expiry check, whose disposition is the only record anywhere of
- * what happened to the material.
+ * Three writes are e-signed (`evidence_id`), each under its OWN action verb so
+ * a ticket minted for one can never be spent on another: the issue, closing out
+ * an expiry check, and — since KAN-001 — acknowledging what a Kanban consumed.
  */
 import { api } from './client';
 import type { CellOption } from './kits';
@@ -207,3 +212,120 @@ export const CONSUMABLE_ISSUE_ACTION = 'movement.consumable_issue';
  *  issue verb on purpose: a signature made to issue stock is not a signature
  *  saying that stock was later discarded, and the backend refuses the swap. */
 export const CONSUMABLE_EXPIRY_CHECK_ACTION = 'consumable.expiry_check';
+
+/** The e-sign action verb for acknowledging what a Kanban consumed (KAN-001).
+ *  A THIRD verb, for the same reason there is a second: this signature writes
+ *  stock off the books. */
+export const CONSUMABLE_CONSUMPTION_ACTION = 'consumable.consumption';
+
+// ── Kanban restock loop (KAN-001) ──────────────────────────────────────
+//
+// A Kanban holds NO balance — an issue debits the stock immediately.
+// So there is nothing here that reads a bin's contents; the loop is:
+//
+//     request restock  →  acknowledge what was used  →  issue the replenishment
+//
+// and only that last step moves stock, through the ordinary issue dialog.
+
+export type RestockState = 'open' | 'fulfilled' | 'cancelled';
+
+export const RESTOCK_STATE_LABEL: Record<RestockState, string> = {
+  open: 'Open',
+  fulfilled: 'Restocked',
+  cancelled: 'Cancelled',
+};
+
+export interface RestockRequest {
+  id: string;
+  kanban_node_id: string;
+  kanban_path: string;
+  item_id: string;
+  item_number: string;
+  description: string | null;
+  requested_qty: number | null;
+  note: string | null;
+  state: RestockState;
+  requested_at: string;
+  requested_by: string | null;
+  closed_at: string | null;
+  closed_by: string | null;
+  /** What the operator confirmed was used. Null until fulfilled. Stored on the
+   *  request: no stock moves at acknowledgment, so no ledger row carries it. */
+  consumed_qty: number | null;
+  /** How much has been issued into this Kanban since the request was raised —
+   *  "has my restock arrived yet". NOT a bin balance; a Kanban holds none. */
+  issued_since_qty: number;
+}
+
+export interface RestockRequestList {
+  items: RestockRequest[];
+  total: number;
+}
+
+export interface RestockRequestInput {
+  kanban_node_id: string;
+  item_id: string;
+  /** Optional — "we're low" is a legitimate request. */
+  requested_qty?: number | null;
+  note?: string | null;
+}
+
+/** Closing a restock request. The signature IS the acknowledgment.
+ *
+ *  `qty` is optional and the UI does not ask for it. It was collected at first,
+ *  on the reading that KAN-001's "marks the depleted quantity consumed" wanted
+ *  a number — but the stock was already debited at issue, so nothing consumes
+ *  that figure: no balance moves, no report reads it, nothing reconciles
+ *  against it. What it did produce was an attestation reading "0 was used"
+ *  whenever the request carried no quantity, which is a false sentence over a
+ *  Part 11 signature. The field stays on the wire for an integration that has a
+ *  real number to record. */
+export interface AcknowledgeConsumptionInput {
+  qty?: number | null;
+  note?: string | null;
+  evidence_id: string;
+}
+
+export const kanbanRestockApi = {
+  /** `itemId` asks the other way round — every open request for one
+   *  consumable, across all Kanbans. That is the item page's question: a
+   *  request is raised on the floor and answered in stores, by different
+   *  people on different screens. */
+  listRequests: (
+    params: {
+      kanbanNodeId?: string;
+      itemId?: string;
+      state?: RestockState;
+      limit?: number;
+      offset?: number;
+    } = {},
+    opts?: { signal?: AbortSignal },
+  ) =>
+    api.get<RestockRequestList>(
+      `/consumables/restock-requests${qs({
+        kanban_node_id: params.kanbanNodeId,
+        item_id: params.itemId,
+        state: params.state,
+        limit: params.limit === undefined ? undefined : String(params.limit),
+        offset: params.offset === undefined ? undefined : String(params.offset),
+      })}`,
+      { signal: opts?.signal },
+    ),
+
+  /** Not e-signed: asking for more moves no stock and asserts nothing about
+   *  material. Any consumable may be requested — the bin need not already hold
+   *  it, which is the point of raising the ask. */
+  createRequest: (input: RestockRequestInput) =>
+    api.post<RestockRequest>('/consumables/restock-requests', { json: input }),
+
+  cancelRequest: (requestId: string) =>
+    api.post<RestockRequest>(`/consumables/restock-requests/${requestId}/cancel`, { json: {} }),
+
+  /** E-signed (`consumable.consumption`). Records the figure and closes the
+   *  request; moves no stock, because the units were debited at issue. */
+  acknowledgeConsumption: (requestId: string, input: AcknowledgeConsumptionInput) =>
+    api.post<RestockRequest>(
+      `/consumables/restock-requests/${requestId}/acknowledge`,
+      { json: input },
+    ),
+};
