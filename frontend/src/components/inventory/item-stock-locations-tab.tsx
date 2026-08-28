@@ -8,7 +8,7 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { LotLink } from '@/components/inventory/lot-link';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
@@ -220,13 +220,13 @@ export function ItemStockLocationsTab({
                       className="border-b border-border/60 last:border-b-0"
                     >
                       <td className="px-4 py-2.5">
-                        <LocationLink
-                          nodeId={r.node_id}
-                          // The API sends the full breadcrumb; show it whole so
-                          // "Shelf B" is never ambiguous between two areas.
-                          name={r.location}
-                          path={r.location}
-                        />
+                        {/* The API sends the full breadcrumb. It used to be
+                            printed whole, so that "Shelf B" was never ambiguous
+                            between two areas — but the cost was a column of
+                            near-identical prefixes truncating away the one part
+                            that identifies the place. The hover panel answers
+                            the ambiguity without spending the column on it. */}
+                        <LocationPath nodeId={r.node_id} path={r.location} />
                       </td>
                       <td className="px-4 py-2.5 font-mono text-xs text-text-2">
                         {/* Click through to the lot, as the Unit Ledger and a

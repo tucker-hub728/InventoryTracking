@@ -18,6 +18,32 @@ Excess can be handed back at any point in production with no lot assignment
 (REQ-2026-07-01-TRX-008), and cancelling an in-production kit returns
 everything — nothing is ever stranded, because nothing was bound to a
 production lot at kitting (TRX-002).
+
+Who may do what (REQ-2026-08-13-CTL-001, client 2026-08-27)
+-----------------------------------------------------------
+Every route that puts material BACK into inventory is Super-Admin-only, and
+every one of them is already recorded — an audit row on ``app.kits`` plus the
+ledger movement it wrote:
+
+  ==========================  =======================  ===================
+  Route                       Returns material?        Who
+  ==========================  =======================  ===================
+  ``/{id}/close-out``         yes — the back-flush     super_admin
+  ``/{id}/lines/{lid}/return``yes — TRX-008 excess     super_admin
+  ``/{id}/cancel``            yes — the whole floor    super_admin
+  ``/{id}/produce``           no                       inventory:sign
+  ``/{id}/issue``, ``/add``   no (material goes OUT)   inventory:create
+  ==========================  =======================  ===================
+
+The split is deliberate: **producing stays open to operators** so the floor is
+never blocked waiting on an admin, while the three doors that credit stock back
+— the manual returns and the automatic close-out back-flush that CTL-001 calls
+"the automatic close-out backfill" — need the highest role. Cancel is in the
+list because a post-issue cancel *is* a bulk return, not merely a status flip.
+
+The gate is a route DEPENDENCY, not a check inside the handler, so a refused
+close-out or cancel is rejected before ``consume_reauth_evidence`` runs and the
+operator's signature ticket is not burned on a 403.
 """
 
 from __future__ import annotations
@@ -39,7 +65,11 @@ from app.locations import repository as loc_repo
 from app.models.inventory import Item, StockMovement
 from app.models.kitting import Kit, KitLine
 from app.models.locations import LocationNode, is_ln2_node
-from app.security.permissions import RequirePermission
+from app.security.permissions import (
+    SUPER_ADMIN_ROLE,
+    RequirePermission,
+    RequireRole,
+)
 
 from . import repository as kit_repo
 from .schemas import (
@@ -99,6 +129,25 @@ _BUILT_TIERS = ("sub_assembly", "finished_good")
 # every built item from two inputs (CR+CR→AY, AY+AY→AY, CR+AY→FG), so a
 # single-line BOM is an unfinished recipe, not a kittable item.
 _MIN_BOM_LINES = 2
+
+
+def _super_admin_only(action: str) -> RequireRole:
+    """CTL-001 — gate a return-to-inventory route on ``super_admin``.
+
+    Pairs with the route's existing ``RequirePermission``: that one says the
+    caller may write inventory at all, this one says the caller is allowed
+    *this* action. Both are needed, because ``operator`` holds
+    ``inventory:create`` AND ``inventory:sign`` — the permission matrix cannot
+    tell an operator from an admin for write purposes, only the role can.
+
+    ``action`` is the verb as the operator would say it ("close out a kit"), so
+    the 403 reads as a sentence rather than as a role dump.
+    """
+    return RequireRole(
+        SUPER_ADMIN_ROLE,
+        what=action,
+        message=f"Only a Super Admin can {action}",
+    )
 
 
 def _parse_uuid_or_422(value: str, *, field: str) -> uuid.UUID:
@@ -2019,8 +2068,16 @@ async def additional_issue(
 @kits_router.post(
     "/{kit_id}/lines/{line_id}/return",
     response_model=KitRead,
-    summary="Return excess material from the floor back into inventory (TRX-008)",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
+    summary=(
+        "Return excess material from the floor back into inventory (TRX-008). "
+        "Super Admin only."
+    ),
+    dependencies=[
+        Depends(RequirePermission("inventory", "create")),
+        # CTL-001: this is the manual return-to-inventory — material credited
+        # back outside the automatic close-out back-flush.
+        Depends(_super_admin_only("return material to inventory")),
+    ],
 )
 async def return_excess(
     db: DBSession,
@@ -2260,6 +2317,10 @@ async def save_production(
     "/{kit_id}/produce",
     response_model=KitRead,
     summary="Produce a batch of the AY/FG and keep the kit open. E-signed.",
+    # Deliberately NOT super-admin-gated (CTL-001, client 2026-08-27): a produce
+    # batch consumes floor material and mints the output lot, it never credits
+    # material back to inventory. Any signing role keeps producing; only the
+    # close that back-flushes the leftover needs a Super Admin.
     dependencies=[Depends(RequirePermission("inventory", "sign"))],
 )
 async def produce_kit(
@@ -2366,8 +2427,17 @@ async def produce_kit(
 @kits_router.post(
     "/{kit_id}/close-out",
     response_model=KitRead,
-    summary="Post output, reconcile, and back-flush the leftover. E-signed.",
-    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+    summary=(
+        "Post output, reconcile, and back-flush the leftover. E-signed. "
+        "Super Admin only."
+    ),
+    dependencies=[
+        Depends(RequirePermission("inventory", "sign")),
+        # CTL-001: the automatic close-out back-flush credits every leftover
+        # unit back to inventory, so the close is Super-Admin-only. Producing a
+        # batch is NOT — see ``produce_kit`` — so the floor keeps working.
+        Depends(_super_admin_only("close out a kit")),
+    ],
 )
 async def close_out_kit(
     db: DBSession,
@@ -2569,8 +2639,18 @@ async def close_out_kit(
 @kits_router.post(
     "/{kit_id}/cancel",
     response_model=KitRead,
-    summary="Cancel an open kit — draft (no movements) or in-production (returns everything). E-signed.",
-    dependencies=[Depends(RequirePermission("inventory", "create"))],
+    summary=(
+        "Cancel an open kit — draft (no movements) or in-production (returns "
+        "everything). E-signed. Super Admin only."
+    ),
+    dependencies=[
+        Depends(RequirePermission("inventory", "create")),
+        # CTL-001: a post-issue cancel hands the WHOLE floor back — the largest
+        # return the module can make. Gated on the role for the same reason the
+        # per-line return is, and uniformly, so a draft cancel doesn't teach a
+        # different rule than an in-production one.
+        Depends(_super_admin_only("cancel a kit")),
+    ],
 )
 async def cancel_kit(
     db: DBSession,

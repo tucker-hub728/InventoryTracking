@@ -144,6 +144,11 @@ class IssuedRow(BaseModel):
     # Where it was drawn FROM — the shelf / freezer / box that lost the stock.
     # A disposition log without this cannot answer "where did it go from".
     source_path: str | None = None
+    #: The source shelf itself, so the log can link back to the place the material
+    #: came FROM. This is not the drill-into-a-holding field the docstring rules
+    #: out — that would be the destination, which holds nothing. The source is a
+    #: real location that still exists and still has a page.
+    source_node_id: str | None = None
     issued_at: datetime
     issued_by: str | None = None
     notes: str | None = None

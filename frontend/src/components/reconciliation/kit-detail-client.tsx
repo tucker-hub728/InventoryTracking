@@ -62,6 +62,7 @@ import {
 import { locationNodesApi, LN2_NODE_TYPES, type LocationNode } from '@/lib/api/location-nodes';
 import { lotsApi } from '@/lib/api/lots';
 import { cn } from '@/lib/utils';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
@@ -178,6 +179,19 @@ const todayStr = (): string => {
 export function KitDetailClient({ kitId }: { kitId: string }) {
   const canSign = usePermission('inventory', 'sign');
   const canWrite = usePermission('inventory', 'create');
+  // CTL-001 — every action that puts material BACK into inventory is
+  // Super-Admin-only. `usePermission` can't answer this: `operator` holds both
+  // `inventory:create` and `inventory:sign`, and the frontend collapses
+  // `super_admin` into the same `admin` bucket, so the raw role is the only
+  // thing that tells them apart (`selectIsSuperAdmin`). The API enforces it
+  // too — this only hides controls that would come back a 403.
+  const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  /** The manual return (TRX-008) and the cancel that returns the whole floor. */
+  const canReturn = canWrite && isSuperAdmin;
+  /** The signed close, whose back-flush credits the leftover back to stock. */
+  const canClose = canSign && isSuperAdmin;
+  // Producing is deliberately NOT gated: it consumes floor material and mints
+  // the output lot, so an operator keeps building without an admin present.
 
   const [kit, setKit] = React.useState<ApiKit | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -597,11 +611,15 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // one button, so its own gate governs. Step 3 shows Produce AND Sign & close
   // together, so either being blocked is worth explaining; the close-only
   // reasons say "before closing" so they never read as blocking Produce.
+  //
+  // CTL-001: when the viewer cannot close, the close-only gates are not
+  // blocking anything they could do — counting them would print "3 things to
+  // fix above" next to a screen with no close button on it.
   const kitOpen = kit.status === 'issued' || kit.status === 'in_production';
   const stepBlocked = finalizeOnly
-    ? !closeReady
+    ? canClose && !closeReady
     : activeStep === 3
-      ? !produceReady || !closeReady
+      ? !produceReady || (canClose && !closeReady)
       : !produceReady;
   const primaryBlocked = kitOpen && (activeStep === 2 || activeStep === 3) && stepBlocked;
 
@@ -801,7 +819,11 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <Button variant="secondary" onClick={() => setActivityOpen(true)}>
               <ScrollText size={14} /> Activity log
             </Button>
-            {(editableDraft || inProd) && canWrite && (
+            {/* CTL-001: cancelling an issued kit hands the whole floor back to
+                inventory, so it is Super-Admin-only. A draft cancel moves
+                nothing, but it is hidden on the same rule — one visible
+                "Cancel kit" that sometimes works would read as a bug. */}
+            {(editableDraft || inProd) && canReturn && (
               <Button variant="danger" onClick={() => void onCancel()} disabled={busy}>
                 Cancel kit
               </Button>
@@ -903,6 +925,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           <ProductionStep
             kit={kit}
             canWrite={canWrite}
+            canReturn={canReturn}
             busy={busy}
             onIssueMore={(l) => setAddingTo(l)}
             onReturn={(l) => setReturningFrom(l)}
@@ -941,6 +964,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             returnLoc={returnLoc}
             nodeOptions={nodeOptions}
             prodName={prodName}
+            canClose={canClose}
           />
         )}
 
@@ -971,6 +995,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
               blockers: primaryBlocked ? blockers : [],
               canWrite,
               canSign,
+              canClose,
               busy,
               closeReady,
               produceReady,
@@ -1175,6 +1200,9 @@ function footerPrimary(
   ctx: {
     canWrite: boolean;
     canSign: boolean;
+    /** CTL-001 — ``canSign`` AND a real Super Admin. Gates the terminal close
+     *  only; ``canSign`` alone still governs Produce. */
+    canClose: boolean;
     busy: boolean;
     closeReady: boolean;
     produceReady: boolean;
@@ -1225,7 +1253,10 @@ function footerPrimary(
   // Review-and-produce screen), or "Review & close" for a pure finalize.
   if (activeStep === 2 && open) {
     const finalize = !ctx.producingNow;
-    const canAdvance = finalize ? ctx.closeReady : ctx.produceReady;
+    // CTL-001: for a viewer who cannot close, this button is pure navigation to
+    // a read-only Review — gating it on ``closeReady`` would strand them on
+    // Close-Out behind conditions only a Super Admin can act on.
+    const canAdvance = finalize ? !ctx.canClose || ctx.closeReady : ctx.produceReady;
     return (
       <Button
         variant="primary"
@@ -1235,7 +1266,10 @@ function footerPrimary(
       >
         {finalize ? (
           <>
-            Review &amp; close <ArrowRight size={14} />
+            {/* CTL-001: a non-Super-Admin can still read the Review step, so
+                the step stays reachable — the button just stops promising a
+                close it cannot perform. */}
+            {ctx.canClose ? 'Review & close' : 'Review'} <ArrowRight size={14} />
           </>
         ) : (
           <>
@@ -1267,7 +1301,12 @@ function footerPrimary(
             Produce another batch
           </Button>
         )}
-        {ctx.canSign && (
+        {/* CTL-001 — the close back-flushes every leftover unit to inventory,
+            so it needs a Super Admin. Hidden, not disabled: the two live
+            buttons beside it (Produce / Produce another batch) are the whole
+            job an operator still has here, and a permanently dead primary
+            would out-rank them. */}
+        {ctx.canClose ? (
           <Button
             variant={ctx.producingNow ? 'secondary' : 'primary'}
             onClick={ctx.onClose}
@@ -1276,6 +1315,10 @@ function footerPrimary(
           >
             Sign &amp; close kit <ArrowRight size={14} />
           </Button>
+        ) : (
+          <span className="text-xs text-text-3">
+            A Super Admin signs the close-out.
+          </span>
         )}
       </div>
     );
@@ -1430,12 +1473,16 @@ function IssueStep({
 function ProductionStep({
   kit,
   canWrite,
+  canReturn,
   busy,
   onIssueMore,
   onReturn,
 }: {
   kit: ApiKit;
   canWrite: boolean;
+  /** CTL-001 — Super Admin only. Issuing more is still ``canWrite``: material
+   *  going OUT to the floor is not a return. */
+  canReturn: boolean;
   busy: boolean;
   onIssueMore: (line: ApiKitLine) => void;
   onReturn: (line: ApiKitLine) => void;
@@ -1532,14 +1579,20 @@ function ProductionStep({
                         >
                           <Plus size={12} /> Issue more
                         </Button>
+                        {/* Disabled rather than hidden: the row's Returned
+                            column already tells an operator the action exists,
+                            so removing the button would look broken. The
+                            tooltip says who can. */}
                         <Button
                           variant="ghost"
                           size="sm"
-                          disabled={!canWrite || busy || floor <= 0}
+                          disabled={!canReturn || busy || floor <= 0}
                           title={
-                            floor > 0
-                              ? 'Return material to inventory'
-                              : 'Nothing on the floor to return'
+                            !canReturn
+                              ? 'Only a Super Admin can return material to inventory'
+                              : floor > 0
+                                ? 'Return material to inventory'
+                                : 'Nothing on the floor to return'
                           }
                           onClick={() => onReturn(line)}
                         >
@@ -1559,6 +1612,15 @@ function ProductionStep({
         Nothing here is final — adjust freely. The produced output is recorded and the leftover
         back-flushed at close-out, in one signed step.
       </RuleNote>
+      {/* CTL-001 — say it once here rather than only in a tooltip, so an
+          operator planning the day knows to line up a Super Admin. */}
+      {!canReturn && editable && (
+        <RuleNote>
+          Returning material to inventory is restricted to a{' '}
+          <span className="text-text-2">Super Admin</span>, and every return is recorded. You can
+          still issue more.
+        </RuleNote>
+      )}
     </div>
   );
 }
@@ -2195,6 +2257,7 @@ function ReviewStep({
   returnLoc,
   nodeOptions,
   prodName,
+  canClose,
 }: {
   kit: ApiKit;
   output: OutputDraft;
@@ -2207,6 +2270,9 @@ function ReviewStep({
   nodeOptions: SelectOption[];
   /** Resolved production-floor name (production nodes aren't in nodeOptions). */
   prodName: string;
+  /** CTL-001 — false for everyone but a Super Admin. The step stays readable
+   *  either way; only the wording of what happens next changes. */
+  canClose: boolean;
 }) {
   const closed = kit.status === 'closed';
   // Good/scrap accumulate on the kit across produce batches (KIT-007).
@@ -2391,11 +2457,20 @@ function ReviewStep({
             </p>
           </div>
         </Card>
-      ) : (
+      ) : canClose ? (
         <RuleNote>
           <span className="text-text-2">Produce another batch</span> to make more (the kit stays
           open), or <span className="text-text-2">Sign &amp; close</span> to finish — the{' '}
           {floorTotal} unit{floorTotal === 1 ? '' : 's'} still on the floor back-flush to inventory.
+        </RuleNote>
+      ) : (
+        /* CTL-001 — the close back-flushes the leftover to inventory, so only a
+           Super Admin signs it. Producing stays available here. */
+        <RuleNote>
+          <span className="text-text-2">Produce another batch</span> to make more (the kit stays
+          open). Closing the kit back-flushes the {floorTotal} unit
+          {floorTotal === 1 ? '' : 's'} still on the floor to inventory, so it is signed by a{' '}
+          <span className="text-text-2">Super Admin</span> and recorded.
         </RuleNote>
       )}
     </div>

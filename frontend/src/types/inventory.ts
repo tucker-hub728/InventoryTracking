@@ -96,8 +96,13 @@ export interface LedgerEntry {
   kitId?: string | null;
   /** Customer shipment (CUST-001 / TRX-005): the named customer the finished
    *  good left inventory to (null = catalog / unassigned), and the reference /
-   *  tracking number. Set only on ``customer_shipment`` rows. */
+   *  tracking number. Set only on ``customer_shipment`` rows.
+   *
+   *  The id is carried alongside the name so the column can link to that
+   *  customer's shipping history. It can be null while the name is not —
+   *  the ledger is append-only and outlives the master data it names. */
   customerName?: string | null;
+  customerId?: string | null;
   referenceNumber?: string | null;
   /** True if this row is itself a reversal of an earlier row. */
   isReversal?: boolean;

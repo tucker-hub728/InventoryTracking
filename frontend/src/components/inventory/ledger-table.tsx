@@ -30,8 +30,9 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { EmptyState } from '@/components/shared/empty-state';
+import { CustomerLink } from '@/components/customers/customer-link';
 import { LotLink } from '@/components/inventory/lot-link';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import type { ApiItemKitConsumption } from '@/lib/api/kits';
 import type { LedgerEntry } from '@/types/inventory';
 import type { BadgeTone } from '@/types/ui';
@@ -634,7 +635,7 @@ export function LedgerTable({
                   {/* The storage location the movement touched. For a shipment
                       that's the source the finished good left from. */}
                   <TableCell className="text-xs text-text-2">
-                    <LocationLink
+                    <LocationPath
                       nodeId={e.locationId}
                       name={e.location}
                       path={e.locationPath}
@@ -652,11 +653,19 @@ export function LedgerTable({
                   {showCustomer && (
                     <TableCell className="text-xs text-text-2">
                       {e.movementType === 'customer_shipment' ? (
-                        <span
-                          className="block truncate"
-                          title={e.referenceNumber ? `Ref ${e.referenceNumber}` : undefined}
-                        >
-                          {e.customerName ?? (
+                        <span className="block truncate">
+                          {e.customerName ? (
+                            // Links to that customer's shipping history — the
+                            // same move the Lot and Location columns beside it
+                            // already make. Falls back to plain text when the
+                            // row names a customer the master data no longer
+                            // has; see CustomerLink.
+                            <CustomerLink
+                              customerName={e.customerName}
+                              customerId={e.customerId}
+                              className="block"
+                            />
+                          ) : (
                             <span className="italic text-text-3">Catalog (no customer)</span>
                           )}
                         </span>

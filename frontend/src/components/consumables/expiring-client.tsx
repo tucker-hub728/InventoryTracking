@@ -20,7 +20,7 @@ import {
 import { EmptyState } from '@/components/shared/empty-state';
 import { PageHeader } from '@/components/shared/page-header';
 import { ItemLink } from '@/components/inventory/item-link';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import { AcknowledgeDialog } from '@/components/consumables/acknowledge-dialog';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
@@ -145,12 +145,14 @@ export function ExpiringClient() {
                   {r.lot_number && (
                     <span className="font-mono text-[11px] text-text-3">Lot {r.lot_number}</span>
                   )}
-                  {/* The whole breadcrumb is the link: both halves lead to the
-                      same place — that room's Kanban tab — and this list is
-                      cross-area, so the room name is the part that orients you. */}
-                  <LocationLink
+                  {/* This list is cross-area, so the room is what orients you —
+                      which is why the whole breadcrumb used to be printed here.
+                      It now lives in the hover panel instead, with every other
+                      location in the app: a column of full paths reads as noise
+                      long before it reads as orientation, and the station name
+                      is what the row is actually about. */}
+                  <LocationPath
                     nodeId={r.kanban_node_id}
-                    name={r.kanban_path}
                     path={r.kanban_path}
                     className="text-xs"
                   />

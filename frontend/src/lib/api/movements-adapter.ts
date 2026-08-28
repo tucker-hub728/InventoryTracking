@@ -93,6 +93,7 @@ export function apiMovementsToLedgerEntries(
       kitId: m.kit_id ?? null,
       kitNumber: m.kit_number ?? null,
       customerName: m.customer_name ?? null,
+      customerId: m.customer_id ?? null,
       referenceNumber: m.reference_number ?? null,
       isReversal: false,
       isReversed: false,
