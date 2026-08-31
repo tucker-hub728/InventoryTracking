@@ -35,6 +35,7 @@ import {
 } from '@/lib/api/consumables';
 import { refreshNavCounts } from '@/hooks/use-nav-counts';
 import { cn } from '@/lib/utils';
+import { LocationPath } from '@/components/locations/location-path';
 
 /** One-line explanation per outcome, so the operator picks by meaning rather
  *  than by guessing what the label implies for stock. */
@@ -167,7 +168,13 @@ export function AcknowledgeDialog({
                   {row.lot_number && <span className="text-text-3"> · Lot {row.lot_number}</span>}
                 </p>
                 <p className="mt-1 text-text-3">
-                  Issued to {row.kanban_path} on {new Date(row.issued_at).toLocaleDateString()}
+                  {/* The station, not the whole address. TRX-006 wants the
+                      acknowledgment to say WHERE — which the station name does,
+                      with the room a hover away rather than four words of
+                      prefix in the middle of a sentence. */}
+                  Issued to{' '}
+                  <LocationPath nodeId={row.kanban_node_id} path={row.kanban_path} /> on{' '}
+                  {new Date(row.issued_at).toLocaleDateString()}
                   {row.issued_by && <> by {row.issued_by}</>}
                 </p>
                 {row.expiration_date && (

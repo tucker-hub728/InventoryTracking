@@ -51,6 +51,8 @@ from app.locations.schemas import (
     PlaceRequest,
     ProductionAreaCreate,
     ReceiveToInventoryRequest,
+    StockAdjustRequest,
+    StockAdjustResult,
     StorageCategoryCreate,
     StorageGroupsUpdate,
     TransferBatchRequest,
@@ -2484,6 +2486,181 @@ async def transfer_multi(
     )
     await db.commit()
     return results
+
+
+@alloc_router.post(
+    "/adjust",
+    response_model=StockAdjustResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Correct the stock at one location, in or out, signed (CTL-002)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def adjust_stock(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: StockAdjustRequest,
+) -> StockAdjustResult:
+    """Move a ``(lot × location)`` balance to what is actually there.
+
+    REQ-2026-08-13-CTL-002 asks that an error be corrected by a transaction
+    carrying an explanatory comment, visible in the ledger, rather than by a
+    silent edit. This is that transaction for a counting discrepancy: the shelf
+    holds 58 where the record says 60, or 3 vials turn up that were never
+    recorded. One signed ``adjustment`` row, with the location on it.
+
+    **Not an edit of the lot's received quantity.** ``lots.ordered_qty`` records
+    what arrived; a miscount later does not change that, and rewriting it would
+    put the lot at odds with the placement cap every placement path enforces.
+    So an adjustment IN is not capped by ``ordered_qty`` — finding more than the
+    paperwork claimed is precisely the discrepancy being recorded, and refusing
+    it would leave the operator with no way to make the record true.
+
+    Two rules, and they come from the material rather than from a label:
+
+    * **Out cannot overdraw.** The draw is the same one transfer, shipment and
+      material issue use (``draw_lot_at_node``), so a box gives up the exact
+      vials selected and a flat location goes FIFO, and taking more than is
+      there is refused with ``adjust_exceeds_available``.
+    * **In needs the lot to have been received to inventory already.** Otherwise
+      this becomes a second, uncapped receiving door that skips the
+      ``ordered_qty`` cap and the release step. Deliberately checked against
+      placement (``sum_received_qty_for_lot``) and not against
+      ``release_state`` — the state is a label (STS-003), it can be moved back
+      to quarantine by a signed decision, and a partial receipt stays
+      quarantined while holding real material, so gating on it would be both
+      bypassable and wrong for partial receipts.
+
+    The signature's subject is the lot the operator opened, while the ticket
+    targets the ledger row it authorised — the split VR-006 asks for.
+    """
+    lot_uuid = _parse_uuid(payload.lot_id, field="lot_id")
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+
+    lot = await inv_repo.get_lot(db, lot_uuid)
+    if lot is None or lot.deleted_at is not None:
+        raise NotFoundError(f"Lot {payload.lot_id} not found")
+
+    node = await _resolve_storage_node(db, payload.node_id)
+    grid = is_grid_node(node.node_type)
+
+    # A box carries one unit per cell, so which vials is not a detail the
+    # operator may skip — without it the adjustment cannot say which positions
+    # it emptied or filled, and the grid would silently disagree with the count.
+    if grid and not (payload.cells or payload.cell_allocation_ids):
+        raise ValidationError(
+            f"{node.name} stores one unit per position, so an adjustment must "
+            f"name the {'positions to fill' if payload.direction == 'in' else 'vials to remove'}.",
+            code="cells_required",
+        )
+    if not grid and (payload.cells or payload.cell_allocation_ids):
+        raise ValidationError(
+            f"{node.name} is not a box, so it has no vial positions.",
+            code="cells_not_supported",
+        )
+
+    if payload.direction == "out":
+        await loc_repo.draw_lot_at_node(
+            db,
+            item_id=lot.item_id,
+            lot_id=lot_uuid,
+            node_id=node.id,
+            qty=payload.qty,
+            cell_allocation_ids=payload.cell_allocation_ids or None,
+            line_no=1,
+            exceeds_code="adjust_exceeds_available",
+        )
+    else:
+        received_ever = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
+        if received_ever <= 0:
+            raise ConflictError(
+                f"Lot {lot.lot_number} has not been received to inventory yet, so "
+                f"there is no balance to correct. Receive it to inventory first.",
+                code="lot_not_in_inventory",
+            )
+        if payload.cells:
+            for cell in payload.cells:
+                await _validate_cell_target(
+                    db,
+                    node=node,
+                    grid_row=cell.grid_row,
+                    grid_col=cell.grid_col,
+                    qty=Decimal("1"),
+                    override=False,
+                    role=current.role,
+                )
+                await loc_repo.create_allocation(
+                    db,
+                    lot_id=lot_uuid,
+                    location_node_id=node.id,
+                    qty=Decimal("1"),
+                    grid_row=cell.grid_row,
+                    grid_col=cell.grid_col,
+                    created_by_user_id=current.id,
+                    notes=payload.notes,
+                )
+        else:
+            # One allocation per (location, lot), as the transfer path does: two
+            # rows for the same lot on the same shelf is a split with no meaning.
+            await loc_repo.create_allocation(
+                db,
+                lot_id=lot_uuid,
+                location_node_id=node.id,
+                qty=Decimal(payload.qty),
+                created_by_user_id=current.id,
+                notes=payload.notes,
+            )
+    await db.flush()
+
+    qty_delta = payload.qty if payload.direction == "in" else -payload.qty
+    direction_word = "in" if payload.direction == "in" else "out"
+    note = (
+        f"Adjusted {payload.qty} {direction_word} at {node.name}"
+        # The comment is optional on every e-signature (client 2026-06-29), so
+        # the note states the correction on its own and only carries the
+        # rationale when the operator gave one.
+        + (f" — {payload.notes}" if payload.notes else "")
+    )
+    movement = await loc_repo.create_node_adjustment_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot_uuid,
+        node_id=node.id,
+        qty_delta=qty_delta,
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=note,
+    )
+
+    from app.kitting import repository as kit_repo
+
+    qty_at_node = sum(
+        int(a.qty)
+        for a in await kit_repo.allocations_for_item_at_node(db, lot.item_id, node.id)
+        if a.lot_id == lot_uuid
+    )
+
+    # Consumed LAST so a replay or an expiry rolls the adjustment back with it.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.adjustment",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+        # Subject is the lot: it is the record the operator opened and signed
+        # about, while the target above is the row the signature authorised.
+        record_table="app.lots",
+        record_id=lot_uuid,
+    )
+    await db.commit()
+
+    return StockAdjustResult(
+        movement_id=str(movement.id),
+        lot_id=str(lot_uuid),
+        node_id=str(node.id),
+        qty_delta=qty_delta,
+        qty_at_node=qty_at_node,
+    )
 
 
 @alloc_router.get(

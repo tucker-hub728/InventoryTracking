@@ -185,6 +185,20 @@ def _needed(line: KitLine, target_qty: int) -> Decimal:
     return line.qty_per_unit * target_qty
 
 
+def _with_reason(note: str, reason: str | None) -> str:
+    """Append the e-signature comment to a ledger note.
+
+    REQ-2026-08-13-CTL-002: an error is corrected by re-kitting with an
+    explanatory comment, and the correction has to be visible *in the ledger* —
+    not only on the signature row. Every signed kitting write routes its note
+    through here so the operator's rationale lands on ``stock_movements.notes``.
+
+    The comment stays OPTIONAL (client, 2026-06-29 — no e-sign requires one),
+    so a blank reason leaves the note exactly as it was.
+    """
+    return f"{note} — {reason}" if reason else note
+
+
 def _kit_snapshot(kit: Kit) -> dict:
     """A full audit snapshot of a kit and *every* line.
 
@@ -2440,9 +2454,9 @@ async def return_excess(
                     f"(tried to return {req}).",
                     code="return_exceeds_lot_on_floor",
                 )
-        note = f"Returned {total} to inventory from {kit.kit_number}"
-        if payload.reason:
-            note = f"{note} — {payload.reason}"
+        note = _with_reason(
+            f"Returned {total} to inventory from {kit.kit_number}", payload.reason
+        )
         for lot_uuid, q, node_uuid, cells in picks:
             await _return_to_inventory(
                 db,
@@ -2491,9 +2505,9 @@ async def return_excess(
             claimed=claimed_cells,
             origin_types=origin_types,
         )
-        note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
-        if payload.reason:
-            note = f"{note} — {payload.reason}"
+        note = _with_reason(
+            f"Returned {payload.qty} to inventory from {kit.kit_number}", payload.reason
+        )
         for node_uuid, q, cells in resolved:
             await _return_to_inventory(
                 db,
@@ -2645,7 +2659,9 @@ async def produce_kit(
         lot_number=lot_no,
         used_by_line=used_by_line,
         evidence=evidence_uuid,
-        note=f"Produced batch of {payload.good_qty} for {kit.kit_number}",
+        note=_with_reason(
+            f"Produced batch of {payload.good_qty} for {kit.kit_number}", payload.reason
+        ),
         current=current,
     )
     kit.status = "in_production"  # stays OPEN — produce more, or close later
@@ -2803,7 +2819,10 @@ async def close_out_kit(
         lot_number=lot_no,
         used_by_line=used_by_line,
         evidence=evidence_uuid,
-        note=f"{payload.good_qty} produced and stocked for {kit.kit_number}",
+        note=_with_reason(
+            f"{payload.good_qty} produced and stocked for {kit.kit_number}",
+            payload.reason,
+        ),
         current=current,
     )
 
@@ -2842,9 +2861,10 @@ async def close_out_kit(
                 qty=qty,
                 to_node=node_uuid,
                 evidence=evidence_uuid,
-                note=(
+                note=_with_reason(
                     f"Issued {line.issued_qty + line.additional_issued_qty}, "
-                    f"used {line.used_qty}, backflushed {qty}"
+                    f"used {line.used_qty}, backflushed {qty}",
+                    payload.reason,
                 ),
                 current=current,
                 # Back-flushing into an LN2 box places one unit per chosen cell.
@@ -3015,7 +3035,10 @@ async def cancel_kit(
                     qty=qty,
                     to_node=node_uuid,
                     evidence=None,
-                    note=f"{kit.kit_number} cancelled — {qty} returned to inventory",
+                    note=_with_reason(
+                        f"{kit.kit_number} cancelled — {qty} returned to inventory",
+                        payload.reason,
+                    ),
                     current=current,
                     return_cells=cells,
                     movement_type="kit_cancel_return",

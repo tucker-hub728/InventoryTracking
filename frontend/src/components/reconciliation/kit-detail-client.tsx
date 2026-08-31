@@ -68,6 +68,7 @@ import { selectIsAdminOrAbove, selectIsSuperAdmin, useAuthStore } from '@/stores
 
 import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
+import { LocationPath } from '@/components/locations/location-path';
 import {
   LotSourcePicker,
   autoFillFifo,
@@ -84,7 +85,6 @@ import {
   RuleNote,
   Stat,
   formatDateTime,
-  type SelectOption,
 } from './recon-bits';
 import { BatchDetailSheet } from './batch-detail-sheet';
 import { KitCostExportButton } from './kit-cost-export-button';
@@ -354,10 +354,12 @@ export function KitDetailClient({
     return () => ctrl.abort();
   }, [load]);
 
-  const nodeOptions: SelectOption[] = React.useMemo(
-    () => nodes.map((n) => ({ value: n.id, label: n.path ?? n.name })),
-    [nodes],
-  );
+  // ``nodeOptions`` — ``{value: n.id, label: n.path ?? n.name}`` — used to be
+  // built here and threaded into the steps so a chosen node could be shown as
+  // text. That made a DROPDOWN's option label do double duty as display, which
+  // is why those cells printed a full path. ``LocationPath`` resolves a node id
+  // against the shared location forest instead, so nothing needs the list and
+  // the pickers below build their own from ``nodes``.
   // Output + back-flush may land on a shelf, freezer sub-location, or an LN2 box
   // (KIT-005) — a box only alongside an explicit free-cell selection.
   const returnableIds = React.useMemo(
@@ -1000,7 +1002,6 @@ export function KitDetailClient({
         {activeStep === 0 && (
           <IssueStep
             kit={kit}
-            nodeOptions={nodeOptions}
             editableDraft={editableDraft}
             busy={busy}
             picks={linePicks}
@@ -1050,7 +1051,6 @@ export function KitDetailClient({
             outputDests={outputDests}
             used={used}
             returnLoc={returnLoc}
-            nodeOptions={nodeOptions}
             prodName={prodName}
             canClose={canClose}
           />
@@ -1417,14 +1417,12 @@ function footerPrimary(
 
 function IssueStep({
   kit,
-  nodeOptions,
   editableDraft,
   busy,
   picks,
   onPicksChange,
 }: {
   kit: ApiKit;
-  nodeOptions: SelectOption[];
   editableDraft: boolean;
   busy: boolean;
   picks: Record<string, LotPick[]>;
@@ -1524,19 +1522,23 @@ function IssueStep({
                             <span
                               key={idx}
                               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface/60 px-2 py-0.5 text-[11px]"
-                              title={f.location}
                             >
                               <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
                               <span className="text-text-3">·</span>
-                              <span className="max-w-[160px] truncate text-text-3">{f.location}</span>
+                              {/* The shelf, with its ancestry on hover. A chip
+                                  this narrow truncated the path at 160px, which
+                                  ate the leaf and left the room prefix — the
+                                  one part every chip in the row shares. */}
+                              <span className="max-w-[160px] text-text-3">
+                                <LocationPath path={f.location} />
+                              </span>
                               <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
                             </span>
                           ))}
                         </div>
                       ) : (
-                        <span className="text-xs text-text-3">
-                          {nodeOptions.find((o) => o.value === line.source_location_node_id)?.label ??
-                            '—'}
+                        <span className="min-w-0 text-xs text-text-3">
+                          <LocationPath nodeId={line.source_location_node_id} />
                         </span>
                       )}
                     </td>
@@ -2343,7 +2345,6 @@ function ReviewStep({
   outputDests,
   used,
   returnLoc,
-  nodeOptions,
   prodName,
   canClose,
 }: {
@@ -2355,7 +2356,6 @@ function ReviewStep({
   outputDests: OutputDest[];
   used: Record<string, number | null>;
   returnLoc: Record<string, string>;
-  nodeOptions: SelectOption[];
   /** Resolved production-floor name (production nodes aren't in nodeOptions). */
   prodName: string;
   /** CTL-001 — false for everyone but a Super Admin. The step stays readable
@@ -2371,8 +2371,11 @@ function ReviewStep({
   const producingNow = pendingGood >= 1;
   const totalMade = producedSoFar + scrapSoFar;
   const yieldPct = totalMade > 0 ? producedSoFar / totalMade : null;
-  const label = (id: string | null | undefined) =>
-    id ? (nodeOptions.find((o) => o.value === id)?.label ?? '—') : '—';
+  // A ``label(nodeId)`` helper used to turn a node id into the picker's own
+  // option text, which was the full path. ``LocationPath`` resolves the id
+  // against the shared location forest instead, so it renders the leaf, hovers
+  // the hierarchy and links — and the display no longer borrows a string that
+  // exists to disambiguate a dropdown.
   // ``on_floor_qty`` already nets out cumulative used, so it is the material
   // still physically on the floor — which is exactly what back-flushes at close.
   const floorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
@@ -2466,7 +2469,9 @@ function ReviewStep({
                 dests.map((d) => (
                   <li key={d.key} className="flex items-baseline gap-2 text-sm">
                     <ArrowRight size={12} className="shrink-0 text-text-3" aria-hidden />
-                    <span className="text-text">{label(d.location_node_id)}</span>
+                    <span className="min-w-0 text-text">
+                      <LocationPath nodeId={d.location_node_id} />
+                    </span>
                     <span className="font-mono tabular-nums text-text-2">×{destPlaced(d)}</span>
                     {d.isBox && (
                       <span className="text-[11px] text-text-3">
@@ -2487,7 +2492,6 @@ function ReviewStep({
             mode="batch"
             used={used}
             returnLoc={returnLoc}
-            label={label}
             closed={closed}
           />
         </Card>
@@ -2671,7 +2675,6 @@ function ReviewStep({
             mode="kit"
             used={used}
             returnLoc={returnLoc}
-            label={label}
             closed={closed}
           />
         </Card>
@@ -2755,14 +2758,12 @@ function ComponentReviewTable({
   mode,
   used,
   returnLoc,
-  label,
   closed,
 }: {
   kit: ApiKit;
   mode: 'batch' | 'kit';
   used: Record<string, number | null>;
   returnLoc: Record<string, string>;
-  label: (id: string | null | undefined) => string;
   closed: boolean;
 }) {
   const isBatch = mode === 'batch';
@@ -2845,9 +2846,13 @@ function ComponentReviewTable({
                 </td>
                 <td className="px-4 py-2.5">
                   <span className="text-xs text-text-2">
-                    {remaining > 0
-                      ? label(closed ? line.return_location_node_id : returnLoc[line.id])
-                      : '—'}
+                    {remaining > 0 ? (
+                      <LocationPath
+                        nodeId={closed ? line.return_location_node_id : returnLoc[line.id]}
+                      />
+                    ) : (
+                      '—'
+                    )}
                   </span>
                 </td>
               </tr>
@@ -3703,7 +3708,9 @@ function TimelineItem({ node, last }: { node: TimelineNode; last: boolean }) {
             {node.outputLocation && (
               <div className="flex gap-1.5">
                 <dt className="text-text-3">Stocked to</dt>
-                <dd className="font-medium text-text-2">{node.outputLocation}</dd>
+                <dd className="min-w-0 font-medium text-text-2">
+                  <LocationPath path={node.outputLocation} />
+                </dd>
               </div>
             )}
             {node.outputExpiry && (

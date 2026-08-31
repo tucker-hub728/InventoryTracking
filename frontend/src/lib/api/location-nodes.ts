@@ -495,6 +495,34 @@ export interface LotAvailability {
   remaining: number | null;
 }
 
+/** Correct what is actually at one location, up or down (CTL-002).
+ *
+ *  Direction is explicit and ``qty`` is always positive — "adjust out 5" is
+ *  what the operator is doing, and a minus sign is too easy to lose in a form.
+ *  A box carries one unit per position, so ``cells`` names the free positions
+ *  to fill going in and ``cell_allocation_ids`` the exact vials coming out;
+ *  flat locations leave both empty. */
+export interface StockAdjustInput {
+  lot_id: string;
+  node_id: string;
+  direction: 'in' | 'out';
+  qty: number;
+  cells?: { grid_row: number; grid_col: number }[];
+  cell_allocation_ids?: string[];
+  evidence_id: string;
+  notes?: string | null;
+}
+
+export interface StockAdjustResult {
+  movement_id: string;
+  lot_id: string;
+  node_id: string;
+  /** Signed: positive going in, negative coming out. */
+  qty_delta: number;
+  /** The (lot × location) balance after the adjustment. */
+  qty_at_node: number;
+}
+
 export const locationNodesApi = {
   ln2Tree: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
     api.get<NodeTree[]>('/location-nodes/ln2-tree', {
@@ -620,6 +648,11 @@ export const locationNodesApi = {
    *  destination allocations come back. */
   transferMulti: (input: TransferMultiInput) =>
     api.post<Allocation[]>('/allocations/transfer-multi', { json: input }),
+
+  /** Correct one (lot × location) balance in or out — the counting correction
+   *  (CTL-002). Does NOT touch the lot's received quantity. */
+  adjust: (input: StockAdjustInput) =>
+    api.post<StockAdjustResult>('/allocations/adjust', { json: input }),
 
   lotAvailability: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<LotAvailability>(`/allocations/lot-availability/${lotId}`, {

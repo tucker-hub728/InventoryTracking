@@ -1261,12 +1261,38 @@ async def update_lot(
     if lot is None or lot.deleted_at is not None:
         raise NotFoundError(f"Lot {lot_id} not found")
 
-    # Quantity may be corrected post-receipt, but never below what is already
-    # physically placed in locations — the operator must unplace first.
+    # Quantity may be corrected post-receipt, but never below what this lot has
+    # already put into inventory. TWO floors, because consumption moves them
+    # apart and only one of them can be undone:
+    #
+    #   * ``sum_received_qty_for_lot`` — lifetime received to inventory. Every
+    #     placement path caps against this (``place_exceeds_ordered``) precisely
+    #     so consumed units keep counting and cannot free up capacity. It never
+    #     shrinks, so the operator cannot get under it by unplacing.
+    #   * ``sum_active_alloc_qty_for_lot`` — what is sitting in locations right
+    #     now. This one DOES shrink when material is used, and unplacing clears
+    #     it, so its message tells the operator to unplace first.
+    #
+    # Checking only the second (as this did until 2026-08-28) lets consumption
+    # lower the floor under a lot that has already spent its units: 360 received
+    # and 300 consumed leaves 60 allocated, so a "correction" to 60 would pass
+    # while the placement paths still believe 360 were received to inventory,
+    # and the availability endpoint would report negative remaining capacity.
+    # The lifetime floor is checked first because it is the one the operator
+    # cannot work around.
     new_qty: int | None = None
     origin_line = None
     if "ordered_qty" in patch:
         new_qty = patch["ordered_qty"]
+        received_ever = int(await loc_repo.sum_received_qty_for_lot(db, lot.id))
+        if new_qty < received_ever:
+            raise ConflictError(
+                f"{received_ever} unit(s) of this lot have already been "
+                f"received to inventory, and units that have since been used "
+                f"still count. The received quantity cannot be corrected below "
+                f"{received_ever}.",
+                code="qty_below_placed",
+            )
         placed = int(await loc_repo.sum_active_alloc_qty_for_lot(db, lot.id))
         if new_qty < placed:
             raise ConflictError(
@@ -1369,6 +1395,27 @@ async def update_lot(
                         status=new_status,
                         received_by_user_id=current.id,
                     )
+
+    # NOTE — a quantity correction writes NO stock movement, deliberately.
+    #
+    # It is tempting (this route did it for one day, 2026-08-28) to post an
+    # ``adjustment`` for the delta so CTL-002's "visible in the ledger" is
+    # satisfied here. It is wrong, because ``ordered_qty`` and the ledger count
+    # different things: ``ordered_qty`` is what ARRIVED, while every ledger
+    # unit-IN is written by *placement* (``receipt``, and per
+    # ``sum_received_qty_for_lot`` "place is the sole writer"). Correcting 360
+    # to 420 does not make 60 units exist — it makes 60 units *placeable*.
+    #
+    # Posting the delta therefore credits stock that is in no location, which is
+    # exactly what it looked like: an ``Adjusted +60`` row with a blank Location
+    # while every neighbouring row named one. Worse, it double-counts — placing
+    # those 60 writes its own ``receipt +60``, so a 420-unit lot reports 480.
+    #
+    # CTL-002 is satisfied without it, and more literally: the correction itself
+    # is signed and audited below (before/after plus the operator's comment),
+    # and the *re-receiving* the requirement actually names is the placement of
+    # the extra units — a real ``receipt`` row, with a real location and its own
+    # signature. Do not reintroduce a synthetic movement here.
 
     await record_entity_change(
         db,

@@ -1373,6 +1373,56 @@ async def create_node_receipt_movement(
     return movement
 
 
+async def create_node_adjustment_movement(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    node_id: uuid.UUID,
+    qty_delta: int,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> StockMovement:
+    """The ledger row for a counting correction at one location (CTL-002).
+
+    ``adjustment`` is the one movement type exempt from both
+    ``ck_movements_type_sign`` and ``ck_movements_locations`` (see ``issue01``),
+    which is exactly what this needs: the delta goes either way, and only one
+    side of the move exists. Units appearing are an IN *to* the node with no
+    origin — they were never anywhere else, that is the whole point — and units
+    disappearing are an OUT *from* it with no destination.
+
+    Naming that one side matters. The first attempt at CTL-002 wrote an
+    adjustment with neither, and the Unit Ledger showed a bare ``Adjusted +60``
+    against a blank Location while every neighbouring row named one. A
+    correction the reader cannot place is not a correction they can trust.
+
+    ``qty_delta`` must be non-zero — ``ck_movements_qty_abs_positive`` refuses a
+    no-op row, and the route rejects a zero quantity before reaching here.
+    """
+    path = await node_path_text(session, node_id)
+    going_in = qty_delta > 0
+    movement = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=None if going_in else node_id,
+        to_location_node_id=node_id if going_in else None,
+        from_location_path=None if going_in else path,
+        to_location_path=path if going_in else None,
+        movement_type="adjustment",
+        qty_delta=qty_delta,
+        qty_abs=abs(qty_delta),
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    mark_item(session, item_id)
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
 async def create_node_dispense_movement(
     session: AsyncSession,
     *,
