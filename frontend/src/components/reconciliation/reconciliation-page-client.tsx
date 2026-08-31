@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/select';
 import { LocationPath } from '@/components/locations/location-path';
 import { usePermission } from '@/hooks/use-permission';
+import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -30,6 +31,7 @@ import {
   type KitStatus,
 } from '@/lib/api/kits';
 
+import { KitCostExportButton } from './kit-cost-export-button';
 import { NewKitDialog } from './new-kit-dialog';
 import { ItemCell, KitStatusBadge, RuleNote, formatDate } from './recon-bits';
 
@@ -50,6 +52,14 @@ const OUTPUT_COL_HINT =
 
 export function ReconciliationPageClient() {
   const canCreate = usePermission('inventory', 'create');
+  // The cost export is Admin + Super Admin only: it carries what each customer
+  // is charged per finished lot, which `inventory:view` would hand to every
+  // read-only account. Mirrors the route's own RequireRole(*ADMIN_ROLES).
+  //
+  // `selectIsAdminOrAbove` reads the RAW backend role, not the collapsed RBAC
+  // bucket — `operator` also holds `inventory:create`, so a permission-matrix
+  // check could not tell the two apart.
+  const canExport = useAuthStore(selectIsAdminOrAbove);
 
   const [kits, setKits] = React.useState<ApiKitListItem[]>([]);
   const [total, setTotal] = React.useState(0);
@@ -124,11 +134,17 @@ export function ReconciliationPageClient() {
         title="Kitting"
         subtitle="Gather material for a build, issue it to production, then reconcile what was actually used and back-flush the rest."
         actions={
-          canCreate ? (
-            <Button variant="primary" onClick={() => setCreating(true)}>
-              <Plus size={14} /> New kit
-            </Button>
-          ) : undefined
+          <span className="flex items-center gap-2">
+            {/* RPT-003. Admin-gated in the UI to match the endpoint — a button
+                that always 403s teaches people to ignore errors. The server is
+                still the authority; this only hides what cannot be used. */}
+            {canExport && <KitCostExportButton />}
+            {canCreate && (
+              <Button variant="primary" onClick={() => setCreating(true)}>
+                <Plus size={14} /> New kit
+              </Button>
+            )}
+          </span>
         }
       />
 
@@ -383,3 +399,4 @@ function OutputCell({ target, good }: { target: number; good: number | null }) {
     </div>
   );
 }
+

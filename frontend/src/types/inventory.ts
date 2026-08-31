@@ -78,6 +78,15 @@ export interface LedgerEntry {
    *  per-lot subtotal can show it. Never rendered against an individual
    *  movement: a movement is a past event and this is the present state. */
   lotReleaseState?: LotReleaseState | null;
+  /** Decimal (string). The LOT's per-unit price as it is NOW (RPT-003).
+   *
+   *  Carried on the row for the same reason as `lotReleaseState`, and with the
+   *  same rule: it is present state, not history — prices stay editable after
+   *  receive and nothing records what one was on the day of a movement. So it
+   *  is rendered on the per-lot subtotal only, never against a movement.
+   *
+   *  `null` means no price recorded, which is NOT `0`. */
+  lotUnitPrice?: string | null;
   initials: string;
   /** Full ``app.users.full_name`` of the operator who recorded the row.
    *  Rendered in the ledger "By" column and the audit-timeline movement

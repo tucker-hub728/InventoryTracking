@@ -101,6 +101,7 @@ def _movement_to_read(
         lot_number=m.lot.lot_number if m.lot else None,
         lot_expiration_date=m.lot.expiration_date if m.lot else None,
         lot_release_state=m.lot.release_state if m.lot else None,
+        lot_unit_price_amount=m.lot.unit_price_amount if m.lot else None,
         from_location_node_id=(
             str(m.from_location_node_id) if m.from_location_node_id else None
         ),

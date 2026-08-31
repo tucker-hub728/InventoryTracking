@@ -103,6 +103,10 @@ export interface ApiMovement {
    *  happened, which nothing records. Rendered on the ledger's per-lot subtotal
    *  row only, never on a movement row, or it would misread history. */
   lot_release_state: LotReleaseState | null;
+  /** Decimal (string). The lot's per-unit price as it is NOW (RPT-003) — the
+   *  same present-state caveat as `lot_release_state`. `null` is "no price
+   *  recorded", never zero. */
+  lot_unit_price_amount: string | null;
 
   /** Location System node references + resolved name / breadcrumb path. */
   from_location_node_id: string | null;

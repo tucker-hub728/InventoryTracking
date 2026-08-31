@@ -27,6 +27,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -152,6 +153,14 @@ class Kit(Base):
         cascade="all, delete-orphan",
         order_by="KitLine.line_no",
     )
+    # One row per produce/close-out batch that ran (RPT-003). A kit can produce
+    # several finished lots (KIT-007), so this is where per-lot cost lives —
+    # ``kits`` itself carries only the cumulative good/scrap totals.
+    batches: Mapped[list[KitProductionBatch]] = relationship(
+        back_populates="kit",
+        cascade="all, delete-orphan",
+        order_by="KitProductionBatch.batch_no",
+    )
 
 
 class KitLine(Base):
@@ -237,3 +246,205 @@ class KitLine(Base):
     )
 
     kit: Mapped[Kit] = relationship(back_populates="lines")
+
+
+class KitProductionBatch(Base):
+    """One produce (or close-out) batch, and what its output lot cost — RPT-003.
+
+    A kit may run several batches (KIT-007 incremental / serialized production),
+    each minting its own lot, and the client bills per finished lot: *"the Kit is
+    closed out to the FG Lot specifically so the Customer can be charged the
+    actual cost for that particular FG Lot"* (2026-08-27). A kit-level average
+    would smear one batch's cost onto another batch's lot, so cost is attributed
+    here, per batch, and stamped onto ``lots.unit_price_amount`` at mint.
+
+    **``scrap_value_amount`` is a slice of ``material_cost_amount``, not an
+    addend to it.** Scrapped material was charged at issue and never credited
+    back, so it is already inside the total; what makes the customer pay for it
+    is dividing by ``good_qty`` alone. The column exists so the loss is visible,
+    and a DB CHECK keeps it ``<= material_cost_amount`` so no later reader can
+    mistake it for an extra charge.
+
+    All three money columns are NULL together when ``cost_is_complete`` is
+    false — an input lot had no price, and a partial sum would read as a
+    complete one (RPT-001's blank-is-never-zero rule, one level up).
+    """
+
+    __tablename__ = "kit_production_batches"
+    __table_args__ = (
+        Index(
+            "uq_kit_production_batches_kit_batch_no",
+            "kit_id",
+            "batch_no",
+            unique=True,
+        ),
+        Index(
+            "uq_kit_production_batches_output_lot",
+            "output_lot_id",
+            unique=True,
+            postgresql_where=text("output_lot_id IS NOT NULL"),
+        ),
+        Index("ix_kit_production_batches_produced_at_desc", text("produced_at DESC")),
+        CheckConstraint("batch_no > 0", name="ck_kit_production_batches_batch_no_positive"),
+        CheckConstraint(
+            "good_qty >= 0 AND scrap_qty >= 0",
+            name="ck_kit_production_batches_qty_nonneg",
+        ),
+        # Mirrors lots.unit_price_amount: $0 is a real price (customer-owned
+        # cells arrive on a 0$ PO); NULL means "not known".
+        CheckConstraint(
+            "(material_cost_amount IS NULL OR material_cost_amount >= 0) "
+            "AND (unit_cost_amount IS NULL OR unit_cost_amount >= 0) "
+            "AND (scrap_value_amount IS NULL OR scrap_value_amount >= 0)",
+            name="ck_kit_production_batches_money_nonneg",
+        ),
+        CheckConstraint(
+            "scrap_value_amount IS NULL "
+            "OR material_cost_amount IS NULL "
+            "OR scrap_value_amount <= material_cost_amount",
+            name="ck_kit_production_batches_scrap_is_slice",
+        ),
+        CheckConstraint(
+            "(output_lot_id IS NULL) = (good_qty = 0)",
+            name="ck_kit_production_batches_lot_pairing",
+        ),
+        CheckConstraint(
+            "cost_is_complete OR ("
+            "material_cost_amount IS NULL "
+            "AND unit_cost_amount IS NULL "
+            "AND scrap_value_amount IS NULL)",
+            name="ck_kit_production_batches_incomplete_is_blank",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    kit_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.kits.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    batch_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    # NULL when the batch made 0 good units — a final close-out that scrapped
+    # everything consumes material and mints no lot.
+    output_lot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.lots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    good_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    scrap_qty: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    material_cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    unit_cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    scrap_value_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    cost_is_complete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    produced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    performed_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reauth_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("audit.reauth_events.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    kit: Mapped[Kit] = relationship(back_populates="batches")
+    consumptions: Mapped[list[KitBatchConsumption]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
+
+
+class KitBatchConsumption(Base):
+    """What one batch drew from one kit line, and what that value was — RPT-003.
+
+    The per-component breakdown behind ``KitProductionBatch.material_cost_amount``,
+    so a customer's figure can be explained rather than asserted.
+
+    ``unit_cost_amount`` is the line's moving weighted average **frozen at the
+    moment of consumption**. Lot prices stay editable after receive, so
+    re-deriving this later would silently change what a customer was charged.
+
+    There is deliberately **no source-lot column**: under a moving average a
+    batch consumes value from a pool, not identified lots, and naming one here
+    would invent a fact. The identified lots live in the ledger, on the
+    ``kit_issue`` rows.
+    """
+
+    __tablename__ = "kit_batch_consumptions"
+    __table_args__ = (
+        Index(
+            "uq_kit_batch_consumptions_batch_line",
+            "batch_id",
+            "kit_line_id",
+            unique=True,
+        ),
+        Index("ix_kit_batch_consumptions_kit_line_id", "kit_line_id"),
+        # A row records material actually consumed; zero is not an event.
+        CheckConstraint("qty > 0", name="ck_kit_batch_consumptions_qty_positive"),
+        CheckConstraint(
+            "(unit_cost_amount IS NULL OR unit_cost_amount >= 0) "
+            "AND (extended_value_amount IS NULL OR extended_value_amount >= 0)",
+            name="ck_kit_batch_consumptions_money_nonneg",
+        ),
+        CheckConstraint(
+            "cost_is_complete OR (unit_cost_amount IS NULL AND extended_value_amount IS NULL)",
+            name="ck_kit_batch_consumptions_incomplete_is_blank",
+        ),
+        {"schema": "app"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.kit_production_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kit_line_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.kit_lines.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Denormalised from the line so the export can group by component without
+    # joining back through kit_lines.
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("app.items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    extended_value_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    cost_is_complete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    batch: Mapped[KitProductionBatch] = relationship(back_populates="consumptions")

@@ -82,6 +82,30 @@ export function formatNumber(n: number): string {
   return new Intl.NumberFormat('en-US').format(n);
 }
 
+const MONEY_FORMAT = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+});
+
+/**
+ * Format a money amount that may be unknown.
+ *
+ * Decimals arrive from the API as strings (NUMERIC would lose precision as a
+ * JS number), so this takes one and hands back a display string.
+ *
+ * **`null` renders as an em dash, never as $0.00.** The two mean different
+ * things and the distinction is load-bearing: a blank says "no price recorded",
+ * a zero says "this cost nothing" — which is a real, correct answer for the
+ * customer-owned cells that arrive on a $0 PO. Collapsing them would report
+ * unpriced stock as free. Same rule the finance export follows (RPT-001).
+ */
+export function formatMoney(amount: string | null | undefined): string {
+  if (amount === null || amount === undefined || amount === '') return '—';
+  const n = Number(amount);
+  if (Number.isNaN(n)) return '—';
+  return MONEY_FORMAT.format(n);
+}
+
 /** Truncate a string with ellipsis. */
 export function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;

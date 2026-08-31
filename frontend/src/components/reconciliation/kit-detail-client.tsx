@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   ArrowRight,
   Check,
@@ -53,6 +54,7 @@ import {
   type ApiKit,
   type ApiKitActivityRow,
   type ApiKitAuditEvent,
+  type ApiKitBatch,
   type ApiKitLine,
   type CancelLineInput,
   type KitStatus,
@@ -61,8 +63,8 @@ import {
 } from '@/lib/api/kits';
 import { locationNodesApi, LN2_NODE_TYPES, type LocationNode } from '@/lib/api/location-nodes';
 import { lotsApi } from '@/lib/api/lots';
-import { cn } from '@/lib/utils';
-import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
+import { cn, formatMoney } from '@/lib/utils';
+import { selectIsAdminOrAbove, selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
@@ -84,6 +86,8 @@ import {
   formatDateTime,
   type SelectOption,
 } from './recon-bits';
+import { BatchDetailSheet } from './batch-detail-sheet';
+import { KitCostExportButton } from './kit-cost-export-button';
 
 const STEPS = [
   { key: 'issue', label: 'Issue', hint: 'Pull material to production' },
@@ -91,6 +95,18 @@ const STEPS = [
   { key: 'closeout', label: 'Close-Out', hint: 'Record output & reconcile' },
   { key: 'review', label: 'Review', hint: 'Confirm the batch, then produce or close' },
 ] as const;
+
+/** URL segment per step — what the operator sees in the address bar and copies
+ *  into a message. Kept apart from ``STEPS[].key`` so a label can be reworded
+ *  without breaking a link somebody saved. */
+const STEP_SLUGS = ['issue', 'production', 'close-out', 'review'] as const;
+
+/** ``/reconciliation/<id>/close-out`` → 2. Anything unrecognised → ``null``, so
+ *  the caller can fall back to the kit's own default rather than step 0. */
+function stepFromSlug(slug: string | undefined): number | null {
+  const i = STEP_SLUGS.indexOf(slug as (typeof STEP_SLUGS)[number]);
+  return i === -1 ? null : i;
+}
 
 // Four steps (client 2026-07-22): Issue → Production (adjust only) → Close-Out
 // (record output + reconcile) → Review & Close (summary + e-signed close). The
@@ -153,14 +169,6 @@ const emptyDest = (): OutputDest => ({
 const destPlaced = (d: OutputDest): number =>
   d.location_node_id ? (d.isBox ? d.cells.length : d.qty ?? 0) : 0;
 
-/** The batch size to offer for the NEXT produce: what is still owed against the
- *  kit's target (client 2026-07-28). Target 5 with nothing made yet → 5; after a
- *  batch of 3 → 2. Once the target is met or overshot it floors at **1**, so the
- *  operator can keep producing extras until they close the kit — production is
- *  incremental and the target is a plan, not a cap (KIT-007). */
-const remainingToTarget = (k: ApiKit): number =>
-  Math.max(1, (k.target_qty ?? 0) - (k.good_qty ?? 0));
-
 /** The BOM need for a line, rounded up to whole units (matches the backend). */
 const lineNeededQty = (l: ApiKitLine) => Math.ceil(Number(l.needed_qty));
 
@@ -176,7 +184,16 @@ const todayStr = (): string => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export function KitDetailClient({ kitId }: { kitId: string }) {
+export function KitDetailClient({
+  kitId,
+  // The step segments render nothing — they exist so each step has a URL, and
+  // the shell reads the segment to know which one to show (see the layout).
+  // Accepted and ignored so Next's layout contract is honoured.
+  children: _children,
+}: {
+  kitId: string;
+  children?: React.ReactNode;
+}) {
   const canSign = usePermission('inventory', 'sign');
   const canWrite = usePermission('inventory', 'create');
   // CTL-001 — every action that puts material BACK into inventory is
@@ -186,6 +203,9 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // thing that tells them apart (`selectIsSuperAdmin`). The API enforces it
   // too — this only hides controls that would come back a 403.
   const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  /** The cost export is Admin + Super Admin only — it carries what each
+   *  customer is charged. Mirrors the endpoint's own RequireRole gate. */
+  const canExportCosts = useAuthStore(selectIsAdminOrAbove);
   /** The manual return (TRX-008) and the cancel that returns the whole floor. */
   const canReturn = canWrite && isSuperAdmin;
   /** The signed close, whose back-flush credits the leftover back to stock. */
@@ -197,7 +217,35 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [nodes, setNodes] = React.useState<LocationNode[]>([]);
-  const [activeStep, setActiveStep] = React.useState(0);
+  // ── The step is the URL ─────────────────────────────────────────────────
+  // ``/reconciliation/<id>/close-out`` IS step 2 — there is no step state to
+  // drift out of sync with the address bar, so a link, a refresh and the back
+  // button all land exactly where they say they will.
+  const router = useRouter();
+  const pathname = usePathname();
+  // Everything after the kit id: [] on the bare route, ['review','PL-123'] on a
+  // lot deep link.
+  const tail = React.useMemo(() => {
+    const parts = pathname.split('/').filter(Boolean);
+    const at = parts.indexOf(kitId);
+    return at === -1 ? [] : parts.slice(at + 1);
+  }, [pathname, kitId]);
+  const urlStep = stepFromSlug(tail[0]);
+  const stepHref = React.useCallback(
+    (n: number) => `/reconciliation/${kitId}/${STEP_SLUGS[n] ?? STEP_SLUGS[0]}`,
+    [kitId],
+  );
+  const activeStep = urlStep ?? 0;
+  /** Navigate to a step. Deliberately keeps the ``useState`` setter signature —
+   *  updater callbacks included — so every existing call site reads unchanged
+   *  and none of them has to know the step now lives in the URL. */
+  const setActiveStep = React.useCallback(
+    (next: number | ((prev: number) => number)) => {
+      const target = typeof next === 'function' ? next(urlStep ?? 0) : next;
+      router.push(stepHref(target));
+    },
+    [router, stepHref, urlStep],
+  );
   const [busy, setBusy] = React.useState(false);
 
   const [activityOpen, setActivityOpen] = React.useState(false);
@@ -245,14 +293,20 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       try {
         const k = await kitsApi.get(kitId, { signal });
         setKit(k);
-        setActiveStep(stepModel(k.status).def);
         setOutput((prev) => ({
           // "This batch" holds only the NEXT batch's amount — never the kit's
-          // cumulative good (that's priorGood). Default to what's still owed
-          // against the target (client 2026-07-28, replacing the flat 1 of
-          // 2026-07-24); keep a value the operator already typed this session.
-          good_qty: prev.good_qty ?? remainingToTarget(k),
-          scrap_qty: k.scrap_qty ?? prev.scrap_qty ?? 0,
+          // cumulative totals. Both default to ZERO, not to what is owed
+          // against the target: the operator is attesting to what they actually
+          // made, and a pre-filled quantity is a number the form invented and
+          // they then signed for. A blank form also means a freshly produced kit
+          // comes back with nothing outstanding, instead of red text listing
+          // what a batch nobody has started is missing.
+          good_qty: prev.good_qty ?? 0,
+          // ``k.scrap_qty`` is the kit's CUMULATIVE scrap across every batch;
+          // reading it here put that running total into a per-batch field, so a
+          // kit that had scrapped 4 units over its life opened its next batch
+          // pre-scrapped by 4.
+          scrap_qty: prev.scrap_qty ?? 0,
           output_location_node_id:
             k.output_location_node_id ?? prev.output_location_node_id ?? '',
           output_expiration_date: prev.output_expiration_date ?? '',
@@ -277,6 +331,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     },
     [kitId],
   );
+
+  // Land the bare ``/reconciliation/<id>`` on the step the kit's status makes
+  // sensible, and bounce a step the kit cannot reach yet — a draft kit has no
+  // Close-Out to show, and a URL can be typed where a disabled tab could not be
+  // clicked. ``replace``, so Back leaves the kit rather than bouncing again.
+  React.useEffect(() => {
+    if (!kit) return;
+    const { def, reachable } = stepModel(kit.status);
+    if (urlStep === null || urlStep > reachable) {
+      router.replace(stepHref(urlStep === null ? def : Math.min(urlStep, reachable)));
+    }
+  }, [kit, urlStep, router, stepHref]);
 
   React.useEffect(() => {
     const ctrl = new AbortController();
@@ -553,6 +619,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // ``produceReady`` / ``closeReady``, so the list is empty exactly when the
   // button is live.
   const finalizeOnly = !producingNow;
+  // Has the operator begun entering THIS batch at all? Straight after a produce
+  // the form is deliberately blank, and a blank form is not a wrong one — the
+  // count of what it is "missing" then reads as an accusation about work nobody
+  // has started. The reasons still reach anyone who wants them: each field
+  // prints its own message once touched, and the disabled button keeps the full
+  // list as its tooltip.
+  const batchStarted =
+    (output.good_qty ?? 0) > 0 ||
+    (output.scrap_qty ?? 0) > 0 ||
+    lotEntered.length > 0 ||
+    outputDests.some((d) => Boolean(d.location_node_id)) ||
+    Object.values(used).some((v) => v != null);
   const blockers: string[] = [];
   if (finalizeOnly && priorGood + (output.good_qty ?? 0) < 1) {
     blockers.push('Nothing produced yet — make at least one unit before closing.');
@@ -732,20 +810,19 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       setKit(k);
       // Reset the batch form for the next batch.
       setOutput((p) => ({
-        // Default the next batch to what's still owed against the target — the
-        // just-produced batch is already folded into ``k.good_qty`` (client
-        // 2026-07-28). Floors at 1 once the target is met, so extras stay easy.
-        good_qty: remainingToTarget(k),
+        // Back to zero, not to what is still owed against the target. The batch
+        // just made is folded into ``k.good_qty``; leaving a quantity in the
+        // form implies another batch is already under way, and every field it
+        // depends on — lot number, output location — is now blank, so the
+        // screen filled with red text for a batch the operator had not begun.
+        // Zero means "no batch in progress", which is the truth after a produce.
+        good_qty: 0,
         scrap_qty: 0,
         output_location_node_id: p.output_location_node_id,
         output_expiration_date: '',
         output_lot_number: '',
       }));
-      // Seed the fresh destination with the next batch size directly. The sync
-      // effect keys off ``good_qty`` alone, so it would NOT fire when the new
-      // default equals the old one (e.g. producing while already at 1-per-batch)
-      // and the row would come back blank.
-      setOutputDests([{ ...emptyDest(), qty: remainingToTarget(k) }]);
+      setOutputDests([emptyDest()]);
       setUsed(Object.fromEntries(k.lines.map((l) => [l.id, null])));
       setActiveStep(3);
       toast.success(`Produced ${made} × ${k.item_number}`, {
@@ -819,6 +896,17 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <Button variant="secondary" onClick={() => setActivityOpen(true)}>
               <ScrollText size={14} /> Activity log
             </Button>
+            {/* Scoped to THIS kit, the way the inventory Export button exports
+                the tier you are looking at (RPT-003). Only once the kit has
+                produced something — an export of a kit with no finished lot is
+                a header row. Admin+, matching the endpoint's own gate. */}
+            {canExportCosts && kit.batches.length > 0 && (
+              <KitCostExportButton
+                kitId={kit.id}
+                kitNumber={kit.kit_number}
+                label="Export cost"
+              />
+            )}
             {/* CTL-001: cancelling an issued kit hands the whole floor back to
                 inventory, so it is Super-Admin-only. A draft cancel moves
                 nothing, but it is hidden on the same rule — one visible
@@ -986,7 +1074,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
                 too was pure duplication; this just points at them. The full list
                 is the button's tooltip. Rendered only when the button really is
                 disabled, so it can never contradict a live button. */}
-            {primaryBlocked && blockers.length > 0 && (
+            {primaryBlocked && blockers.length > 0 && batchStarted && (
               <span className="text-xs text-danger">
                 {blockers.length} thing{blockers.length === 1 ? '' : 's'} to fix above
               </span>
@@ -2289,6 +2377,43 @@ function ReviewStep({
   // still physically on the floor — which is exactly what back-flushes at close.
   const floorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
   const usedTotal = kit.lines.reduce((a, l) => a + (l.used_qty ?? 0), 0);
+  const router = useRouter();
+  const pathname = usePathname();
+  /** The lot segment of ``/review/<lot>``, if the panel is open. */
+  const openBatchKey = React.useMemo(() => {
+    const parts = pathname.split('/').filter(Boolean);
+    const at = parts.indexOf('review');
+    const lot = at === -1 ? undefined : parts[at + 1];
+    return lot ? decodeURIComponent(lot) : null;
+  }, [pathname]);
+  // The open batch breakdown is a route of its own —
+  // ``/reconciliation/<kit>/review/<lot>`` — so it is linkable, survives a
+  // refresh, and a lot number clicked anywhere else in the app lands straight
+  // on it. Keyed by lot number because that is what the rest of the system
+  // quotes; a batch that scrapped everything has no lot, so it falls back to id.
+  const batchDetail =
+    openBatchKey === null
+      ? null
+      : (kit.batches.find(
+          (b) => b.output_lot_number === openBatchKey || b.id === openBatchKey,
+        ) ?? null);
+  const reviewHref = `/reconciliation/${kit.id}/review`;
+  const showBatch = (b: ApiKitBatch) =>
+    router.push(`${reviewHref}/${encodeURIComponent(b.output_lot_number ?? b.id)}`, {
+      scroll: false,
+    });
+  const hideBatch = () => router.push(reviewHref, { scroll: false });
+  // RPT-003. Summed from the batches, not recomputed from the kit total: each
+  // batch's scrap was valued at ITS unit cost, which differs between batches
+  // when the material mix changed. `null` if any batch is unpriced — a partial
+  // scrap figure would understate the loss while looking authoritative.
+  const scrapValueTotal = kit.batches.some((b) => !b.cost_is_complete)
+    ? null
+    : kit.batches.length > 0
+      ? String(
+          kit.batches.reduce((a, b) => a + Number(b.scrap_value_amount ?? 0), 0),
+        )
+      : null;
   // Both come from the close-out draft. The batch card below only renders while
   // a batch is pending (never once closed), so there is no closed-kit branch to
   // take here — ApiKit doesn't carry the produced expiry anyway.
@@ -2411,6 +2536,36 @@ function ReviewStep({
               <span className="font-mono tabular-nums">{floorTotal}</span>{' '}
               {closed ? 'returned' : 'on floor'}
             </ReviewStat>
+            {/* RPT-003. Net of returns, so handing material back lowers it.
+                "—  unpriced material" rather than $0.00 when an input lot has
+                no price: blank means unknown, zero means free, and the $0
+                customer-owned cells make that a distinction with real money
+                behind it. */}
+            <ReviewStat label="Material cost">
+              {kit.cost_is_complete ? (
+                <span className="font-mono tabular-nums font-semibold text-text">
+                  {formatMoney(kit.material_cost_amount)}
+                </span>
+              ) : (
+                <span className="text-text-3">
+                  — <span className="text-[11px]">unpriced material</span>
+                </span>
+              )}
+            </ReviewStat>
+            {/* "Of which" is deliberate wording: the scrap value is a PORTION
+                of the material cost above, not an extra charge on top. The
+                scrapped units' material was charged at issue; what bills it to
+                the customer is dividing by good units alone. */}
+            {scrapValueTotal !== null && scrapSoFar > 0 && (
+              <ReviewStat label="Of which scrap">
+                <span className="font-mono tabular-nums text-warning">
+                  {formatMoney(scrapValueTotal)}
+                </span>
+                <span className="ml-1.5 text-[11px] text-text-3">
+                  {scrapSoFar} unit{scrapSoFar === 1 ? '' : 's'}
+                </span>
+              </ReviewStat>
+            )}
           </div>
         </div>
 
@@ -2420,6 +2575,83 @@ function ReviewStep({
           </p>
         )}
       </Card>
+
+      {/* Per-batch cost (RPT-003). Only worth showing once a kit has produced
+          more than one lot — that is the case the single "Material cost" figure
+          above cannot answer, and the client bills per finished lot: "the Kit is
+          closed out to the FG Lot specifically so the Customer can be charged
+          the actual cost for that particular FG Lot".
+
+          These figures are FROZEN at produce time, unlike the kit total above,
+          which re-reads lot prices every time this page loads. If a price was
+          corrected after a batch was made the two will differ, and they should:
+          a shipped lot's cost must not move retroactively. */}
+      {kit.batches.length > 1 && (
+        <Card className="overflow-hidden">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="text-sm font-medium text-text">Cost by finished lot</h2>
+            <p className="mt-0.5 text-xs text-text-3">
+              Each batch carries its own material cost. Scrap is included — the
+              per-unit figure divides by good units only.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-[11px] uppercase tracking-wider text-text-3">
+                  <th className="px-4 py-2 text-left font-medium">Batch</th>
+                  <th className="px-4 py-2 text-left font-medium">Lot</th>
+                  <th className="px-4 py-2 text-right font-medium">Good</th>
+                  <th className="px-4 py-2 text-right font-medium">Scrap</th>
+                  <th className="px-4 py-2 text-right font-medium">Material cost</th>
+                  <th className="px-4 py-2 text-right font-medium">Per unit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kit.batches.map((b) => (
+                  <tr
+                    key={b.id}
+                    onClick={() => showBatch(b)}
+                    className="cursor-pointer border-b border-border transition-colors last:border-0 hover:bg-surface/60"
+                    title="See how this lot was made"
+                  >
+                    <td className="px-4 py-2 tabular-nums text-text-2">{b.batch_no}</td>
+                    <td className="px-4 py-2 font-mono text-accent underline-offset-2 hover:underline">
+                      {b.output_lot_number ?? (
+                        <span className="text-text-3">no lot · all scrapped</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">
+                      {b.good_qty}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums text-text-3">
+                      {b.scrap_qty || '—'}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">
+                      {b.cost_is_complete ? (
+                        formatMoney(b.material_cost_amount)
+                      ) : (
+                        <span className="text-text-3" title="An input lot had no price">
+                          —
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums font-semibold">
+                      {b.cost_is_complete ? (
+                        formatMoney(b.unit_cost_amount)
+                      ) : (
+                        <span className="font-normal text-text-3">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <BatchDetailSheet batch={batchDetail} kit={kit} onClose={hideBatch} />
 
       {/* The kit-level component picture. Shown on its own only when there is no
           batch above — otherwise the batch table already covers the components
@@ -2477,6 +2709,25 @@ function ReviewStep({
   );
 }
 
+/**
+ * A component line's contribution in money (RPT-003).
+ *
+ * With ``batchQty``, prices the units this pending batch will consume at the
+ * line's current unit cost. Without it, reports what the line has already
+ * handed to finished lots across every batch.
+ *
+ * Returns an em dash rather than `$0.00` when the cost is unknown — an input
+ * lot with no price. That is not the same as free, and the $0 customer-owned
+ * cells are the reason the difference has money behind it.
+ */
+function lineCost(line: ApiKitLine, batchQty: number | null): string {
+  if (batchQty !== null) {
+    if (line.unit_cost_amount === null || batchQty <= 0) return '—';
+    return formatMoney(String(Number(line.unit_cost_amount) * batchQty));
+  }
+  return formatMoney(line.consumed_value_amount);
+}
+
 /** One labelled figure in the kit strip. */
 function ReviewStat({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -2526,6 +2777,10 @@ function ComponentReviewTable({
             <th className="px-4 py-2 text-right font-medium">
               {isBatch ? 'Left after' : closed ? 'Back-flushed' : 'On floor'}
             </th>
+            {/* RPT-003. The value of what this component contributes — for a
+                batch, what it puts into THIS lot; for the kit, what it has
+                handed to finished lots in total. */}
+            <th className="px-4 py-2 text-right font-medium">Cost</th>
             <th className="px-4 py-2 font-medium">
               {closed ? 'Returned to' : 'Back-flushes to'}
             </th>
@@ -2556,6 +2811,20 @@ function ComponentReviewTable({
                         >
                           <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
                           <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
+                          {/* The per-lot price (RPT-003). A line drawing from
+                              two lots reports a blended unit cost, and these
+                              are what it blends — without them the average is
+                              a number nobody can check. */}
+                          <span
+                            className="font-mono tabular-nums text-text-3"
+                            title={
+                              f.unit_price_amount === null
+                                ? 'This lot has no price, so the line has no cost'
+                                : 'Price per unit'
+                            }
+                          >
+                            @ {formatMoney(f.unit_price_amount)}
+                          </span>
                         </span>
                       ))}
                     </div>
@@ -2568,6 +2837,11 @@ function ComponentReviewTable({
                 </td>
                 <td className="px-4 py-2.5 text-right">
                   <QtyCell value={remaining || null} tone={remaining ? 'success' : 'muted'} />
+                </td>
+                <td className="px-4 py-2.5 text-right">
+                  <span className="font-mono text-xs tabular-nums text-text-2">
+                    {lineCost(line, isBatch ? thisBatch : null)}
+                  </span>
                 </td>
                 <td className="px-4 py-2.5">
                   <span className="text-xs text-text-2">

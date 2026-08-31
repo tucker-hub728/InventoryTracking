@@ -38,7 +38,7 @@ import type { LedgerEntry } from '@/types/inventory';
 import type { BadgeTone } from '@/types/ui';
 import type { MovementType } from '@/lib/api/movements';
 import { expiryStatus } from '@/lib/inventory-helpers';
-import { cn, daysFromNow } from '@/lib/utils';
+import { cn, daysFromNow, formatMoney } from '@/lib/utils';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
 import { RELEASE_STATE_OPTIONS, type LotReleaseState } from '@/lib/api/lots';
 
@@ -62,6 +62,12 @@ interface LotGroup {
   /** The lot's CURRENT release state. A property of the batch, which is why it
    *  belongs on the group and not on the rows — the rows are past events. */
   releaseState: LotReleaseState | null;
+  /** The lot's CURRENT per-unit price (RPT-003), on the group for exactly the
+   *  same reason as `releaseState`. `null` = no price recorded, never zero. */
+  unitPrice: string | null;
+  /** `balance × unitPrice` — what this lot's remaining units are worth.
+   *  `null` when the lot has no price: unknown, not free. */
+  balanceValue: number | null;
 }
 
 /** Tri-state expiry sort: off → soonest-first → latest-first → off. */
@@ -175,16 +181,25 @@ function groupByLot(entries: LedgerEntry[]): LotGroup[] {
         exp = e.exp;
       }
     }
+    const balance = totalIn - totalOut;
+    // A lot has ONE price, so the first row carrying it speaks for the group.
+    // `?? null` rather than a truthiness check: "0.000000" is a real price (the
+    // customer-owned cells arrive on a $0 PO) and would be skipped by `find`
+    // on a falsy test, silently turning free into unknown.
+    const priced = rows.find((e) => e.lotUnitPrice != null);
+    const unitPrice = priced?.lotUnitPrice ?? null;
     return {
       lot,
       lotId: rows.find((e) => e.lotId)?.lotId ?? null,
       rows,
       totalIn,
       totalOut,
-      balance: totalIn - totalOut,
+      balance,
       exp,
       expDays,
       releaseState: rows.find((e) => e.lotReleaseState)?.lotReleaseState ?? null,
+      unitPrice,
+      balanceValue: unitPrice === null ? null : Number(unitPrice) * balance,
     };
   });
 }
@@ -533,8 +548,16 @@ export function LedgerTable({
   const grandIn = groups.reduce((s, g) => s + g.totalIn, 0);
   const grandOut = groups.reduce((s, g) => s + g.totalOut, 0);
   const grandBalance = grandIn - grandOut;
-  // Date, Transaction, In, Out, Balance, Location, [Customer], Lot, Expiry, By (+ actions)
-  const cols = 9 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0);
+  // Total value across the visible lots (RPT-003). Unpriced lots contribute
+  // NOTHING rather than zero, and `grandUnpriced` counts them so the figure can
+  // say it is partial — a total that silently omits half the stock while
+  // looking complete is the failure mode the finance export exists to avoid.
+  const pricedGroups = groups.filter((g) => g.balanceValue !== null);
+  const grandUnpriced = groups.length - pricedGroups.length;
+  const grandValue = pricedGroups.reduce((s, g) => s + (g.balanceValue ?? 0), 0);
+  // Date, Transaction, In, Out, Balance, Unit cost, Value, Location,
+  // [Customer], Lot, Expiry, By (+ actions)
+  const cols = 11 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0);
 
   const SortIcon = sortDir === 'asc' ? ArrowUp : sortDir === 'desc' ? ArrowDown : ChevronsUpDown;
   const sortAria = sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none';
@@ -556,6 +579,12 @@ export function LedgerTable({
           <TableHead className="w-[90px] text-right">Units In</TableHead>
           <TableHead className="w-[90px] text-right">Units Out</TableHead>
           <TableHead className="w-[100px] text-right">Balance</TableHead>
+          {/* Cost (RPT-003). Both are LOT facts, so they are populated on the
+              per-lot subtotal and the item total only — never against a
+              movement row, for the same reason the quality status isn't:
+              a movement is a past event and this is the price now. */}
+          <TableHead className="w-[100px] text-right">Unit cost</TableHead>
+          <TableHead className="w-[110px] text-right">Value</TableHead>
           <TableHead className="w-[160px]">Location</TableHead>
           {showCustomer && <TableHead className="w-[150px]">Customer</TableHead>}
           <TableHead className="w-[140px]">Lot</TableHead>
@@ -631,6 +660,11 @@ export function LedgerTable({
                     )}
                   </TableCell>
                   {/* Per-row balance lives on the lot Total row, like the workbook. */}
+                  <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
+                  {/* Cost is a lot fact and a PRESENT one; pricing a past
+                      movement with today's price would invent history. Both
+                      cells are filled on the lot subtotal below. */}
+                  <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
                   <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
                   {/* The storage location the movement touched. For a shipment
                       that's the source the finished good left from. */}
@@ -723,7 +757,7 @@ export function LedgerTable({
                   <TableRow className="border-none bg-surface/50 hover:bg-surface/50">
                     <TableCell />
                     <TableCell
-                      colSpan={9 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0)}
+                      colSpan={11 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0)}
                       className="py-1.5 text-[11px] text-text-3"
                     >
                       <span
@@ -760,6 +794,25 @@ export function LedgerTable({
                 {group.totalOut}
               </TableCell>
               <TableCell className="text-right font-mono text-xs">{group.balance}</TableCell>
+              {/* The lot's price and what its remaining units are worth
+                  (RPT-003). An em dash means no price recorded — NOT free.
+                  A kit-produced lot from before kitcost01 reads blank here,
+                  while customer-owned cells on a $0 PO read $0.00. */}
+              <TableCell className="text-right font-mono text-xs text-text-2">
+                {formatMoney(group.unitPrice)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {group.balanceValue === null ? (
+                  <span
+                    className="text-text-3"
+                    title="This lot has no price recorded — not the same as free"
+                  >
+                    —
+                  </span>
+                ) : (
+                  formatMoney(String(group.balanceValue))
+                )}
+              </TableCell>
               <TableCell />
               {showCustomer && <TableCell />}
               {/* The one place a quality status belongs in this table: the
@@ -801,8 +854,34 @@ export function LedgerTable({
           <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm">
             {grandBalance}
           </TableCell>
-          {/* label + spacer + the three totals = 5 cells already rendered. */}
-          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" colSpan={cols - 5} />
+          {/* No item-level unit cost: lots are priced individually and an
+              average across them would be a number nobody asked for. */}
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" />
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm">
+            {pricedGroups.length === 0 ? (
+              <span
+                className="font-normal text-text-3"
+                title="No lot here has a price recorded"
+              >
+                —
+              </span>
+            ) : (
+              <span
+                title={
+                  grandUnpriced > 0
+                    ? `Excludes ${grandUnpriced} lot(s) with no price recorded`
+                    : undefined
+                }
+              >
+                {formatMoney(String(grandValue))}
+                {grandUnpriced > 0 && (
+                  <span className="ml-1 font-normal text-warning">*</span>
+                )}
+              </span>
+            )}
+          </TableCell>
+          {/* label + spacer + in/out/balance + unit cost + value = 7 rendered. */}
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" colSpan={cols - 7} />
         </TableRow>
       </TableBody>
     </Table>

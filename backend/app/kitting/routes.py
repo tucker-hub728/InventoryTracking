@@ -71,6 +71,7 @@ from app.security.permissions import (
     RequireRole,
 )
 
+from . import costing
 from . import repository as kit_repo
 from .schemas import (
     AdditionalIssueRequest,
@@ -95,6 +96,8 @@ from .schemas import (
     KitActivityResponse,
     KitActivityRow,
     KitAuditEventRow,
+    KitBatchConsumptionRead,
+    KitBatchRead,
     KitConsumedLine,
     KitCreateRequest,
     KitLineFloorLot,
@@ -248,6 +251,8 @@ def _line_read(
     issued_breakdown: dict[uuid.UUID, list] | None = None,
     floor_lots: dict[uuid.UUID, list] | None = None,
     origins_by_line: dict[uuid.UUID, set[str]] | None = None,
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]] | None = None,
+    all_charges: dict[uuid.UUID, list] | None = None,
 ) -> KitLineRead:
     item = items.get(line.item_id)
     per_node = stock_by_node.get(line.item_id, {})
@@ -261,8 +266,26 @@ def _line_read(
         return path or name
 
     issued_from = [
-        KitLineIssuedFrom(lot_number=lot_number, location=_node_path(node_id), qty=qty)
-        for lot_number, node_id, qty in (issued_breakdown or {}).get(line.id, [])
+        KitLineIssuedFrom(
+            lot_number=lot_number,
+            location=_node_path(node_id),
+            qty=qty,
+            unit_price_amount=price,
+        )
+        for lot_number, node_id, qty, price in (issued_breakdown or {}).get(line.id, [])
+    ]
+    # Every charge, top-ups included — what the cost figures average over.
+    sourced_from = [
+        KitLineIssuedFrom(
+            lot_number=lot_number,
+            location=_node_path(node_id),
+            qty=qty,
+            unit_price_amount=price,
+            is_additional=is_additional,
+        )
+        for lot_number, node_id, qty, price, is_additional in (all_charges or {}).get(
+            line.id, []
+        )
     ]
 
     def _lot_cells(node_id: uuid.UUID, lot_id: uuid.UUID) -> list[CellOption]:
@@ -390,7 +413,56 @@ def _line_read(
         source_available=(
             per_node.get(line.source_location_node_id, 0) if line.source_location_node_id else 0
         ),
+        unit_cost_amount=(line_costs or {}).get(line.id, (None, None))[0],
+        consumed_value_amount=(line_costs or {}).get(line.id, (None, None))[1],
+        sourced_from=sourced_from,
     )
+
+
+async def _kit_cost_view(
+    db, kit: Kit
+) -> tuple[
+    Decimal | None,
+    Decimal | None,
+    bool,
+    dict[uuid.UUID, tuple[Decimal | None, Decimal | None]],
+]:
+    """The kit's cost picture for the read model (RPT-003).
+
+    Returns ``(kit_material_cost, consumed_total, cost_is_complete,
+    {line_id: (unit_cost, consumed_value)})``.
+
+    The kit-level figure is LIVE — it re-reads lot prices, which stay editable
+    after receive — while the per-batch figures already stamped onto finished
+    lots are frozen. That divergence is correct: a shipped lot's cost must not
+    move because somebody corrected a price months later. Both are published so
+    the difference is a subtraction the reader can perform.
+    """
+    charge_credit = await kit_repo.line_charge_credit_values(db, kit.id)
+    consumed_prior = await kit_repo.consumed_values_by_line(db, kit.id)
+
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]] = {}
+    net = Decimal("0")
+    complete = True
+    for line in kit.lines:
+        charged, credited, _unpriced = charge_credit.get(
+            line.id, (Decimal("0"), Decimal("0"), 0)
+        )
+        unit_cost = costing.line_unit_cost(
+            charged=charged,
+            credited=credited,
+            consumed=consumed_prior.get(line.id, Decimal("0")),
+            residual_qty=_on_floor(line),
+        )
+        line_costs[line.id] = (unit_cost, consumed_prior.get(line.id))
+        if charged is None:
+            complete = False
+        else:
+            net += charged - credited
+    if not complete:
+        return None, None, False, line_costs
+    consumed_total = sum(consumed_prior.values(), Decimal("0"))
+    return net, consumed_total, True, line_costs
 
 
 async def _kit_read(db, kit: Kit) -> KitRead:
@@ -404,6 +476,9 @@ async def _kit_read(db, kit: Kit) -> KitRead:
     lots_by_item = await kit_repo.item_stock_by_node_lot(db, line_item_ids)
     # What each line was ISSUED from (lot × source), for the post-issue snapshot.
     issued_breakdown = await kit_repo.line_issue_breakdown(db, kit.id)
+    # Every charge including mid-production top-ups — the set the cost figures
+    # average over, and the one the batch drill-down must show.
+    all_charges = await kit_repo.line_all_charges_breakdown(db, kit.id)
     # LOC-003 back-flush: the node types each line was issued from, so the
     # close-out and return pickers can pre-filter destinations.
     origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
@@ -424,6 +499,15 @@ async def _kit_read(db, kit: Kit) -> KitRead:
         for n in (await kit_repo.grid_nodes(db, grid_ids)).values()
         if n.grid_rows and n.grid_cols
     }
+    # Material cost (RPT-003): the kit's live net, plus the frozen per-batch
+    # figures that were stamped onto each finished lot.
+    kit_cost, consumed_total, cost_complete, line_costs = await _kit_cost_view(db, kit)
+    batches = await kit_repo.batches_for_kit(db, kit.id)
+    batch_lot_numbers = await kit_repo.batch_output_lot_numbers(db, kit.id)
+    batch_operators = await kit_repo.batch_operator_names(db, kit.id)
+    # line_id → line_no, so a consumption row can name the component's position
+    # on the kit rather than only its item.
+    line_nos = {ln.id: ln.line_no for ln in kit.lines}
     parent = items.get(kit.item_id)
     return KitRead(
         id=str(kit.id),
@@ -458,8 +542,52 @@ async def _kit_read(db, kit: Kit) -> KitRead:
                 issued_breakdown,
                 floor_lots,
                 origins_by_line,
+                line_costs,
+                all_charges,
             )
             for ln in kit.lines
+        ],
+        material_cost_amount=kit_cost,
+        consumed_value_amount=consumed_total,
+        cost_is_complete=cost_complete,
+        batches=[
+            KitBatchRead(
+                id=str(b.id),
+                batch_no=b.batch_no,
+                output_lot_id=str(b.output_lot_id) if b.output_lot_id else None,
+                output_lot_number=batch_lot_numbers.get(b.id),
+                good_qty=b.good_qty,
+                scrap_qty=b.scrap_qty,
+                material_cost_amount=b.material_cost_amount,
+                unit_cost_amount=b.unit_cost_amount,
+                scrap_value_amount=b.scrap_value_amount,
+                cost_is_complete=b.cost_is_complete,
+                produced_at=b.produced_at,
+                performed_by_name=batch_operators.get(b.id),
+                consumptions=[
+                    KitBatchConsumptionRead(
+                        kit_line_id=str(c.kit_line_id),
+                        line_no=line_nos.get(c.kit_line_id),
+                        item_id=str(c.item_id),
+                        item_number=(
+                            items[c.item_id].item_number if c.item_id in items else ""
+                        ),
+                        description=(
+                            items[c.item_id].description if c.item_id in items else ""
+                        ),
+                        qty=c.qty,
+                        unit_cost_amount=c.unit_cost_amount,
+                        extended_value_amount=c.extended_value_amount,
+                        cost_is_complete=c.cost_is_complete,
+                    )
+                    # By line order, so the breakdown reads down the BOM the same
+                    # way the Components table above it does.
+                    for c in sorted(
+                        b.consumptions, key=lambda c: line_nos.get(c.kit_line_id) or 0
+                    )
+                ],
+            )
+            for b in batches
         ],
     )
 
@@ -1103,6 +1231,9 @@ async def _produce_batch(
     attempted = good + scrap
     # Pre-flight EVERY line before anything moves, so a short batch produces nothing.
     consume: dict[uuid.UUID, int] = {}
+    # What each line held BEFORE this batch drew on it — the denominator of the
+    # cost attribution below, captured here because the mutate loop destroys it.
+    residual_before: dict[uuid.UUID, int] = {}
     for line in kit.lines:
         if line.id not in used_by_line:
             raise ValidationError(
@@ -1125,6 +1256,22 @@ async def _produce_batch(
                 code="used_exceeds_issued",
             )
         consume[line.id] = used
+        residual_before[line.id] = on_floor
+    # ── Material cost attribution (RPT-003) ───────────────────────────────
+    # This MUST run here, in the pre-flight, before the drain and before
+    # ``used_qty`` moves. The moving average divides by what the line still
+    # holds, and ``_on_floor`` reads ``used_qty`` — compute it after the mutate
+    # loop below and you divide by an already-reduced residual, which is wrong
+    # on every line and wrong quietly.
+    batch_cost_amount, batch_cost_complete, line_costs = await _attribute_batch_cost(
+        db, kit=kit, consume=consume, residual_before=residual_before
+    )
+    unit_cost = costing.output_unit_cost(batch_cost_amount, good)
+    # Set only when a lot is actually minted below. Held in its own name rather
+    # than re-testing ``good > 0 and destinations`` at the bottom, because the
+    # batch row's ``(output_lot_id IS NULL) = (good_qty = 0)`` CHECK is exactly
+    # the invariant those two conditions drifting apart would break.
+    output_lot_id: uuid.UUID | None = None
     for line in kit.lines:
         used = consume[line.id]
         if used <= 0:
@@ -1143,6 +1290,17 @@ async def _produce_batch(
             lot_number=lot_number,
             created_by_user_id=current.id,
             expiration_date=expiration_date,
+            # RPT-003 — "the FG Lot-xxx should pull through all the costs". This
+            # one argument is the whole cost flow: a priced output lot is an
+            # ordinary priced lot, so when a later kit issues this AY as a
+            # sub-assembly the same charge sum picks the price up with no
+            # recursion and no special case. Before this, every kit-produced lot
+            # was unpriced, which also meant every AY and FG on the shelf valued
+            # at $0 in ``compute_item_valuations``.
+            #
+            # ``None`` when any input lot had no price: unknown must not become
+            # a partial figure that reads as a complete one.
+            unit_price_amount=unit_cost,
             # REQ-2026-07-31-STS-001: newly manufactured product defaults to
             # quarantine until somebody signs it out of there. This is the ONLY
             # place a release state is set without a signature, and rightly so —
@@ -1169,8 +1327,125 @@ async def _produce_batch(
             )
         # Primary destination (informational — the ledger has every split).
         kit.output_location_node_id = destinations[0][0]
+        output_lot_id = lot.id
     kit.good_qty = (kit.good_qty or 0) + good
     kit.scrap_qty = (kit.scrap_qty or 0) + scrap
+    # The costing record for this batch, and its per-component breakdown, so the
+    # figure on a customer's invoice can be explained rather than asserted
+    # (RPT-003). Written last: the lot must exist before it can be referenced.
+    await _record_batch_costs(
+        db,
+        kit=kit,
+        lot_id=output_lot_id,
+        good=good,
+        scrap=scrap,
+        consume=consume,
+        line_costs=line_costs,
+        material_cost_amount=batch_cost_amount,
+        unit_cost_amount=unit_cost,
+        cost_is_complete=batch_cost_complete,
+        evidence=evidence,
+        current=current,
+    )
+
+
+async def _attribute_batch_cost(
+    db,
+    *,
+    kit: Kit,
+    consume: dict[uuid.UUID, int],
+    residual_before: dict[uuid.UUID, int],
+) -> tuple[Decimal | None, bool, dict[uuid.UUID, tuple[Decimal | None, Decimal | None]]]:
+    """What this batch's material is worth, per component and in total — RPT-003.
+
+    Reads the kit's OWN ledger rows (``kit_id`` + ``kit_line_id``), never the
+    production floor. The floor is shared between kits by design — material is
+    never bound to a kit (TRX-002) — so a floor-derived cost could bill one
+    customer for another's material, plausibly and silently.
+
+    Returns ``(material_cost, cost_is_complete, {line_id: (unit_cost, extended)})``.
+    A single unpriced input anywhere makes ``material_cost`` ``None`` and
+    ``cost_is_complete`` false: a finished good is either costed or it is not.
+    """
+    charge_credit = await kit_repo.line_charge_credit_values(db, kit.id)
+    consumed_prior = await kit_repo.consumed_values_by_line(db, kit.id)
+
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]] = {}
+    line_values: list[Decimal | None] = []
+    for line in kit.lines:
+        used = consume.get(line.id, 0)
+        if used <= 0:
+            continue
+        charged, credited, _unpriced_qty = charge_credit.get(
+            line.id, (Decimal("0"), Decimal("0"), 0)
+        )
+        unit_cost = costing.line_unit_cost(
+            charged=charged,
+            credited=credited,
+            consumed=consumed_prior.get(line.id, Decimal("0")),
+            residual_qty=residual_before.get(line.id, 0),
+        )
+        extended = costing.line_extended_value(unit_cost, used)
+        line_costs[line.id] = (unit_cost, extended)
+        line_values.append(extended)
+
+    material_cost, cost_is_complete = costing.batch_cost(line_values)
+    return material_cost, cost_is_complete, line_costs
+
+
+async def _record_batch_costs(
+    db,
+    *,
+    kit: Kit,
+    lot_id: uuid.UUID | None,
+    good: int,
+    scrap: int,
+    consume: dict[uuid.UUID, int],
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]],
+    material_cost_amount: Decimal | None,
+    unit_cost_amount: Decimal | None,
+    cost_is_complete: bool,
+    evidence: uuid.UUID | None,
+    current,
+) -> None:
+    """Persist one batch's cost and its per-component breakdown (RPT-003).
+
+    ``scrap_value_amount`` is stored as ``scrap_qty × unit_cost`` — a **reported
+    slice** of ``material_cost_amount``, not an addition to it. The scrapped
+    units' material was charged at issue and is already inside the total; what
+    charges it to the customer is ``output_unit_cost`` dividing by good units
+    alone. A DB CHECK keeps this value at or below the batch total so no later
+    reader can mistake it for a fourth number to add.
+    """
+    batch = await kit_repo.create_batch(
+        db,
+        kit_id=kit.id,
+        batch_no=await kit_repo.next_batch_no(db, kit.id),
+        output_lot_id=lot_id,
+        good_qty=good,
+        scrap_qty=scrap,
+        material_cost_amount=material_cost_amount,
+        unit_cost_amount=unit_cost_amount,
+        scrap_value_amount=costing.scrap_value(material_cost_amount, good, scrap),
+        cost_is_complete=cost_is_complete,
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence,
+    )
+    for line in kit.lines:
+        used = consume.get(line.id, 0)
+        if used <= 0:
+            continue
+        unit_cost, extended = line_costs.get(line.id, (None, None))
+        await kit_repo.create_batch_consumption(
+            db,
+            batch_id=batch.id,
+            kit_line_id=line.id,
+            item_id=line.item_id,
+            qty=used,
+            unit_cost_amount=unit_cost,
+            extended_value_amount=extended,
+            cost_is_complete=extended is not None,
+        )
 
 
 async def _consumed_context(

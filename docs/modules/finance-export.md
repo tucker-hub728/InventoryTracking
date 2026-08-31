@@ -177,6 +177,36 @@ One `unit_price` column carrying both is a 100× error that reads as plausible.
   only a couple of connections, so it is *not* pool exhaustion). Fix:
   `docker restart cellready-backend`.
 
+## The sibling export — kit costs (RPT-003)
+
+`GET /v1/exports/kit-costs.csv` is a second export in the same module, built on
+the same writer. Read `docs/modules/kitting.md` §12 for the costing rules; the
+differences that matter here:
+
+| | RPT-001 `inventory.csv` | RPT-003 `kit-costs.csv` |
+|---|---|---|
+| Grain | current state, per (lot × location) | events over a **date range** |
+| Range | none — "as of now" | `occurred_from` / `occurred_to`, **half-open** |
+| Gate | `inventory:view` | `inventory:view` **+ Admin or Super Admin** |
+| Audit subject | `app.inventory_exports` | `app.kit_cost_exports` |
+| Row kinds | 4 | 6 |
+
+The narrower gate is deliberate: this file says what each customer is charged
+for each finished lot, and `inventory:view` alone would hand it to every
+read-only account (dev seeds 513 of them).
+
+**Both files inherit the conventions above** — blank is never `0`, companion
+`has_*` columns, unrounded decimals, the CSV-injection guard, the utf-8-sig BOM,
+one audit row per download, and 422-rather-than-truncate on overflow. They share
+`csv_writer.py`, so they cannot drift apart on formatting.
+
+One rule this file adds: **`batch_scrap_value_amount` is a slice of
+`batch_material_cost_amount`, not an addend.** Summing the two double-counts
+every kit. It has its own column rather than its own row kind precisely so it
+reads as the "of which" it is.
+
+---
+
 ## Open questions for the client
 
 1. Is `awaiting_release` stock an asset at month-end?

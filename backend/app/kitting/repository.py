@@ -11,14 +11,15 @@ from __future__ import annotations
 import uuid
 from decimal import ROUND_CEILING, Decimal
 
-from sqlalchemy import Select, func, or_, select, text
+from sqlalchemy import Select, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.core.search import like_contains
 from app.models.audit import AuditEvent
+from app.models.identity import User
 from app.models.inventory import BomLine, Item, ItemPrefix, ItemTier, Lot, StockMovement
-from app.models.kitting import Kit, KitLine
+from app.models.kitting import Kit, KitBatchConsumption, KitLine, KitProductionBatch
 from app.models.locations import KANBAN_NODE_TYPE, LocationNode, LotAllocation
 from app.notifications.pending import mark_item
 
@@ -398,17 +399,23 @@ async def list_kits(
 
 async def line_issue_breakdown(
     session: AsyncSession, kit_id: uuid.UUID
-) -> dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int]]]:
+) -> dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int, Decimal | None]]]:
     """Per kit line, the INITIAL issue split by (lot, source node) — powers the
     "lots pulled" snapshot on the Issue step (client 2026-07-22). Only
     ``kit_issue`` rows (not additional issues or returns), summed per lot at each
-    source. Returns ``{kit_line_id: [(lot_number, from_node_id, qty)]}``."""
+    source. Returns ``{kit_line_id: [(lot_number, from_node_id, qty, price)]}``.
+
+    ``price`` is that lot's per-consume-unit cost (RPT-003), carried so the UI
+    can show what each pull was worth. A line drawing from two differently
+    priced lots reports a blended unit cost, and without the per-lot prices
+    beside it that blend is a number nobody can check."""
     stmt = (
         select(
             StockMovement.kit_line_id,
             Lot.lot_number,
             StockMovement.from_location_node_id,
             func.coalesce(func.sum(StockMovement.qty_abs), 0),
+            Lot.unit_price_amount,
         )
         .select_from(StockMovement)
         .join(Lot, Lot.id == StockMovement.lot_id, isouter=True)
@@ -416,14 +423,276 @@ async def line_issue_breakdown(
             StockMovement.kit_id == kit_id,
             StockMovement.movement_type == "kit_issue",
         )
-        .group_by(StockMovement.kit_line_id, Lot.lot_number, StockMovement.from_location_node_id)
+        .group_by(
+            StockMovement.kit_line_id,
+            Lot.lot_number,
+            StockMovement.from_location_node_id,
+            Lot.unit_price_amount,
+        )
     )
-    out: dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int]]] = {}
-    for line_id, lot_number, from_node, qty in (await session.execute(stmt)).all():
+    out: dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int, Decimal | None]]] = {}
+    for line_id, lot_number, from_node, qty, price in (await session.execute(stmt)).all():
         if line_id is None:
             continue
-        out.setdefault(line_id, []).append((lot_number, from_node, int(qty)))
+        out.setdefault(line_id, []).append((lot_number, from_node, int(qty), price))
     return out
+
+
+async def line_all_charges_breakdown(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int, Decimal | None, bool]]]:
+    """Per kit line, EVERY charge split by lot — initial issue *and* additional.
+
+    Returns ``{kit_line_id: [(lot_number, from_node_id, qty, price, is_additional)]}``.
+
+    Distinct from :func:`line_issue_breakdown`, which is deliberately the
+    ``kit_issue`` rows only because it powers the Issue step's "lots pulled"
+    snapshot (client 2026-07-22). That is the wrong set for **cost**: a kit
+    topped up over several feeding days does most of its buying through
+    ``kit_additional_issue``, and a cost panel built on the initial issue alone
+    hides the very lot whose price explains the number it is trying to justify.
+
+    Ordered oldest-first so the sequence reads as the line's buying history —
+    which is what a moving average is an average *of*.
+    """
+    from app.kitting.costing import CHARGE_MOVEMENT_TYPES
+
+    stmt = (
+        select(
+            StockMovement.kit_line_id,
+            Lot.lot_number,
+            StockMovement.from_location_node_id,
+            StockMovement.qty_abs,
+            Lot.unit_price_amount,
+            StockMovement.movement_type,
+            StockMovement.performed_at,
+        )
+        .select_from(StockMovement)
+        .join(Lot, Lot.id == StockMovement.lot_id, isouter=True)
+        .where(
+            StockMovement.kit_id == kit_id,
+            StockMovement.kit_line_id.is_not(None),
+            StockMovement.movement_type.in_(CHARGE_MOVEMENT_TYPES),
+        )
+        .order_by(StockMovement.performed_at.asc())
+    )
+    out: dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None, int, Decimal | None, bool]]] = {}
+    for line_id, lot_number, node_id, qty, price, mv_type, _at in (
+        await session.execute(stmt)
+    ).all():
+        out.setdefault(line_id, []).append(
+            (lot_number, node_id, int(qty), price, mv_type == "kit_additional_issue")
+        )
+    return out
+
+
+async def line_charge_credit_values(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, tuple[Decimal | None, Decimal, int]]:
+    """Per kit line, the money charged to it and credited back — RPT-003.
+
+    Returns ``{kit_line_id: (charged, credited, unpriced_charge_qty)}``:
+
+    * ``charged``  — Σ ``qty_abs × lots.unit_price_amount`` over ``kit_issue`` +
+      ``kit_additional_issue``. **``None`` when any issued lot had no price**;
+      see ``unpriced_charge_qty`` below for how that is detected.
+    * ``credited`` — the same sum over the three return types. Note this is the
+      *lot-price* valuation; whether it is the one actually used is
+      ``costing.CREDIT_AT_LINE_AVERAGE``'s call, and by default it is not.
+    * ``unpriced_charge_qty`` — units issued to the line from a lot with no
+      price. Non-zero means the line's cost is unknowable, and the caller must
+      propagate that rather than sum the priced remainder.
+
+    Reads the kit's **own** movements only. That is the point: the production
+    floor is shared between kits (``allocations_for_item_at_node`` has no kit
+    filter, by design — material is never bound to a kit, TRX-002), so anything
+    derived from the floor could charge one kit for another's material. These
+    rows carry ``kit_id`` and ``kit_line_id`` and cannot.
+    """
+    from app.kitting.costing import CHARGE_MOVEMENT_TYPES, CREDIT_MOVEMENT_TYPES
+
+    priced_value = func.coalesce(
+        func.sum(
+            case(
+                (Lot.unit_price_amount.is_not(None), StockMovement.qty_abs * Lot.unit_price_amount),
+                else_=0,
+            )
+        ),
+        0,
+    )
+    unpriced_qty = func.coalesce(
+        func.sum(case((Lot.unit_price_amount.is_(None), StockMovement.qty_abs), else_=0)),
+        0,
+    )
+    stmt = (
+        select(
+            StockMovement.kit_line_id,
+            StockMovement.movement_type,
+            priced_value,
+            unpriced_qty,
+        )
+        .select_from(StockMovement)
+        .join(Lot, Lot.id == StockMovement.lot_id)
+        .where(
+            StockMovement.kit_id == kit_id,
+            StockMovement.kit_line_id.is_not(None),
+            StockMovement.movement_type.in_(CHARGE_MOVEMENT_TYPES + CREDIT_MOVEMENT_TYPES),
+        )
+        .group_by(StockMovement.kit_line_id, StockMovement.movement_type)
+    )
+    charged: dict[uuid.UUID, Decimal] = {}
+    credited: dict[uuid.UUID, Decimal] = {}
+    unpriced: dict[uuid.UUID, int] = {}
+    for line_id, mv_type, value, no_price_qty in (await session.execute(stmt)).all():
+        if mv_type in CHARGE_MOVEMENT_TYPES:
+            charged[line_id] = charged.get(line_id, Decimal("0")) + Decimal(value)
+            # Only an unpriced CHARGE makes the cost unknown. An unpriced return
+            # cannot: the material was priced on the way in, so the line already
+            # knows what a unit of it is worth.
+            unpriced[line_id] = unpriced.get(line_id, 0) + int(no_price_qty)
+        else:
+            credited[line_id] = credited.get(line_id, Decimal("0")) + Decimal(value)
+
+    out: dict[uuid.UUID, tuple[Decimal | None, Decimal, int]] = {}
+    for line_id in set(charged) | set(credited):
+        no_price = unpriced.get(line_id, 0)
+        out[line_id] = (
+            None if no_price else charged.get(line_id, Decimal("0")),
+            credited.get(line_id, Decimal("0")),
+            no_price,
+        )
+    return out
+
+
+async def consumed_values_by_line(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, Decimal]:
+    """Per kit line, the value already attributed to earlier batches — RPT-003.
+
+    The third term of the moving average. Without it, batch 2 would re-spend the
+    value batch 1 already carried away into its own finished lot.
+    """
+    stmt = (
+        select(
+            KitBatchConsumption.kit_line_id,
+            func.coalesce(func.sum(KitBatchConsumption.extended_value_amount), 0),
+        )
+        .select_from(KitBatchConsumption)
+        .join(KitProductionBatch, KitProductionBatch.id == KitBatchConsumption.batch_id)
+        .where(KitProductionBatch.kit_id == kit_id)
+        .group_by(KitBatchConsumption.kit_line_id)
+    )
+    return {
+        line_id: Decimal(value) for line_id, value in (await session.execute(stmt)).all()
+    }
+
+
+async def next_batch_no(session: AsyncSession, kit_id: uuid.UUID) -> int:
+    """The 1-based sequence number for the batch about to be written."""
+    stmt = select(func.coalesce(func.max(KitProductionBatch.batch_no), 0)).where(
+        KitProductionBatch.kit_id == kit_id
+    )
+    return int((await session.execute(stmt)).scalar_one()) + 1
+
+
+async def create_batch(
+    session: AsyncSession,
+    *,
+    kit_id: uuid.UUID,
+    batch_no: int,
+    output_lot_id: uuid.UUID | None,
+    good_qty: int,
+    scrap_qty: int,
+    material_cost_amount: Decimal | None,
+    unit_cost_amount: Decimal | None,
+    scrap_value_amount: Decimal | None,
+    cost_is_complete: bool,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None,
+) -> KitProductionBatch:
+    batch = KitProductionBatch(
+        kit_id=kit_id,
+        batch_no=batch_no,
+        output_lot_id=output_lot_id,
+        good_qty=good_qty,
+        scrap_qty=scrap_qty,
+        material_cost_amount=material_cost_amount,
+        unit_cost_amount=unit_cost_amount,
+        scrap_value_amount=scrap_value_amount,
+        cost_is_complete=cost_is_complete,
+        performed_by_user_id=performed_by_user_id,
+        reauth_evidence_id=reauth_evidence_id,
+    )
+    session.add(batch)
+    await session.flush()
+    return batch
+
+
+async def create_batch_consumption(
+    session: AsyncSession,
+    *,
+    batch_id: uuid.UUID,
+    kit_line_id: uuid.UUID,
+    item_id: uuid.UUID,
+    qty: int,
+    unit_cost_amount: Decimal | None,
+    extended_value_amount: Decimal | None,
+    cost_is_complete: bool,
+) -> KitBatchConsumption:
+    row = KitBatchConsumption(
+        batch_id=batch_id,
+        kit_line_id=kit_line_id,
+        item_id=item_id,
+        qty=qty,
+        unit_cost_amount=unit_cost_amount,
+        extended_value_amount=extended_value_amount,
+        cost_is_complete=cost_is_complete,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def batches_for_kit(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> list[KitProductionBatch]:
+    """Every batch a kit has run, oldest first, with its consumption rows.
+
+    ``selectinload`` rather than a lazy walk: the batch detail view renders the
+    per-component breakdown for every batch at once, so lazy loading would be a
+    query per batch on a page that already knows it needs them all.
+    """
+    stmt = (
+        select(KitProductionBatch)
+        .options(selectinload(KitProductionBatch.consumptions))
+        .where(KitProductionBatch.kit_id == kit_id)
+        .order_by(KitProductionBatch.batch_no.asc())
+    )
+    return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def batch_operator_names(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, str]:
+    """``{batch_id: operator full name}`` — who ran each batch."""
+    stmt = (
+        select(KitProductionBatch.id, User.full_name)
+        .join(User, User.id == KitProductionBatch.performed_by_user_id)
+        .where(KitProductionBatch.kit_id == kit_id)
+    )
+    return dict((await session.execute(stmt)).all())
+
+
+async def batch_output_lot_numbers(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> dict[uuid.UUID, str]:
+    """``{batch_id: lot_number}`` for a kit's batches that minted a lot."""
+    stmt = (
+        select(KitProductionBatch.id, Lot.lot_number)
+        .join(Lot, Lot.id == KitProductionBatch.output_lot_id)
+        .where(KitProductionBatch.kit_id == kit_id)
+    )
+    return dict((await session.execute(stmt)).all())
 
 
 async def kit_movements(session: AsyncSession, kit_id: uuid.UUID) -> list[StockMovement]:

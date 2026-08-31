@@ -536,6 +536,16 @@ class MovementRead(BaseModel):
     # mistake it for history: the ledger renders it on the per-lot subtotal row,
     # never on an individual movement (client 2026-08-17).
     lot_release_state: str | None = None
+    # The lot's per-consume-unit price AS IT IS NOW (RPT-003) — same "present
+    # state, not history" caveat as ``lot_release_state`` above, and for the
+    # same reason: prices stay editable after receive and nothing records what
+    # one was on the day a movement happened. The ledger therefore renders cost
+    # on the per-lot subtotal, never against an individual movement.
+    #
+    # ``None`` means no price recorded, which is NOT zero — a kit-produced lot
+    # from before ``kitcost01`` is blank, while customer-owned cells received on
+    # a $0 PO are a real, known zero.
+    lot_unit_price_amount: Decimal | None = None
 
     # Location System node references. For consume, ``to_location_node_id`` is
     # the Flat location that consumed the unit. ``*_name`` / ``*_path`` are

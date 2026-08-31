@@ -125,6 +125,72 @@ export interface ApiKitLine {
   on_floor_lots: KitLineFloorLot[];
   /** Available at the currently-chosen source node (the issue cap). */
   source_available: number;
+  /** Decimal (string). What one unit of this line's remaining floor material is
+   *  worth (RPT-003) — a moving weighted average, so a line that drew from two
+   *  differently-priced lots reports the blend rather than either lot. `null`
+   *  when an issued lot has no price, or the line is spent. */
+  unit_cost_amount: string | null;
+  /** Decimal (string). Cumulative value this line has handed to finished lots
+   *  across every batch. `null` when any of it was unpriced. */
+  consumed_value_amount: string | null;
+  /** EVERY charge to this line — the initial issue AND every top-up — oldest
+   *  first, each with its lot price. This is what the cost figures are an
+   *  average of, so it is what the batch drill-down shows. `issued_from` above
+   *  stays the initial-issue-only snapshot the Issue step was built around;
+   *  using that for cost would hide the top-ups, which on a kit fed over
+   *  several days is most of the spend. */
+  sourced_from: KitLineIssuedFrom[];
+}
+
+/** One produce/close-out batch and what its output lot cost (RPT-003).
+ *
+ *  A kit can run several (KIT-007), each minting its own lot at its own price,
+ *  which is why cost lives here and not on the kit. `scrap_value_amount` is a
+ *  reported SLICE of `material_cost_amount` — never an addition to it. */
+export interface ApiKitBatch {
+  id: string;
+  batch_no: number;
+  output_lot_id: string | null;
+  output_lot_number: string | null;
+  good_qty: number;
+  scrap_qty: number;
+  /** Decimal (string). Total material attributed to this batch. */
+  material_cost_amount: string | null;
+  /** Decimal (string). material_cost ÷ good_qty — what one finished unit cost,
+   *  and what was stamped onto the output lot. */
+  unit_cost_amount: string | null;
+  /** Decimal (string). scrap_qty × unit_cost — the portion lost to failed
+   *  units. Already inside material_cost_amount; shown, not added. */
+  scrap_value_amount: string | null;
+  /** False when an input lot had no price; the money fields are then all null.
+   *  Render "—", never 0: blank means unknown, zero means free. */
+  cost_is_complete: boolean;
+  produced_at: string;
+  performed_by_name: string | null;
+  /** The per-component breakdown behind `material_cost_amount`. */
+  consumptions: ApiKitBatchConsumption[];
+}
+
+/** One component's contribution to one finished lot (RPT-003).
+ *
+ *  `Σ extended_value_amount` over a batch equals its `material_cost_amount`,
+ *  so the total on the customer's bill is explainable line by line.
+ *
+ *  Carries **no source lot**, deliberately: cost is a moving weighted average
+ *  over a pool, so a batch consumes value rather than identified lots. The lots
+ *  that fed the average are on the kit line's `issued_from`. */
+export interface ApiKitBatchConsumption {
+  kit_line_id: string;
+  line_no: number | null;
+  item_id: string;
+  item_number: string;
+  description: string;
+  qty: number;
+  /** Decimal (string). Frozen at the moment of consumption. */
+  unit_cost_amount: string | null;
+  /** Decimal (string). `qty × unit_cost_amount`. */
+  extended_value_amount: string | null;
+  cost_is_complete: boolean;
 }
 
 /** One lot of a component on the production floor — a pickable return source. */
@@ -139,6 +205,14 @@ export interface KitLineIssuedFrom {
   lot_number: string | null;
   location: string;
   qty: number;
+  /** Decimal (string). That lot's per-consume-unit price (RPT-003) — shown so a
+   *  line's blended unit cost can be checked against what it actually pulled.
+   *  `null` when the lot has no price, which is what makes the line's whole
+   *  cost unknown. */
+  unit_price_amount: string | null;
+  /** True when this pull was a mid-production top-up rather than part of the
+   *  initial issue. Only ever set on `sourced_from`. */
+  is_additional: boolean;
 }
 
 export interface ApiKit {
@@ -160,6 +234,20 @@ export interface ApiKit {
   created_at: string;
   updated_at: string;
   lines: ApiKitLine[];
+  /** Decimal (string). Net material charged to the kit over its whole life
+   *  (RPT-003) — issues minus returns, at lot cost.
+   *
+   *  This is a LIVE figure: lot prices stay editable after receive, so it can
+   *  move retroactively. The per-batch figures in `batches` are frozen at
+   *  produce time and do not. A divergence between the two is real, not a bug —
+   *  a shipped lot's cost must not change because a price was corrected later. */
+  material_cost_amount: string | null;
+  /** Decimal (string). Total already handed to finished lots. Kit cost minus
+   *  this is what is still sitting on the production floor. */
+  consumed_value_amount: string | null;
+  /** False when any input lot had no price. Render "—", never 0. */
+  cost_is_complete: boolean;
+  batches: ApiKitBatch[];
 }
 
 export interface ApiKitListItem {

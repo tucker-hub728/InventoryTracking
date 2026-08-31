@@ -165,7 +165,9 @@ def format_cell(value: Any) -> str:  # noqa: PLR0911 — a type-dispatch ladder;
 
 
 def render_csv(
-    rows: Iterable[Mapping[str, Any]], columns: tuple[str, ...] = COLUMNS
+    rows: Iterable[Mapping[str, Any]],
+    columns: tuple[str, ...] = COLUMNS,
+    headers: tuple[str, ...] | None = None,
 ) -> bytes:
     """Render the header + rows to RFC-4180 CSV bytes.
 
@@ -181,14 +183,26 @@ def render_csv(
     """
     buf = io.StringIO(newline="")
     writer = csv.writer(buf, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(columns)
+    # ``headers`` lets a file print plain-English column titles while the row
+    # dicts stay keyed by the internal names the code uses. RPT-001 has no need
+    # of it — finance pivots on those snake_case keys and expects them — but
+    # RPT-003 goes to departments who open it in Excel, where
+    # ``batch_material_cost_amount`` is a worse answer than "Batch material cost".
+    writer.writerow(headers or columns)
     for row in rows:
         writer.writerow([format_cell(row.get(column)) for column in columns])
     return buf.getvalue().encode("utf-8-sig")
 
 
-def export_filename(generated_at: datetime, extension: str = "csv") -> str:
+def export_filename(
+    generated_at: datetime, extension: str = "csv", prefix: str = "inventory"
+) -> str:
     """``cellready-inventory-20260825T140311Z.csv`` (or ``.xlsx``).
+
+    ``prefix`` names the export: ``inventory`` (RPT-001) or ``kit-costs``
+    (RPT-003). It defaults to the original so existing callers and the frozen
+    filename test are unaffected — and it must stay ASCII for the same reason
+    the stamp is, so ``Content-Disposition`` never needs an RFC-5987 form.
 
     Pure ASCII (so ``Content-Disposition`` needs no ``filename*``), sorts
     chronologically in a Downloads folder, and carries the same as-of stamp
@@ -199,4 +213,4 @@ def export_filename(generated_at: datetime, extension: str = "csv") -> str:
     moment are recognisably the same export.
     """
     stamp = generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"cellready-inventory-{stamp}.{extension}"
+    return f"cellready-{prefix}-{stamp}.{extension}"

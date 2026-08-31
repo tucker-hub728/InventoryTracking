@@ -236,6 +236,8 @@ async def _audit_export(
     item_count: int,
     counts: dict[str, int],
     filters: dict[str, Any],
+    subject_table: str = EXPORT_SUBJECT_TABLE,
+    requirement: str = "RPT-001",
 ) -> None:
     """One ``audit.audit_events`` row per download, written before it is served.
 
@@ -257,7 +259,11 @@ async def _audit_export(
         # The recorder allows exactly four verbs and the column has no CHECK,
         # so this needs no schema change.
         action="created",
-        subject_table=EXPORT_SUBJECT_TABLE,
+        # Defaults to the RPT-001 constant; the kit-cost export passes its own
+        # so the two are distinguishable in the audit viewer — "who took a copy
+        # of our customer pricing" is a different question from "who took a copy
+        # of our stock valuation".
+        subject_table=subject_table,
         subject_id=uuid.uuid4(),
         subject_label=filename,
         before=None,
@@ -269,7 +275,7 @@ async def _audit_export(
             "item_count": item_count,
         },
         context={
-            "requirement": "RPT-001",
+            "requirement": requirement,
             "row_counts_by_kind": counts,
             "filters": filters,
         },
