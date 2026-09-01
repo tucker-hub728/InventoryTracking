@@ -92,6 +92,8 @@ export interface ApiItem {
   uom: string | null;
   /** Blind-consumed (no per-lot traceability) when true. */
   is_consumable: boolean;
+  /** Consumed to the kit, never back-flushed (KIT-003) when true. */
+  consumed_in_kit: boolean;
   /** Tier (REQ-2026-07-15-ITM-001). ``tier_type`` drives the Type column:
    *  sub_assembly / finished_good may have a BOM; raw_material is bought as-is. */
   tier_id: string;
@@ -169,6 +171,12 @@ export interface ListItemsParams {
    * ``qty_available <= 0`` first, so those read as ``out_of_stock``).
    */
   below_reorder?: boolean | null;
+  /**
+   * `true` selects items with stock that has ARRIVED but is not yet placed and
+   * released (REQ-2026-07-31-STS-001) â material on site and paid for, which
+   * the reorder screen deliberately does not count as missing.
+   */
+  awaiting_release?: boolean | null;
   sort?: ApiSortField;
   direction?: ApiSortDirection;
   limit?: number;
@@ -189,6 +197,9 @@ export interface ItemCreateInput {
   uom?: string | null;
   /** Blind-consumed with no per-lot traceability when true. */
   is_consumable?: boolean;
+  /** The media twin: consumed to the kit and never back-flushed (KIT-003).
+   *  Mutually exclusive with `is_consumable` — the server 422s on both. */
+  consumed_in_kit?: boolean;
   /** Assigned suppliers (zero-or-more). The only suppliers the item can later
    *  be received against. */
   supplier_ids?: string[];
@@ -206,6 +217,7 @@ export interface ItemUpdateInput {
   description?: string;
   uom?: string | null;
   is_consumable?: boolean;
+  consumed_in_kit?: boolean;
   /** Re-assign the item to another prefix (its tier is derived). Blocked
    *  server-side if moving a BOM-bearing item to a raw-material prefix. */
   prefix_id?: string;
@@ -228,6 +240,7 @@ export const itemsApi = {
         prefix_id: params.prefix_id ?? undefined,
         status: params.status ?? undefined,
         is_consumable: params.is_consumable ?? undefined,
+        awaiting_release: params.awaiting_release ?? undefined,
         has_bom: params.has_bom ?? undefined,
         min_bom_lines: params.min_bom_lines ?? undefined,
         below_reorder: params.below_reorder ?? undefined,

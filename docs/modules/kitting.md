@@ -13,7 +13,7 @@ This brief proposes the tables for the kit lifecycle **Draft → Issued → In P
 These are already settled in the mock and carry into the backend unless flagged in §99.
 
 1. **Three tiers, prefix-agnostic.** A kit builds a **sub-assembly (AY)** or a **finished good (FG)**; its BOM lines are **raw materials (CR)** and/or nested AYs. Eligibility comes from `item_tiers.type`, never the ID prefix.
-2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99).
+2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99). **Amended 2026-08-31 (KIT-003):** media still reaches a kit — as a **non-consumable twin item** (its own part number, its own stock balance), which enters the BOM like any other component and carries `items.consumed_in_kit`. Such a line is an ordinary component while the kit is open — same recipe need, same operator entry, same gates — and differs at close-out, where its leftover is **consumed rather than back-flushed**; see the `consumed_in_kit` column on `app.kit_lines`.
 3. **Kitted material stops counting as available on-hand at issue time** (REQ-2026-07-09-TRX-001) **and physically moves to the production location** (`Transaction_Spec` §2). Issue is a stock-**out** of the *available* balance and a **relocation** of the material to the production node. See §0.3a.
 
 4. **Material is never bound to a production lot at kitting time** (REQ-2026-07-09-TRX-002) — which is exactly why a cancelled kit can always hand its material back with nothing stranded.
@@ -151,6 +151,7 @@ One row per BOM component of the kit, snapshotted at creation so a later BOM edi
 | `line_no` | `INTEGER NOT NULL` | display order |
 | `item_id` | `UUID NOT NULL FK → app.items(id)` `RESTRICT` | the component (CR or nested AY) — **never a consumable** (§0.2) |
 | `qty_per_unit` | `NUMERIC(14,3) NOT NULL` | **snapshot** of `bom_lines.qty_per_unit`; `ck_kit_lines_qty_per_unit_positive` (`> 0`) |
+| `consumed_in_kit` | `BOOLEAN NOT NULL DEFAULT FALSE` | **snapshot** of `items.consumed_in_kit` (KIT-003) — media: ordinary while the kit is open; at close-out its leftover is consumed, never back-flushed, so it needs no return location |
 | `issued_qty` | `INTEGER NOT NULL DEFAULT 0` | pulled at issue; `ck_kit_lines_issued_qty_nonneg` |
 | `additional_issued_qty` | `INTEGER NOT NULL DEFAULT 0` | mid-production top-ups (Transaction Spec §2.1); `ck_kit_lines_additional_issued_qty_nonneg` |
 | `used_qty` | `INTEGER NULL` | entered at close-out from the traveler; `ck_kit_lines_used_qty_nonneg` |
@@ -460,6 +461,106 @@ No data backfill — new feature, empty tables.
 - **Locations** (`docs/modules/locations.md`) — `production/output/source/return` are `meta.location_nodes`; finished-output placement into a Box cell is a Location System follow-up, not owned here.
 - **Movements ledger** — this module is a *writer* of `app.stock_movements`; on-hand stays `v_item_stock`.
 - **Receipt Admin** (`docs/modules/receipt-admin.md`) — the paired-header/line/event shape of `kits`→`kit_lines`→movements mirrors `receipt_transactions`→lines→`receipt_events`; reuse the service patterns.
+
+---
+
+## 12. Material cost flow (RPT-003) — `kitcost01`, 2026-08-28
+
+> "Cost shall flow through kitting: issued quantities carry their lot cost, so a closed kit can be costed (materials only)." — SRS Consolidated Amendment 9+10
+>
+> "The FG Lot-xxx should pull through all the costs. The Kit should capture the costs to that specific Lot — so the process scrap or material scrap and actual material costs are put to the Kit and the Kit is closed out to the FG Lot specifically so the Customer can be charged the actual cost for that particular FG Lot." — Blane Larson, 2026-08-27
+
+Materials only; labour and overhead are explicitly out of scope for phase one.
+
+### 12.1 The one-line defect this closed
+
+`_produce_batch` minted its output lot without passing `unit_price_amount`, which `inv_repo.create_lot` had always accepted. So **every kit-produced lot was unpriced** — cost stopped dead at the kit, and because `compute_item_valuations` filters `unit_price_amount IS NOT NULL`, every AY and FG on the shelf valued at **$0**. Passing that one argument is the whole cost flow.
+
+### 12.2 The formula
+
+```
+kit_material_cost = Σ charges − Σ credits
+```
+
+| Role | `movement_type` | `qty_delta` |
+|---|---|---|
+| CHARGE | `kit_issue`, `kit_additional_issue` | negative |
+| CREDIT | `backflush`, `kit_return`, `kit_cancel_return` | positive |
+| EXCLUDED | `production_output` | it is the output, not an input |
+
+Per batch, per line, the attribution is a **moving weighted average** over what the line still holds:
+
+```
+unit_cost_L = (charged_L − credited_L − consumed_L) / residual_qty_L
+```
+
+`Σ batch values + residual == charged − credited` holds exactly — the value identity mirrors the quantity identity close-out already enforces.
+
+**Cost is never read off the production floor.** `allocations_for_item_at_node` has no kit filter (material is never bound to a kit, TRX-002), so a floor-derived cost could bill one customer for another kit's material — plausibly, and silently. Only the kit's own `kit_id`/`kit_line_id`-tagged ledger rows are used.
+
+Credits are valued at the returned lot's own price (`costing.CREDIT_AT_LOT_PRICE`). The alternative — the line's average at return time — is arguably more correct but is not derivable after the fact; it would have to be computed and stored on every return, in three endpoints.
+
+### 12.3 Scrap is INCLUDED, and it is a slice
+
+The customer pays for scrap. **The mechanism is the divisor, not an extra line:**
+
+| | Divisor | $450 material, 5 attempted, 4 good | Who absorbs the scrap |
+|---|---|---|---|
+| **Included** ← implemented | `good_qty` | **$112.50/unit** → customer pays $450 | The customer |
+| Excluded | `good_qty + scrap_qty` | $90.00/unit → customer pays $360 | CellReady |
+
+Scrapped material was charged at issue and never credited back, so its value is **already inside** `material_cost_amount`; adding a scrap term double-counts it. `scrap_value_amount` reports the portion for visibility, prorated over units **attempted**:
+
+```
+scrap_value = material_cost × scrap_qty / (good_qty + scrap_qty)
+```
+
+and a DB CHECK keeps it `<= material_cost_amount` so no later reader can mistake it for a fourth number to add.
+
+**Not `scrap_qty × unit_cost_amount`** — that was the first cut and it is wrong twice over. `unit_cost_amount` is `material ÷ good`, so it *already* carries the scrap; multiplying it back out double-applies the absorption. At `good == scrap` it reports the entire batch cost as scrap, and at `scrap > good` it exceeds the batch total and trips the CHECK — a **500 on produce**, not merely a wrong number on a screen. Guarded by `test_scrap_value_never_exceeds_the_batch_cost`.
+
+Only **process** scrap (failed output units) gets a figure. There is no material-scrap column anywhere — spilled material is folded into `used_qty` — so material waste is real, charged, and invisible. Giving it a quantity would change the close-out identity and `ck_kit_lines_no_overuse`; deliberately deferred.
+
+### 12.4 Sub-assemblies
+
+Stamping the price at mint closes the nested-cost hole **with no recursive query**. A kit-produced AY lot is an ordinary priced lot; when a later kit issues it, the same charge sum picks the price up. The recursion already happened, once, at each mint.
+
+Lots produced **before** `kitcost01` keep a NULL price and are not backfilled — their input prices are editable and per-batch attribution never existed for them, so any figure would be one that was never true. A kit consuming a pre-change AY therefore mints a **blank-cost** FG, which is honest.
+
+`parent_lot_id` is **not** set: it is single-parent (split lineage) and a kit output has N parents. Lineage is the `production_output` `(kit_id, lot_id)` pair plus `kit_batch_consumptions`.
+
+### 12.5 Unknown is not zero
+
+If any lot feeding a line has no price, the whole batch is unknown: `material_cost_amount` and `unit_cost_amount` are both NULL, `cost_is_complete` is false, and the minted lot is left **unpriced**. A partial sum reads as a complete one, which for a billing artefact is the worst available outcome (RPT-001's blank-is-never-zero rule, one level up).
+
+**`$0` is a different fact** — a known price, and the correct one for the customer-owned cells that arrive on a $0 PO. It flows through as a real zero and keeps `cost_is_complete` true.
+
+### 12.6 Tables
+
+- `app.kit_production_batches` — one row per produce/close-out batch: its output lot, good/scrap, `material_cost_amount`, `unit_cost_amount`, `cost_is_complete`.
+- `app.kit_batch_consumptions` — one row per (batch × kit line): qty, `unit_cost_amount`, `extended_value_amount`.
+
+**No new movement type**, no column on `app.lots` or `app.kit_lines`, and no source-lot column on the consumption rows (under a moving average a batch consumes value from a pool, not identified lots — identified lots live in the ledger on the `kit_issue` rows).
+
+**Nothing derivable is stored.** A schema review on 2026-08-31 removed two columns that could be computed from their own row: `scrap_value_amount` (now prorated on read) and `kit_batch_consumptions.item_id` (the component is `kit_line.item_id`, one hop away). What survives is stored either because the derivation is *lossy* — `unit_cost_amount` is rounded to 6dp while `material_cost_amount` is exact, so neither recovers the other — or because it is path-dependent, like the moving average.
+
+### 12.7 A price correction follows the material
+
+> "when i update the price from the edit lot will it effect the price of the AY/FG which is already produce … it should be" — client, 2026-08-31
+
+It does now. Editing `lots.unit_price_amount` re-costs every kit **charged** that lot, re-stamps the lots those kits produced, and follows those lots into any kit that consumed *them* — see `app/kitting/recompute.py`. One price, everywhere, always current.
+
+It is a **replay, not a multiply**: the moving average is path-dependent, so each batch is re-run in order with charges and credits taken as of its own timestamp. Every input still exists — the movements carry current prices, each batch's per-line `qty` and `good_qty` are stored — so the result is deterministic.
+
+Before this, `KitRead.material_cost_amount` re-read prices while the per-batch figures did not, so the kit page could disagree with the table directly beneath it. That inconsistency is gone.
+
+**The accepted consequence:** a lot that has already shipped can change price. A figure cannot be both live and immutable, and the client chose live. Every recompute therefore writes its scope — kits touched, batches updated, and each lot's old and new price — into the `context` of the lot-edit audit row, under `recosted`.
+
+The frontier is **charges only**. A kit that merely handed the lot back never took its cost, so nothing it produced moves.
+
+### 12.8 Known adjacent defect
+
+`save_production` assigns `kits.good_qty`/`scrap_qty` **absolutely** while `_produce_batch` accumulates them, so anyone with `inventory:create` can rewrite a kit's produced total, unsigned. Costing is immune (the divisor is the batch's own `good_qty`) but the UI's "Produced so far" is not. Fix separately by rejecting the PATCH once the kit has batches.
 
 ---
 

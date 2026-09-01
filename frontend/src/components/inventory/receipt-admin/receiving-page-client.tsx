@@ -52,7 +52,7 @@ import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog
 import { ItemLink } from '@/components/inventory/item-link';
 import { usePermission } from '@/hooks/use-permission';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { cn } from '@/lib/utils';
+import { cn, formatUnitPrice } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -819,7 +819,7 @@ function OrderDetailSheet({
                             <dt className="text-text-3">
                               Unit price{l.pack_uom ? ` / ${l.pack_uom}` : ''}
                             </dt>
-                            <dd className="font-mono tabular-nums">{l.unit_price_amount ?? '—'}</dd>
+                            <dd className="font-mono tabular-nums">{formatUnitPrice(l.unit_price_amount)}</dd>
                           </div>
                         </dl>
                         {l.pack_uom && l.units_per_pack != null && (

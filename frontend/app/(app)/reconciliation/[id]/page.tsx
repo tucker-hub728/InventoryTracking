@@ -1,10 +1,5 @@
-import type { Metadata } from 'next';
-
-import { KitDetailClient } from '@/components/reconciliation/kit-detail-client';
-
-export const metadata: Metadata = { title: 'Kit' };
-
-export default async function KitDetailPage(props: { params: Promise<{ id: string }> }) {
-  const params = await props.params;
-  return <KitDetailClient kitId={params.id} />;
+// Bare /reconciliation/<id> — the shell redirects to whichever step the kit's
+// status makes the sensible landing point, once it knows the status.
+export default function KitDetailIndexPage() {
+  return null;
 }

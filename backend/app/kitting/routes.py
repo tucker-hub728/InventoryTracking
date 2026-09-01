@@ -71,6 +71,7 @@ from app.security.permissions import (
     RequireRole,
 )
 
+from . import costing
 from . import repository as kit_repo
 from .schemas import (
     AdditionalIssueRequest,
@@ -95,6 +96,8 @@ from .schemas import (
     KitActivityResponse,
     KitActivityRow,
     KitAuditEventRow,
+    KitBatchConsumptionRead,
+    KitBatchRead,
     KitConsumedLine,
     KitCreateRequest,
     KitLineFloorLot,
@@ -182,6 +185,20 @@ def _needed(line: KitLine, target_qty: int) -> Decimal:
     return line.qty_per_unit * target_qty
 
 
+def _with_reason(note: str, reason: str | None) -> str:
+    """Append the e-signature comment to a ledger note.
+
+    REQ-2026-08-13-CTL-002: an error is corrected by re-kitting with an
+    explanatory comment, and the correction has to be visible *in the ledger* —
+    not only on the signature row. Every signed kitting write routes its note
+    through here so the operator's rationale lands on ``stock_movements.notes``.
+
+    The comment stays OPTIONAL (client, 2026-06-29 — no e-sign requires one),
+    so a blank reason leaves the note exactly as it was.
+    """
+    return f"{note} — {reason}" if reason else note
+
+
 def _kit_snapshot(kit: Kit) -> dict:
     """A full audit snapshot of a kit and *every* line.
 
@@ -208,6 +225,7 @@ def _kit_snapshot(kit: Kit) -> dict:
                 "line_no": ln.line_no,
                 "item_id": str(ln.item_id),
                 "qty_per_unit": str(ln.qty_per_unit),
+                "consumed_in_kit": ln.consumed_in_kit,
                 "needed_qty": str(_needed(ln, kit.target_qty)),
                 "issued_qty": ln.issued_qty,
                 "additional_issued_qty": ln.additional_issued_qty,
@@ -248,6 +266,8 @@ def _line_read(
     issued_breakdown: dict[uuid.UUID, list] | None = None,
     floor_lots: dict[uuid.UUID, list] | None = None,
     origins_by_line: dict[uuid.UUID, set[str]] | None = None,
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]] | None = None,
+    all_charges: dict[uuid.UUID, list] | None = None,
 ) -> KitLineRead:
     item = items.get(line.item_id)
     per_node = stock_by_node.get(line.item_id, {})
@@ -261,8 +281,26 @@ def _line_read(
         return path or name
 
     issued_from = [
-        KitLineIssuedFrom(lot_number=lot_number, location=_node_path(node_id), qty=qty)
-        for lot_number, node_id, qty in (issued_breakdown or {}).get(line.id, [])
+        KitLineIssuedFrom(
+            lot_number=lot_number,
+            location=_node_path(node_id),
+            qty=qty,
+            unit_price_amount=price,
+        )
+        for lot_number, node_id, qty, price in (issued_breakdown or {}).get(line.id, [])
+    ]
+    # Every charge, top-ups included — what the cost figures average over.
+    sourced_from = [
+        KitLineIssuedFrom(
+            lot_number=lot_number,
+            location=_node_path(node_id),
+            qty=qty,
+            unit_price_amount=price,
+            is_additional=is_additional,
+        )
+        for lot_number, node_id, qty, price, is_additional in (all_charges or {}).get(
+            line.id, []
+        )
     ]
 
     def _lot_cells(node_id: uuid.UUID, lot_id: uuid.UUID) -> list[CellOption]:
@@ -349,6 +387,9 @@ def _line_read(
         item_number=item.item_number if item else "",
         description=item.description if item else "",
         qty_per_unit=line.qty_per_unit,
+        # From the LINE, never the item: a kit opened before the flag was set
+        # must keep reconciling the way it was created (KIT-003).
+        consumed_in_kit=line.consumed_in_kit,
         needed_qty=line.qty_per_unit * target_qty,
         issued_qty=line.issued_qty,
         additional_issued_qty=line.additional_issued_qty,
@@ -390,7 +431,56 @@ def _line_read(
         source_available=(
             per_node.get(line.source_location_node_id, 0) if line.source_location_node_id else 0
         ),
+        unit_cost_amount=(line_costs or {}).get(line.id, (None, None))[0],
+        consumed_value_amount=(line_costs or {}).get(line.id, (None, None))[1],
+        sourced_from=sourced_from,
     )
+
+
+async def _kit_cost_view(
+    db, kit: Kit
+) -> tuple[
+    Decimal | None,
+    Decimal | None,
+    bool,
+    dict[uuid.UUID, tuple[Decimal | None, Decimal | None]],
+]:
+    """The kit's cost picture for the read model (RPT-003).
+
+    Returns ``(kit_material_cost, consumed_total, cost_is_complete,
+    {line_id: (unit_cost, consumed_value)})``.
+
+    The kit-level figure is LIVE — it re-reads lot prices, which stay editable
+    after receive — while the per-batch figures already stamped onto finished
+    lots are frozen. That divergence is correct: a shipped lot's cost must not
+    move because somebody corrected a price months later. Both are published so
+    the difference is a subtraction the reader can perform.
+    """
+    charge_credit = await kit_repo.line_charge_credit_values(db, kit.id)
+    consumed_prior = await kit_repo.consumed_values_by_line(db, kit.id)
+
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]] = {}
+    net = Decimal("0")
+    complete = True
+    for line in kit.lines:
+        charged, credited, _unpriced = charge_credit.get(
+            line.id, (Decimal("0"), Decimal("0"), 0)
+        )
+        unit_cost = costing.line_unit_cost(
+            charged=charged,
+            credited=credited,
+            consumed=consumed_prior.get(line.id, Decimal("0")),
+            residual_qty=_on_floor(line),
+        )
+        line_costs[line.id] = (unit_cost, consumed_prior.get(line.id))
+        if charged is None:
+            complete = False
+        else:
+            net += charged - credited
+    if not complete:
+        return None, None, False, line_costs
+    consumed_total = sum(consumed_prior.values(), Decimal("0"))
+    return net, consumed_total, True, line_costs
 
 
 async def _kit_read(db, kit: Kit) -> KitRead:
@@ -404,6 +494,9 @@ async def _kit_read(db, kit: Kit) -> KitRead:
     lots_by_item = await kit_repo.item_stock_by_node_lot(db, line_item_ids)
     # What each line was ISSUED from (lot × source), for the post-issue snapshot.
     issued_breakdown = await kit_repo.line_issue_breakdown(db, kit.id)
+    # Every charge including mid-production top-ups — the set the cost figures
+    # average over, and the one the batch drill-down must show.
+    all_charges = await kit_repo.line_all_charges_breakdown(db, kit.id)
     # LOC-003 back-flush: the node types each line was issued from, so the
     # close-out and return pickers can pre-filter destinations.
     origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
@@ -424,6 +517,16 @@ async def _kit_read(db, kit: Kit) -> KitRead:
         for n in (await kit_repo.grid_nodes(db, grid_ids)).values()
         if n.grid_rows and n.grid_cols
     }
+    # Material cost (RPT-003): the kit's live net, plus the frozen per-batch
+    # figures that were stamped onto each finished lot.
+    kit_cost, consumed_total, cost_complete, line_costs = await _kit_cost_view(db, kit)
+    batches = await kit_repo.batches_for_kit(db, kit.id)
+    batch_lot_numbers = await kit_repo.batch_output_lot_numbers(db, kit.id)
+    batch_operators = await kit_repo.batch_operator_names(db, kit.id)
+    # line_id → line_no / item_id, so a consumption row can name the component's
+    # position and identity without storing either alongside it.
+    line_nos = {ln.id: ln.line_no for ln in kit.lines}
+    line_items = {ln.id: ln.item_id for ln in kit.lines}
     parent = items.get(kit.item_id)
     return KitRead(
         id=str(kit.id),
@@ -458,8 +561,53 @@ async def _kit_read(db, kit: Kit) -> KitRead:
                 issued_breakdown,
                 floor_lots,
                 origins_by_line,
+                line_costs,
+                all_charges,
             )
             for ln in kit.lines
+        ],
+        material_cost_amount=kit_cost,
+        consumed_value_amount=consumed_total,
+        cost_is_complete=cost_complete,
+        batches=[
+            KitBatchRead(
+                id=str(b.id),
+                batch_no=b.batch_no,
+                output_lot_id=str(b.output_lot_id) if b.output_lot_id else None,
+                output_lot_number=batch_lot_numbers.get(b.id),
+                good_qty=b.good_qty,
+                scrap_qty=b.scrap_qty,
+                material_cost_amount=b.material_cost_amount,
+                unit_cost_amount=b.unit_cost_amount,
+                scrap_value_amount=costing.scrap_value(
+                    b.material_cost_amount, b.good_qty, b.scrap_qty
+                ),
+                cost_is_complete=b.cost_is_complete,
+                produced_at=b.produced_at,
+                performed_by_name=batch_operators.get(b.id),
+                consumptions=[
+                    KitBatchConsumptionRead(
+                        kit_line_id=str(c.kit_line_id),
+                        line_no=line_nos.get(c.kit_line_id),
+                        # The component comes from the LINE, one hop away and
+                        # already loaded — the consumption row does not repeat
+                        # it. ``line_items`` is built from ``kit.lines`` above.
+                        item_id=str(line_items.get(c.kit_line_id, "")),
+                        item_number=_component_field(c, line_items, items, "item_number"),
+                        description=_component_field(c, line_items, items, "description"),
+                        qty=c.qty,
+                        unit_cost_amount=c.unit_cost_amount,
+                        extended_value_amount=c.extended_value_amount,
+                        cost_is_complete=c.cost_is_complete,
+                    )
+                    # By line order, so the breakdown reads down the BOM the same
+                    # way the Components table above it does.
+                    for c in sorted(
+                        b.consumptions, key=lambda c: line_nos.get(c.kit_line_id) or 0
+                    )
+                ],
+            )
+            for b in batches
         ],
     )
 
@@ -1092,7 +1240,16 @@ async def _produce_batch(
     ``ceil(qty_per_unit × (good + scrap))`` — you can't make N units with less
     than N units' worth (``used_below_need``) — and no more than what's on the
     floor (``used_exceeds_issued``). A component missing a value is
-    ``used_qty_missing``. The used amount is drained and added to the cumulative
+    ``used_qty_missing``.
+
+    A media line (``consumed_in_kit``, REQ-2026-07-31-KIT-003) gets no special
+    treatment here at all: it needs, is entered and is validated exactly like
+    any other component, and a batch consumes only what was recorded against it.
+    Media differs solely in what happens to the REMAINDER when the kit closes,
+    and that lives in ``close_out_kit`` — it is discarded rather than returned,
+    and it is deliberately not charged to this batch's lot.
+
+    The used amount is drained and added to the cumulative
     ``used_qty``; ``good`` units are placed into the output as a NEW per-batch lot
     (``KIT-0289-1``, ``-2``, … — its own expiry, client 2026-07-23) and
     ``good_qty`` / ``scrap_qty`` accumulate. The batch's units may be SPLIT across
@@ -1103,12 +1260,21 @@ async def _produce_batch(
     attempted = good + scrap
     # Pre-flight EVERY line before anything moves, so a short batch produces nothing.
     consume: dict[uuid.UUID, int] = {}
+    # What each line held BEFORE this batch drew on it — the denominator of the
+    # cost attribution below, captured here because the mutate loop destroys it.
+    residual_before: dict[uuid.UUID, int] = {}
     for line in kit.lines:
+        # A media line is an ORDINARY component here — same recipe need, same
+        # operator entry, same gates (REQ-2026-07-31-KIT-003). The batch consumes
+        # what was recorded against it and nothing more. What makes media
+        # different happens at close-out, outside this function: the remainder is
+        # discarded rather than handed back. See ``close_out_kit`` step 2.
         if line.id not in used_by_line:
             raise ValidationError(
                 f"Enter the material used for line {line.line_no}", code="used_qty_missing"
             )
-        used = used_by_line[line.id]
+        else:
+            used = used_by_line[line.id]
         need = kit_repo.default_issued_qty(line.qty_per_unit, attempted)
         if used < need:
             raise ValidationError(
@@ -1125,6 +1291,22 @@ async def _produce_batch(
                 code="used_exceeds_issued",
             )
         consume[line.id] = used
+        residual_before[line.id] = on_floor
+    # ── Material cost attribution (RPT-003) ───────────────────────────────
+    # This MUST run here, in the pre-flight, before the drain and before
+    # ``used_qty`` moves. The moving average divides by what the line still
+    # holds, and ``_on_floor`` reads ``used_qty`` — compute it after the mutate
+    # loop below and you divide by an already-reduced residual, which is wrong
+    # on every line and wrong quietly.
+    batch_cost_amount, batch_cost_complete, line_costs = await _attribute_batch_cost(
+        db, kit=kit, consume=consume, residual_before=residual_before
+    )
+    unit_cost = costing.output_unit_cost(batch_cost_amount, good)
+    # Set only when a lot is actually minted below. Held in its own name rather
+    # than re-testing ``good > 0 and destinations`` at the bottom, because the
+    # batch row's ``(output_lot_id IS NULL) = (good_qty = 0)`` CHECK is exactly
+    # the invariant those two conditions drifting apart would break.
+    output_lot_id: uuid.UUID | None = None
     for line in kit.lines:
         used = consume[line.id]
         if used <= 0:
@@ -1143,6 +1325,17 @@ async def _produce_batch(
             lot_number=lot_number,
             created_by_user_id=current.id,
             expiration_date=expiration_date,
+            # RPT-003 — "the FG Lot-xxx should pull through all the costs". This
+            # one argument is the whole cost flow: a priced output lot is an
+            # ordinary priced lot, so when a later kit issues this AY as a
+            # sub-assembly the same charge sum picks the price up with no
+            # recursion and no special case. Before this, every kit-produced lot
+            # was unpriced, which also meant every AY and FG on the shelf valued
+            # at $0 in ``compute_item_valuations``.
+            #
+            # ``None`` when any input lot had no price: unknown must not become
+            # a partial figure that reads as a complete one.
+            unit_price_amount=unit_cost,
             # REQ-2026-07-31-STS-001: newly manufactured product defaults to
             # quarantine until somebody signs it out of there. This is the ONLY
             # place a release state is set without a signature, and rightly so —
@@ -1169,8 +1362,134 @@ async def _produce_batch(
             )
         # Primary destination (informational — the ledger has every split).
         kit.output_location_node_id = destinations[0][0]
+        output_lot_id = lot.id
     kit.good_qty = (kit.good_qty or 0) + good
     kit.scrap_qty = (kit.scrap_qty or 0) + scrap
+    # The costing record for this batch, and its per-component breakdown, so the
+    # figure on a customer's invoice can be explained rather than asserted
+    # (RPT-003). Written last: the lot must exist before it can be referenced.
+    await _record_batch_costs(
+        db,
+        kit=kit,
+        lot_id=output_lot_id,
+        good=good,
+        scrap=scrap,
+        consume=consume,
+        line_costs=line_costs,
+        material_cost_amount=batch_cost_amount,
+        unit_cost_amount=unit_cost,
+        cost_is_complete=batch_cost_complete,
+        evidence=evidence,
+        current=current,
+    )
+
+
+def _component_field(consumption, line_items: dict, items: dict, attr: str) -> str:
+    """A consumption row's component name, resolved through its kit line.
+
+    The consumption row stores no item of its own — the line already holds it,
+    and a second copy could only ever agree or be wrong.
+    """
+    item_id = line_items.get(consumption.kit_line_id)
+    item = items.get(item_id) if item_id else None
+    return getattr(item, attr, "") or "" if item else ""
+
+
+async def _attribute_batch_cost(
+    db,
+    *,
+    kit: Kit,
+    consume: dict[uuid.UUID, int],
+    residual_before: dict[uuid.UUID, int],
+) -> tuple[Decimal | None, bool, dict[uuid.UUID, tuple[Decimal | None, Decimal | None]]]:
+    """What this batch's material is worth, per component and in total — RPT-003.
+
+    Reads the kit's OWN ledger rows (``kit_id`` + ``kit_line_id``), never the
+    production floor. The floor is shared between kits by design — material is
+    never bound to a kit (TRX-002) — so a floor-derived cost could bill one
+    customer for another's material, plausibly and silently.
+
+    Returns ``(material_cost, cost_is_complete, {line_id: (unit_cost, extended)})``.
+    A single unpriced input anywhere makes ``material_cost`` ``None`` and
+    ``cost_is_complete`` false: a finished good is either costed or it is not.
+    """
+    charge_credit = await kit_repo.line_charge_credit_values(db, kit.id)
+    consumed_prior = await kit_repo.consumed_values_by_line(db, kit.id)
+
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]] = {}
+    line_values: list[Decimal | None] = []
+    for line in kit.lines:
+        used = consume.get(line.id, 0)
+        if used <= 0:
+            continue
+        charged, credited, _unpriced_qty = charge_credit.get(
+            line.id, (Decimal("0"), Decimal("0"), 0)
+        )
+        unit_cost = costing.line_unit_cost(
+            charged=charged,
+            credited=credited,
+            consumed=consumed_prior.get(line.id, Decimal("0")),
+            residual_qty=residual_before.get(line.id, 0),
+        )
+        extended = costing.line_extended_value(unit_cost, used)
+        line_costs[line.id] = (unit_cost, extended)
+        line_values.append(extended)
+
+    material_cost, cost_is_complete = costing.batch_cost(line_values)
+    return material_cost, cost_is_complete, line_costs
+
+
+async def _record_batch_costs(
+    db,
+    *,
+    kit: Kit,
+    lot_id: uuid.UUID | None,
+    good: int,
+    scrap: int,
+    consume: dict[uuid.UUID, int],
+    line_costs: dict[uuid.UUID, tuple[Decimal | None, Decimal | None]],
+    material_cost_amount: Decimal | None,
+    unit_cost_amount: Decimal | None,
+    cost_is_complete: bool,
+    evidence: uuid.UUID | None,
+    current,
+) -> None:
+    """Persist one batch's cost and its per-component breakdown (RPT-003).
+
+    **The scrap loss is not stored here.** It is a share of
+    ``material_cost_amount`` — the scrapped units' material was charged at issue
+    and is already inside the total — so it is prorated by
+    ``costing.scrap_value()`` when it is read, not duplicated when it is
+    written. What charges it to the customer is ``output_unit_cost`` dividing by
+    good units alone, which happens above.
+    """
+    batch = await kit_repo.create_batch(
+        db,
+        kit_id=kit.id,
+        batch_no=await kit_repo.next_batch_no(db, kit.id),
+        output_lot_id=lot_id,
+        good_qty=good,
+        scrap_qty=scrap,
+        material_cost_amount=material_cost_amount,
+        unit_cost_amount=unit_cost_amount,
+        cost_is_complete=cost_is_complete,
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence,
+    )
+    for line in kit.lines:
+        used = consume.get(line.id, 0)
+        if used <= 0:
+            continue
+        unit_cost, extended = line_costs.get(line.id, (None, None))
+        await kit_repo.create_batch_consumption(
+            db,
+            batch_id=batch.id,
+            kit_line_id=line.id,
+            qty=used,
+            unit_cost_amount=unit_cost,
+            extended_value_amount=extended,
+            cost_is_complete=extended is not None,
+        )
 
 
 async def _consumed_context(
@@ -1706,6 +2025,13 @@ async def create_kit(
             f'The kit name "{kit_number}" is already in use.',
             code="kit_number_conflict",
         )
+    # The KIT-003 flag is SNAPSHOTTED onto each line, so read it off the item
+    # here rather than at close-out. Via load_item_map, not bom.child_item —
+    # list_bom_children does not eager-load the child, so touching that
+    # relationship inside an async route raises MissingGreenlet.
+    child_items = await kit_repo.load_item_map(
+        db, {c.child_item_id for c in children}
+    )
     kit = await kit_repo.create_kit(
         db,
         kit_number=kit_number,
@@ -1726,6 +2052,7 @@ async def create_kit(
             line_no=line_no,
             item_id=bom.child_item_id,
             qty_per_unit=bom.qty_per_unit,
+            consumed_in_kit=child_items[bom.child_item_id].consumed_in_kit,
             issued_qty=kit_repo.default_issued_qty(bom.qty_per_unit, payload.target_qty),
             source_location_node_id=None,
         )
@@ -2092,7 +2419,11 @@ async def return_excess(
     back, never re-minted), so nothing is stranded. The legacy single
     ``qty`` + ``return_location_node_id`` (FIFO across the floor's lots) still
     works when ``sources`` is empty. Unsigned, matching issue / additional issue
-    (only close-out is e-signed)."""
+    (only close-out is e-signed).
+
+    Refuses a ``consumed_in_kit`` (media) line outright — see the guard below.
+    This was the one remaining way media could reach inventory again, and it is
+    shut (client, 2026-09-01)."""
     kit = await _require_kit(db, kit_id)
     if kit.status not in ("issued", "in_production"):
         raise ValidationError(
@@ -2102,6 +2433,21 @@ async def return_excess(
     line = next((ln for ln in kit.lines if ln.id == line_id), None)
     if line is None:
         raise NotFoundError(f"Line {line_id} not on kit {kit_id}", code="line_not_found")
+
+    # KIT-003: media never goes back to inventory, by ANY route. The automatic
+    # paths (close-out back-flush, cancel) already decline it; this is the last
+    # manual one, and the client closed it too (2026-09-01) so that "consumed
+    # when replaced and not back-flushed" holds without an exception to
+    # remember. A mis-issue is therefore not recoverable: the units stay with
+    # the kit and are discarded at close. That is the deliberate price of the
+    # rule being absolute.
+    if line.consumed_in_kit:
+        raise ValidationError(
+            f"Line {line.line_no} is consumed to the kit, so it cannot be "
+            f"returned to inventory. Whatever the batches do not use is "
+            f"discarded when the kit closes.",
+            code="return_not_allowed_for_consumed",
+        )
 
     # No recipe cap on returns (REQ-2026-07-22-KIT-007): the operator may hand
     # back whatever wasn't used, even below the BOM requirement. The only limit is
@@ -2165,9 +2511,9 @@ async def return_excess(
                     f"(tried to return {req}).",
                     code="return_exceeds_lot_on_floor",
                 )
-        note = f"Returned {total} to inventory from {kit.kit_number}"
-        if payload.reason:
-            note = f"{note} — {payload.reason}"
+        note = _with_reason(
+            f"Returned {total} to inventory from {kit.kit_number}", payload.reason
+        )
         for lot_uuid, q, node_uuid, cells in picks:
             await _return_to_inventory(
                 db,
@@ -2216,9 +2562,9 @@ async def return_excess(
             claimed=claimed_cells,
             origin_types=origin_types,
         )
-        note = f"Returned {payload.qty} to inventory from {kit.kit_number}"
-        if payload.reason:
-            note = f"{note} — {payload.reason}"
+        note = _with_reason(
+            f"Returned {payload.qty} to inventory from {kit.kit_number}", payload.reason
+        )
         for node_uuid, q, cells in resolved:
             await _return_to_inventory(
                 db,
@@ -2370,7 +2716,9 @@ async def produce_kit(
         lot_number=lot_no,
         used_by_line=used_by_line,
         evidence=evidence_uuid,
-        note=f"Produced batch of {payload.good_qty} for {kit.kit_number}",
+        note=_with_reason(
+            f"Produced batch of {payload.good_qty} for {kit.kit_number}", payload.reason
+        ),
         current=current,
     )
     kit.status = "in_production"  # stays OPEN — produce more, or close later
@@ -2528,7 +2876,10 @@ async def close_out_kit(
         lot_number=lot_no,
         used_by_line=used_by_line,
         evidence=evidence_uuid,
-        note=f"{payload.good_qty} produced and stocked for {kit.kit_number}",
+        note=_with_reason(
+            f"{payload.good_qty} produced and stocked for {kit.kit_number}",
+            payload.reason,
+        ),
         current=current,
     )
 
@@ -2538,7 +2889,37 @@ async def close_out_kit(
     #    reaches zero.
     # LOC-003 origins for every line at once, rather than a query per line.
     origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
+    # Media discarded at close (KIT-003). Recorded in the audit context because
+    # it moves no stock and mints no batch row, so the audit entry is its only
+    # record of having happened.
+    wasted_at_close: list[dict[str, object]] = []
     for line in kit.lines:
+        if line.consumed_in_kit:
+            # KIT-003: media is never handed back — but it cannot stay on the
+            # floor either, or a closed kit leaves stranded WIP allocations
+            # behind it. So whatever the batches did not record is DISCARDED:
+            # drained off the floor and added to ``used_qty`` (the material is
+            # genuinely gone), with no movement, no batch row and no cost
+            # attribution.
+            #
+            # Not charged to the closing lot, deliberately (client, 2026-09-01).
+            # The operator's entry says what the batch actually took; pouring the
+            # rest into it would triple that lot's material cost with material
+            # the batch never used. The value instead falls out as
+            # ``material_cost_amount - consumed_value_amount`` — charged to the
+            # kit, handed to no lot — which is exactly what waste is.
+            #
+            # REQ-2026-07-22-KIT-006 ("back-flush the difference between issued
+            # and used") is not contradicted so much as inapplicable: there is no
+            # return path for media to take.
+            discarded = _on_floor(line)
+            if discarded > 0:
+                await _drain_production(db, kit=kit, line=line, qty=discarded)
+                line.used_qty = (line.used_qty or 0) + discarded
+                wasted_at_close.append(
+                    {"line_no": line.line_no, "qty": discarded}
+                )
+            continue
         returned = _on_floor(line)
         if returned <= 0:
             continue
@@ -2567,9 +2948,10 @@ async def close_out_kit(
                 qty=qty,
                 to_node=node_uuid,
                 evidence=evidence_uuid,
-                note=(
+                note=_with_reason(
                     f"Issued {line.issued_qty + line.additional_issued_qty}, "
-                    f"used {line.used_qty}, backflushed {qty}"
+                    f"used {line.used_qty}, backflushed {qty}",
+                    payload.reason,
                 ),
                 current=current,
                 # Back-flushing into an LN2 box places one unit per chosen cell.
@@ -2598,6 +2980,7 @@ async def close_out_kit(
         after=_kit_snapshot(kit),
         context={
             "operation": "close_out",
+            "wasted_at_close": wasted_at_close or None,
             "good_qty": payload.good_qty,
             "scrap_qty": payload.scrap_qty,
             "output_lot_number": lot_no,
@@ -2666,6 +3049,11 @@ async def cancel_kit(
         )
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
     before = _kit_snapshot(kit)
+    # Media discarded on cancel (KIT-003), for the audit context — it moves no
+    # stock and mints no batch row, so the audit entry is its only record.
+    # Declared out here because a draft cancel skips the block below entirely
+    # and the audit row is written for both.
+    discarded_on_cancel: list[dict[str, object]] = []
     # Post-issue cancel (resolves the deferred §99.8): hand every unit still on
     # the floor back to inventory. Safe by construction — nothing was bound to a
     # production lot at kitting (TRX-002), so nothing can be stranded, and the
@@ -2682,7 +3070,14 @@ async def cancel_kit(
             _parse_uuid_or_422(li.line_id, field="line_id"): li for li in payload.lines
         }
         if by_line:
-            missing = [ln.line_no for ln in kit.lines if _on_floor(ln) > 0 and ln.id not in by_line]
+            # Media never returns anywhere (KIT-003), so demanding a return
+            # location for it would block a cancel on a destination that would
+            # go unused.
+            missing = [
+                ln.line_no
+                for ln in kit.lines
+                if _on_floor(ln) > 0 and not ln.consumed_in_kit and ln.id not in by_line
+            ]
             if missing:
                 raise ValidationError(
                     f"Every line still holding material needs a return location "
@@ -2695,6 +3090,28 @@ async def cancel_kit(
         for line in kit.lines:
             on_floor = _on_floor(line)
             if on_floor <= 0:
+                continue
+            if line.consumed_in_kit:
+                # KIT-003: media is DISCARDED here, exactly as it is at close-out
+                # — drained off the floor, never credited back, charged to no
+                # lot. Same event, same word: abandoning a kit is not a way for
+                # poured media to become stock again.
+                #
+                # Skipping the line outright was the other option and is wrong:
+                # the WIP allocations would stay parked at a cancelled kit's
+                # production node forever, and the quantity identity
+                # "issued + additional == used + early_returned + backflushed"
+                # would no longer hold. Draining and adding to ``used_qty`` says
+                # the material is gone, which it is.
+                #
+                # No movement and no batch row: consuming material is a
+                # zero-delta event (it left ``v_item_stock`` at issue), and a
+                # cancel mints no lot to attribute value to. The cost therefore
+                # stays charged to the abandoned kit with nothing to show for
+                # it, which is what a wasted feeding actually costs.
+                await _drain_production(db, kit=kit, line=line, qty=on_floor)
+                line.used_qty = (line.used_qty or 0) + on_floor
+                discarded_on_cancel.append({"line_no": line.line_no, "qty": on_floor})
                 continue
             line_in = by_line.get(line.id)
             if line_in is not None:
@@ -2740,7 +3157,10 @@ async def cancel_kit(
                     qty=qty,
                     to_node=node_uuid,
                     evidence=None,
-                    note=f"{kit.kit_number} cancelled — {qty} returned to inventory",
+                    note=_with_reason(
+                        f"{kit.kit_number} cancelled — {qty} returned to inventory",
+                        payload.reason,
+                    ),
                     current=current,
                     return_cells=cells,
                     movement_type="kit_cancel_return",
@@ -2763,7 +3183,11 @@ async def cancel_kit(
         subject_label=kit.kit_number,
         before=before,
         after=_kit_snapshot(kit),
-        context={"operation": "cancel", "reason": payload.reason or None},
+        context={
+            "operation": "cancel",
+            "reason": payload.reason or None,
+            "discarded_on_cancel": discarded_on_cancel or None,
+        },
         signature_id=evidence_uuid,
     )
     # Consume the evidence last so a replay rolls back the whole cancel.

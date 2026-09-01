@@ -61,6 +61,7 @@ from app.inventory.schemas import (
     SupplierRead,
     SupplierUpdate,
 )
+from app.kitting import recompute as kit_recompute
 from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import ItemStockLocationCell, ItemStockLocationRead
@@ -101,6 +102,7 @@ def _movement_to_read(
         lot_number=m.lot.lot_number if m.lot else None,
         lot_expiration_date=m.lot.expiration_date if m.lot else None,
         lot_release_state=m.lot.release_state if m.lot else None,
+        lot_unit_price_amount=m.lot.unit_price_amount if m.lot else None,
         from_location_node_id=(
             str(m.from_location_node_id) if m.from_location_node_id else None
         ),
@@ -198,6 +200,27 @@ def _supplier_to_read(v: Supplier) -> SupplierRead:
     )
 
 
+def _reject_consumable_and_consumed_in_kit(
+    *, is_consumable: bool, consumed_in_kit: bool
+) -> None:
+    """The two flags are mutually exclusive (REQ-2026-07-31-KIT-003).
+
+    ``consumed_in_kit`` marks the non-consumable TWIN of a consumable â the
+    thing that exists precisely so media can enter a BOM, which an
+    ``is_consumable`` item may never do (``_require_eligible_child``). An item
+    that were both would be barred from the only place the flag means anything.
+    The DB CHECK ``ck_items_consumable_xor_consumed_in_kit`` is the backstop;
+    this is the sentence the operator reads.
+    """
+    if is_consumable and consumed_in_kit:
+        raise ValidationError(
+            "An item can't be both a consumable and consumed-to-the-kit. "
+            "Consumables are never in a bill of materials â create a separate, "
+            "non-consumable item for the version that goes into kits.",
+            code="consumable_and_consumed_in_kit",
+        )
+
+
 def _item_to_read(
     item: Item,
     valuation: tuple[Decimal, Decimal, Decimal] | None = None,
@@ -231,6 +254,7 @@ def _item_to_read(
         description=item.description,
         uom=item.uom,
         is_consumable=item.is_consumable,
+        consumed_in_kit=item.consumed_in_kit,
         tier_id=str(item.tier_id),
         tier_name=tier.name if tier else "",
         tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
@@ -598,6 +622,17 @@ async def list_items(
             )
         ),
     ] = None,
+    awaiting_release: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Filter to items with stock that has arrived but is not yet "
+                "placed and released (REQ-2026-07-31-STS-001). This material is "
+                "on site and paid for, so it is deliberately NOT counted as "
+                "missing by the reorder screen."
+            )
+        ),
+    ] = None,
     sort: Annotated[
         Literal["item_number", "description", "updated_at", "created_at"],
         Query(),
@@ -617,6 +652,7 @@ async def list_items(
         has_bom=has_bom,
         min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
+        awaiting_release=awaiting_release,
         sort=sort,
         direction=direction,
         limit=limit,
@@ -710,6 +746,11 @@ async def create_item(
             code="item_number_conflict",
         )
 
+    _reject_consumable_and_consumed_in_kit(
+        is_consumable=payload.is_consumable,
+        consumed_in_kit=payload.consumed_in_kit,
+    )
+
     try:
         item = await inv_repo.create_item(
             db,
@@ -719,6 +760,7 @@ async def create_item(
             created_by_user_id=current.id,
             uom=payload.uom,
             is_consumable=payload.is_consumable,
+            consumed_in_kit=payload.consumed_in_kit,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
@@ -818,6 +860,14 @@ async def update_item(
                     code="item_received",
                 )
         patch["prefix_id"] = prefix_uuid
+
+    # The pair is mutually exclusive, and ItemUpdate is PARTIAL — a request
+    # setting only one of them still has to be judged against the value the item
+    # already carries, which a Pydantic validator cannot see. Merge, then test.
+    _reject_consumable_and_consumed_in_kit(
+        is_consumable=bool(patch.get("is_consumable", item.is_consumable)),
+        consumed_in_kit=bool(patch.get("consumed_in_kit", item.consumed_in_kit)),
+    )
 
     if not patch and supplier_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")
@@ -1260,12 +1310,38 @@ async def update_lot(
     if lot is None or lot.deleted_at is not None:
         raise NotFoundError(f"Lot {lot_id} not found")
 
-    # Quantity may be corrected post-receipt, but never below what is already
-    # physically placed in locations — the operator must unplace first.
+    # Quantity may be corrected post-receipt, but never below what this lot has
+    # already put into inventory. TWO floors, because consumption moves them
+    # apart and only one of them can be undone:
+    #
+    #   * ``sum_received_qty_for_lot`` — lifetime received to inventory. Every
+    #     placement path caps against this (``place_exceeds_ordered``) precisely
+    #     so consumed units keep counting and cannot free up capacity. It never
+    #     shrinks, so the operator cannot get under it by unplacing.
+    #   * ``sum_active_alloc_qty_for_lot`` — what is sitting in locations right
+    #     now. This one DOES shrink when material is used, and unplacing clears
+    #     it, so its message tells the operator to unplace first.
+    #
+    # Checking only the second (as this did until 2026-08-28) lets consumption
+    # lower the floor under a lot that has already spent its units: 360 received
+    # and 300 consumed leaves 60 allocated, so a "correction" to 60 would pass
+    # while the placement paths still believe 360 were received to inventory,
+    # and the availability endpoint would report negative remaining capacity.
+    # The lifetime floor is checked first because it is the one the operator
+    # cannot work around.
     new_qty: int | None = None
     origin_line = None
     if "ordered_qty" in patch:
         new_qty = patch["ordered_qty"]
+        received_ever = int(await loc_repo.sum_received_qty_for_lot(db, lot.id))
+        if new_qty < received_ever:
+            raise ConflictError(
+                f"{received_ever} unit(s) of this lot have already been "
+                f"received to inventory, and units that have since been used "
+                f"still count. The received quantity cannot be corrected below "
+                f"{received_ever}.",
+                code="qty_below_placed",
+            )
         placed = int(await loc_repo.sum_active_alloc_qty_for_lot(db, lot.id))
         if new_qty < placed:
             raise ConflictError(
@@ -1336,6 +1412,19 @@ async def update_lot(
         raise
     after = inv_repo.lot_to_audit_snapshot(updated)
 
+    # RPT-003 — a price correction follows the material. Every kit that was
+    # charged this lot is re-costed and the lots it produced are re-stamped,
+    # cascading into any kit that consumed *those*. Without this the edit
+    # changed one row and left every finished good built from it carrying a
+    # price the system itself no longer believed (client, 2026-08-31).
+    #
+    # Only on a real change: PATCHing a lot's notes must not re-cost a kit.
+    recost = None
+    if "unit_price_amount" in patch and before.get("unit_price_amount") != after.get(
+        "unit_price_amount"
+    ):
+        recost = await kit_recompute.recompute_kits_for_lot(db, lot_id=updated.id)
+
     # A qty correction re-syncs the Order line's received total (the lot maps
     # one-to-one to a receive-event draw) and re-derives the Order status
     # (e.g. dropping below ordered flips received → partially_received).
@@ -1369,6 +1458,27 @@ async def update_lot(
                         received_by_user_id=current.id,
                     )
 
+    # NOTE — a quantity correction writes NO stock movement, deliberately.
+    #
+    # It is tempting (this route did it for one day, 2026-08-28) to post an
+    # ``adjustment`` for the delta so CTL-002's "visible in the ledger" is
+    # satisfied here. It is wrong, because ``ordered_qty`` and the ledger count
+    # different things: ``ordered_qty`` is what ARRIVED, while every ledger
+    # unit-IN is written by *placement* (``receipt``, and per
+    # ``sum_received_qty_for_lot`` "place is the sole writer"). Correcting 360
+    # to 420 does not make 60 units exist — it makes 60 units *placeable*.
+    #
+    # Posting the delta therefore credits stock that is in no location, which is
+    # exactly what it looked like: an ``Adjusted +60`` row with a blank Location
+    # while every neighbouring row named one. Worse, it double-counts — placing
+    # those 60 writes its own ``receipt +60``, so a 420-unit lot reports 480.
+    #
+    # CTL-002 is satisfied without it, and more literally: the correction itself
+    # is signed and audited below (before/after plus the operator's comment),
+    # and the *re-receiving* the requirement actually names is the placement of
+    # the extra units — a real ``receipt`` row, with a real location and its own
+    # signature. Do not reintroduce a synthetic movement here.
+
     await record_entity_change(
         db,
         actor_user_id=current.id,
@@ -1378,7 +1488,28 @@ async def update_lot(
         subject_label=updated.lot_number,
         before=before,
         after=after,
-        context={"reason": reason},
+        context={
+            "reason": reason,
+            # RPT-003 — what the price correction moved downstream. A finished
+            # lot's cost changing is exactly the kind of thing an inspector
+            # asks about, so it is recorded on the edit that caused it rather
+            # than left to be inferred from two timestamps.
+            **(
+                {
+                    "recosted": {
+                        "requirement": "RPT-003",
+                        "kits": recost.kits_visited,
+                        "batches": recost.batches_updated,
+                        "lots_repriced": {
+                            lot_no: [str(old), str(new)]
+                            for lot_no, (old, new) in recost.lots_repriced.items()
+                        },
+                    }
+                }
+                if recost is not None and recost.changed
+                else {}
+            ),
+        },
         signature_id=evidence_uuid,
     )
 

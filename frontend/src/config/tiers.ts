@@ -38,6 +38,22 @@ const MISSING_BOM: TierFilter = {
   params: { has_bom: false },
 };
 
+/**
+ * "Awaiting release" — stock that has ARRIVED but has not been placed and
+ * released (REQ-2026-07-31-STS-001).
+ *
+ * CR-only, because only purchased material is received: a built item's stock is
+ * minted by a kit close-out, which places it directly. Worth its own filter
+ * because this material is easy to lose track of — it is on site and paid for,
+ * yet it counts towards nothing until somebody signs it in, so an item can look
+ * short while a box of it sits in receiving.
+ */
+const AWAITING_RELEASE: TierFilter = {
+  id: 'awaiting-release',
+  label: 'Awaiting release',
+  params: { awaiting_release: true },
+};
+
 const ALL: TierFilter = { id: 'all', label: 'All' };
 
 /** CR — off-the-shelf raw material purchased externally (REQ-2026-07-01-INV-002). */
@@ -61,6 +77,7 @@ export const RAW_MATERIAL_TIER: TierConfig = {
       params: { is_consumable: false },
     },
     NEEDS_REORDER,
+    AWAITING_RELEASE,
   ],
 };
 

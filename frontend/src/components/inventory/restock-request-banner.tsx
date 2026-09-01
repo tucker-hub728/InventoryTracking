@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { kanbanRestockApi, type RestockRequest } from '@/lib/api/consumables';
 import { usePermission } from '@/hooks/use-permission';
 import { formatNumber } from '@/lib/utils';
+import { LocationPath } from '@/components/locations/location-path';
 
 /**
  * Open restock requests for THIS consumable, on the item page (KAN-001).
@@ -108,8 +109,12 @@ export function RestockRequestBanner({
           <span className="min-w-0 text-xs text-text-3">
           {single ? (
             // One request: name the bin, since that IS the whole story here.
+            // The bin's NAME — the full address mid-sentence was four words of
+            // room prefix before the one word that identifies it. Not linked:
+            // this clause sits in muted banner detail, and an accent link here
+            // would outshout the banner's own action button.
             <>
-              · {single.kanban_path}
+              · <LocationPath path={single.kanban_path} />
               {single.requested_qty !== null && (
                 <>, {formatNumber(single.requested_qty)} asked for</>
               )}

@@ -600,6 +600,87 @@ class TransferMultiRequest(BaseModel):
         return self
 
 
+class StockAdjustRequest(BaseModel):
+    """Correct what is actually at one location, up or down (CTL-002).
+
+    The counting correction: the shelf holds 58 where the record says 60, or 3
+    turn up that were never recorded. It is deliberately NOT an edit of the
+    lot's received quantity — ``lots.ordered_qty`` records what *arrived*, and
+    a miscount months later does not change that. This moves the balance where
+    the discrepancy actually is, at one ``(lot × location)``, and says so in the
+    ledger with a location on the row.
+
+    Direction is explicit rather than a signed quantity: ``qty`` is always how
+    many units, and ``direction`` says which way. A minus sign is too easy to
+    lose in a form, and "adjust out 5" is what the operator is actually doing.
+
+    LN2 boxes carry one unit per cell, so a box adjustment names the cells and
+    ``qty`` is their count — ``cells`` (free positions to fill) going in,
+    ``cell_allocation_ids`` (the exact vials) coming out. Flat locations leave
+    both empty. Sending the wrong one for the direction is refused here rather
+    than half-applied.
+
+    Signed with ``movement.adjustment``; the comment stays optional, as every
+    e-signature's does (client 2026-06-29).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    node_id: str
+    direction: Literal["in", "out"]
+    qty: int = Field(gt=0, le=MAX_QTY)
+    cells: list[BatchCell] = Field(default_factory=list, max_length=400)
+    cell_allocation_ids: list[str] = Field(default_factory=list, max_length=400)
+    evidence_id: str
+    notes: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _cells_match_direction(self) -> StockAdjustRequest:
+        if self.direction == "in":
+            if self.cell_allocation_ids:
+                raise ValueError(
+                    "cell_allocation_ids names vials to take OUT; adjusting in "
+                    "names free positions in 'cells'"
+                )
+            if self.cells:
+                if len(self.cells) != self.qty:
+                    raise ValueError(
+                        f"{len(self.cells)} cells selected but qty is {self.qty} — "
+                        f"for a box the quantity is the number of vials"
+                    )
+                seen = {(c.grid_row, c.grid_col) for c in self.cells}
+                if len(seen) != len(self.cells):
+                    raise ValueError("Destination cells must be distinct")
+        else:
+            if self.cells:
+                raise ValueError(
+                    "cells names free positions to fill; adjusting out names the "
+                    "vials to remove in 'cell_allocation_ids'"
+                )
+            if self.cell_allocation_ids and len(set(self.cell_allocation_ids)) != self.qty:
+                raise ValueError(
+                    f"{len(set(self.cell_allocation_ids))} vials selected but qty is "
+                    f"{self.qty} — for a box the quantity is the number of vials"
+                )
+        return self
+
+
+class StockAdjustResult(BaseModel):
+    """What the adjustment did, and where the balance landed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    movement_id: str
+    lot_id: str
+    node_id: str
+    #: Signed: positive going in, negative coming out.
+    qty_delta: int
+    #: The ``(lot × location)`` balance after the adjustment — what the operator
+    #: should now see on the row they adjusted.
+    qty_at_node: int
+
+
 class ItemStockLocationCell(BaseModel):
     """One occupied vial position in an LN2 box — exactly one unit of one lot
     (``uq_lot_allocations_cell``), so the transfer dialog can draw the box and

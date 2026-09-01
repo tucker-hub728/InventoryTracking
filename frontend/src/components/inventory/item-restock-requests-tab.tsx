@@ -27,6 +27,7 @@ import {
   type RestockState,
 } from '@/lib/api/consumables';
 import { formatDate, formatNumber } from '@/lib/utils';
+import { LocationPath } from '@/components/locations/location-path';
 
 const STATE_TONE: Record<RestockState, 'warning' | 'success' | 'neutral'> = {
   open: 'warning',
@@ -185,9 +186,11 @@ export function ItemRestockRequestsTab({
               not a thing the reader asked to change.
 
               Kanban is left unsized on purpose: under ``table-fixed`` the one
-              column without a width absorbs whatever is left, so the longest
-              value (a room › station path) gets the slack instead of a
-              percentage guessed here. */}
+              column without a width absorbs whatever is left, so it takes the
+              slack instead of a percentage guessed here. It used to need that
+              slack for a full room › station path; the cell now renders only
+              the station and keeps the path in its hover panel, so the slack is
+              simply where the spare width goes rather than a requirement. */}
           {/* The fixed widths total 48rem; below this the Kanban column would
               be crushed to nothing, so the wrapper scrolls instead. */}
           <Table className="w-full min-w-[64rem] table-fixed">
@@ -215,12 +218,11 @@ export function ItemRestockRequestsTab({
               {rows.map((r) => (
                 <TableRow key={r.id}>
                   <TableCell className="align-top">
-                    {/* Truncated: under a fixed layout a long room › station
-                        path would spill into the next column instead of
-                        widening its own. */}
-                    <span className="block truncate text-text" title={r.kanban_path}>
-                      {r.kanban_path}
-                    </span>
+                    {/* The station, with its room one hover away. This used to
+                        print the whole room › station path and truncate it,
+                        which clipped the station name — the half that says
+                        which bin this request is about. */}
+                    <LocationPath nodeId={r.kanban_node_id} path={r.kanban_path} />
                     {/* Clamped to one line with the full text on hover. A note
                         is free text an operator typed at a bin; left to wrap it
                         sets the height of every other cell in the row, and one

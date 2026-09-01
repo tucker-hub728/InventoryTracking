@@ -202,6 +202,12 @@ class ItemCreate(BaseModel):
     # Consumables are blind-consumed with no per-lot traceability
     # (REQ-2026-07-01-TRX-003). Defaults to a traceable, one-for-one material.
     is_consumable: bool = False
+    # The media twin (REQ-2026-07-31-KIT-003): a non-consumable stand-in for a
+    # consumable, so it may enter a BOM. On a kit it behaves like any other
+    # component until close-out, where its leftover is consumed rather than
+    # back-flushed. Mutually exclusive with ``is_consumable`` — enforced in the
+    # route and by a DB CHECK.
+    consumed_in_kit: bool = False
     # No lot-control flag (REQ-003): every item may be received without a lot
     # number, so there is nothing per-item to decide.
     supplier_ids: list[str] = Field(default_factory=list, max_length=100)
@@ -237,6 +243,7 @@ class ItemUpdate(BaseModel):
     # No pack fields — see ``ItemCreate``. An order's pack is edited on the
     # Order line or corrected at receive, never on the item.
     is_consumable: bool | None = None
+    consumed_in_kit: bool | None = None
     # Re-assign an item to another prefix. The prefix's tier (derived server-side)
     # still governs BOM eligibility — the route blocks moving a BOM-bearing item
     # to a raw-material prefix, and a stocked item to a built prefix.
@@ -271,6 +278,8 @@ class ItemRead(BaseModel):
     uom: str | None = None
     # Blind-consumed (no per-lot traceability) when true.
     is_consumable: bool = False
+    # Consumed to the kit, never back-flushed (KIT-003) when true.
+    consumed_in_kit: bool = False
     # Tier (requirements v2 §6). ``tier_type`` drives the UI "Type"
     # column: sub_assembly/finished_good may have a BOM; raw_material is bought as-is.
     tier_id: str
@@ -536,6 +545,16 @@ class MovementRead(BaseModel):
     # mistake it for history: the ledger renders it on the per-lot subtotal row,
     # never on an individual movement (client 2026-08-17).
     lot_release_state: str | None = None
+    # The lot's per-consume-unit price AS IT IS NOW (RPT-003) — same "present
+    # state, not history" caveat as ``lot_release_state`` above, and for the
+    # same reason: prices stay editable after receive and nothing records what
+    # one was on the day a movement happened. The ledger therefore renders cost
+    # on the per-lot subtotal, never against an individual movement.
+    #
+    # ``None`` means no price recorded, which is NOT zero — a kit-produced lot
+    # from before ``kitcost01`` is blank, while customer-owned cells received on
+    # a $0 PO are a real, known zero.
+    lot_unit_price_amount: Decimal | None = None
 
     # Location System node references. For consume, ``to_location_node_id`` is
     # the Flat location that consumed the unit. ``*_name`` / ``*_path`` are

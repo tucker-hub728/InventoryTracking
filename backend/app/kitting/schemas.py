@@ -96,6 +96,13 @@ class KitLineIssuedFrom(BaseModel):
     lot_number: str | None = None
     location: str
     qty: int
+    #: That lot's per-consume-unit price (RPT-003), so the UI can show what the
+    #: pull was worth. ``None`` when the lot has no price — which is exactly
+    #: what makes the whole line's cost unknown, so it is worth seeing here.
+    unit_price_amount: Decimal | None = None
+    #: True when this pull was a mid-production top-up (``kit_additional_issue``)
+    #: rather than part of the initial issue. Only ever set on ``sourced_from``.
+    is_additional: bool = False
 
 
 class KitLineFloorLot(BaseModel):
@@ -118,6 +125,11 @@ class KitLineRead(BaseModel):
     item_number: str
     description: str
     qty_per_unit: Decimal
+    # Snapshot of items.consumed_in_kit at kit creation (REQ-2026-07-31-KIT-003).
+    # When true this line is media: ordinary in every respect while the kit is
+    # open, but at close-out its leftover is CONSUMED rather than back-flushed,
+    # so it needs no return destination.
+    consumed_in_kit: bool = False
     # Derived = qty_per_unit × kit.target_qty.
     needed_qty: Decimal
     issued_qty: int
@@ -125,8 +137,8 @@ class KitLineRead(BaseModel):
     used_qty: int | None = None
     # Returned to inventory before close-out (TRX-008).
     early_returned_qty: int = 0
-    # Derived = issued + additional − early_returned: what is still on the
-    # production floor and must be reconciled at close-out.
+    # Derived = issued + additional − early_returned − used: what is still on
+    # the production floor and must be reconciled at close-out.
     on_floor_qty: int = 0
     # Derived = on_floor − used (null until used is entered) — the close-out
     # back-flush amount.
@@ -159,6 +171,80 @@ class KitLineRead(BaseModel):
     on_floor_lots: list[KitLineFloorLot] = Field(default_factory=list)
     # Available at the currently-chosen source node (the issue cap).
     source_available: int = 0
+    #: What one unit of this line's remaining floor material is worth (RPT-003).
+    #: A moving weighted average over what the line still holds, so a line that
+    #: drew from two differently-priced lots reports the blend, not either lot.
+    #: ``None`` when an issued lot has no price, or the line is spent.
+    unit_cost_amount: Decimal | None = None
+    #: Cumulative value this line has handed to finished lots across all
+    #: batches. ``None`` when any of it was unpriced.
+    consumed_value_amount: Decimal | None = None
+    #: EVERY charge to this line — the initial issue **and** every additional
+    #: issue — oldest first, each with the lot's price. This is what the cost
+    #: figures are an average of, so it is the set the batch-cost drill-down
+    #: shows. ``issued_from`` above stays the initial-issue-only snapshot the
+    #: Issue step was built around; a cost panel using that would omit the
+    #: top-ups, which on a kit fed over several days is most of the spend.
+    sourced_from: list[KitLineIssuedFrom] = Field(default_factory=list)
+
+
+class KitBatchConsumptionRead(BaseModel):
+    """What one batch drew from one component line, and what it was worth.
+
+    The line items of a finished lot's bill of cost — ``Σ extended_value_amount``
+    over a batch equals its ``material_cost_amount``, so the total is
+    explainable rather than asserted.
+
+    There is deliberately **no source lot**. Cost is attributed as a moving
+    weighted average over what the line still holds, so a batch consumes value
+    from a pool rather than from identified lots; naming one here would invent a
+    fact. The identified lots are on the kit line's ``issued_from``, which is
+    what the average is built from.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    kit_line_id: str
+    line_no: int | None = None
+    item_id: str
+    item_number: str
+    description: str
+    qty: int
+    #: The line's moving average frozen at the moment of consumption. Lot prices
+    #: stay editable, so re-deriving this later would change history.
+    unit_cost_amount: Decimal | None = None
+    extended_value_amount: Decimal | None = None
+    cost_is_complete: bool = True
+
+
+class KitBatchRead(BaseModel):
+    """One produce/close-out batch and what its output lot cost (RPT-003).
+
+    A kit may run several (KIT-007), each minting its own lot at its own price —
+    which is why cost cannot live on the kit. ``scrap_value_amount`` is a
+    reported *slice* of ``material_cost_amount``, never an addition to it, and
+    is **computed on read** rather than stored: every input to it is in this
+    same row and frozen with it, so a column bought nothing.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    batch_no: int
+    output_lot_id: str | None = None
+    output_lot_number: str | None = None
+    good_qty: int
+    scrap_qty: int
+    material_cost_amount: Decimal | None = None
+    unit_cost_amount: Decimal | None = None
+    scrap_value_amount: Decimal | None = None
+    #: False when an input lot had no price. The three money fields are then all
+    #: null — never a partial sum, which would read as a complete one.
+    cost_is_complete: bool = True
+    produced_at: datetime
+    performed_by_name: str | None = None
+    #: The per-component breakdown behind ``material_cost_amount``.
+    consumptions: list[KitBatchConsumptionRead] = Field(default_factory=list)
 
 
 class KitRead(BaseModel):
@@ -182,6 +268,17 @@ class KitRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     lines: list[KitLineRead] = Field(default_factory=list)
+    #: Net material charged to the kit across its whole life (RPT-003) —
+    #: issues minus returns, at lot cost. This is a LIVE figure: lot prices stay
+    #: editable after receive, so it can move retroactively. The per-batch
+    #: figures in ``batches`` are frozen at produce time and do not. A
+    #: divergence between them is real, not a bug.
+    material_cost_amount: Decimal | None = None
+    #: Total already handed to finished lots. Kit cost minus this is what is
+    #: still sitting on the production floor.
+    consumed_value_amount: Decimal | None = None
+    cost_is_complete: bool = True
+    batches: list[KitBatchRead] = Field(default_factory=list)
 
 
 class KitListItem(BaseModel):

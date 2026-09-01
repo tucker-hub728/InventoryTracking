@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ArrowLeftRight, ShieldCheck } from 'lucide-react';
+import { ArrowLeftRight, Scale, ShieldCheck } from 'lucide-react';
 
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
@@ -13,6 +13,10 @@ import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { LotLink } from '@/components/inventory/lot-link';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
 import { ReleaseStateDialog } from '@/components/inventory/release-state-dialog';
+import {
+  StockAdjustDialog,
+  type AdjustTarget,
+} from '@/components/inventory/stock-adjust-dialog';
 import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItemStockLocation } from '@/lib/api/items';
@@ -85,6 +89,10 @@ export function ItemStockLocationsTab({
     lot_id: string;
     node_id: string;
   } | null>(null);
+  /** The (lot × location) whose recorded quantity is being corrected (CTL-002),
+   *  or null. The row carries everything the dialog needs, so there is nothing
+   *  to pick once it is open. */
+  const [adjustTarget, setAdjustTarget] = React.useState<AdjustTarget | null>(null);
   // Held briefly — the fetch returns in ~20ms, too fast to see otherwise.
   const showSkeleton = useMinDuration(loading && rows.length === 0);
   /** Release state to narrow to, or null for "everything" (STS-001). */
@@ -283,6 +291,28 @@ export function ItemStockLocationsTab({
                                 <ShieldCheck size={13} /> Quality status
                               </Button>
                             )}
+                            {/* Adjust sits beside Transfer for the same reason
+                                the release action does: this is the row the
+                                operator is looking at when the shelf and the
+                                screen disagree. It corrects what is HERE — the
+                                lot's received quantity is a different number,
+                                edited from the lot itself (CTL-002). */}
+                            <Button
+                              size="sm"
+                              aria-label={`Adjust ${r.lot_number ?? 'stock'} at ${r.location}`}
+                              onClick={() =>
+                                setAdjustTarget({
+                                  lot_id: r.lot_id,
+                                  lot_number: r.lot_number,
+                                  node_id: r.node_id,
+                                  location: r.location,
+                                  qty: r.qty,
+                                  is_grid: r.is_grid,
+                                })
+                              }
+                            >
+                              <Scale size={13} /> Adjust
+                            </Button>
                             <Button
                               size="sm"
                               aria-label={`Transfer ${r.lot_number ?? 'stock'} from ${r.location}`}
@@ -348,6 +378,17 @@ export function ItemStockLocationsTab({
         item={item}
         presetSource={transferFrom}
         onDone={() => {
+          void load();
+          onChanged();
+        }}
+      />
+
+      <StockAdjustDialog
+        target={adjustTarget}
+        onOpenChange={(o) => !o && setAdjustTarget(null)}
+        onDone={() => {
+          // The correction changes the item's balance, so the KPI header and
+          // the ledger above are stale too — same refresh Transfer asks for.
           void load();
           onChanged();
         }}

@@ -43,6 +43,51 @@ export interface InventoryCsvParams extends InventoryExportParams {
   rowKinds?: readonly ExportRowKind[];
 }
 
+/** Row kinds in the kit-cost dump (RPT-003). Omit for all six. */
+export type KitCostRowKind =
+  | 'material_issue'
+  | 'material_return'
+  | 'batch_consumption'
+  | 'batch_output'
+  | 'output_shipment'
+  | 'kit_summary';
+
+/** How much of the story to include — the choice the export dialog offers.
+ *
+ *  Row kinds are the API's vocabulary, not a reader's. These three are what a
+ *  non-technical person actually wants to pick between, and each maps to a
+ *  subset below. */
+export type KitCostDetail = 'summary' | 'costs' | 'full';
+
+/** Detail level → row kinds. Named here rather than in the component so the
+ *  meaning of "Summary" lives with the API wrapper it parameterises. */
+export const KIT_COST_DETAIL_KINDS: Record<KitCostDetail, readonly KitCostRowKind[]> = {
+  /** One line per finished lot, plus a total per kit. What you send finance. */
+  summary: ['batch_output', 'kit_summary'],
+  /** Adds what each component contributed and where the lots went. */
+  costs: ['batch_output', 'kit_summary', 'batch_consumption', 'output_shipment'],
+  /** Everything, including every issue and return movement. */
+  full: [
+    'material_issue',
+    'material_return',
+    'batch_consumption',
+    'batch_output',
+    'output_shipment',
+    'kit_summary',
+  ],
+};
+
+export interface KitCostExportParams {
+  /** ISO datetime, INCLUSIVE. */
+  occurredFrom?: string;
+  /** ISO datetime, EXCLUSIVE — the range is half-open, matching the audit
+   *  filters. To include a whole day, send the start of the NEXT day. */
+  occurredTo?: string;
+  kitId?: string;
+  status?: string;
+  rowKinds?: readonly KitCostRowKind[];
+}
+
 function baseQuery(params: InventoryExportParams) {
   return {
     tier_id: params.tierId,
@@ -71,6 +116,23 @@ export const exportsApi = {
   ): Promise<DownloadResult> =>
     api.download('/exports/inventory.csv', {
       query: { ...baseQuery(params), row_kinds: params.rowKinds },
+      signal: opts?.signal,
+    }),
+
+  /** The kit material cost dump (RPT-003). Admin + Super Admin only — it
+   *  carries what each customer is charged per finished lot. */
+  kitCostsCsv: (
+    params: KitCostExportParams = {},
+    opts?: { signal?: AbortSignal },
+  ): Promise<DownloadResult> =>
+    api.download('/exports/kit-costs.csv', {
+      query: {
+        occurred_from: params.occurredFrom,
+        occurred_to: params.occurredTo,
+        kit_id: params.kitId,
+        status: params.status,
+        row_kinds: params.rowKinds,
+      },
       signal: opts?.signal,
     }),
 };

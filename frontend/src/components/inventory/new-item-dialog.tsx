@@ -73,6 +73,10 @@ const schema = z.object({
   // purchase and not to the material.
   // Blind-consumed, no per-lot traceability.
   isConsumable: z.boolean().default(false),
+  // The media twin (REQ-2026-07-31-KIT-003): a non-consumable stand-in that CAN
+  // sit in a bill of materials. On a kit it is consumed to the kit as the unit
+  // and never back-flushed. Mutually exclusive with `isConsumable`.
+  consumedInKit: z.boolean().default(false),
   // Assigned suppliers — zero-or-more. The only suppliers this item can later be
   // received against. Optional: an item may start with none and add later.
   supplierIds: z.array(z.string()).default([]),
@@ -155,6 +159,7 @@ export function NewItemDialog({
       prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
       uom: '',
       isConsumable: false,
+      consumedInKit: false,
       supplierIds: [],
       leadDays: 0,
       threshold: 0,
@@ -166,6 +171,7 @@ export function NewItemDialog({
   const tierId = watch('tierId');
   const prefixId = watch('prefixId');
   const isConsumable = watch('isConsumable');
+  const consumedInKit = watch('consumedInKit');
   const suffix = watch('suffix');
   // The tier whose prefixes scope the picker, and the chosen prefix within it.
   // A locked tier is re-resolved from the fetched list so a prefix added from
@@ -274,6 +280,7 @@ export function NewItemDialog({
         prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
         uom: '',
         isConsumable: false,
+        consumedInKit: false,
         supplierIds: [],
         leadDays: 0,
         threshold: 0,
@@ -303,6 +310,7 @@ export function NewItemDialog({
         prefix_id: data.prefixId,
         uom: data.uom ? data.uom : null,
         is_consumable: data.isConsumable,
+        consumed_in_kit: data.consumedInKit,
         supplier_ids: data.supplierIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
@@ -495,7 +503,30 @@ export function NewItemDialog({
                     <Switch
                       id="ni-consumable"
                       checked={isConsumable}
-                      onCheckedChange={(v) => setValue('isConsumable', v)}
+                      onCheckedChange={(v) => {
+                        setValue('isConsumable', v);
+                        // The two are mutually exclusive (the server 422s on
+                        // both), so turning one on turns the other off rather
+                        // than letting the operator build a rejected item.
+                        if (v) setValue('consumedInKit', false);
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="ni-consumed-in-kit">Consumed to the kit</Label>
+                      <p className="text-xs text-text-3">
+                        Media and the like: consumed when replaced, never back-flushed
+                      </p>
+                    </div>
+                    <Switch
+                      id="ni-consumed-in-kit"
+                      checked={consumedInKit}
+                      onCheckedChange={(v) => {
+                        setValue('consumedInKit', v);
+                        if (v) setValue('isConsumable', false);
+                      }}
                     />
                   </div>
 
