@@ -62,7 +62,7 @@ import {
   type KitUpdateInput,
   type ReturnCellInput,
 } from '@/lib/api/kits';
-import { locationNodesApi, LN2_NODE_TYPES, type LocationNode } from '@/lib/api/location-nodes';
+import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { lotsApi } from '@/lib/api/lots';
 import { cn, formatMoney } from '@/lib/utils';
 import { selectIsAdminOrAbove, selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
@@ -375,35 +375,6 @@ export function KitDetailClient({
           .map((n) => n.id),
       ),
     [nodes],
-  );
-  // LOC-003 applied to back-flush: leftovers go back to the kind of place they
-  // came from, so a RETURN picker offers only its line's side of the LN2
-  // boundary. The server refuses the rest anyway
-  // (``return_breaks_cold_chain`` / ``return_blocked_ln2_entry``); filtering
-  // here spares the operator finding out after they have signed the close-out.
-  //
-  // OUTPUT placement is deliberately NOT filtered — produced material is new and
-  // has no origin to match, and narrowing it would stop finished goods being
-  // stocked in a tank.
-  const returnableByOrigin = React.useMemo(() => {
-    const ln2 = new Set<string>();
-    const nonLn2 = new Set<string>();
-    for (const n of nodes) {
-      if (!returnableIds.has(n.id)) continue;
-      (LN2_NODE_TYPES.has(n.node_type) ? ln2 : nonLn2).add(n.id);
-    }
-    return { ln2, nonLn2 };
-  }, [nodes, returnableIds]);
-  /** The return destinations this line may use. Null origin = nothing issued yet
-   *  or a line drawn from both sides, both of which the server leaves open. */
-  const allowedReturnFor = React.useCallback(
-    (line: { origin_is_ln2: boolean | null }) =>
-      line.origin_is_ln2 === null
-        ? returnableIds
-        : line.origin_is_ln2
-          ? returnableByOrigin.ln2
-          : returnableByOrigin.nonLn2,
-    [returnableIds, returnableByOrigin],
   );
   // The production location can be any node in the hierarchy (not just a
   // storage leaf), so resolve its name with a dedicated lookup.
@@ -1048,7 +1019,7 @@ export function KitDetailClient({
             returnRowsFor={returnRowsFor}
             onReturnDests={(id, next) => setReturnDests((p) => ({ ...p, [id]: next }))}
             returnPlaced={returnPlaced}
-            allowedReturnFor={allowedReturnFor}
+            returnAllowedIds={returnableIds}
           />
         )}
         {activeStep === 3 && (
@@ -1121,7 +1092,7 @@ export function KitDetailClient({
       <CancelKitDialog
         kit={kit}
         open={cancelOpen}
-        allowedReturnFor={allowedReturnFor}
+        returnAllowedIds={returnableIds}
         onOpenChange={setCancelOpen}
         onSubmit={(cancelLines) => {
           setCancelOpen(false);
@@ -1133,7 +1104,7 @@ export function KitDetailClient({
       <ReturnExcessDialog
         kit={kit}
         line={returningFrom}
-        allowedReturnFor={allowedReturnFor}
+        returnAllowedIds={returnableIds}
         onOpenChange={(o) => !o && setReturningFrom(null)}
         onDone={(k) => {
           setKit(k);
@@ -1778,17 +1749,6 @@ function ProductionStep({
  * a bulk row (shelf / freezer) takes a typed quantity. ``BoxCellPicker`` reports
  * whether a location is a box, so we swap the cell grid for a quantity input.
  */
-/** Why a line's return locations are narrowed, or null when they are not.
- *
- *  One wording for all three return paths — close-out back-flush, return excess
- *  and cancel — so the operator meets the same sentence wherever they hit it. */
-function returnHint(line: { origin_is_ln2: boolean | null }): string | null {
-  if (line.origin_is_ln2 === null) return null;
-  return line.origin_is_ln2
-    ? 'Issued out of liquid nitrogen, so it goes back to an LN2 box — to keep the cold chain intact.'
-    : 'Not issued out of liquid nitrogen, so it cannot go back into a tank — LN2 is a closed set.';
-}
-
 function OutputPlacement({
   good,
   dests,
@@ -1799,7 +1759,6 @@ function OutputPlacement({
   label = 'Stock the output to',
   noun = 'Output location',
   hideHeader = false,
-  hint,
 }: {
   good: number;
   dests: OutputDest[];
@@ -1813,10 +1772,6 @@ function OutputPlacement({
   label?: string;
   /** Singular, for the per-row aria labels. */
   noun?: string;
-  /** Why the location list is narrower than usual. Shown under the rows so an
-   *  operator who can see the freezers on the Storage page and not here reads a
-   *  rule rather than a bug (LOC-003 back-flush). */
-  hint?: React.ReactNode;
   /** Drop the heading row — a per-component card already names the component,
    *  so repeating "Return to" above every one is noise. */
   hideHeader?: boolean;
@@ -1928,7 +1883,6 @@ function OutputPlacement({
         );
       })}
 
-      {hint ? <p className="text-[11px] text-text-3">{hint}</p> : null}
 
       {required && good > 0 && placed !== good && (
         <p className="text-xs text-danger">
@@ -1966,7 +1920,7 @@ function CloseOutStep({
   returnRowsFor,
   onReturnDests,
   returnPlaced,
-  allowedReturnFor,
+  returnAllowedIds,
   lotStatus,
 }: {
   kit: ApiKit;
@@ -1982,7 +1936,7 @@ function CloseOutStep({
   onReturnDests: (lineId: string, next: OutputDest[]) => void;
   /** Units of a line's leftover already placed across its destinations. */
   returnPlaced: (line: ApiKitLine) => number;
-  allowedReturnFor: (line: ApiKitLine) => Set<string>;
+  returnAllowedIds: Set<string>;
   /** Live availability of the typed produced lot number (checked upstream). */
   lotStatus: 'unknown' | 'checking' | 'free' | 'taken';
 }) {
@@ -2371,8 +2325,7 @@ function CloseOutStep({
                                 good={left}
                                 dests={returnRowsFor(line)}
                                 onChange={(next) => onReturnDests(line.id, next)}
-                                allowedIds={allowedReturnFor(line)}
-                                hint={returnHint(line)}
+                                allowedIds={returnAllowedIds}
                                 required
                                 reservedFor={reservedFor}
                                 label={`Back-flush ${line.item_number} to`}
@@ -3183,13 +3136,13 @@ function AdditionalIssueDialog({
 function ReturnExcessDialog({
   kit,
   line,
-  allowedReturnFor,
+  returnAllowedIds,
   onOpenChange,
   onDone,
 }: {
   kit: ApiKit;
   line: ApiKitLine | null;
-  allowedReturnFor: (line: ApiKitLine) => Set<string>;
+  returnAllowedIds: Set<string>;
   onOpenChange: (open: boolean) => void;
   onDone: (kit: ApiKit) => void;
 }) {
@@ -3294,9 +3247,6 @@ function ReturnExcessDialog({
           <div className="rounded-md border border-border bg-surface p-3">
             <ItemCell itemNumber={line.item_number} description={line.description} itemId={line.item_id} />
           </div>
-          {returnHint(line) ? (
-            <p className="text-[11px] text-text-3">{returnHint(line)}</p>
-          ) : null}
           <dl className="grid grid-cols-2 gap-2 text-center">
             <div className="rounded-md border border-border bg-bg-elev p-2" title="Everything here can be returned">
               <dt className="text-[11px] uppercase tracking-wider text-text-3">On floor</dt>
@@ -3350,7 +3300,7 @@ function ReturnExcessDialog({
                           value={r.node}
                           onChange={(v) => setRow(r.key, { node: v, isBox: false, cells: [] })}
                           areas={['storage']}
-                          allowedNodeIds={line ? allowedReturnFor(line) : null}
+                          allowedNodeIds={returnAllowedIds}
                           modal
                           showPath
                         />
@@ -3464,13 +3414,13 @@ interface ReturnRow {
 function CancelKitDialog({
   kit,
   open,
-  allowedReturnFor,
+  returnAllowedIds,
   onOpenChange,
   onSubmit,
 }: {
   kit: ApiKit;
   open: boolean;
-  allowedReturnFor: (line: ApiKitLine) => Set<string>;
+  returnAllowedIds: Set<string>;
   onOpenChange: (open: boolean) => void;
   /** Hand the chosen return locations back — the parent then collects the
    *  signature and posts the cancel. */
@@ -3604,8 +3554,7 @@ function CancelKitDialog({
                   good={line.on_floor_qty}
                   dests={rows}
                   onChange={(next) => setDests((p) => ({ ...p, [line.id]: next }))}
-                  allowedIds={allowedReturnFor(line)}
-                  hint={returnHint(line)}
+                  allowedIds={returnAllowedIds}
                   required
                   reservedFor={reservedFor}
                   label={`Return ${line.item_number} to`}

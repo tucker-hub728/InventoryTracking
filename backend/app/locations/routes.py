@@ -67,13 +67,10 @@ from app.models.locations import (
     STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
-    blocks_transfer_into_ln2,
     can_store,
     group_default_name,
     group_kind_for_code,
     is_grid_node,
-    is_ln2_node,
-    permits_ln2_transfer_to,
 )
 from app.security.permissions import RequirePermission, has_permission
 
@@ -1439,52 +1436,6 @@ async def _resolve_storage_node(db: DBSession, node_id: str) -> LocationNode:
     return node
 
 
-def _require_permitted_destination(
-    *, from_node: LocationNode, to_node: LocationNode, prefix: str = ""
-) -> None:
-    """Enforce the LOC-003 cold-chain rule on ONE transfer leg.
-
-    Material leaving liquid nitrogen may only be transferred to another LN2 box.
-    The other two destinations the requirement permits — a production room and a
-    customer shipment — are not transfers at all, so the refusal names the action
-    that does reach them instead of leaving the operator to guess.
-
-    Deliberately NOT folded into :func:`_resolve_storage_node`. That helper has
-    no source node in scope, and its callers include ``/allocations/place`` and
-    ``/allocations/place-batch`` — the routes the LN2 box page uses to put stock
-    INTO a box, which have no source at all and which LOC-003 does not govern.
-    Guarding there would break placement (and, through it, the only fixtures that
-    can seed LN2 stock for the smokes). It is likewise not pushed down into
-    ``draw_lot_at_node``: that is shared with customer shipment and material
-    issue, and takes no destination argument, so the rule is not even expressible
-    there.
-
-    ``prefix`` lets the multi-source endpoint name the offending leg, matching
-    the ``Source {i}: ...`` convention its neighbouring errors already use.
-    """
-    if is_ln2_node(from_node.node_type):
-        if not permits_ln2_transfer_to(to_node.node_type):
-            raise ValidationError(
-                f"{prefix}'{to_node.name}' is not a permitted destination for material "
-                f"leaving liquid nitrogen — a transfer out of LN2 may only go to another "
-                f"LN2 box, to keep the cold chain intact. To begin manufacturing with "
-                f"this material use Issue on a kit; to send it to a customer use Ship.",
-                code="transfer_blocked_cold_chain",
-            )
-        return
-
-    # The mirror half (client 2026-08-20, beyond LOC-003 as written): LN2 is a
-    # CLOSED SET, so material that is not already in it cannot be transferred in.
-    if blocks_transfer_into_ln2(from_node.node_type, to_node.node_type):
-        raise ValidationError(
-            f"{prefix}'{from_node.name}' is outside liquid nitrogen, so its material "
-            f"cannot be transferred into '{to_node.name}' — LN2 is a closed set. "
-            f"Material enters a tank when it is received (place it straight into the "
-            f"box) or when a kit returns it.",
-            code="transfer_blocked_ln2_entry",
-        )
-
-
 async def _validate_cell_target(
     db: DBSession,
     *,
@@ -1921,10 +1872,6 @@ async def transfer_allocation(
         raise NotFoundError(f"Active allocation {payload.allocation_id} not found")
 
     to_node = await _resolve_storage_node(db, payload.to_node_id)
-    # LOC-003 cold chain. ``alloc.location_node`` costs no query — the
-    # relationship is ``lazy="joined"``, and ``get_allocation``'s FOR UPDATE is
-    # scoped ``of=LotAllocation``, so the eager join still applies.
-    _require_permitted_destination(from_node=alloc.location_node, to_node=to_node)
     if to_node.id == alloc.location_node_id and (
         payload.to_grid_row == alloc.grid_row and payload.to_grid_col == alloc.grid_col
     ):
@@ -2146,10 +2093,6 @@ async def transfer_batch(
     available = sum((a.qty for a in allocs), Decimal(0))
 
     to_node = await _resolve_storage_node(db, payload.to_node_id)
-    # LOC-003 cold chain. One check covers the whole batch: ``_load_batch_sources``
-    # already rejected a mixed-location batch (``batch_multi_node``), so every
-    # allocation here shares one source node.
-    _require_permitted_destination(from_node=allocs[0].location_node, to_node=to_node)
     dest_is_box = is_grid_node(to_node.node_type)
     source_is_box = all(a.grid_row is not None for a in allocs)
 
@@ -2326,10 +2269,10 @@ async def transfer_multi(
     # one signature covers one item's move and the ledger rows agree.
     item_id: uuid.UUID | None = None
     legs: list[_TransferLeg] = []
-    # Source nodes for the LOC-003 check, cached by id: one request commonly
-    # draws several lots out of the SAME box, and nothing else on this path
-    # loads the source node (the payload carries only its id).
-    from_nodes: dict[uuid.UUID, LocationNode] = {}
+    # Source node ids already proved to exist. Nothing else on this path loads
+    # the source node (the payload carries only its id), and one request commonly
+    # draws several lots out of the SAME box, so each node is checked once.
+    seen_from_nodes: set[uuid.UUID] = set()
     for i, src in enumerate(payload.sources, start=1):
         lot_uuid = _parse_uuid(src.lot_id, field="lot_id")
         node_uuid = _parse_uuid(src.node_id, field="node_id")
@@ -2349,16 +2292,10 @@ async def transfer_multi(
                 f"Source {i}: the destination is the location it is already in",
                 code="transfer_same_location",
             )
-        # LOC-003 cold chain, checked PER LEG: one signature may carry several
-        # sources, and a warehouse row travelling alongside an LN2 row is not
-        # governed by the rule. Per-leg also lets the message name the offender.
-        from_node = from_nodes.get(node_uuid)
-        if from_node is None:
-            from_node = await loc_repo.get_node(db, node_uuid)
-            if from_node is None:
+        if node_uuid not in seen_from_nodes:
+            if await loc_repo.get_node(db, node_uuid) is None:
                 raise NotFoundError(f"Source {i}: location node {src.node_id} not found")
-            from_nodes[node_uuid] = from_node
-        _require_permitted_destination(from_node=from_node, to_node=to_node, prefix=f"Source {i}: ")
+            seen_from_nodes.add(node_uuid)
         if is_grid_node(to_node.node_type):
             if not src.to_cells:
                 raise ValidationError(

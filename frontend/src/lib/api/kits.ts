@@ -109,13 +109,6 @@ export interface ApiKitLine {
   returned_qty: number | null;
   source_location_node_id: string | null;
   return_location_node_id: string | null;
-  /** Which side of the LN2 boundary this line's material came from, so the
-   *  return pickers offer only what the server will accept (LOC-003 applied to
-   *  back-flush): `true` = issued from LN2, so returns must go to an LN2 box;
-   *  `false` = issued from outside it, so returns must stay outside; `null` =
-   *  nothing issued yet, or the line drew from BOTH sides, which is deliberately
-   *  unconstrained because the leftovers are indistinguishable. */
-  origin_is_ln2: boolean | null;
   /** Total available for this component across all locations. */
   on_hand: number;
   /** Locations holding the component, with per-node qty (legacy picker). */

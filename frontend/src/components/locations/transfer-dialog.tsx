@@ -32,7 +32,7 @@ import { ApiError } from '@/lib/api/client';
 import type { ReauthResponse } from '@/lib/api/auth';
 import type { KitLineSourceLot } from '@/lib/api/kits';
 import { itemsApi, type ApiItemStockLocation } from '@/lib/api/items';
-import { locationNodesApi, LN2_NODE_TYPES, type Allocation } from '@/lib/api/location-nodes';
+import { locationNodesApi, type Allocation } from '@/lib/api/location-nodes';
 import { cn } from '@/lib/utils';
 import {
   ReceiveLocationPicker,
@@ -121,8 +121,6 @@ export function TransferDialog(props: Props) {
 
   // Item mode — the multi-lot source picker.
   const [lots, setLots] = React.useState<KitLineSourceLot[] | null>(null);
-  /** Item mode: which of the source nodes above are in LN2 (REQ-2026-08-13-LOC-003). */
-  const [ln2Nodes, setLn2Nodes] = React.useState<Set<string>>(() => new Set());
   const [picks, setPicks] = React.useState<LotPick[]>([]);
   // Item mode destinations, one per source row, keyed by the ROW's ``rid``.
   //
@@ -249,13 +247,6 @@ export function TransferDialog(props: Props) {
       .then((rows) => {
         const mapped = rows.map(toSourceLot);
         setLots(mapped);
-        // LOC-003 needs the source's node TYPE, which the shared
-        // ``KitLineSourceLot`` shape does not carry — and must not learn, since
-        // kitting builds it too. Kept beside it as a set of LN2 node ids read
-        // straight off the API rows.
-        setLn2Nodes(
-          new Set(rows.filter((r) => LN2_NODE_TYPES.has(r.node_type)).map((r) => r.node_id)),
-        );
         // A row action names its source, so open with that lot filled in at its
         // full quantity — the same default the location-view transfer uses.
         // Otherwise seed one blank row: there is no target quantity to reach,
@@ -511,11 +502,6 @@ export function TransferDialog(props: Props) {
                               excludeLabel={
                                 lots?.find((l) => l.node_id === row.node_id)?.node_name
                               }
-                              // LOC-003: an LN2 source may only go to another
-                              // LN2 box. Checked PER ROW — one signature can
-                              // carry a freezer row and an LN2 row, and the
-                              // freezer row is not governed by the cold chain.
-                              ln2Source={ln2Nodes.has(row.node_id)}
                               // Cells the OTHER rows already aim at in this same
                               // box. Nothing on the server knows about them
                               // until the transfer is signed, so without this
@@ -572,12 +558,6 @@ export function TransferDialog(props: Props) {
                   // in the source, which is the one place this cannot go.
                   excludeNodeId={allocation?.location_node_id}
                   excludeLabel={sourceLabel}
-                  // LOC-003: out of LN2, only another LN2 box is offered. Any
-                  // allocation will do for the test — a batch is one lot at ONE
-                  // node, so they all share the source type.
-                  ln2Source={LN2_NODE_TYPES.has(
-                    allocations?.[0]?.location_node_type ?? '',
-                  )}
                 />
               ) : (
                 <p className="text-xs text-text-3">Loading locations…</p>

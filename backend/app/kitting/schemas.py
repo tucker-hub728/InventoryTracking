@@ -145,19 +145,6 @@ class KitLineRead(BaseModel):
     returned_qty: int | None = None
     source_location_node_id: str | None = None
     return_location_node_id: str | None = None
-    #: Which side of the liquid-nitrogen boundary this line's material came from,
-    #: so the close-out and return pickers can offer only destinations the server
-    #: will accept (REQ-2026-08-13-LOC-003 applied to back-flush).
-    #:
-    #:   ``True``   every issue pick was LN2   → returns must go to an LN2 box
-    #:   ``False``  none were                  → returns must stay outside LN2
-    #:   ``None``   nothing issued yet, or the line drew from BOTH sides, which
-    #:              is deliberately unconstrained (client 2026-08-20) because the
-    #:              leftovers are physically indistinguishable
-    #:
-    #: Mirrors ``_require_return_matches_origin`` exactly, including the mixed
-    #: case, so the picker and the server cannot disagree about what is legal.
-    origin_is_ln2: bool | None = None
     # Location-System stock for this component (from lot_allocations).
     on_hand: int = 0
     # Per-location totals (legacy single-source picker).
