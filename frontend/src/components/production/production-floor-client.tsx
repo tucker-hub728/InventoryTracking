@@ -196,14 +196,14 @@ export function ProductionFloorClient({ nodeId, tab }: Props) {
                     ? 'Nothing building here'
                     : section === 'closed'
                       ? 'Nothing closed here yet'
-                      : 'No cancelled kits with output'
+                      : 'No cancelled kits'
                 }
                 hint={
                   section === 'in_production'
                     ? 'Material appears here when a kit is issued to this floor.'
                     : section === 'closed'
                       ? 'Closed kits that built on this floor will be listed here.'
-                      : 'Kits cancelled after producing units on this floor appear here. Cancelling without producing leaves nothing to account for.'
+                      : 'Kits cancelled on this floor appear here, with anything they produced before being abandoned and the material they consumed.'
                 }
               />
             ) : section === 'in_production' ? (
@@ -350,7 +350,16 @@ function ConsumedKitCard({ kit }: { kit: ApiFloorKitConsumed }) {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-mono text-xs font-semibold text-accent">{kit.kit_number}</span>
-            <Badge tone="success">{kit.good_qty ?? 0} made</Badge>
+            {(kit.good_qty ?? 0) > 0 ? (
+              <Badge tone="success">{kit.good_qty} made</Badge>
+            ) : (
+              // A kit cancelled before producing anything. It used to be hidden
+              // from this tab entirely, on the reasoning that its material had
+              // gone back — untrue since KIT-003, which discards media rather
+              // than returning it. "0 made" would read as a yield figure, so
+              // say what actually happened instead.
+              <Badge tone="neutral">nothing made</Badge>
+            )}
             {(kit.scrap_qty ?? 0) > 0 && <Badge tone="danger">{kit.scrap_qty} scrapped</Badge>}
           </div>
           <div className="mt-0.5 truncate text-[11px] text-text-3">
@@ -433,6 +442,11 @@ function CancelledKitCard({ kit }: { kit: ApiFloorKitCancelled }) {
         </div>
       )}
 
+      {kit.lines.length > 0 && (
+        <div className="px-3 pt-2">
+          <SubHead>Consumed, not returned</SubHead>
+        </div>
+      )}
       {kit.lines.length > 0 && (
         <ul className="divide-y divide-border/50">
           {kit.lines.map((line) => (

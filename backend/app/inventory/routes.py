@@ -622,6 +622,17 @@ async def list_items(
             )
         ),
     ] = None,
+    awaiting_release: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Filter to items with stock that has arrived but is not yet "
+                "placed and released (REQ-2026-07-31-STS-001). This material is "
+                "on site and paid for, so it is deliberately NOT counted as "
+                "missing by the reorder screen."
+            )
+        ),
+    ] = None,
     sort: Annotated[
         Literal["item_number", "description", "updated_at", "created_at"],
         Query(),
@@ -641,6 +652,7 @@ async def list_items(
         has_bom=has_bom,
         min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
+        awaiting_release=awaiting_release,
         sort=sort,
         direction=direction,
         limit=limit,

@@ -183,6 +183,7 @@ def _apply_filters(
     has_bom: bool | None = None,
     min_bom_lines: int | None = None,
     below_reorder: bool | None = None,
+    awaiting_release: bool | None = None,
 ) -> Select[tuple[Item]]:
     stmt = stmt.where(Item.deleted_at.is_(None))
     if tier_id is not None:
@@ -215,6 +216,15 @@ def _apply_filters(
             .having(func.count(BomLine.id) >= min_bom_lines)
         )
         stmt = stmt.where(Item.id.in_(enough_lines))
+    if awaiting_release is not None:
+        # REQ-2026-07-31-STS-001. Material that has ARRIVED but is not yet
+        # placed and released — on site and paid for, and the one state a
+        # reorder screen must not read as "missing" (see
+        # ``awaiting_release_units_subquery``). Expressed with the same
+        # correlated scalar the list already reports per row, so the filter and
+        # the number in the column can never disagree.
+        waiting = awaiting_release_units_subquery() > 0
+        stmt = stmt.where(waiting if awaiting_release else ~waiting)
     if supplier_id is not None:
         # Suppliers live in ``meta.item_suppliers`` now — filter items that have
         # the requested supplier in their assigned list.
@@ -279,6 +289,7 @@ async def list_items(
     has_bom: bool | None = None,
     min_bom_lines: int | None = None,
     below_reorder: bool | None = None,
+    awaiting_release: bool | None = None,
     sort: SortField = "item_number",
     direction: SortDirection = "asc",
     limit: int = 50,
@@ -299,6 +310,7 @@ async def list_items(
         has_bom=has_bom,
         min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
+        awaiting_release=awaiting_release,
     )
     count_stmt = _apply_filters(
         select(func.count()).select_from(Item),
@@ -311,6 +323,7 @@ async def list_items(
         has_bom=has_bom,
         min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
+        awaiting_release=awaiting_release,
     )
     total = int((await session.execute(count_stmt)).scalar_one())
 

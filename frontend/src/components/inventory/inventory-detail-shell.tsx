@@ -44,10 +44,60 @@ import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
+import { ConsumableBadge, ConsumedInKitBadge } from './item-kind-badges';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 const TIER_CFGS = [RAW_MATERIAL_TIER, SUB_ASSEMBLY_TIER, FINISHED_GOOD_TIER];
 
-/** Breadcrumb for an item's tier — e.g. `Raw Materials` linking to
+/** How many suppliers to name in the header before collapsing to a count. */
+const HEADER_SUPPLIERS = 2;
+
+/**
+ * The item's suppliers, without letting a long list run away with the header.
+ *
+ * They arrive pre-joined as one string. Printing it whole is fine for the one
+ * or two suppliers most items have, but an item sourced from four vendors —
+ * "ATCC, Applied Cells, Becton Dickinson (BD), Bio-Techne" — pushed the stock
+ * badge onto a second line and made the subtitle the widest thing on the page
+ * (client 2026-09-01). So: name the first two, count the rest, and put the full
+ * list in a tooltip for whoever actually needs it.
+ *
+ * Deliberately not truncated with CSS: a mid-word ellipsis on "Becton Dickinso…"
+ * tells the reader neither who the supplier is nor how many were hidden.
+ */
+function SupplierSummary({ suppliers }: { suppliers: string }) {
+  const names = suppliers
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  if (names.length === 0) return <span className="text-text-3">No supplier</span>;
+  if (names.length <= HEADER_SUPPLIERS) return <span>{names.join(', ')}</span>;
+
+  const shown = names.slice(0, HEADER_SUPPLIERS);
+  const hidden = names.length - HEADER_SUPPLIERS;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="cursor-default">
+          {shown.join(', ')}
+          <span className="ml-1 text-text-3">+{hidden} more</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <span className="font-medium">Suppliers</span>
+        <ul className="mt-1 space-y-0.5">
+          {names.map((name) => (
+            <li key={name}>{name}</li>
+          ))}
+        </ul>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Breadcrumb for an item's tier
+ — e.g. `Raw Materials` linking to
  *  `/inventory/cr`. Null when the tier is unknown (the crumb is then omitted). */
 function tierCrumb(tierType: string | null | undefined) {
   const cfg = TIER_CFGS.find((c) => c.type === tierType);
@@ -405,10 +455,22 @@ export function InventoryDetailShell({
             <Badge tone={(item.tierTone as never) ?? 'neutral'} dot>
               {item.tierName}
             </Badge>
+            {/* What this item IS, before what it currently has. Both flags are
+                surfaced because the difference decides whether the item can go
+                in a recipe at all, and whether a kit ever gives it back
+                (client 2026-09-01). The consumable split is CR-only — a built
+                item is manufactured, never blind-consumed. */}
             {!built && (
               <>
                 <span aria-hidden>·</span>
-                <span>{item.supplier || '— No supplier —'}</span>
+                <ConsumableBadge isConsumable={item.isConsumable} />
+              </>
+            )}
+            <ConsumedInKitBadge consumedInKit={item.consumedInKit} />
+            {!built && (
+              <>
+                <span aria-hidden>·</span>
+                <SupplierSummary suppliers={item.supplier} />
                 <span aria-hidden>·</span>
                 {/* Awaiting-release aware: a delivery sitting in quarantine
                     must not read as "go buy more". */}

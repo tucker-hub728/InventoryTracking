@@ -10,6 +10,7 @@ import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { Badge } from '@/components/ui/badge';
+import { ConsumedInKitBadge } from './item-kind-badges';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -21,7 +22,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { SegmentedControl } from '@/components/ui/segmented-control';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { usePermission } from '@/hooks/use-permission';
 import { toast } from '@/components/ui/sonner';
@@ -53,7 +60,10 @@ export interface TierFilter {
   /** Extra query params merged into the list request. Omit for "All".
    *  Filtering is server-side: the list is capped at 200 rows, so filtering
    *  in memory would quietly search only the first page. */
-  params?: Pick<ListItemsParams, 'is_consumable' | 'has_bom' | 'below_reorder'>;
+  params?: Pick<
+    ListItemsParams,
+    'is_consumable' | 'has_bom' | 'below_reorder' | 'awaiting_release'
+  >;
 }
 
 export interface TierConfig {
@@ -306,16 +316,25 @@ export function TierListClient({ config }: { config: TierConfig }) {
             />
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            {/* A dropdown, not a segmented row (client 2026-09-01). The pill
+                row was fine at three filters; CR now has five, and they wrapped
+                under the Export button at laptop widths. A Select also keeps the
+                chosen filter readable when it is not the default — the header
+                says "Awaiting release" instead of making the reader find which
+                pill is highlighted. */}
             {config.filters.length > 1 && (
-              <SegmentedControl
-                aria-label={`Filter ${config.plural}`}
-                options={config.filters.map((f) => ({
-                  value: f.id,
-                  label: f.label,
-                }))}
-                value={filterId}
-                onChange={setFilterId}
-              />
+              <Select value={filterId} onValueChange={setFilterId}>
+                <SelectTrigger className="w-52" aria-label={`Filter ${config.plural}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {config.filters.map((f) => (
+                    <SelectItem key={f.id} value={f.id}>
+                      {f.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
             {canExport && exportButton}
           </div>
@@ -397,7 +416,17 @@ export function TierListClient({ config }: { config: TierConfig }) {
                           {row.id}
                         </Link>
                       </TableCell>
-                      <TableCell className="text-text-2">{row.desc}</TableCell>
+                      <TableCell className="text-text-2">
+                        {/* The kit-consumption flag rides with the NAME rather
+                            than taking a column: it applies to a handful of rows
+                            and a column would be empty on almost all of them.
+                            The Consumable column beside it answers the other
+                            half of the question (client 2026-09-01). */}
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate">{row.desc}</span>
+                          <ConsumedInKitBadge consumedInKit={row.consumedInKit} />
+                        </span>
+                      </TableCell>
                       {showConsumable && (
                         <TableCell>
                           {row.isConsumable ? (

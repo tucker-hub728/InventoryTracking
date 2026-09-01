@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem, type ItemUpdateInput } from '@/lib/api/items';
@@ -56,6 +57,11 @@ const schema = z.object({
       'Near-expiry threshold must be a whole number of days (0–3650)',
     ),
   must_order_flag: z.boolean(),
+  // REQ-2026-07-31-KIT-003. Editable after creation (client 2026-09-01): the
+  // twin item exists precisely so media can enter a BOM, and whether a given
+  // item plays that role is a decision people revise. Create-only would have
+  // meant deleting and re-creating an item — and its part number — to change it.
+  consumed_in_kit: z.boolean(),
   });
 
 type FormValues = z.infer<typeof schema>;
@@ -121,11 +127,13 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       reorder_threshold: '',
       near_expiry_threshold_days: '',
       must_order_flag: false,
+      consumed_in_kit: false,
     },
   });
 
   const supplierIds = watch('supplier_ids');
   const mustOrder = watch('must_order_flag');
+  const consumedInKit = watch('consumed_in_kit');
 
   // Supplier-side fields apply only to the raw-material tier (a built AY/FG is
   // manufactured, not bought) — suppliers, lead time, must-order. Near-expiry
@@ -174,6 +182,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               ? String(freshItem.near_expiry_threshold_days)
               : '',
           must_order_flag: freshItem.must_order_flag,
+          consumed_in_kit: freshItem.consumed_in_kit,
         });
         setSubmitError(null);
       })
@@ -208,6 +217,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
         : 0;
     }
     if (dirtyFields.must_order_flag) patch.must_order_flag = values.must_order_flag;
+    if (dirtyFields.consumed_in_kit) patch.consumed_in_kit = values.consumed_in_kit;
 
     if (Object.keys(patch).length === 0) {
       setSubmitError('No changes to save.');
@@ -375,6 +385,30 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                     )}
                   </div>
                 </div>
+
+                {/* Offered only on a NON-consumable: the two flags are mutually
+                    exclusive (ck_items_consumable_xor_consumed_in_kit), and a
+                    consumable is barred from bills of material anyway, so on one
+                    the switch would be a control that can only produce a 422.
+                    `is_consumable` itself stays create-only — changing it would
+                    silently change whether existing BOM lines are legal. */}
+                {!item?.is_consumable && (
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="it-consumed-in-kit">Consumed to the kit</Label>
+                      <p className="text-xs text-text-3">
+                        Media and the like: consumed when replaced, never back-flushed
+                      </p>
+                    </div>
+                    <Switch
+                      id="it-consumed-in-kit"
+                      checked={consumedInKit}
+                      onCheckedChange={(v) =>
+                        setValue('consumed_in_kit', v, { shouldDirty: true })
+                      }
+                    />
+                  </div>
+                )}
 
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
                   <input

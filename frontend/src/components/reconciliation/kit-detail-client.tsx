@@ -16,6 +16,7 @@ import {
   ScrollText,
   Send,
   Undo2,
+  Ban,
   X,
   XCircle,
   type LucideIcon,
@@ -69,6 +70,7 @@ import { selectIsAdminOrAbove, selectIsSuperAdmin, useAuthStore } from '@/stores
 import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
 import { LocationPath } from '@/components/locations/location-path';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   LotSourcePicker,
   autoFillFifo,
@@ -1174,7 +1176,12 @@ export function KitDetailClient({
         meaning={
           editableDraft
             ? `I am cancelling draft kit ${kit.kit_number}. No material has moved.`
-            : `I am cancelling kit ${kit.kit_number} and returning all material still on the floor to inventory.`
+            : // What the signature actually attests to. Media is NOT returned on
+              // a cancel — it is discarded (KIT-003) — so a blanket "returning
+              // all material" would be a false statement under e-signature.
+              kit.lines.some((l) => l.consumed_in_kit && l.on_floor_qty > 0)
+              ? `I am cancelling kit ${kit.kit_number}, returning the material still on the floor to inventory and discarding the media, which is never returned.`
+              : `I am cancelling kit ${kit.kit_number} and returning all material still on the floor to inventory.`
         }
         title="Sign this cancellation"
         submitLabel="Cancel kit"
@@ -1676,23 +1683,62 @@ function ProductionStep({
                         </Button>
                         {/* Disabled rather than hidden: the row's Returned
                             column already tells an operator the action exists,
-                            so removing the button would look broken. The
-                            tooltip says who can. */}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={!canReturn || busy || floor <= 0}
-                          title={
-                            !canReturn
-                              ? 'Only a Super Admin can return material to inventory'
-                              : floor > 0
-                                ? 'Return material to inventory'
-                                : 'Nothing on the floor to return'
+                            so removing the button would look broken.
+
+                            A greyed-out button with the reason hidden in a
+                            hover title is not an explanation — it reads as the
+                            app being broken (client 2026-09-01). So the reason
+                            is VISIBLE beside the button, and the tooltip carries
+                            the longer form for whoever wants it. Same principle
+                            as the disabled Produce button on Close-Out. */}
+                        {(() => {
+                          // One place decides both whether the action is
+                          // available and what to say when it is not, so the
+                          // button and the sentence can never disagree.
+                          const blocked = line.consumed_in_kit
+                            ? {
+                                short: 'Consumed to the kit',
+                                long: 'Media is never returned — the leftover is discarded at close.',
+                              }
+                            : floor <= 0
+                              ? {
+                                  short: 'Nothing on the floor',
+                                  long: 'Nothing is staged in production for this line.',
+                                }
+                              : !canReturn
+                                ? {
+                                    short: 'Super Admin only',
+                                    long: 'Credits stock back, so it is Super Admin only and e-signed.',
+                                  }
+                                : null;
+
+                          if (blocked) {
+                            return (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="inline-flex cursor-default items-center gap-1 px-2 text-xs text-text-3">
+                                    <Ban size={11} aria-hidden />
+                                    {blocked.short}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs">
+                                  Can’t return: {blocked.long}
+                                </TooltipContent>
+                              </Tooltip>
+                            );
                           }
-                          onClick={() => onReturn(line)}
-                        >
-                          <Undo2 size={12} /> Return
-                        </Button>
+                          return (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={busy}
+                              title="Return material to inventory"
+                              onClick={() => onReturn(line)}
+                            >
+                              <Undo2 size={12} /> Return
+                            </Button>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );
@@ -2277,7 +2323,14 @@ function CloseOutStep({
                             // KIT-003: whatever is still on the floor at sign-out
                             // is poured, so there is no destination to pick.
                             <span className="text-xs text-text-3">
-                              {left > 0 ? `Consumed at close (${left})` : 'Consumed'}
+                              {left > 0
+                                ? // Drained off the floor and gone, but NOT
+                                  // charged to this batch's lot — the lot pays
+                                  // for what you recorded in Used. Named
+                                  // "discarded" rather than "consumed" so the
+                                  // two are not read as the same event.
+                                  `Discarded at close (${left})`
+                                : 'Consumed'}
                             </span>
                           ) : left > 0 ? (
                             // The destinations themselves live in the full-width
@@ -2385,6 +2438,11 @@ function ReviewStep({
   canClose: boolean;
 }) {
   const closed = kit.status === 'closed';
+  // Cancelled counts as FINISHED for anything phrased in tense: the floor is
+  // empty either way and the media is already gone. `closed` alone would tell a
+  // cancelled kit's reader that material is "still on the floor" and that media
+  // will be "discarded at close" — both future tense, on a kit that has ended.
+  const finished = closed || kit.status === 'cancelled';
   // Good/scrap accumulate on the kit across produce batches (KIT-007).
   const producedSoFar = kit.good_qty ?? 0;
   const scrapSoFar = kit.scrap_qty ?? 0;
@@ -2437,17 +2495,17 @@ function ReviewStep({
       scroll: false,
     });
   const hideBatch = () => router.push(reviewHref, { scroll: false });
-  // RPT-003. What the kit has been CHARGED but not yet handed to a finished lot
-  // — the value of the material still staged on the production floor. The two
-  // stats it separates are both correct and routinely differ, which is exactly
-  // why the header names them rather than showing one figure called "cost":
-  // ``material_cost_amount`` is everything pulled, ``consumed_value_amount`` is
-  // what batches have consumed of it. On a closed kit the remainder has been
-  // back-flushed (and credited), so this lands at zero and the line is dropped.
+  // RPT-003. What the kit has been CHARGED but never handed to a finished lot.
+  // The same subtraction means two different things depending on where the kit
+  // is: while it is OPEN that value is still staged on the production floor;
+  // once it is CLOSED the floor is empty, so what is left over is media that was
+  // discarded at sign-out (KIT-003) — drained, never returned, and charged to no
+  // lot. Labelling a closed kit's figure "still on the floor" claimed material
+  // was somewhere it no longer is (user, 2026-09-01).
   //
   // `null` when either side is unknown — subtracting from an unknown total is
   // not a number anyone should read.
-  const costOnFloor =
+  const costUnattributed =
     kit.material_cost_amount === null || kit.consumed_value_amount === null
       ? null
       : Number(kit.material_cost_amount) - Number(kit.consumed_value_amount);
@@ -2603,14 +2661,16 @@ function ReviewStep({
                   <span className="font-mono tabular-nums font-semibold text-text">
                     {formatMoney(kit.material_cost_amount)}
                   </span>
-                  {costOnFloor !== null && costOnFloor > 0 && (
+                  {costUnattributed !== null && costUnattributed > 0 && (
                     <div className="text-[11px] text-text-3">
                       <span className="font-mono tabular-nums">
                         {formatMoney(kit.consumed_value_amount)}
                       </span>{' '}
                       to lots ·{' '}
-                      <span className="font-mono tabular-nums">{formatMoney(String(costOnFloor))}</span>{' '}
-                      still on the floor
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(String(costUnattributed))}
+                      </span>{' '}
+                      {finished ? 'discarded' : 'still on the floor'}
                     </div>
                   )}
                 </>
@@ -2689,9 +2749,16 @@ function ReviewStep({
                   >
                     <td className="px-4 py-2 tabular-nums text-text-2">{b.batch_no}</td>
                     <td className="px-4 py-2 font-mono text-accent underline-offset-2 hover:underline">
-                      {b.output_lot_number ?? (
-                        <span className="text-text-3">no lot · all scrapped</span>
-                      )}
+                      {b.output_lot_number ??
+                        (b.scrap_qty > 0 ? (
+                          <span className="text-text-3">no lot · all scrapped</span>
+                        ) : (
+                          // good 0 AND scrap 0: the close-out's own finalising
+                          // batch, which makes nothing and mints no lot. Calling
+                          // that "all scrapped" claimed a loss that never
+                          // happened (user, 2026-09-01).
+                          <span className="text-text-3">no lot · nothing made</span>
+                        ))}
                     </td>
                     <td className="px-4 py-2 text-right font-mono tabular-nums">
                       {b.good_qty}
@@ -2840,6 +2907,27 @@ function ReviewStat({ label, children }: { label: string; children: React.ReactN
  * component appeared twice under different headings, in different frames of
  * reference, which is what made the page unreadable (client 2026-07-28).
  */
+/**
+ * How much of a line's ``used_qty`` was actually charged to a finished lot.
+ *
+ * For an ordinary component the two are the same number. For media they part
+ * company at close-out: the batches take what the operator recorded, and the
+ * remainder is DISCARDED — drained off the floor and charged to no lot
+ * (REQ-2026-07-31-KIT-003). Summing the batch consumption rows is what tells
+ * them apart after the fact, and the difference is the waste. Derived rather
+ * than stored: both numbers are already on the kit and cannot drift apart.
+ */
+function consumedByLots(kit: ApiKit, lineId: string): number {
+  return kit.batches.reduce(
+    (a, b) =>
+      a +
+      b.consumptions
+        .filter((c) => c.kit_line_id === lineId)
+        .reduce((x, c) => x + c.qty, 0),
+    0,
+  );
+}
+
 function ComponentReviewTable({
   kit,
   mode,
@@ -2879,6 +2967,19 @@ function ComponentReviewTable({
             const thisBatch = used[line.id] ?? 0;
             const leftAfter = line.on_floor_qty - thisBatch;
             const remaining = isBatch ? leftAfter : line.on_floor_qty;
+            // KIT-003: closing the kit DISCARDS a media line's leftover — it is
+            // drained off the floor and never returned to stock, but it is not
+            // charged to this batch's lot either (client, 2026-09-01). The lot
+            // pays for what the batch recorded; the rest is waste against the
+            // kit. So this annotates the quantity only — deliberately not the
+            // cost, because the cost does not move.
+            const discardedAtClose = isBatch && line.consumed_in_kit ? leftAfter : 0;
+            // After the fact: what this line was recorded as using, minus what
+            // the batches actually charged to lots. Non-zero only for media.
+            const discardedTotal = Math.max(
+              0,
+              (line.used_qty ?? 0) - consumedByLots(kit, line.id),
+            );
             return (
               <tr key={line.id} className="border-b border-border/60 align-top last:border-0">
                 <td className="max-w-[240px] px-4 py-2.5">
@@ -2922,9 +3023,17 @@ function ComponentReviewTable({
                 </td>
                 <td className="px-4 py-2.5 text-right">
                   <QtyCell value={isBatch ? thisBatch || null : (line.used_qty ?? null)} />
+                  {!isBatch && discardedTotal > 0 && (
+                    <div className="text-[11px] text-text-3">
+                      {(line.used_qty ?? 0) - discardedTotal} to lots · {discardedTotal} discarded
+                    </div>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-right">
                   <QtyCell value={remaining || null} tone={remaining ? 'success' : 'muted'} />
+                  {discardedAtClose > 0 && (
+                    <div className="text-[11px] text-text-3">discarded at close</div>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-right">
                   <span className="font-mono text-xs tabular-nums text-text-2">
@@ -2940,7 +3049,13 @@ function ComponentReviewTable({
                       // behind it, a media line with a leftover fell through to
                       // the LocationPath and advertised a back-flush that is
                       // never going to happen (user, 2026-09-01).
-                      closed ? 'Consumed' : 'Consumed at close'
+                      closed
+                        ? discardedTotal > 0
+                          ? `Consumed · ${discardedTotal} discarded`
+                          : 'Consumed'
+                        : discardedAtClose > 0
+                          ? `Discarded at close (${discardedAtClose})`
+                          : 'Consumed at close'
                     ) : remaining > 0 ? (
                       <LocationPath
                         nodeId={closed ? line.return_location_node_id : returnLoc[line.id]}
@@ -3362,6 +3477,13 @@ function CancelKitDialog({
   onSubmit: (lines: CancelLineInput[]) => void;
 }) {
   const lines = React.useMemo(() => kit.lines.filter((l) => l.on_floor_qty > 0), [kit.lines]);
+  // KIT-003 splits what a cancel does with the floor, so this dialog has to
+  // split too: ordinary components go back to inventory and need a destination,
+  // media is DISCARDED and has none. Offering it a location picker asked the
+  // operator to decide something the server ignores, then counted those units in
+  // "return 20 & sign" — a promise the cancel does not keep (user, 2026-09-01).
+  const returning = React.useMemo(() => lines.filter((l) => !l.consumed_in_kit), [lines]);
+  const discarding = React.useMemo(() => lines.filter((l) => l.consumed_in_kit), [lines]);
 
   // Default each line to where it was pulled from (D1).
   React.useEffect(() => {
@@ -3393,15 +3515,18 @@ function CancelKitDialog({
   const [dests, setDests] = React.useState<Record<string, OutputDest[]>>({});
   const destsFor = (lineId: string): OutputDest[] => dests[lineId] ?? [];
 
-  const ready = lines.every(
+  const ready = returning.every(
     (l) => destsFor(l.id).reduce((s, d) => s + destPlaced(d), 0) === l.on_floor_qty,
   );
-  const totalUnits = lines.reduce((a, l) => a + l.on_floor_qty, 0);
+  const returnUnits = returning.reduce((a, l) => a + l.on_floor_qty, 0);
+  const discardUnits = discarding.reduce((a, l) => a + l.on_floor_qty, 0);
 
   const submit = () => {
     if (!ready) return;
     onSubmit(
-      lines.map((l) => ({
+      // Media carries no destinations — the server exempts it from the
+      // every-line-needs-one check and would ignore them anyway.
+      returning.map((l) => ({
         line_id: l.id,
         destinations: destsFor(l.id).map((d) => ({
           location_node_id: d.location_node_id,
@@ -3441,13 +3566,25 @@ function CancelKitDialog({
         <DialogHeader>
           <DialogTitle>Cancel {kit.kit_number}?</DialogTitle>
           <DialogDescription>
-            {totalUnits} unit{totalUnits === 1 ? '' : 's'} still on the production floor will be
-            returned to inventory as a back-flush. Choose where each component goes — each is
-            pre-set to where it was pulled from. You’ll sign to confirm on the next step.
+            {returnUnits > 0 && (
+              <>
+                {returnUnits} unit{returnUnits === 1 ? '' : 's'} still on the production floor
+                will be returned to inventory as a back-flush. Choose where each component goes —
+                each is pre-set to where it was pulled from.{' '}
+              </>
+            )}
+            {discardUnits > 0 && (
+              <>
+                {discardUnits} unit{discardUnits === 1 ? '' : 's'} of media {discardUnits === 1 ? 'is' : 'are'}{' '}
+                <span className="text-text-2">discarded</span> — media is never returned to
+                inventory.{' '}
+              </>
+            )}
+            You’ll sign to confirm on the next step.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="max-h-[55vh] space-y-3 overflow-y-auto">
-          {lines.map((line) => {
+          {returning.map((line) => {
             const rows = destsFor(line.id);
             const placed = rows.reduce((s, d) => s + destPlaced(d), 0);
             return (
@@ -3478,13 +3615,36 @@ function CancelKitDialog({
               </div>
             );
           })}
+          {discarding.map((line) => (
+            <div
+              key={line.id}
+              className="rounded-md border border-dashed border-border bg-surface/40 p-3"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <ItemCell
+                  itemNumber={line.item_number}
+                  description={line.description}
+                  itemId={line.item_id}
+                />
+                <span className="shrink-0 font-mono text-sm tabular-nums text-text-3">
+                  {line.on_floor_qty} discarded
+                </span>
+              </div>
+              <p className="mt-2 text-xs text-text-3">
+                Consumed to the kit, so there is nowhere to return it — these units are written
+                off when the kit is cancelled.
+              </p>
+            </div>
+          ))}
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Keep kit
           </Button>
           <Button variant="danger" onClick={submit} disabled={!ready}>
-            Continue — return {totalUnits} &amp; sign
+            {returnUnits > 0
+              ? `Continue — return ${returnUnits} & sign`
+              : 'Continue — discard & sign'}
           </Button>
         </DialogFooter>
       </DialogContent>

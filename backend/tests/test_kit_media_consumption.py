@@ -38,7 +38,6 @@ reset on 2026-08-25 (0 items, 0 lots), so it cannot run at all.
 
 from __future__ import annotations
 
-import ast
 import inspect
 import uuid
 from decimal import Decimal
@@ -159,31 +158,57 @@ def test_cancel_consults_the_flag():
     assert _consults_the_flag(kitting_routes.cancel_kit)
 
 
-def test_the_media_branch_runs_before_the_operator_entry_is_demanded():
-    """Order matters: ``used_qty_missing`` must not fire for a media line.
+def test_produce_does_not_special_case_media():
+    """The flag must NOT reach ``_produce_batch``'s body.
 
-    The close-out form sends no ``used`` for media — there is no input to send
-    one from — so a branch placed *after* that check would 422 every close-out
-    of a kit containing media.
+    It did, twice, and both times the closing lot was charged for material the
+    batch never used. A media line is an ordinary component to a batch; the
+    difference lives entirely in ``close_out_kit``.
     """
-    tree = ast.parse(inspect.getsource(kitting_routes._produce_batch).lstrip())
-    preflight = next(
-        loop
-        for loop in ast.walk(tree)
-        if isinstance(loop, ast.For) and "used_qty_missing" in ast.dump(loop)
-    )
-    body = ast.dump(ast.Module(body=preflight.body, type_ignores=[]))
-    assert body.index("consumed_in_kit") < body.index("used_qty_missing"), (
-        "the media branch must short-circuit before used_qty_missing is raised"
-    )
+    body = inspect.getsource(kitting_routes._produce_batch).split('"""', 2)[-1]
+    assert "consumed_in_kit" not in body
 
 
-def test_cancel_drains_media_instead_of_returning_it():
-    """A cancel writes media off as USED — it must not simply skip the line.
+def test_every_route_that_credits_stock_back_refuses_media():
+    """The rule with no exception (client, 2026-09-01).
 
-    Skipping would leave the WIP allocations parked at the production node of a
-    cancelled kit forever and break the close-out identity
-    ``issued + additional == used + early_returned + backflushed``.
+    Three routes can hand kit material back to inventory: the automatic
+    close-out back-flush, the post-issue cancel, and the manual super-admin
+    ``return``. All three must decline a media line, or "consumed when replaced
+    and not back-flushed" has a footnote — and a footnote is what an operator
+    will find by accident.
+
+    The manual return was the last one open; it is now refused outright, which
+    means a mis-issue is unrecoverable and the units are discarded at close.
+    That is the deliberate price of the rule being absolute.
+    """
+    for fn in (
+        kitting_routes.close_out_kit,
+        kitting_routes.cancel_kit,
+        kitting_routes.return_excess,
+    ):
+        assert "consumed_in_kit" in inspect.getsource(fn), fn.__name__
+
+
+def test_the_manual_return_refuses_media_before_it_moves_anything():
+    """The guard has to come before the destination resolution, not after.
+
+    ``_resolve_return_destinations`` validates cells and claims them; running it
+    first would let a refused return still contend for box cells.
+    """
+    src = inspect.getsource(kitting_routes.return_excess)
+    assert "return_not_allowed_for_consumed" in src
+    assert src.index("if line.consumed_in_kit:") < src.index(
+        "_resolve_return_destinations"
+    ), "the media guard must run before any destination is resolved"
+
+
+def test_cancel_discards_media_instead_of_returning_it():
+    """A cancel is not a way for poured media to become stock again.
+
+    It must DRAIN the line, not skip it: skipping would leave the WIP
+    allocations parked at a cancelled kit's production node forever and break
+    the identity ``issued + additional == used + early_returned + backflushed``.
     """
     src = inspect.getsource(kitting_routes.cancel_kit)
     branch = src[src.index("if line.consumed_in_kit:") :]
@@ -191,6 +216,25 @@ def test_cancel_drains_media_instead_of_returning_it():
     assert "_drain_production" in branch, "media must leave the floor on cancel"
     assert "used_qty" in branch, "and be recorded as used, not as returned"
     assert "_return_to_inventory" not in branch, "media is never credited back"
+    assert "discarded_on_cancel" in branch, "and be recorded in the audit context"
+
+
+def test_close_out_and_cancel_call_the_same_thing_by_the_same_name():
+    """One event, one word.
+
+    Media leaving a kit without being returned is DISCARDED, whether the kit
+    closed or was cancelled. The two paths were briefly split — "wasted" at
+    close, "consumed" on cancel — the sort of drift that makes an operator think
+    two different things happened to the same material.
+    """
+    close_src = inspect.getsource(kitting_routes.close_out_kit)
+    cancel_src = inspect.getsource(kitting_routes.cancel_kit)
+    assert "wasted_at_close" in close_src
+    assert "discarded_on_cancel" in cancel_src
+    for src in (close_src, cancel_src):
+        branch = src[src.index("if line.consumed_in_kit:") :]
+        branch = branch[: branch.index("continue")]
+        assert "discard" in branch.lower(), "both must say what they do: discard"
 
 
 # ── 3. The schema ───────────────────────────────────────────────────────
@@ -542,7 +586,7 @@ async def _line_for(s, kit, item, *, line_no, qty_per_unit="1.000"):
     )
 
 
-async def _produce(s, kit, user, shelf, *, good, used_by_line, finalising=False):
+async def _produce(s, kit, user, shelf, *, good, used_by_line):
     """Call the real ``_produce_batch``, placing the batch on ``shelf``.
 
     ``kit.lines`` is a lazy relationship — the routes always arrive with it
@@ -553,8 +597,8 @@ async def _produce(s, kit, user, shelf, *, good, used_by_line, finalising=False)
     good units must mint a lot, and ``ck_kit_production_batches_lot_pairing``
     enforces ``(output_lot_id IS NULL) = (good_qty = 0)``.
 
-    ``finalising`` is what ``close_out_kit`` passes and ``produce_kit`` does not
-    — the single switch KIT-003 turns on.
+    Note there is no media switch to pass. ``_produce_batch`` treats every line
+    the same; what makes media different happens in ``close_out_kit``.
     """
     await s.refresh(kit, attribute_names=["lines"])
     await kitting_routes._produce_batch(
@@ -566,26 +610,26 @@ async def _produce(s, kit, user, shelf, *, good, used_by_line, finalising=False)
         expiration_date=None,
         lot_number=f"{kit.kit_number}-{(kit.good_qty or 0) + 1}",
         used_by_line=used_by_line,
-        finalising=finalising,
         evidence=None,
         note="KIT-003 e2e",
         current=user,
     )
 
 
-# ── 4a. While the kit is OPEN, media is an ordinary component ───────────
+# ── 4a. A batch consumes what was RECORDED against it, media or not ─────
 #
-# This is the half that is easy to get wrong, and did get built wrong first:
-# consuming the whole floor at every batch makes the BOM meaningless for media
-# and lets an early batch eat the feedings issued for later days. The recipe
-# still governs; only the ENDING differs.
+# This is the half that was got wrong twice. First by consuming a media line's
+# whole floor at every batch (which made the BOM meaningless and let an early
+# batch eat later feedings), then by doing it at close-out (which tripled the
+# closing lot's material cost with material the batch never used). A batch takes
+# the operator's number. Always.
 
 
-async def test_an_intermediate_batch_honours_the_operators_entry_for_media(floor):
-    """Produce (keep open) treats media exactly like any other line.
+async def test_a_batch_honours_the_operators_entry_for_media(floor):
+    """Twelve on the floor, 4 recorded: the other 8 stay put.
 
-    Twelve units on the floor, the operator records 4 for this batch. Eight stay
-    put, waiting for the next feeding — they are NOT consumed early.
+    They are waiting for the next feeding. Nothing about media changes what a
+    PRODUCE does.
     """
     s, kit, user, _prod, shelf, media_item, _part, stock, issue = floor
     media_line = await _line_for(s, kit, media_item, line_no=1)
@@ -594,14 +638,14 @@ async def test_an_intermediate_batch_honours_the_operators_entry_for_media(floor
     await _produce(s, kit, user, shelf, good=1, used_by_line={media_line.id: 4})
 
     assert media_line.used_qty == 4, "the operator's entry, not the floor"
-    assert _on_floor(media_line) == 8, "the rest is still there for the next feeding"
+    assert _on_floor(media_line) == 8
 
 
-async def test_media_is_still_gated_by_its_recipe_quantity(floor):
+async def test_media_is_gated_by_its_recipe_quantity(floor):
     """``used_below_need`` applies to media — this is what the BOM is FOR.
 
-    ``qty_per_unit`` 2 × 3 units attempted needs 6; recording 5 is refused, the
-    same as for any other component.
+    ``qty_per_unit`` 2 × 3 units attempted needs 6; recording 5 is refused,
+    exactly as for any other component.
     """
     s, kit, user, _prod, shelf, media_item, _part, stock, issue = floor
     media_line = await _line_for(s, kit, media_item, line_no=1, qty_per_unit="2.000")
@@ -612,8 +656,8 @@ async def test_media_is_still_gated_by_its_recipe_quantity(floor):
     assert exc.value.code == "used_below_need"
 
 
-async def test_media_still_needs_an_entry_on_an_intermediate_batch(floor):
-    """No silent default while the kit is open — ``used_qty_missing`` holds."""
+async def test_media_still_needs_an_entry(floor):
+    """No silent default anywhere — ``used_qty_missing`` holds for media too."""
     s, kit, user, _prod, shelf, media_item, _part, stock, issue = floor
     media_line = await _line_for(s, kit, media_item, line_no=1)
     await issue(media_line, await stock(media_item, 5, Decimal("1")), 5, top_up=False)
@@ -623,105 +667,48 @@ async def test_media_still_needs_an_entry_on_an_intermediate_batch(floor):
     assert exc.value.code == "used_qty_missing"
 
 
-# ── 4b. At SIGN-OUT the leftover is poured, not returned ────────────────
-
-
-async def test_the_close_out_consumes_the_media_leftover(floor):
-    """The requirement itself, end to end.
-
-    Twelve media issued across two feedings and 2 of a part. The final batch
-    records 4 media and 1 part. The part keeps 1 on the floor for the back-flush
-    loop to hand back; the media's remaining 8 are poured.
-    """
-    s, kit, user, _prod, shelf, media_item, part_item, stock, issue = floor
-    media_line = await _line_for(s, kit, media_item, line_no=1)
-    part_line = await _line_for(s, kit, part_item, line_no=2)
-    media_lot = await stock(media_item, 12, Decimal("3"))
-    await issue(media_line, media_lot, 4, top_up=False)
-    await issue(media_line, media_lot, 8, top_up=True)  # "Issue more", day 2
-    await issue(part_line, await stock(part_item, 2, Decimal("5")), 2, top_up=False)
-
-    await _produce(
-        s,
-        kit,
-        user,
-        shelf,
-        good=1,
-        used_by_line={media_line.id: 4, part_line.id: 1},
-        finalising=True,
-    )
-
-    assert media_line.used_qty == 12, "everything on the floor was poured"
-    assert _on_floor(media_line) == 0
-    assert _line_returned(media_line) == 0, "so the back-flush loop skips it"
-
-    assert part_line.used_qty == 1, "an ordinary line keeps the entry it was given"
-    assert _line_returned(part_line) == 1, "and still back-flushes its leftover"
-
-
-async def test_a_close_out_short_of_the_recipe_is_still_refused_for_media(floor):
-    """Pouring the remainder is not a way around the recipe.
-
-    Only 1 unit of media is on the floor and the batch attempts 3 at
-    ``qty_per_unit`` 1, so consuming everything still falls short — and fails
-    exactly as an ordinary component would. The operator has to Issue more.
-    """
+async def test_media_cannot_be_over_consumed_either(floor):
+    """``used_exceeds_issued`` is physical and applies unchanged."""
     s, kit, user, _prod, shelf, media_item, _part, stock, issue = floor
     media_line = await _line_for(s, kit, media_item, line_no=1)
-    await issue(media_line, await stock(media_item, 1, Decimal("1")), 1, top_up=False)
+    await issue(media_line, await stock(media_item, 3, Decimal("1")), 3, top_up=False)
 
     with pytest.raises(ValidationError) as exc:
-        await _produce(
-            s, kit, user, shelf, good=3, used_by_line={media_line.id: 1}, finalising=True
-        )
-    assert exc.value.code == "used_below_need"
+        await _produce(s, kit, user, shelf, good=1, used_by_line={media_line.id: 4})
+    assert exc.value.code == "used_exceeds_issued"
 
 
-async def test_the_close_out_needs_no_entry_for_media(floor):
-    """The form sends one, but the server must not depend on it.
-
-    A close-out omitting the media line entirely still works, and still pours
-    the whole floor.
-    """
-    s, kit, user, _prod, shelf, media_item, _part, stock, issue = floor
-    media_line = await _line_for(s, kit, media_item, line_no=1)
-    await issue(media_line, await stock(media_item, 6, Decimal("1")), 6, top_up=False)
-
-    await _produce(s, kit, user, shelf, good=1, used_by_line={}, finalising=True)
-    assert media_line.used_qty == 6
+# ── 4b. The lot is charged for what the batch took, and no more ─────────
 
 
-# ── 4c. The cost reaches the finished lot ───────────────────────────────
+async def test_the_lot_is_charged_only_what_the_batch_recorded(floor):
+    """The client's correction, in money (2026-09-01).
 
-
-async def test_the_media_dollars_reach_the_final_lot(floor):
-    """"The cost ($$/unit) should pull through with the kit costs."
-
-    10 units of media at $3 and 2 parts at $5, closed out in one batch of 2. The
-    batch records $40 and the breakdown names the $30 of media — the number the
-    back-flush used to credit away.
+    50 media at $0.265 and 50 of a part at $0.04 on the floor; the closing batch
+    records 20 of each. The lot must cost 20 × both = $6.10. Pouring the media
+    remainder in — the previous behaviour — made it $14.05 and billed the
+    customer for 30 units of media the batch never used.
     """
     s, kit, user, _prod, shelf, media_item, part_item, stock, issue = floor
     media_line = await _line_for(s, kit, media_item, line_no=1)
     part_line = await _line_for(s, kit, part_item, line_no=2)
-    await issue(media_line, await stock(media_item, 10, Decimal("3")), 10, top_up=False)
-    await issue(part_line, await stock(part_item, 2, Decimal("5")), 2, top_up=False)
+    await issue(media_line, await stock(media_item, 50, Decimal("0.265")), 50, top_up=False)
+    await issue(part_line, await stock(part_item, 50, Decimal("0.04")), 50, top_up=False)
 
     await _produce(
         s,
         kit,
         user,
         shelf,
-        good=2,
-        used_by_line={media_line.id: 2, part_line.id: 2},
-        finalising=True,
+        good=20,
+        used_by_line={media_line.id: 20, part_line.id: 20},
     )
 
     batch = (
         await s.execute(select(KitProductionBatch).where(KitProductionBatch.kit_id == kit.id))
     ).scalar_one()
-    assert batch.material_cost_amount == Decimal("40.000000")
-    assert batch.unit_cost_amount == Decimal("20.000000")
+    assert batch.material_cost_amount == Decimal("6.100000")
+    assert batch.unit_cost_amount == Decimal("0.305000")
 
     rows = (
         (
@@ -733,31 +720,22 @@ async def test_the_media_dollars_reach_the_final_lot(floor):
         .all()
     )
     media_row = next(r for r in rows if r.kit_line_id == media_line.id)
-    assert media_row.qty == 10, "the whole floor, not the 2 that were entered"
-    assert media_row.extended_value_amount == Decimal("30.000000")
+    assert media_row.qty == 20, "not the 50 on the floor"
+    assert media_row.extended_value_amount == Decimal("5.300000")
+
+    # And the remainder is still on the floor at this point — discarding it is
+    # the close-out's job, not the batch's.
+    assert _on_floor(media_line) == 30
 
 
 async def test_each_batch_carries_only_what_it_recorded(floor):
-    """The multi-day case: an early batch must not eat the later feedings.
-
-    Batch 1 records 4 of the 10 on the floor, so it is billed $8. The close-out
-    then pours the remaining 6 and is billed $12. Consuming everything at batch 1
-    — the shape this was first built as — would have put all $20 on the first
-    lot and left the second unpriced against no material at all.
-    """
+    """Multi-day: batch 1 must not eat what batch 2 will need."""
     s, kit, user, _prod, shelf, media_item, _part, stock, issue = floor
     media_line = await _line_for(s, kit, media_item, line_no=1)
     await issue(media_line, await stock(media_item, 10, Decimal("2")), 10, top_up=False)
 
     await _produce(s, kit, user, shelf, good=1, used_by_line={media_line.id: 4})
-    assert media_line.used_qty == 4
-    assert _on_floor(media_line) == 6
-
-    await _produce(
-        s, kit, user, shelf, good=1, used_by_line={media_line.id: 1}, finalising=True
-    )
-    assert media_line.used_qty == 10
-    assert _on_floor(media_line) == 0
+    await _produce(s, kit, user, shelf, good=1, used_by_line={media_line.id: 6})
 
     batches = (
         (
@@ -774,3 +752,68 @@ async def test_each_batch_carries_only_what_it_recorded(floor):
         Decimal("8.000000"),
         Decimal("12.000000"),
     ]
+
+
+# ── 4c. What the close-out then does with the remainder ─────────────────
+#
+# ``close_out_kit`` itself needs a reauth ticket and a live password, so the
+# discard is pinned structurally plus by the arithmetic it performs. The rule it
+# implements: drain the remainder off the floor, add it to ``used_qty``, write no
+# movement and no batch row, and charge it to no lot.
+
+
+def test_the_close_out_discards_the_media_remainder():
+    src = inspect.getsource(kitting_routes.close_out_kit)
+    branch = src[src.index("if line.consumed_in_kit:") :]
+    branch = branch[: branch.index("continue")]
+    assert "_drain_production" in branch, "the remainder must leave the floor"
+    assert "used_qty" in branch, "and be recorded as gone"
+    assert "_return_to_inventory" not in branch, "never handed back to inventory"
+    assert "wasted_at_close" in branch, "and be recorded in the audit context"
+
+
+def test_the_discard_happens_after_the_batch_not_inside_it():
+    """The ordering that keeps the lot's cost honest.
+
+    ``_produce_batch`` must not know about media at all — if the discard moved
+    inside it, the remainder would land in ``consume`` and be attributed to the
+    closing lot again, which is the bug this replaced.
+    """
+    src = inspect.getsource(kitting_routes._produce_batch)
+    assert "consumed_in_kit" not in src.split('"""', 2)[-1], (
+        "_produce_batch must treat a media line exactly like any other"
+    )
+
+
+def test_discarding_the_remainder_reconciles_the_line_to_zero():
+    """What the close-out's arithmetic comes to.
+
+    Issued 50, the batch recorded 20, so 30 is discarded: ``used_qty`` reaches
+    the full 50 and nothing is left for the back-flush loop — which is how the
+    kit closes with no stranded WIP and no return.
+    """
+    line = _line(consumed_in_kit=True, issued_qty=50, used_qty=20)
+    discarded = _on_floor(line)
+    assert discarded == 30
+
+    line.used_qty += discarded
+    assert _on_floor(line) == 0
+    assert _line_returned(line) == 0
+    # And still inside ``ck_kit_lines_no_overuse``.
+    assert line.used_qty <= line.issued_qty + line.additional_issued_qty
+
+
+def test_the_wasted_value_is_what_the_kit_was_charged_but_never_handed_to_a_lot():
+    """Where the discarded money shows up, without a column to store it.
+
+    The kit is charged for every unit issued; ``consumed_value_amount`` counts
+    only what batches attributed to finished lots. Media discarded at close is
+    charged and attributed to nothing, so it falls out of the difference — the
+    same subtraction that means "still on the floor" while the kit is open.
+    """
+    charged = Decimal("50") * Decimal("0.265") + Decimal("50") * Decimal("0.04")
+    returned_part = Decimal("30") * Decimal("0.04")  # the part DOES back-flush
+    net_charged = charged - returned_part
+    consumed_by_lots = Decimal("20") * Decimal("0.265") + Decimal("20") * Decimal("0.04")
+
+    assert net_charged - consumed_by_lots == Decimal("30") * Decimal("0.265")

@@ -171,6 +171,12 @@ export interface ListItemsParams {
    * ``qty_available <= 0`` first, so those read as ``out_of_stock``).
    */
   below_reorder?: boolean | null;
+  /**
+   * `true` selects items with stock that has ARRIVED but is not yet placed and
+   * released (REQ-2026-07-31-STS-001) â material on site and paid for, which
+   * the reorder screen deliberately does not count as missing.
+   */
+  awaiting_release?: boolean | null;
   sort?: ApiSortField;
   direction?: ApiSortDirection;
   limit?: number;
@@ -234,6 +240,7 @@ export const itemsApi = {
         prefix_id: params.prefix_id ?? undefined,
         status: params.status ?? undefined,
         is_consumable: params.is_consumable ?? undefined,
+        awaiting_release: params.awaiting_release ?? undefined,
         has_bom: params.has_bom ?? undefined,
         min_bom_lines: params.min_bom_lines ?? undefined,
         below_reorder: params.below_reorder ?? undefined,

@@ -828,11 +828,19 @@ async def count_kits_completed_on_floor(session: AsyncSession, node_id: uuid.UUI
 
 
 def _cancelled_on_floor_where(node_id: uuid.UUID):
+    """Every cancelled kit on this floor — no output filter (client 2026-09-01).
+
+    This used to require ``good_qty > 0``, on the reasoning that a kit cancelled
+    without producing "has no output and its material already went back"
+    (client 2026-07-28). REQ-2026-07-31-KIT-003 made the second half untrue: a
+    cancelled kit discards its media rather than returning it, so a kit that
+    produced nothing can still have destroyed material — and those were exactly
+    the kits the filter hid. The floor view is meant to answer "what happened
+    here", so it now lists them all.
+    """
     return (
         Kit.production_location_node_id == node_id,
         Kit.status == "cancelled",
-        Kit.good_qty.is_not(None),
-        Kit.good_qty > 0,
         Kit.deleted_at.is_(None),
     )
 
@@ -845,15 +853,15 @@ async def count_kits_cancelled_on_floor(session: AsyncSession, node_id: uuid.UUI
 async def kits_cancelled_on_floor(
     session: AsyncSession, node_id: uuid.UUID, *, limit: int = 25, offset: int = 0
 ) -> list[Kit]:
-    """Cancelled kits that PRODUCED something on ``node_id`` before being
-    abandoned. Newest first, capped.
+    """Cancelled kits on ``node_id``. Newest first, capped.
 
     A kit can be cancelled from ``in_production``, and under incremental
     production (KIT-007) it may already have produced batches by then — real
     stock, on real lots, sitting in storage. Without this the floor showed no
-    trace of that work (client 2026-07-28). Kits cancelled having produced
-    nothing are excluded: their material went back to inventory and there is no
-    output to account for.
+    trace of that work (client 2026-07-28).
+
+    Kits that produced nothing are included too (client 2026-09-01) — see
+    ``_cancelled_on_floor_where`` for why that reversed.
 
     ``closed_at`` is stamped on cancel as well as close, so it orders both.
     """

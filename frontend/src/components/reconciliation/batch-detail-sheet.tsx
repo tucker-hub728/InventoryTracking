@@ -133,8 +133,12 @@ export function BatchDetailSheet({
                 {batch.consumptions.length === 0 && (
                   <tr>
                     <td colSpan={5} className="px-3 py-4 text-center text-xs text-text-3">
-                      No component breakdown was recorded for this batch. Batches produced
-                      before cost tracking was added carry only their totals.
+                      {batch.good_qty === 0 && batch.scrap_qty === 0
+                        ? // The close-out's own finalising batch: everything was
+                          // made in earlier batches, so this one consumed
+                          // nothing and mints no lot. Not a missing record.
+                          'This batch made nothing — the kit was finished in earlier batches, so no material was charged to it.'
+                        : 'No component breakdown was recorded for this batch. Batches produced before cost tracking was added carry only their totals.'}
                     </td>
                   </tr>
                 )}
