@@ -119,6 +119,7 @@ export function ItemStockPanel() {
       // has just left whichever state was being filtered on.
       key={refreshSeq}
       item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
+      tierType={item.tierType}
       nearExpiryThresholdDays={item.nearExpiryThresholdDays}
       canSign={canSign}
       onChanged={refresh}
