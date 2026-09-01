@@ -24,6 +24,19 @@ const RETRY_MAX_MS = 30_000;
  * frame, and there is no cursor to get wrong. (A `created_at` cursor would be
  * quietly wrong anyway — commit order is not timestamp order.)
  *
+ * **The stream is paused while the tab is hidden**, and that is not an
+ * optimisation — it is a correctness fix. HTTP/1.1 allows a browser only ~6
+ * concurrent connections per origin, and an SSE stream holds one open for its
+ * whole life. Six tabs of this app therefore consumed the entire budget between
+ * them, and every other request to the origin — page loads, API calls, HMR —
+ * queued behind them forever. The symptom is a tab stuck on a blank "Loading…"
+ * with no error anywhere, because nothing failed; it was never sent.
+ *
+ * A hidden tab has no bell to update, so it gives its connection back and takes
+ * one again when the user returns. The snapshot-per-event design (above) is what
+ * makes that free: reopening re-reads the whole unread head, so a stream that
+ * was closed for an hour is not behind, it is simply new.
+ *
  * `EventSource` reconnects on its own after a network drop, but gives up
  * permanently on a non-2xx response. Since a 401 is expected — the access token
  * is only good for an hour — reconnection is driven here rather than left to
@@ -89,14 +102,38 @@ export function useNotificationsStream(enabled: boolean): void {
       });
     };
 
-    connect();
+    // Hand the connection back while nobody is looking at this tab, and take
+    // one again on return. `visibilitychange` also fires when the whole window
+    // is minimised or the machine sleeps, which is exactly when we want it.
+    const disconnect = () => {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      source?.close();
+      source = null;
+      setConnected(false);
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        disconnect();
+      } else if (!source && !stopped) {
+        // Straight back in, no backoff: this is a deliberate reopen, not a
+        // recovery from a failure.
+        retryMs = RETRY_MIN_MS;
+        connect();
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    if (!document.hidden) connect();
 
     return () => {
       stopped = true;
       ctrl.abort();
-      if (retryTimer) clearTimeout(retryTimer);
-      source?.close();
-      setConnected(false);
+      document.removeEventListener('visibilitychange', onVisibility);
+      disconnect();
     };
   }, [enabled, setFeed, setConnected, reset]);
 }

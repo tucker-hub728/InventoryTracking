@@ -22,6 +22,8 @@ export interface InventoryItem {
   uom: string;
   /** Blind-consumed with no per-lot traceability when true. */
   isConsumable: boolean;
+  /** Consumed to the kit, never back-flushed (KIT-003) when true. */
+  consumedInKit: boolean;
   /** Tier (requirements v2 §6). ``tierType`` drives the Type column. */
   tierId: string;
   tierName: string;

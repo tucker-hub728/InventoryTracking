@@ -6,7 +6,7 @@ import { AlertTriangle, PackageCheck, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
 import { ItemLink } from '@/components/inventory/item-link';
-import { cn, daysFromNow, formatDate, formatNumber } from '@/lib/utils';
+import { cn, daysFromNow, formatDate, formatNumber, formatUnitPrice } from '@/lib/utils';
 import type { Order, OrderLine, ReceiptEventLine } from '@/lib/api/receiving';
 
 /**
@@ -272,7 +272,7 @@ function DrawRow({
 
         {el.unit_price_amount != null && (
           <span className="tabular-nums">
-            ${trimPrice(el.unit_price_amount)}/unit
+            ${formatUnitPrice(el.unit_price_amount)}/unit
           </span>
         )}
 
@@ -389,17 +389,3 @@ function EmptyState() {
   );
 }
 
-/**
- * A per-unit price is stored at six decimals because it is usually a division
- * ($95.00 over a case of 25). Printing all six turns "$3.80" into "$3.800000";
- * printing two would round $0.008333 to "$0.01", an eightfold overstatement on
- * a cheap consumable. So: trim trailing zeros, but never round away a value
- * that would otherwise read as zero.
- */
-function trimPrice(raw: string): string {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return raw;
-  if (n === 0) return '0.00';
-  const fixed = n >= 0.01 ? n.toFixed(2) : n.toFixed(6);
-  return fixed.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
-}

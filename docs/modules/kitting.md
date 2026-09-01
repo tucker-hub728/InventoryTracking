@@ -13,7 +13,7 @@ This brief proposes the tables for the kit lifecycle **Draft → Issued → In P
 These are already settled in the mock and carry into the backend unless flagged in §99.
 
 1. **Three tiers, prefix-agnostic.** A kit builds a **sub-assembly (AY)** or a **finished good (FG)**; its BOM lines are **raw materials (CR)** and/or nested AYs. Eligibility comes from `item_tiers.type`, never the ID prefix.
-2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99).
+2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99). **Amended 2026-08-31 (KIT-003):** media still reaches a kit — as a **non-consumable twin item** (its own part number, its own stock balance), which enters the BOM like any other component and carries `items.consumed_in_kit`. Such a line is an ordinary component while the kit is open — same recipe need, same operator entry, same gates — and differs at close-out, where its leftover is **consumed rather than back-flushed**; see the `consumed_in_kit` column on `app.kit_lines`.
 3. **Kitted material stops counting as available on-hand at issue time** (REQ-2026-07-09-TRX-001) **and physically moves to the production location** (`Transaction_Spec` §2). Issue is a stock-**out** of the *available* balance and a **relocation** of the material to the production node. See §0.3a.
 
 4. **Material is never bound to a production lot at kitting time** (REQ-2026-07-09-TRX-002) — which is exactly why a cancelled kit can always hand its material back with nothing stranded.
@@ -151,6 +151,7 @@ One row per BOM component of the kit, snapshotted at creation so a later BOM edi
 | `line_no` | `INTEGER NOT NULL` | display order |
 | `item_id` | `UUID NOT NULL FK → app.items(id)` `RESTRICT` | the component (CR or nested AY) — **never a consumable** (§0.2) |
 | `qty_per_unit` | `NUMERIC(14,3) NOT NULL` | **snapshot** of `bom_lines.qty_per_unit`; `ck_kit_lines_qty_per_unit_positive` (`> 0`) |
+| `consumed_in_kit` | `BOOLEAN NOT NULL DEFAULT FALSE` | **snapshot** of `items.consumed_in_kit` (KIT-003) — media: ordinary while the kit is open; at close-out its leftover is consumed, never back-flushed, so it needs no return location |
 | `issued_qty` | `INTEGER NOT NULL DEFAULT 0` | pulled at issue; `ck_kit_lines_issued_qty_nonneg` |
 | `additional_issued_qty` | `INTEGER NOT NULL DEFAULT 0` | mid-production top-ups (Transaction Spec §2.1); `ck_kit_lines_additional_issued_qty_nonneg` |
 | `used_qty` | `INTEGER NULL` | entered at close-out from the traveler; `ck_kit_lines_used_qty_nonneg` |

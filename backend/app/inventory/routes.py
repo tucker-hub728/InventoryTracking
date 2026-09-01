@@ -200,6 +200,27 @@ def _supplier_to_read(v: Supplier) -> SupplierRead:
     )
 
 
+def _reject_consumable_and_consumed_in_kit(
+    *, is_consumable: bool, consumed_in_kit: bool
+) -> None:
+    """The two flags are mutually exclusive (REQ-2026-07-31-KIT-003).
+
+    ``consumed_in_kit`` marks the non-consumable TWIN of a consumable â the
+    thing that exists precisely so media can enter a BOM, which an
+    ``is_consumable`` item may never do (``_require_eligible_child``). An item
+    that were both would be barred from the only place the flag means anything.
+    The DB CHECK ``ck_items_consumable_xor_consumed_in_kit`` is the backstop;
+    this is the sentence the operator reads.
+    """
+    if is_consumable and consumed_in_kit:
+        raise ValidationError(
+            "An item can't be both a consumable and consumed-to-the-kit. "
+            "Consumables are never in a bill of materials â create a separate, "
+            "non-consumable item for the version that goes into kits.",
+            code="consumable_and_consumed_in_kit",
+        )
+
+
 def _item_to_read(
     item: Item,
     valuation: tuple[Decimal, Decimal, Decimal] | None = None,
@@ -233,6 +254,7 @@ def _item_to_read(
         description=item.description,
         uom=item.uom,
         is_consumable=item.is_consumable,
+        consumed_in_kit=item.consumed_in_kit,
         tier_id=str(item.tier_id),
         tier_name=tier.name if tier else "",
         tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
@@ -712,6 +734,11 @@ async def create_item(
             code="item_number_conflict",
         )
 
+    _reject_consumable_and_consumed_in_kit(
+        is_consumable=payload.is_consumable,
+        consumed_in_kit=payload.consumed_in_kit,
+    )
+
     try:
         item = await inv_repo.create_item(
             db,
@@ -721,6 +748,7 @@ async def create_item(
             created_by_user_id=current.id,
             uom=payload.uom,
             is_consumable=payload.is_consumable,
+            consumed_in_kit=payload.consumed_in_kit,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
@@ -820,6 +848,14 @@ async def update_item(
                     code="item_received",
                 )
         patch["prefix_id"] = prefix_uuid
+
+    # The pair is mutually exclusive, and ItemUpdate is PARTIAL — a request
+    # setting only one of them still has to be judged against the value the item
+    # already carries, which a Pydantic validator cannot see. Merge, then test.
+    _reject_consumable_and_consumed_in_kit(
+        is_consumable=bool(patch.get("is_consumable", item.is_consumable)),
+        consumed_in_kit=bool(patch.get("consumed_in_kit", item.consumed_in_kit)),
+    )
 
     if not patch and supplier_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")

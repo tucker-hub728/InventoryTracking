@@ -92,6 +92,10 @@ export interface ApiKitLine {
   description: string;
   /** Decimal (string). */
   qty_per_unit: string;
+  /** Media, via its non-consumable twin (REQ-2026-07-31-KIT-003). An ordinary
+   *  component while the kit is open; at close-out its leftover is CONSUMED
+   *  rather than back-flushed, so it needs no return destination. */
+  consumed_in_kit: boolean;
   /** Decimal (string) = qty_per_unit × target_qty. */
   needed_qty: string;
   issued_qty: number;

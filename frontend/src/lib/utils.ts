@@ -106,6 +106,53 @@ export function formatMoney(amount: string | null | undefined): string {
   return MONEY_FORMAT.format(n);
 }
 
+/**
+ * A per-unit price, trimmed for reading.
+ *
+ * Prices are stored at six decimals because they are usually a division ($95.00
+ * over a case of 25). Printing all six turns "$3.80" into "$3.800000"; printing
+ * two would round $0.008333 to "$0.01", an eightfold overstatement on a cheap
+ * consumable. So: trim trailing zeros, but never round away a value that would
+ * otherwise read as zero.
+ *
+ * `null` is an em dash, not "0.00" — same load-bearing distinction `formatMoney`
+ * makes, and for the same reason.
+ */
+export function formatUnitPrice(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === '') return '—';
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return String(raw);
+  if (n === 0) return '0.00';
+  const fixed = n >= 0.01 ? n.toFixed(2) : n.toFixed(6);
+  return fixed.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
+/**
+ * The same price, as it should appear INSIDE an editable field.
+ *
+ * The storage scale is not the user's business: `NUMERIC(14, 6)` hands back
+ * "0.000000" for a price somebody typed as "0", and an input pre-filled with
+ * six zeros they never entered reads as a system that has decided something on
+ * their behalf. Show the shortest exact spelling of the same number.
+ *
+ * Differs from `formatUnitPrice` in two ways that matter for an input: no
+ * padding to two decimals (an input is a value, not a column of figures), and
+ * `null` becomes an EMPTY field rather than an em dash — "no price recorded" is
+ * a blank box the user can fill, not a character they would have to delete.
+ *
+ * Exact, never rounded: `toFixed` would silently truncate a price carrying more
+ * precision than it shows, and saving the field would then write the rounded
+ * number back over the real one.
+ */
+export function priceInputValue(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === '') return '';
+  if (!Number.isFinite(Number(raw))) return String(raw);
+  const trimmed = String(raw).includes('.')
+    ? String(raw).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+    : String(raw);
+  return trimmed === '' || trimmed === '-' ? '0' : trimmed;
+}
+
 /** Truncate a string with ellipsis. */
 export function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;

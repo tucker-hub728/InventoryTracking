@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/searchable-select';
 import { itemsApi, type ApiItem, type ApiItemSupplier } from '@/lib/api/items';
 import type { Order, OrderLineInput } from '@/lib/api/receiving';
+import { priceInputValue } from '@/lib/utils';
 
 // ── Draft model ────────────────────────────────────────────────────────────
 
@@ -90,7 +91,7 @@ export function formStateFromOrder(order: Order): OrderFormState {
       item_id: l.item_id,
       supplierChoice: l.supplier_id,
       ordered_qty: String(l.ordered_qty),
-      unit_price: l.unit_price_amount ?? '',
+      unit_price: priceInputValue(l.unit_price_amount),
       // The line's OWN frozen pack, not the item's current one — editing an
       // order must not silently re-price it at a pack size nobody agreed to.
       pack_uom: l.pack_uom ?? '',

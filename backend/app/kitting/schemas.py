@@ -125,6 +125,11 @@ class KitLineRead(BaseModel):
     item_number: str
     description: str
     qty_per_unit: Decimal
+    # Snapshot of items.consumed_in_kit at kit creation (REQ-2026-07-31-KIT-003).
+    # When true this line is media: ordinary in every respect while the kit is
+    # open, but at close-out its leftover is CONSUMED rather than back-flushed,
+    # so it needs no return destination.
+    consumed_in_kit: bool = False
     # Derived = qty_per_unit × kit.target_qty.
     needed_qty: Decimal
     issued_qty: int
@@ -132,8 +137,8 @@ class KitLineRead(BaseModel):
     used_qty: int | None = None
     # Returned to inventory before close-out (TRX-008).
     early_returned_qty: int = 0
-    # Derived = issued + additional − early_returned: what is still on the
-    # production floor and must be reconciled at close-out.
+    # Derived = issued + additional − early_returned − used: what is still on
+    # the production floor and must be reconciled at close-out.
     on_floor_qty: int = 0
     # Derived = on_floor − used (null until used is entered) — the close-out
     # back-flush amount.

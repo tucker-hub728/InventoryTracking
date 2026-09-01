@@ -1057,6 +1057,7 @@ async def add_kit_line(
     item_id: uuid.UUID,
     qty_per_unit: Decimal,
     issued_qty: int,
+    consumed_in_kit: bool,
     source_location_node_id: uuid.UUID | None,
 ) -> KitLine:
     line = KitLine(
@@ -1065,6 +1066,7 @@ async def add_kit_line(
         item_id=item_id,
         qty_per_unit=qty_per_unit,
         issued_qty=issued_qty,
+        consumed_in_kit=consumed_in_kit,
         source_location_node_id=source_location_node_id,
         return_location_node_id=source_location_node_id,
     )

@@ -92,6 +92,8 @@ export interface ApiItem {
   uom: string | null;
   /** Blind-consumed (no per-lot traceability) when true. */
   is_consumable: boolean;
+  /** Consumed to the kit, never back-flushed (KIT-003) when true. */
+  consumed_in_kit: boolean;
   /** Tier (REQ-2026-07-15-ITM-001). ``tier_type`` drives the Type column:
    *  sub_assembly / finished_good may have a BOM; raw_material is bought as-is. */
   tier_id: string;
@@ -189,6 +191,9 @@ export interface ItemCreateInput {
   uom?: string | null;
   /** Blind-consumed with no per-lot traceability when true. */
   is_consumable?: boolean;
+  /** The media twin: consumed to the kit and never back-flushed (KIT-003).
+   *  Mutually exclusive with `is_consumable` — the server 422s on both. */
+  consumed_in_kit?: boolean;
   /** Assigned suppliers (zero-or-more). The only suppliers the item can later
    *  be received against. */
   supplier_ids?: string[];
@@ -206,6 +211,7 @@ export interface ItemUpdateInput {
   description?: string;
   uom?: string | null;
   is_consumable?: boolean;
+  consumed_in_kit?: boolean;
   /** Re-assign the item to another prefix (its tier is derived). Blocked
    *  server-side if moving a BOM-bearing item to a raw-material prefix. */
   prefix_id?: string;

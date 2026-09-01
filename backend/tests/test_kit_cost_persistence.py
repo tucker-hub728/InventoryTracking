@@ -19,6 +19,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from app.core.config import get_settings
+from app.kitting import costing
 from app.kitting import repository as kit_repo
 from app.models.identity import User
 from app.models.inventory import Item, ItemPrefix, ItemTier, Lot, StockMovement
@@ -697,6 +698,7 @@ async def test_add_kit_line_persists_its_component(kit_fixture):
         line_no=2,
         item_id=second.id,
         qty_per_unit=Decimal("2.500"),
+        consumed_in_kit=False,
         issued_qty=0,
         source_location_node_id=None,
     )
@@ -706,6 +708,7 @@ async def test_add_kit_line_persists_its_component(kit_fixture):
     assert added.kit_id == kit.id
     assert added.line_no == 2
     assert added.qty_per_unit == Decimal("2.500")
+    assert added.consumed_in_kit is False
 
 
 async def test_no_repository_helper_silently_drops_a_parameter():
@@ -736,3 +739,86 @@ async def test_no_repository_helper_silently_drops_a_parameter():
             if not p.startswith("_") and p not in used
         ]
     assert not orphaned, f"accepted but never used: {orphaned}"
+
+
+# ── KIT-003: the media line's cost is never credited away ───────────────
+#
+# The requirement's second half — "the cost ($$/unit) should pull through with
+# the kit costs" — is satisfied by the material simply being CONSUMED instead of
+# returned. These pin that, on the same aggregate the batch attribution divides.
+
+
+async def test_media_is_charged_and_never_credited(kit_fixture):
+    """Ten feedings of media at $3, one kit: $30 charged, nothing credited.
+
+    A back-flush would post a ``backflush`` row and land in ``credited``,
+    cancelling the charge out. Because the close-out consumes whatever is left
+    instead, ``charged - credited`` stays at the full $30 and that is what the
+    batch attribution has to spend on the finished lot.
+    """
+    s, kit, line, _user, make_lot, issue, _credit = kit_fixture
+    media = await make_lot(Decimal("3"))
+    # One "Issue more" per feeding, as the client describes the procedure.
+    for _ in range(10):
+        await issue(media, 1)
+
+    charged, credited, unpriced = (await kit_repo.line_charge_credit_values(s, kit.id))[
+        line.id
+    ]
+    assert charged == Decimal("30.000000")
+    assert credited == Decimal("0"), "media is never handed back, so never credited"
+    assert unpriced == 0
+
+
+async def test_a_fully_consumed_media_line_values_at_its_lot_price(kit_fixture):
+    """$3 a unit in, $3 a unit onto the batch — no dilution, no residual.
+
+    At close-out a media line consumes its whole remaining floor, so the moving
+    average is ``(charged - 0 - 0) / floor`` and the extended value it hands the
+    final batch is the entire charge. The finished lot carries all of it.
+    """
+    s, kit, line, _user, make_lot, issue, _credit = kit_fixture
+    await issue(await make_lot(Decimal("3")), 10)
+
+    charged, credited, _unpriced = (await kit_repo.line_charge_credit_values(s, kit.id))[
+        line.id
+    ]
+    unit = costing.line_unit_cost(
+        charged=charged, credited=credited, consumed=Decimal("0"), residual_qty=10
+    )
+    assert unit == Decimal("3")
+    assert costing.line_extended_value(unit, 10) == Decimal("30")
+
+
+async def test_each_batch_is_charged_only_what_it_recorded(kit_fixture):
+    """The multi-day case: each batch carries only what it recorded.
+
+    Batch 1 is an ordinary produce and takes the 4 the operator entered; the
+    close-out then pours the remaining 6. Consuming the whole floor at batch 1 —
+    the shape this was first built as — would have put all $20 on the first lot
+    and billed the second against no material at all.
+    """
+    s, kit, line, _user, make_lot, issue, _credit = kit_fixture
+    media = await make_lot(Decimal("2"))
+    await issue(media, 4)
+
+    charged, credited, _u = (await kit_repo.line_charge_credit_values(s, kit.id))[line.id]
+    first = costing.line_extended_value(
+        costing.line_unit_cost(
+            charged=charged, credited=credited, consumed=Decimal("0"), residual_qty=4
+        ),
+        4,
+    )
+    assert first == Decimal("8")
+
+    # The close-out pours what is left.
+    await issue(media, 6)
+    charged, credited, _u = (await kit_repo.line_charge_credit_values(s, kit.id))[line.id]
+    second = costing.line_extended_value(
+        costing.line_unit_cost(
+            charged=charged, credited=credited, consumed=first, residual_qty=6
+        ),
+        6,
+    )
+    assert second == Decimal("12")
+    assert first + second == charged, "every dollar issued reaches a finished lot"

@@ -324,6 +324,13 @@ class Item(Base):
             "char_length(trim(sku_suffix)) > 0",
             name="ck_items_sku_suffix_not_blank",
         ),
+        # KIT-003's twin item is the NON-consumable stand-in for a consumable,
+        # so the two flags can never both be true. Enforced here as well as in
+        # the route because the pair decides whether an item may enter a BOM.
+        CheckConstraint(
+            "NOT (is_consumable AND consumed_in_kit)",
+            name="ck_items_consumable_xor_consumed_in_kit",
+        ),
         # The full SKU is derived as ``<prefix code>-<sku_suffix>`` — the number
         # is not stored, it follows the prefix (rename CR→CRX re-labels every
         # item). Uniqueness is therefore per (prefix, suffix); since prefix codes
@@ -366,6 +373,25 @@ class Item(Base):
     # with no per-lot traceability (REQ-2026-07-01-TRX-003). Default: not a
     # consumable (one-for-one traceable material).
     is_consumable: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    # REQ-2026-07-31-KIT-003 — "consumables such as media are consumed when
+    # replaced and are not back-flushed". Media cannot BE an ``is_consumable``
+    # item, because those are banned from BOMs (``_require_eligible_child``) and
+    # a kit line only ever comes from a BOM. The client's answer (2026-08-31) is
+    # a non-consumable TWIN of the media, carrying its own part number and its
+    # own stock balance, which goes in the BOM like any other component. This
+    # flag is what marks that twin. A kit line for such an item behaves like
+    # any other while the kit is open — same recipe need, same operator entry —
+    # and differs at SIGN-OUT: whatever is still on the floor is poured rather
+    # than handed back, which is what pulls its $/unit into the kit's cost.
+    #
+    # Mutually exclusive with ``is_consumable`` — the twin is by definition the
+    # non-consumable one, and an item that were both would be banned from the
+    # very BOM this flag only means anything inside of.
+    consumed_in_kit: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         server_default=text("FALSE"),

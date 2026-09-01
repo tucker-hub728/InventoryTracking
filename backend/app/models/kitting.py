@@ -8,7 +8,11 @@ tables hold the kit's own state, not stock — on-hand stays derived through
 ``app.v_item_stock``.
 
 Design decisions (see the module doc §0):
-  * Consumables are never in a BOM, so a kit line is never a consumable.
+  * Consumables are never in a BOM, so a kit line is never an ``is_consumable``
+    item. Media on a kit is therefore a non-consumable TWIN of the consumable
+    (client 2026-08-31), flagged ``consumed_in_kit`` — an ordinary tracked item
+    that happens to be poured rather than assembled. See that column below and
+    REQ-2026-07-31-KIT-003.
   * Kitted material leaves *available* stock at issue (TRX-001) and MOVES to
     the production node, which holds the WIP until close-out (§0.3a,
     Transaction_Spec §2). Corrected 2026-07-21 — the production location is
@@ -205,7 +209,8 @@ class KitLine(Base):
         nullable=False,
     )
     line_no: Mapped[int] = mapped_column(Integer, nullable=False)
-    # The component (CR or nested AY) — never a consumable (§0.2).
+    # The component (CR or nested AY) — never an ``is_consumable`` item (§0.2);
+    # media reaches a kit as a non-consumable twin, see ``consumed_in_kit``.
     item_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.items.id", ondelete="RESTRICT"),
@@ -214,6 +219,19 @@ class KitLine(Base):
     # Snapshot of bom_lines.qty_per_unit at creation. needed_qty is derived
     # = qty_per_unit × kits.target_qty (not stored).
     qty_per_unit: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    # Snapshot of items.consumed_in_kit at creation, for the same reason
+    # qty_per_unit is snapshotted: how a kit reconciled must not change under it
+    # because somebody edited the item afterwards. REQ-2026-07-31-KIT-003 — a
+    # flagged line is an ordinary component while the kit is open — the BOM
+    # drives its need and the operator records each feeding. It differs in one
+    # place: at CLOSE-OUT it consumes whatever is still on the floor instead of
+    # the entered amount, so ``_on_floor`` reaches 0 and the back-flush has
+    # nothing to give back. Every gate still applies to that number.
+    consumed_in_kit: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
     issued_qty: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     additional_issued_qty: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")

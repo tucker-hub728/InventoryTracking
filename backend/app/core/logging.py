@@ -150,9 +150,12 @@ def configure_logging(settings: Settings) -> None:
         logging.getLogger(noisy).handlers = []
         logging.getLogger(noisy).propagate = False
 
-    # Let SQLAlchemy stay at WARNING unless explicitly raised
+    # SQL statement logging is opt-in via SQL_ECHO, NOT via APP_DEBUG. It used
+    # to follow app_debug, which meant every dev machine logged every statement
+    # forever — the dominant cost on an otherwise idle backend once the SSE
+    # notification streams were added.
     logging.getLogger("sqlalchemy.engine").setLevel(
-        logging.INFO if settings.app_debug else logging.WARNING
+        logging.INFO if settings.sql_echo else logging.WARNING
     )
 
 

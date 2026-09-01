@@ -35,7 +35,7 @@ import type { ReauthResponse } from '@/lib/api/auth';
 import { itemsApi, type ApiItemSupplier } from '@/lib/api/items';
 import { locationNodesApi, type Allocation } from '@/lib/api/location-nodes';
 import { lotsApi, type Lot, type LotUpdateInput } from '@/lib/api/lots';
-import { formatNumber } from '@/lib/utils';
+import { formatNumber, priceInputValue } from '@/lib/utils';
 
 interface Props {
   /** Lot to edit; when null the dialog is closed. */
@@ -178,7 +178,10 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
       .then((fetched) => {
         setLot(fetched);
         setSupplierId(fetched.supplier_id ?? '');
-        setUnitPrice(fetched.unit_price_amount ?? '');
+        // Trimmed, not raw: NUMERIC(14, 6) returns "0.000000" for a price
+        // typed as "0", and six zeros nobody entered read as the system having
+        // decided something.
+        setUnitPrice(priceInputValue(fetched.unit_price_amount));
         setQtyReceived(
           fetched.ordered_qty != null ? String(fetched.ordered_qty) : '',
         );
@@ -255,11 +258,20 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
     const exp = expDate || null;
     if (exp !== (lot.expiration_date ?? null)) patch.expiration_date = exp;
 
-    if (unitPrice.trim() !== (lot.unit_price_amount ?? '')) {
-      if (unitPrice.trim() === '') {
+    // Compared as a NUMBER, not as text. The field is seeded with the trimmed
+    // spelling, so a string compare against the raw stored value would call an
+    // untouched "0" different from "0.000000" and patch the price on every save.
+    const enteredPrice = unitPrice.trim();
+    const storedPrice = lot.unit_price_amount;
+    const priceChanged =
+      enteredPrice === ''
+        ? storedPrice != null
+        : storedPrice == null || Number(enteredPrice) !== Number(storedPrice);
+    if (priceChanged) {
+      if (enteredPrice === '') {
         patch.unit_price_amount = null;
       } else {
-        const p = Number(unitPrice);
+        const p = Number(enteredPrice);
         if (!Number.isFinite(p) || p < 0) {
           setFormError('Unit price must be a non-negative number.');
           return null;

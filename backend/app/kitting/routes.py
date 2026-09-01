@@ -225,6 +225,7 @@ def _kit_snapshot(kit: Kit) -> dict:
                 "line_no": ln.line_no,
                 "item_id": str(ln.item_id),
                 "qty_per_unit": str(ln.qty_per_unit),
+                "consumed_in_kit": ln.consumed_in_kit,
                 "needed_qty": str(_needed(ln, kit.target_qty)),
                 "issued_qty": ln.issued_qty,
                 "additional_issued_qty": ln.additional_issued_qty,
@@ -386,6 +387,9 @@ def _line_read(
         item_number=item.item_number if item else "",
         description=item.description if item else "",
         qty_per_unit=line.qty_per_unit,
+        # From the LINE, never the item: a kit opened before the flag was set
+        # must keep reconciling the way it was created (KIT-003).
+        consumed_in_kit=line.consumed_in_kit,
         needed_qty=line.qty_per_unit * target_qty,
         issued_qty=line.issued_qty,
         additional_issued_qty=line.additional_issued_qty,
@@ -1223,6 +1227,7 @@ async def _produce_batch(
     expiration_date: date | None,
     lot_number: str | None,
     used_by_line: dict[uuid.UUID, int],
+    finalising: bool = False,
     evidence: uuid.UUID,
     note: str,
     current,
@@ -1236,7 +1241,18 @@ async def _produce_batch(
     ``ceil(qty_per_unit × (good + scrap))`` — you can't make N units with less
     than N units' worth (``used_below_need``) — and no more than what's on the
     floor (``used_exceeds_issued``). A component missing a value is
-    ``used_qty_missing``. The used amount is drained and added to the cumulative
+    ``used_qty_missing``.
+
+    ``finalising`` marks the close-out's own batch, and changes one thing: a line
+    flagged ``consumed_in_kit`` — media, via its non-consumable twin — consumes
+    whatever is still on the floor instead of the operator's entry
+    (REQ-2026-07-31-KIT-003). While the kit is OPEN such a line is treated like
+    any other: same recipe need, same operator entry, same gates. It differs only
+    at sign-out, where the remainder is poured rather than handed back — which is
+    also what carries its $/unit onto the final lot, since the close-out's batch
+    is the one that consumes it.
+
+    The used amount is drained and added to the cumulative
     ``used_qty``; ``good`` units are placed into the output as a NEW per-batch lot
     (``KIT-0289-1``, ``-2``, … — its own expiry, client 2026-07-23) and
     ``good_qty`` / ``scrap_qty`` accumulate. The batch's units may be SPLIT across
@@ -1251,11 +1267,24 @@ async def _produce_batch(
     # cost attribution below, captured here because the mutate loop destroys it.
     residual_before: dict[uuid.UUID, int] = {}
     for line in kit.lines:
-        if line.id not in used_by_line:
+        if line.consumed_in_kit and finalising:
+            # REQ-2026-07-31-KIT-003, at SIGN-OUT only. Media behaves like every
+            # other component while the kit is open — the BOM drives its need
+            # and the operator records each feeding — and differs in exactly one
+            # place: what is still on the floor when the kit closes is POURED,
+            # not handed back. So the close-out consumes the remainder, and the
+            # back-flush loop below finds nothing left to credit.
+            #
+            # Every gate below still runs on that number: a media line short of
+            # the recipe need fails ``used_below_need`` exactly as any other
+            # line does, which is what keeps its BOM quantity meaningful.
+            used = _on_floor(line)
+        elif line.id not in used_by_line:
             raise ValidationError(
                 f"Enter the material used for line {line.line_no}", code="used_qty_missing"
             )
-        used = used_by_line[line.id]
+        else:
+            used = used_by_line[line.id]
         need = kit_repo.default_issued_qty(line.qty_per_unit, attempted)
         if used < need:
             raise ValidationError(
@@ -2006,6 +2035,13 @@ async def create_kit(
             f'The kit name "{kit_number}" is already in use.',
             code="kit_number_conflict",
         )
+    # The KIT-003 flag is SNAPSHOTTED onto each line, so read it off the item
+    # here rather than at close-out. Via load_item_map, not bom.child_item —
+    # list_bom_children does not eager-load the child, so touching that
+    # relationship inside an async route raises MissingGreenlet.
+    child_items = await kit_repo.load_item_map(
+        db, {c.child_item_id for c in children}
+    )
     kit = await kit_repo.create_kit(
         db,
         kit_number=kit_number,
@@ -2026,6 +2062,7 @@ async def create_kit(
             line_no=line_no,
             item_id=bom.child_item_id,
             qty_per_unit=bom.qty_per_unit,
+            consumed_in_kit=child_items[bom.child_item_id].consumed_in_kit,
             issued_qty=kit_repo.default_issued_qty(bom.qty_per_unit, payload.target_qty),
             source_location_node_id=None,
         )
@@ -2392,7 +2429,14 @@ async def return_excess(
     back, never re-minted), so nothing is stranded. The legacy single
     ``qty`` + ``return_location_node_id`` (FIFO across the floor's lots) still
     works when ``sources`` is empty. Unsigned, matching issue / additional issue
-    (only close-out is e-signed)."""
+    (only close-out is e-signed).
+
+    Deliberately still open to a ``consumed_in_kit`` (media) line, even though
+    KIT-003 forbids handing media back automatically. This is the signed
+    super_admin correction door (CTL-001) for a genuine mis-issue — a bottle
+    pulled and never opened. Note the window is narrow by construction: the next
+    produce batch consumes the whole media floor, after which the cap below is 0
+    and every return is refused with ``return_exceeds_on_floor``."""
     kit = await _require_kit(db, kit_id)
     if kit.status not in ("issued", "in_production"):
         raise ValidationError(
@@ -2829,6 +2873,10 @@ async def close_out_kit(
         expiration_date=payload.output_expiration_date,
         lot_number=lot_no,
         used_by_line=used_by_line,
+        # The kit is closing: a media line pours whatever is left rather than
+        # handing it back (KIT-003). Only here — an intermediate produce
+        # leaves it on the floor for the next feeding.
+        finalising=True,
         evidence=evidence_uuid,
         note=_with_reason(
             f"{payload.good_qty} produced and stocked for {kit.kit_number}",
@@ -2844,6 +2892,17 @@ async def close_out_kit(
     # LOC-003 origins for every line at once, rather than a query per line.
     origins_by_line = await kit_repo.line_issue_source_types(db, kit.id)
     for line in kit.lines:
+        if line.consumed_in_kit:
+            # KIT-003: media is never handed back. _produce_batch above has
+            # already drained this line to zero, so this guard changes no
+            # number today — it exists so a future change to the consumption
+            # rules cannot quietly reintroduce a media back-flush here.
+            #
+            # REQ-2026-07-22-KIT-006 ("back-flush the difference between issued
+            # and used") is not overridden: for such a line "used" is DEFINED as
+            # the whole floor, so the difference is zero and the rule has
+            # nothing to do.
+            continue
         returned = _on_floor(line)
         if returned <= 0:
             continue
@@ -2972,6 +3031,10 @@ async def cancel_kit(
         )
     evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
     before = _kit_snapshot(kit)
+    # Media written off on cancel (KIT-003), for the audit context. Declared out
+    # here because a draft cancel skips the block below entirely and the audit
+    # row is written for both.
+    consumed_on_cancel: list[dict[str, object]] = []
     # Post-issue cancel (resolves the deferred §99.8): hand every unit still on
     # the floor back to inventory. Safe by construction — nothing was bound to a
     # production lot at kitting (TRX-002), so nothing can be stranded, and the
@@ -2988,7 +3051,14 @@ async def cancel_kit(
             _parse_uuid_or_422(li.line_id, field="line_id"): li for li in payload.lines
         }
         if by_line:
-            missing = [ln.line_no for ln in kit.lines if _on_floor(ln) > 0 and ln.id not in by_line]
+            # Media never returns anywhere (KIT-003), so demanding a return
+            # location for it would block a cancel on a destination that would
+            # go unused.
+            missing = [
+                ln.line_no
+                for ln in kit.lines
+                if _on_floor(ln) > 0 and not ln.consumed_in_kit and ln.id not in by_line
+            ]
             if missing:
                 raise ValidationError(
                     f"Every line still holding material needs a return location "
@@ -3001,6 +3071,24 @@ async def cancel_kit(
         for line in kit.lines:
             on_floor = _on_floor(line)
             if on_floor <= 0:
+                continue
+            if line.consumed_in_kit:
+                # KIT-003: media that was already poured cannot be un-poured, so
+                # a cancel writes it off as USED rather than crediting it back.
+                # Skipping it outright was the other option and is wrong: the
+                # WIP allocations would stay parked at the production node of a
+                # cancelled kit forever, and the close-out identity
+                # "issued + additional == used + early_returned + backflushed"
+                # would no longer hold. No movement and no batch row — consuming
+                # material is a zero-delta event (it left v_item_stock at
+                # issue), and a cancel produces nothing to attribute cost to, so
+                # the value simply stays charged to the abandoned kit. Which is
+                # what a wasted feeding actually costs.
+                await _drain_production(db, kit=kit, line=line, qty=on_floor)
+                line.used_qty = (line.used_qty or 0) + on_floor
+                consumed_on_cancel.append(
+                    {"line_no": line.line_no, "qty": on_floor}
+                )
                 continue
             line_in = by_line.get(line.id)
             if line_in is not None:
@@ -3072,7 +3160,13 @@ async def cancel_kit(
         subject_label=kit.kit_number,
         before=before,
         after=_kit_snapshot(kit),
-        context={"operation": "cancel", "reason": payload.reason or None},
+        context={
+            "operation": "cancel",
+            "reason": payload.reason or None,
+            # KIT-003 write-offs — the one thing a cancel does that moves no
+            # stock and mints no movement, so the audit row is its only record.
+            "consumed_on_cancel": consumed_on_cancel or None,
+        },
         signature_id=evidence_uuid,
     )
     # Consume the evidence last so a replay rolls back the whole cancel.

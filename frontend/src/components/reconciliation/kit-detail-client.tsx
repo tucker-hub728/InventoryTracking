@@ -548,6 +548,11 @@ export function KitDetailClient({
   const batchAttempt = (output.good_qty ?? 0) + (output.scrap_qty ?? 0);
   const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * batchAttempt);
   const lineLeft = (l: ApiKitLine) => l.on_floor_qty - (used[l.id] ?? 0);
+  // A media line's leftover is CONSUMED at sign-out, never handed back
+  // (REQ-2026-07-31-KIT-003), so it needs no return destination — everywhere
+  // else it is an ordinary line: same recipe need, same operator entry, same
+  // gates. This is the only thing that differs.
+  const backFlushes = (l: ApiKitLine) => !l.consumed_in_kit && lineLeft(l) > 0;
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
   const usedBelowNeed = kit.lines.some(
     (l) => used[l.id] != null && (used[l.id] as number) < lineNeed(l),
@@ -580,9 +585,8 @@ export function KitDetailClient({
   // Every leftover unit must have somewhere to go — across ALL of a line's
   // destinations, since the leftover may be split between boxes.
   const cellsIncomplete = kit.lines.some((l) => {
-    const left = lineLeft(l);
-    if (left <= 0) return false;
-    return returnPlaced(l) !== left;
+    if (!backFlushes(l)) return false;
+    return returnPlaced(l) !== lineLeft(l);
   });
   const usedValid = usedComplete && !usedBelowNeed && !usedOverFloor;
   // The operator types the produced batch's lot number (client 2026-07-24 —
@@ -764,12 +768,13 @@ export function KitDetailClient({
         output_lot_number: output.output_lot_number?.trim() || undefined,
         lines: kit.lines.map((l) => ({
           line_id: l.id,
+          // For a media line the close-out overrides this with the whole floor
+          // (KIT-003); for every other line it is what the operator entered.
           used_qty: used[l.id] ?? 0,
           // Only lines with something left carry destinations; the rest have
           // nothing to place, and an empty list means "use the default".
-          destinations:
-            lineLeft(l) > 0
-              ? returnRowsFor(l)
+          destinations: backFlushes(l)
+            ? returnRowsFor(l)
                   .filter((d) => d.location_node_id && destPlaced(d) > 0)
                   .map((d) => ({
                     location_node_id: d.location_node_id,
@@ -2199,6 +2204,13 @@ function CloseOutStep({
               <span className="text-text-2">Needs</span> — making {attempted} unit
               {attempted === 1 ? '' : 's'} takes at least that much — and no more than what&apos;s on
               the floor. The leftover back-flushes when you <span className="text-text-2">close</span>.
+              {kit.lines.some((l) => l.consumed_in_kit) && (
+                <>
+                  {' '}
+                  Media is the exception: whatever is still on the floor at close is
+                  <span className="text-text-2"> consumed</span>, never returned.
+                </>
+              )}
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -2216,6 +2228,10 @@ function CloseOutStep({
               </thead>
               <tbody>
                 {kit.lines.map((line) => {
+                  // A media line's leftover is poured at sign-out rather than
+                  // returned (KIT-003), so it asks for no destination. In every
+                  // other respect it is an ordinary component.
+                  const media = line.consumed_in_kit;
                   const need = lineNeed(line);
                   const floor = line.on_floor_qty;
                   const u = used[line.id];
@@ -2257,7 +2273,13 @@ function CloseOutStep({
                           )}
                         </td>
                         <td className="px-3 py-2">
-                          {left > 0 ? (
+                          {media ? (
+                            // KIT-003: whatever is still on the floor at sign-out
+                            // is poured, so there is no destination to pick.
+                            <span className="text-xs text-text-3">
+                              {left > 0 ? `Consumed at close (${left})` : 'Consumed'}
+                            </span>
+                          ) : left > 0 ? (
                             // The destinations themselves live in the full-width
                             // row below — a split needs more room than a table
                             // cell. This says how much of the leftover is placed.
@@ -2288,7 +2310,7 @@ function CloseOutStep({
                       {/* Where the leftover goes — one row, or several when no
                           single box has enough free cells. Full width because a
                           split carries a cryobox grid per destination. */}
-                      {left > 0 && (
+                      {left > 0 && !media && (
                         <tr className="border-b border-border/60 bg-surface/40">
                           <td colSpan={7} className="px-3 pb-3 pt-2">
                             <div className="max-w-xl">
@@ -2380,6 +2402,15 @@ function ReviewStep({
   // still physically on the floor — which is exactly what back-flushes at close.
   const floorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
   const usedTotal = kit.lines.reduce((a, l) => a + (l.used_qty ?? 0), 0);
+  // KIT-003 splits the floor in two at close: media is poured, everything else
+  // is handed back. The copy below has to say which, because "N units still on
+  // the floor back-flush to inventory" is a promise the close-out will not keep
+  // for the media half of that number.
+  const floorPoured = kit.lines.reduce(
+    (a, l) => a + (l.consumed_in_kit ? l.on_floor_qty : 0),
+    0,
+  );
+  const floorReturned = floorTotal - floorPoured;
   const router = useRouter();
   const pathname = usePathname();
   /** The lot segment of ``/review/<lot>``, if the panel is open. */
@@ -2406,6 +2437,20 @@ function ReviewStep({
       scroll: false,
     });
   const hideBatch = () => router.push(reviewHref, { scroll: false });
+  // RPT-003. What the kit has been CHARGED but not yet handed to a finished lot
+  // — the value of the material still staged on the production floor. The two
+  // stats it separates are both correct and routinely differ, which is exactly
+  // why the header names them rather than showing one figure called "cost":
+  // ``material_cost_amount`` is everything pulled, ``consumed_value_amount`` is
+  // what batches have consumed of it. On a closed kit the remainder has been
+  // back-flushed (and credited), so this lands at zero and the line is dropped.
+  //
+  // `null` when either side is unknown — subtracting from an unknown total is
+  // not a number anyone should read.
+  const costOnFloor =
+    kit.material_cost_amount === null || kit.consumed_value_amount === null
+      ? null
+      : Number(kit.material_cost_amount) - Number(kit.consumed_value_amount);
   // RPT-003. Summed from the batches, not recomputed from the kit total: each
   // batch's scrap was valued at ITS unit cost, which differs between batches
   // when the material mix changed. `null` if any batch is unpriced — a partial
@@ -2544,12 +2589,31 @@ function ReviewStep({
                 "—  unpriced material" rather than $0.00 when an input lot has
                 no price: blank means unknown, zero means free, and the $0
                 customer-owned cells make that a distinction with real money
-                behind it. */}
-            <ReviewStat label="Material cost">
+                behind it.
+
+                Labelled CHARGED, not "Material cost", and split below. This is
+                everything pulled onto the floor; the per-lot figures in the
+                table beneath are what batches have actually CONSUMED, and until
+                the kit closes those are different numbers. Two stats inches
+                apart both reading "Material cost" and disagreeing is a bug
+                report waiting to happen — it was one (user, 2026-08-31). */}
+            <ReviewStat label="Material charged">
               {kit.cost_is_complete ? (
-                <span className="font-mono tabular-nums font-semibold text-text">
-                  {formatMoney(kit.material_cost_amount)}
-                </span>
+                <>
+                  <span className="font-mono tabular-nums font-semibold text-text">
+                    {formatMoney(kit.material_cost_amount)}
+                  </span>
+                  {costOnFloor !== null && costOnFloor > 0 && (
+                    <div className="text-[11px] text-text-3">
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(kit.consumed_value_amount)}
+                      </span>{' '}
+                      to lots ·{' '}
+                      <span className="font-mono tabular-nums">{formatMoney(String(costOnFloor))}</span>{' '}
+                      still on the floor
+                    </div>
+                  )}
+                </>
               ) : (
                 <span className="text-text-3">
                   — <span className="text-[11px]">unpriced material</span>
@@ -2580,20 +2644,24 @@ function ReviewStep({
         )}
       </Card>
 
-      {/* Per-batch cost (RPT-003). Only worth showing once a kit has produced
-          more than one lot — that is the case the single "Material cost" figure
-          above cannot answer, and the client bills per finished lot: "the Kit is
-          closed out to the FG Lot specifically so the Customer can be charged
-          the actual cost for that particular FG Lot".
+      {/* Per-batch cost (RPT-003). Shown as soon as a kit has produced ANYTHING:
+          the client bills per finished lot — "the Kit is closed out to the FG Lot
+          specifically so the Customer can be charged the actual cost for that
+          particular FG Lot" — and nothing else on this step names the lot that
+          was minted. It was briefly gated on two-or-more batches, on the theory
+          that one lot is already covered by the kit-level "Material cost" above;
+          that was wrong (user, 2026-08-31). The header figure is a kit total, not
+          a lot, so a kit with exactly one batch showed its output lot NOWHERE
+          once the pending-batch card had gone.
 
           These figures are FROZEN at produce time, unlike the kit total above,
           which re-reads lot prices every time this page loads. If a price was
           corrected after a batch was made the two will differ, and they should:
           a shipped lot's cost must not move retroactively. */}
-      {kit.batches.length > 1 && (
+      {kit.batches.length > 0 && (
         <Card className="overflow-hidden">
           <div className="border-b border-border px-4 py-3">
-            <h2 className="text-sm font-medium text-text">Cost by finished lot</h2>
+            <h2 className="text-sm font-medium text-text">Lots produced by this kit</h2>
             <p className="mt-0.5 text-xs text-text-3">
               Each batch carries its own material cost. Scrap is included — the
               per-unit figure divides by good units only.
@@ -2667,7 +2735,9 @@ function ReviewStep({
             <p className="mt-0.5 text-xs text-text-3">
               {closed
                 ? 'What the kit consumed and what returned to inventory.'
-                : 'Consumed so far and what is still staged on the floor — the remainder back-flushes at close.'}
+                : floorPoured > 0
+                  ? 'Consumed so far and what is still staged on the floor — at close the leftover back-flushes, except media, which is consumed.'
+                  : 'Consumed so far and what is still staged on the floor — the remainder back-flushes at close.'}
             </p>
           </div>
           <ComponentReviewTable
@@ -2695,8 +2765,25 @@ function ReviewStep({
       ) : canClose ? (
         <RuleNote>
           <span className="text-text-2">Produce another batch</span> to make more (the kit stays
-          open), or <span className="text-text-2">Sign &amp; close</span> to finish — the{' '}
-          {floorTotal} unit{floorTotal === 1 ? '' : 's'} still on the floor back-flush to inventory.
+          open), or <span className="text-text-2">Sign &amp; close</span> to finish.{' '}
+          {/* What the close actually does with the floor. KIT-003 splits it:
+              media is poured, everything else is handed back — so the two halves
+              are named separately rather than promising a back-flush of units
+              that will never see one. */}
+          {floorReturned > 0 && (
+            <>
+              The {floorReturned} unit{floorReturned === 1 ? '' : 's'} still on the floor
+              back-flush{floorReturned === 1 ? 'es' : ''} to inventory
+              {floorPoured > 0 ? ', ' : '.'}
+            </>
+          )}
+          {floorPoured > 0 && (
+            <>
+              {floorReturned > 0 ? 'and the' : 'The'} {floorPoured} unit
+              {floorPoured === 1 ? '' : 's'} of media{' '}
+              {floorReturned > 0 ? 'are consumed, never returned.' : 'on the floor are consumed, never returned.'}
+            </>
+          )}
         </RuleNote>
       ) : (
         /* CTL-001 — the close back-flushes the leftover to inventory, so only a
@@ -2846,7 +2933,15 @@ function ComponentReviewTable({
                 </td>
                 <td className="px-4 py-2.5">
                   <span className="text-xs text-text-2">
-                    {remaining > 0 ? (
+                    {line.consumed_in_kit ? (
+                      // KIT-003: media is poured at sign-out, never returned, so
+                      // it has no destination HOWEVER much is still on the floor.
+                      // This test has to come before the `remaining > 0` one —
+                      // behind it, a media line with a leftover fell through to
+                      // the LocationPath and advertised a back-flush that is
+                      // never going to happen (user, 2026-09-01).
+                      closed ? 'Consumed' : 'Consumed at close'
+                    ) : remaining > 0 ? (
                       <LocationPath
                         nodeId={closed ? line.return_location_node_id : returnLoc[line.id]}
                       />

@@ -18,6 +18,7 @@ import { Label } from '@/components/ui/label';
 import { toast } from '@/components/ui/sonner';
 import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { ApiError } from '@/lib/api/client';
+import { priceInputValue } from '@/lib/utils';
 import type { ReauthResponse } from '@/lib/api/auth';
 import {
   receivingApi,
@@ -64,7 +65,7 @@ function seedLineDraft(line: OrderLine): LineDraft {
     lot_number: '',
     manufacture_date: '',
     expiration_date: '',
-    unit_price: line.unit_price_amount ?? '',
+    unit_price: priceInputValue(line.unit_price_amount),
     pack_uom: line.pack_uom ?? '',
     units_per_pack: line.units_per_pack == null ? '' : String(line.units_per_pack),
   };
