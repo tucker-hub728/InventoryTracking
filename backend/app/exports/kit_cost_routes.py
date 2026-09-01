@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.core.exceptions import ValidationError
+from app.kitting import costing
 from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.security.permissions import ADMIN_ROLES, RequirePermission, RequireRole
@@ -177,7 +178,9 @@ async def kit_costs_csv(
                 output_lot_release_state=release_state,
                 material_cost=batch.material_cost_amount,
                 unit_cost=batch.unit_cost_amount,
-                scrap_value=batch.scrap_value_amount,
+                scrap_value=costing.scrap_value(
+                    batch.material_cost_amount, batch.good_qty, batch.scrap_qty
+                ),
                 cost_is_complete=batch.cost_is_complete,
                 performed_by_name=actor,
                 **stamp,

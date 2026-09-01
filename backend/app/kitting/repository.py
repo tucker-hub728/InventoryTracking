@@ -13,7 +13,7 @@ from decimal import ROUND_CEILING, Decimal
 
 from sqlalchemy import Select, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import joinedload, lazyload, selectinload
 
 from app.core.search import like_contains
 from app.models.audit import AuditEvent
@@ -605,7 +605,6 @@ async def create_batch(
     scrap_qty: int,
     material_cost_amount: Decimal | None,
     unit_cost_amount: Decimal | None,
-    scrap_value_amount: Decimal | None,
     cost_is_complete: bool,
     performed_by_user_id: uuid.UUID,
     reauth_evidence_id: uuid.UUID | None,
@@ -618,7 +617,6 @@ async def create_batch(
         scrap_qty=scrap_qty,
         material_cost_amount=material_cost_amount,
         unit_cost_amount=unit_cost_amount,
-        scrap_value_amount=scrap_value_amount,
         cost_is_complete=cost_is_complete,
         performed_by_user_id=performed_by_user_id,
         reauth_evidence_id=reauth_evidence_id,
@@ -633,7 +631,6 @@ async def create_batch_consumption(
     *,
     batch_id: uuid.UUID,
     kit_line_id: uuid.UUID,
-    item_id: uuid.UUID,
     qty: int,
     unit_cost_amount: Decimal | None,
     extended_value_amount: Decimal | None,
@@ -642,7 +639,6 @@ async def create_batch_consumption(
     row = KitBatchConsumption(
         batch_id=batch_id,
         kit_line_id=kit_line_id,
-        item_id=item_id,
         qty=qty,
         unit_cost_amount=unit_cost_amount,
         extended_value_amount=extended_value_amount,
@@ -669,6 +665,87 @@ async def batches_for_kit(
         .order_by(KitProductionBatch.batch_no.asc())
     )
     return list((await session.execute(stmt)).scalars().unique().all())
+
+
+async def kits_that_consumed_lot(
+    session: AsyncSession, lot_id: uuid.UUID
+) -> list[uuid.UUID]:
+    """Kits that were CHARGED this lot, oldest first — the recompute frontier.
+
+    Charges only. A kit that merely handed the lot back never took its cost, so
+    correcting the price changes nothing it produced.
+    """
+    from app.kitting.costing import CHARGE_MOVEMENT_TYPES
+
+    stmt = (
+        select(StockMovement.kit_id)
+        .where(
+            StockMovement.lot_id == lot_id,
+            StockMovement.kit_id.is_not(None),
+            StockMovement.movement_type.in_(CHARGE_MOVEMENT_TYPES),
+        )
+        .group_by(StockMovement.kit_id)
+        .order_by(func.min(StockMovement.performed_at).asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def kit_movement_flows(
+    session: AsyncSession, kit_id: uuid.UUID
+) -> list[tuple[uuid.UUID, object, str, int, Decimal | None]]:
+    """Every charge and credit on a kit, with its timestamp, qty and lot price.
+
+    One query for the whole replay: the recompute needs each line's position as
+    of each batch, and asking the database once per batch would be N queries to
+    answer a question one ordered list already covers.
+
+    Returns ``(kit_line_id, performed_at, movement_type, qty_abs, unit_price)``.
+    """
+    from app.kitting.costing import CHARGE_MOVEMENT_TYPES, CREDIT_MOVEMENT_TYPES
+
+    stmt = (
+        select(
+            StockMovement.kit_line_id,
+            StockMovement.performed_at,
+            StockMovement.movement_type,
+            StockMovement.qty_abs,
+            Lot.unit_price_amount,
+        )
+        .join(Lot, Lot.id == StockMovement.lot_id)
+        .where(
+            StockMovement.kit_id == kit_id,
+            StockMovement.kit_line_id.is_not(None),
+            StockMovement.movement_type.in_(CHARGE_MOVEMENT_TYPES + CREDIT_MOVEMENT_TYPES),
+        )
+        .order_by(StockMovement.performed_at.asc())
+    )
+    return [
+        (line_id, at, mv_type, int(qty), price)
+        for line_id, at, mv_type, qty, price in (await session.execute(stmt)).all()
+    ]
+
+
+async def line_ids_for_kit(session: AsyncSession, kit_id: uuid.UUID) -> list[uuid.UUID]:
+    stmt = select(KitLine.id).where(KitLine.kit_id == kit_id)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def get_lot_for_update(session: AsyncSession, lot_id: uuid.UUID) -> Lot | None:
+    """A lot, locked, so two concurrent recomputes cannot interleave a restamp.
+
+    ``lazyload("*")`` is not optional. ``Lot`` eager-loads its item, tier,
+    prefix, stock view and supplier, which SQLAlchemy renders as LEFT OUTER
+    JOINs — and Postgres refuses ``FOR UPDATE`` against the nullable side of an
+    outer join outright. Only the lot's own row is being locked, so none of
+    those relationships is wanted here anyway.
+    """
+    stmt = (
+        select(Lot)
+        .where(Lot.id == lot_id)
+        .options(lazyload("*"))
+        .with_for_update(of=Lot)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def batch_operator_names(

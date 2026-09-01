@@ -305,7 +305,6 @@ async def test_batch_and_consumption_round_trip(kit_fixture):
         scrap_qty=1,
         material_cost_amount=Decimal("450"),
         unit_cost_amount=Decimal("112.500000"),
-        scrap_value_amount=Decimal("112.500000"),
         cost_is_complete=True,
         performed_by_user_id=user.id,
         reauth_evidence_id=None,
@@ -314,7 +313,6 @@ async def test_batch_and_consumption_round_trip(kit_fixture):
         s,
         batch_id=batch.id,
         kit_line_id=line.id,
-        item_id=line.item_id,
         qty=50,
         unit_cost_amount=Decimal("9"),
         extended_value_amount=Decimal("450"),
@@ -344,7 +342,6 @@ async def test_consumed_value_accumulates_across_batches(kit_fixture):
             scrap_qty=0,
             material_cost_amount=Decimal("100"),
             unit_cost_amount=Decimal("20"),
-            scrap_value_amount=Decimal("0"),
             cost_is_complete=True,
             performed_by_user_id=user.id,
             reauth_evidence_id=None,
@@ -353,7 +350,6 @@ async def test_consumed_value_accumulates_across_batches(kit_fixture):
             s,
             batch_id=batch.id,
             kit_line_id=line.id,
-            item_id=line.item_id,
             qty=50,
             unit_cost_amount=Decimal("2"),
             extended_value_amount=Decimal("100"),
@@ -375,7 +371,6 @@ async def test_a_scrap_only_batch_mints_no_lot(kit_fixture):
         scrap_qty=3,
         material_cost_amount=Decimal("60"),
         unit_cost_amount=None,
-        scrap_value_amount=None,
         cost_is_complete=True,
         performed_by_user_id=user.id,
         reauth_evidence_id=None,
@@ -384,32 +379,6 @@ async def test_a_scrap_only_batch_mints_no_lot(kit_fixture):
 
 
 # ── The constraints that encode the design ──────────────────────────────
-
-
-async def test_scrap_value_may_not_exceed_the_batch_cost(kit_fixture):
-    """The DB refuses to let scrap become an addend.
-
-    This is the constraint that stops someone re-deriving "material + scrap" as
-    the kit total. Scrap is a SLICE of the material cost — the scrapped units'
-    material was charged at issue and is already inside it.
-    """
-    s, kit, _line, user, make_lot, _issue, _credit = kit_fixture
-    lot = await make_lot(Decimal("1"))
-    with pytest.raises(IntegrityError):
-        await kit_repo.create_batch(
-            s,
-            kit_id=kit.id,
-            batch_no=1,
-            output_lot_id=lot.id,
-            good_qty=4,
-            scrap_qty=1,
-            material_cost_amount=Decimal("450"),
-            unit_cost_amount=Decimal("112.5"),
-            scrap_value_amount=Decimal("500"),  # more than the whole batch
-            cost_is_complete=True,
-            performed_by_user_id=user.id,
-            reauth_evidence_id=None,
-        )
 
 
 async def test_an_incomplete_cost_may_not_carry_numbers(kit_fixture):
@@ -426,7 +395,6 @@ async def test_an_incomplete_cost_may_not_carry_numbers(kit_fixture):
             scrap_qty=0,
             material_cost_amount=Decimal("450"),
             unit_cost_amount=Decimal("112.5"),
-            scrap_value_amount=None,
             cost_is_complete=False,  # contradicts the numbers above
             performed_by_user_id=user.id,
             reauth_evidence_id=None,
@@ -446,7 +414,6 @@ async def test_a_batch_that_made_nothing_may_not_claim_a_lot(kit_fixture):
             scrap_qty=2,
             material_cost_amount=None,
             unit_cost_amount=None,
-            scrap_value_amount=None,
             cost_is_complete=True,
             performed_by_user_id=user.id,
             reauth_evidence_id=None,
@@ -464,7 +431,6 @@ async def test_one_output_lot_belongs_to_one_batch(kit_fixture):
         "scrap_qty": 0,
         "material_cost_amount": Decimal("10"),
         "unit_cost_amount": Decimal("10"),
-        "scrap_value_amount": Decimal("0"),
         "cost_is_complete": True,
         "performed_by_user_id": user.id,
         "reauth_evidence_id": None,
@@ -487,7 +453,6 @@ async def test_batches_cascade_when_a_kit_is_deleted(kit_fixture):
         scrap_qty=0,
         material_cost_amount=Decimal("10"),
         unit_cost_amount=Decimal("10"),
-        scrap_value_amount=Decimal("0"),
         cost_is_complete=True,
         performed_by_user_id=user.id,
         reauth_evidence_id=None,
@@ -498,3 +463,276 @@ async def test_batches_cascade_when_a_kit_is_deleted(kit_fixture):
         await s.execute(select(KitProductionBatch).where(KitProductionBatch.kit_id == kit.id))
     ).scalars().all()
     assert remaining == []
+
+
+# ── Price corrections propagate (RPT-003, client 2026-08-31) ────────────
+
+
+async def _produce(s, kit, line, user, *, batch_no, qty, good, lot):
+    """Record a batch the way ``_produce_batch`` does, at today's prices."""
+    from app.kitting import recompute as kit_recompute
+
+    batch = await kit_repo.create_batch(
+        s,
+        kit_id=kit.id,
+        batch_no=batch_no,
+        output_lot_id=lot.id,
+        good_qty=good,
+        scrap_qty=0,
+        material_cost_amount=None,
+        unit_cost_amount=None,
+        cost_is_complete=True,
+        performed_by_user_id=user.id,
+        reauth_evidence_id=None,
+    )
+    await kit_repo.create_batch_consumption(
+        s,
+        batch_id=batch.id,
+        kit_line_id=line.id,
+        qty=qty,
+        unit_cost_amount=None,
+        extended_value_amount=None,
+        cost_is_complete=True,
+    )
+    # Cost it for the first time by replaying — the same path a correction uses,
+    # so the test proves the replay against a known answer before relying on it.
+    await kit_recompute.recompute_kit(s, kit_id=kit.id)
+    return batch
+
+
+async def test_correcting_an_input_price_restamps_the_produced_lot(kit_fixture):
+    """The client's question, as a test.
+
+    Issue 100 @ $1, make 10 units → the finished lot is stamped $10/unit.
+    Correct the input to $2 and the finished lot must become $20/unit — the
+    whole point of the 2026-08-31 change. Before it, this stayed at $10 while
+    the kit header said $200, and the page disagreed with itself.
+    """
+    from app.kitting import recompute as kit_recompute
+
+    s, kit, line, user, make_lot, issue, _credit = kit_fixture
+    source = await make_lot(Decimal("1"))
+    await issue(source, 100)
+    out = await make_lot(None)
+    await _produce(s, kit, line, user, batch_no=1, qty=100, good=10, lot=out)
+
+    assert out.unit_price_amount == Decimal("10.000000")
+
+    source.unit_price_amount = Decimal("2")
+    await s.flush()
+    result = await kit_recompute.recompute_kits_for_lot(s, lot_id=source.id)
+
+    assert out.unit_price_amount == Decimal("20.000000")
+    assert result.kits_visited == 1
+    assert result.lots_repriced[out.lot_number] == (Decimal("10.000000"), Decimal("20.000000"))
+
+
+async def test_the_batch_breakdown_moves_with_it(kit_fixture):
+    """The per-component rows are recomputed too, not just the lot price.
+
+    If they were left behind, the drill-down would still explain the OLD number
+    while the lot showed the new one — the same self-contradiction on a smaller
+    screen.
+    """
+    from app.kitting import recompute as kit_recompute
+
+    s, kit, line, user, make_lot, issue, _credit = kit_fixture
+    source = await make_lot(Decimal("1"))
+    await issue(source, 100)
+    out = await make_lot(None)
+    batch = await _produce(s, kit, line, user, batch_no=1, qty=100, good=10, lot=out)
+    assert batch.material_cost_amount == Decimal("100")
+
+    source.unit_price_amount = Decimal("3")
+    await s.flush()
+    await kit_recompute.recompute_kits_for_lot(s, lot_id=source.id)
+
+    assert batch.material_cost_amount == Decimal("300")
+    assert batch.consumptions[0].extended_value_amount == Decimal("300")
+    assert batch.consumptions[0].unit_cost_amount == Decimal("3")
+
+
+async def test_a_correction_cascades_into_the_finished_good(kit_fixture):
+    """An AY's price correction must reach the FG built from it.
+
+    This is the case a one-level recompute would miss: the sub-assembly's own
+    lot is re-stamped, and unless the cascade follows it, the finished good goes
+    on carrying a cost derived from a price nothing else believes any more.
+    """
+    from app.kitting import recompute as kit_recompute
+    from app.models.kitting import Kit, KitLine
+
+    s, kit, line, user, make_lot, issue, _credit = kit_fixture
+    # Kit 1: raw material → an AY lot.
+    source = await make_lot(Decimal("1"))
+    await issue(source, 100)
+    ay = await make_lot(None)
+    await _produce(s, kit, line, user, batch_no=1, qty=100, good=10, lot=ay)
+    assert ay.unit_price_amount == Decimal("10.000000")
+
+    # Kit 2 consumes that AY and produces a finished good.
+    kit2 = Kit(
+        kit_number=f"{kit.kit_number}-FG",
+        item_id=kit.item_id,
+        target_qty=5,
+        status="in_production",
+        production_location_node_id=kit.production_location_node_id,
+        created_by_user_id=user.id,
+    )
+    s.add(kit2)
+    await s.flush()
+    line2 = KitLine(
+        kit_id=kit2.id, line_no=1, item_id=line.item_id, qty_per_unit=Decimal("1.000"), issued_qty=0
+    )
+    s.add(line2)
+    await s.flush()
+    s.add(
+        StockMovement(
+            item_id=line.item_id,
+            lot_id=ay.id,
+            movement_type="kit_issue",
+            qty_delta=-10,
+            qty_abs=10,
+            from_location_node_id=kit.production_location_node_id,
+            to_location_node_id=kit.production_location_node_id,
+            kit_id=kit2.id,
+            kit_line_id=line2.id,
+            performed_by_user_id=user.id,
+        )
+    )
+    await s.flush()
+    fg = await make_lot(None)
+    await _produce(s, kit2, line2, user, batch_no=1, qty=10, good=5, lot=fg)
+    # 10 AY units at $10 = $100 over 5 good = $20 each.
+    assert fg.unit_price_amount == Decimal("20.000000")
+
+    # Correct the ORIGINAL raw material. It must reach the FG two hops away.
+    source.unit_price_amount = Decimal("2")
+    await s.flush()
+    result = await kit_recompute.recompute_kits_for_lot(s, lot_id=source.id)
+
+    assert ay.unit_price_amount == Decimal("20.000000")
+    assert fg.unit_price_amount == Decimal("40.000000")
+    assert result.kits_visited == 2
+    assert set(result.lots_repriced) == {ay.lot_number, fg.lot_number}
+
+
+async def test_a_kit_that_never_touched_the_lot_is_left_alone(kit_fixture):
+    """The recompute frontier is charges, not proximity.
+
+    A kit sharing the production floor — or the same item from a different lot —
+    must not be re-costed, or a price correction would ripple across unrelated
+    customers' bills.
+    """
+    from app.kitting import recompute as kit_recompute
+
+    s, kit, line, user, make_lot, issue, _credit = kit_fixture
+    used = await make_lot(Decimal("1"))
+    untouched = await make_lot(Decimal("5"))
+    await issue(used, 100)
+    out = await make_lot(None)
+    await _produce(s, kit, line, user, batch_no=1, qty=100, good=10, lot=out)
+
+    untouched.unit_price_amount = Decimal("50")
+    await s.flush()
+    result = await kit_recompute.recompute_kits_for_lot(s, lot_id=untouched.id)
+
+    assert result.kits_visited == 0
+    assert out.unit_price_amount == Decimal("10.000000")
+
+
+# ── Kit creation actually persists its identity ─────────────────────────
+#
+# These exist because a blunt ``sed`` once deleted ``item_id=item_id`` from
+# ``create_kit`` and ``add_kit_line``, and the whole suite stayed green while
+# no kit could be created at all — the failure only surfaced when a person
+# clicked the button. Every NOT NULL column a repository helper is responsible
+# for is worth one cheap assertion.
+
+
+async def test_create_kit_persists_every_required_column(kit_fixture):
+    """A kit round-trips with its item, target and location intact.
+
+    ``item_id`` is the one that broke: NOT NULL in the database, so losing it
+    is a 500 on the first insert rather than a subtly wrong row.
+    """
+    s, kit, line, user, _make_lot, _issue, _credit = kit_fixture
+    created = await kit_repo.create_kit(
+        s,
+        kit_number=f"{kit.kit_number}-NEW",
+        item_id=kit.item_id,
+        target_qty=7,
+        production_location_node_id=kit.production_location_node_id,
+        notes="round-trip",
+        created_by_user_id=user.id,
+    )
+    await s.flush()
+
+    assert created.item_id == kit.item_id, "item_id must reach the row"
+    assert created.target_qty == 7
+    assert created.production_location_node_id == kit.production_location_node_id
+    assert created.created_by_user_id == user.id
+    assert created.status == "draft"
+
+
+async def test_add_kit_line_persists_its_component(kit_fixture):
+    """The same guard for lines — a line without an item is not a line."""
+    s, kit, line, user, _make_lot, _issue, _credit = kit_fixture
+    # A DISTINCT component: ``uq_kit_lines_kit_item`` allows one line per item
+    # per kit, and the fixture already spent this kit's on ``line``.
+    existing = (await s.execute(select(Item).where(Item.id == line.item_id))).scalar_one()
+    second = Item(
+        prefix_id=existing.prefix_id,
+        sku_suffix=f"X{uuid.uuid4().hex[:8]}",
+        description="second component",
+        created_by_user_id=user.id,
+        updated_by_user_id=user.id,
+    )
+    s.add(second)
+    await s.flush()
+
+    added = await kit_repo.add_kit_line(
+        s,
+        kit_id=kit.id,
+        line_no=2,
+        item_id=second.id,
+        qty_per_unit=Decimal("2.500"),
+        issued_qty=0,
+        source_location_node_id=None,
+    )
+    await s.flush()
+
+    assert added.item_id == second.id, "item_id must reach the row"
+    assert added.kit_id == kit.id
+    assert added.line_no == 2
+    assert added.qty_per_unit == Decimal("2.500")
+
+
+async def test_no_repository_helper_silently_drops_a_parameter():
+    """Catch the *class* of bug, not just the two instances of it.
+
+    A keyword-only parameter that a helper accepts and then never mentions in
+    its body is almost always a line that went missing — which is exactly how
+    ``create_kit`` lost ``item_id`` without a single test noticing.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(kit_repo.__file__).read_text(encoding="utf-8")
+    orphaned: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        params = [a.arg for a in node.args.args + node.args.kwonlyargs]
+        used = {
+            n.id
+            for stmt in node.body
+            for n in ast.walk(stmt)
+            if isinstance(n, ast.Name)
+        }
+        orphaned += [
+            f"{node.name}({p})"
+            for p in params
+            if not p.startswith("_") and p not in used
+        ]
+    assert not orphaned, f"accepted but never used: {orphaned}"

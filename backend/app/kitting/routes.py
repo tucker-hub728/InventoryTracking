@@ -519,9 +519,10 @@ async def _kit_read(db, kit: Kit) -> KitRead:
     batches = await kit_repo.batches_for_kit(db, kit.id)
     batch_lot_numbers = await kit_repo.batch_output_lot_numbers(db, kit.id)
     batch_operators = await kit_repo.batch_operator_names(db, kit.id)
-    # line_id → line_no, so a consumption row can name the component's position
-    # on the kit rather than only its item.
+    # line_id → line_no / item_id, so a consumption row can name the component's
+    # position and identity without storing either alongside it.
     line_nos = {ln.id: ln.line_no for ln in kit.lines}
+    line_items = {ln.id: ln.item_id for ln in kit.lines}
     parent = items.get(kit.item_id)
     return KitRead(
         id=str(kit.id),
@@ -574,7 +575,9 @@ async def _kit_read(db, kit: Kit) -> KitRead:
                 scrap_qty=b.scrap_qty,
                 material_cost_amount=b.material_cost_amount,
                 unit_cost_amount=b.unit_cost_amount,
-                scrap_value_amount=b.scrap_value_amount,
+                scrap_value_amount=costing.scrap_value(
+                    b.material_cost_amount, b.good_qty, b.scrap_qty
+                ),
                 cost_is_complete=b.cost_is_complete,
                 produced_at=b.produced_at,
                 performed_by_name=batch_operators.get(b.id),
@@ -582,13 +585,12 @@ async def _kit_read(db, kit: Kit) -> KitRead:
                     KitBatchConsumptionRead(
                         kit_line_id=str(c.kit_line_id),
                         line_no=line_nos.get(c.kit_line_id),
-                        item_id=str(c.item_id),
-                        item_number=(
-                            items[c.item_id].item_number if c.item_id in items else ""
-                        ),
-                        description=(
-                            items[c.item_id].description if c.item_id in items else ""
-                        ),
+                        # The component comes from the LINE, one hop away and
+                        # already loaded — the consumption row does not repeat
+                        # it. ``line_items`` is built from ``kit.lines`` above.
+                        item_id=str(line_items.get(c.kit_line_id, "")),
+                        item_number=_component_field(c, line_items, items, "item_number"),
+                        description=_component_field(c, line_items, items, "description"),
                         qty=c.qty,
                         unit_cost_amount=c.unit_cost_amount,
                         extended_value_amount=c.extended_value_amount,
@@ -1363,6 +1365,17 @@ async def _produce_batch(
     )
 
 
+def _component_field(consumption, line_items: dict, items: dict, attr: str) -> str:
+    """A consumption row's component name, resolved through its kit line.
+
+    The consumption row stores no item of its own — the line already holds it,
+    and a second copy could only ever agree or be wrong.
+    """
+    item_id = line_items.get(consumption.kit_line_id)
+    item = items.get(item_id) if item_id else None
+    return getattr(item, attr, "") or "" if item else ""
+
+
 async def _attribute_batch_cost(
     db,
     *,
@@ -1424,12 +1437,12 @@ async def _record_batch_costs(
 ) -> None:
     """Persist one batch's cost and its per-component breakdown (RPT-003).
 
-    ``scrap_value_amount`` is stored as ``scrap_qty × unit_cost`` — a **reported
-    slice** of ``material_cost_amount``, not an addition to it. The scrapped
-    units' material was charged at issue and is already inside the total; what
-    charges it to the customer is ``output_unit_cost`` dividing by good units
-    alone. A DB CHECK keeps this value at or below the batch total so no later
-    reader can mistake it for a fourth number to add.
+    **The scrap loss is not stored here.** It is a share of
+    ``material_cost_amount`` — the scrapped units' material was charged at issue
+    and is already inside the total — so it is prorated by
+    ``costing.scrap_value()`` when it is read, not duplicated when it is
+    written. What charges it to the customer is ``output_unit_cost`` dividing by
+    good units alone, which happens above.
     """
     batch = await kit_repo.create_batch(
         db,
@@ -1440,7 +1453,6 @@ async def _record_batch_costs(
         scrap_qty=scrap,
         material_cost_amount=material_cost_amount,
         unit_cost_amount=unit_cost_amount,
-        scrap_value_amount=costing.scrap_value(material_cost_amount, good, scrap),
         cost_is_complete=cost_is_complete,
         performed_by_user_id=current.id,
         reauth_evidence_id=evidence,
@@ -1454,7 +1466,6 @@ async def _record_batch_costs(
             db,
             batch_id=batch.id,
             kit_line_id=line.id,
-            item_id=line.item_id,
             qty=used,
             unit_cost_amount=unit_cost,
             extended_value_amount=extended,

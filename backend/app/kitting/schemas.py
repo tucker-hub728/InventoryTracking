@@ -217,7 +217,9 @@ class KitBatchRead(BaseModel):
 
     A kit may run several (KIT-007), each minting its own lot at its own price —
     which is why cost cannot live on the kit. ``scrap_value_amount`` is a
-    reported *slice* of ``material_cost_amount``, never an addition to it.
+    reported *slice* of ``material_cost_amount``, never an addition to it, and
+    is **computed on read** rather than stored: every input to it is in this
+    same row and frozen with it, so a column bought nothing.
     """
 
     model_config = ConfigDict(from_attributes=True)

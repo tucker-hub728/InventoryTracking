@@ -258,14 +258,16 @@ class KitProductionBatch(Base):
     would smear one batch's cost onto another batch's lot, so cost is attributed
     here, per batch, and stamped onto ``lots.unit_price_amount`` at mint.
 
-    **``scrap_value_amount`` is a slice of ``material_cost_amount``, not an
-    addend to it.** Scrapped material was charged at issue and never credited
-    back, so it is already inside the total; what makes the customer pay for it
-    is dividing by ``good_qty`` alone. The column exists so the loss is visible,
-    and a DB CHECK keeps it ``<= material_cost_amount`` so no later reader can
-    mistake it for an extra charge.
+    **The scrap loss is DERIVED, not stored.** Scrapped material was charged at
+    issue and never credited back, so it is already inside
+    ``material_cost_amount``; what makes the customer pay for it is dividing by
+    ``good_qty`` alone. ``costing.scrap_value()`` prorates it over units
+    *attempted* at read time. It was a column here briefly and did not survive
+    review — every input to it sits in this row and is frozen alongside it, so
+    storing it bought nothing a computation does not, and the CHECK that kept it
+    ``<= material_cost_amount`` is now redundant with the proration itself.
 
-    All three money columns are NULL together when ``cost_is_complete`` is
+    Both money columns are NULL together when ``cost_is_complete`` is
     false — an input lot had no price, and a partial sum would read as a
     complete one (RPT-001's blank-is-never-zero rule, one level up).
     """
@@ -294,15 +296,8 @@ class KitProductionBatch(Base):
         # cells arrive on a 0$ PO); NULL means "not known".
         CheckConstraint(
             "(material_cost_amount IS NULL OR material_cost_amount >= 0) "
-            "AND (unit_cost_amount IS NULL OR unit_cost_amount >= 0) "
-            "AND (scrap_value_amount IS NULL OR scrap_value_amount >= 0)",
+            "AND (unit_cost_amount IS NULL OR unit_cost_amount >= 0)",
             name="ck_kit_production_batches_money_nonneg",
-        ),
-        CheckConstraint(
-            "scrap_value_amount IS NULL "
-            "OR material_cost_amount IS NULL "
-            "OR scrap_value_amount <= material_cost_amount",
-            name="ck_kit_production_batches_scrap_is_slice",
         ),
         CheckConstraint(
             "(output_lot_id IS NULL) = (good_qty = 0)",
@@ -310,9 +305,7 @@ class KitProductionBatch(Base):
         ),
         CheckConstraint(
             "cost_is_complete OR ("
-            "material_cost_amount IS NULL "
-            "AND unit_cost_amount IS NULL "
-            "AND scrap_value_amount IS NULL)",
+            "material_cost_amount IS NULL AND unit_cost_amount IS NULL)",
             name="ck_kit_production_batches_incomplete_is_blank",
         ),
         {"schema": "app"},
@@ -341,7 +334,6 @@ class KitProductionBatch(Base):
     scrap_qty: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     material_cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     unit_cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
-    scrap_value_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     cost_is_complete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
@@ -381,11 +373,17 @@ class KitBatchConsumption(Base):
     The per-component breakdown behind ``KitProductionBatch.material_cost_amount``,
     so a customer's figure can be explained rather than asserted.
 
-    ``unit_cost_amount`` is the line's moving weighted average **frozen at the
-    moment of consumption**. Lot prices stay editable after receive, so
-    re-deriving this later would silently change what a customer was charged.
+    ``unit_cost_amount`` is the line's moving weighted average at the moment
+    this batch consumed it. It is **recomputed** if an input lot's price is
+    later corrected (``kitting/recompute.py``), so it stays the cost of what was
+    actually bought rather than a snapshot of a price since found wrong. It is
+    stored rather than derived because the average is path-dependent — replaying
+    it needs every batch in order — and because ``extended_value_amount`` is
+    computed from the *unrounded* figure, so the two do not recover each other.
 
-    There is deliberately **no source-lot column**: under a moving average a
+    There is deliberately **no item column**: the component is
+    ``kit_line.item_id``, one FK hop away and already loaded wherever this is
+    read. There is deliberately **no source-lot column**: under a moving average a
     batch consumes value from a pool, not identified lots, and naming one here
     would invent a fact. The identified lots live in the ledger, on the
     ``kit_issue`` rows.
@@ -428,13 +426,6 @@ class KitBatchConsumption(Base):
     kit_line_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("app.kit_lines.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    # Denormalised from the line so the export can group by component without
-    # joining back through kit_lines.
-    item_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("app.items.id", ondelete="RESTRICT"),
         nullable=False,
     )
     qty: Mapped[int] = mapped_column(Integer, nullable=False)

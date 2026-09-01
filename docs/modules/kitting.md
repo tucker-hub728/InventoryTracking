@@ -530,20 +530,32 @@ Lots produced **before** `kitcost01` keep a NULL price and are not backfilled �
 
 ### 12.5 Unknown is not zero
 
-If any lot feeding a line has no price, the whole batch is unknown: `material_cost_amount`, `unit_cost_amount` and `scrap_value_amount` are all NULL, `cost_is_complete` is false, and the minted lot is left **unpriced**. A partial sum reads as a complete one, which for a billing artefact is the worst available outcome (RPT-001's blank-is-never-zero rule, one level up).
+If any lot feeding a line has no price, the whole batch is unknown: `material_cost_amount` and `unit_cost_amount` are both NULL, `cost_is_complete` is false, and the minted lot is left **unpriced**. A partial sum reads as a complete one, which for a billing artefact is the worst available outcome (RPT-001's blank-is-never-zero rule, one level up).
 
 **`$0` is a different fact** — a known price, and the correct one for the customer-owned cells that arrive on a $0 PO. It flows through as a real zero and keeps `cost_is_complete` true.
 
 ### 12.6 Tables
 
-- `app.kit_production_batches` — one row per produce/close-out batch: its output lot, good/scrap, the three money columns, `cost_is_complete`.
-- `app.kit_batch_consumptions` — one row per (batch × kit line): qty, the frozen `unit_cost_amount`, `extended_value_amount`.
+- `app.kit_production_batches` — one row per produce/close-out batch: its output lot, good/scrap, `material_cost_amount`, `unit_cost_amount`, `cost_is_complete`.
+- `app.kit_batch_consumptions` — one row per (batch × kit line): qty, `unit_cost_amount`, `extended_value_amount`.
 
 **No new movement type**, no column on `app.lots` or `app.kit_lines`, and no source-lot column on the consumption rows (under a moving average a batch consumes value from a pool, not identified lots — identified lots live in the ledger on the `kit_issue` rows).
 
-### 12.7 Two live figures, deliberately
+**Nothing derivable is stored.** A schema review on 2026-08-31 removed two columns that could be computed from their own row: `scrap_value_amount` (now prorated on read) and `kit_batch_consumptions.item_id` (the component is `kit_line.item_id`, one hop away). What survives is stored either because the derivation is *lossy* — `unit_cost_amount` is rounded to 6dp while `material_cost_amount` is exact, so neither recovers the other — or because it is path-dependent, like the moving average.
 
-`KitRead.material_cost_amount` is **live** (it re-reads lot prices, which stay editable after receive). The per-batch figures are **frozen** at produce time. A divergence is correct, not a bug: a shipped lot's cost must not move because someone corrected a price months later. Both are published so the difference is a subtraction the reader can perform.
+### 12.7 A price correction follows the material
+
+> "when i update the price from the edit lot will it effect the price of the AY/FG which is already produce … it should be" — client, 2026-08-31
+
+It does now. Editing `lots.unit_price_amount` re-costs every kit **charged** that lot, re-stamps the lots those kits produced, and follows those lots into any kit that consumed *them* — see `app/kitting/recompute.py`. One price, everywhere, always current.
+
+It is a **replay, not a multiply**: the moving average is path-dependent, so each batch is re-run in order with charges and credits taken as of its own timestamp. Every input still exists — the movements carry current prices, each batch's per-line `qty` and `good_qty` are stored — so the result is deterministic.
+
+Before this, `KitRead.material_cost_amount` re-read prices while the per-batch figures did not, so the kit page could disagree with the table directly beneath it. That inconsistency is gone.
+
+**The accepted consequence:** a lot that has already shipped can change price. A figure cannot be both live and immutable, and the client chose live. Every recompute therefore writes its scope — kits touched, batches updated, and each lot's old and new price — into the `context` of the lot-edit audit row, under `recosted`.
+
+The frontier is **charges only**. A kit that merely handed the lot back never took its cost, so nothing it produced moves.
 
 ### 12.8 Known adjacent defect
 

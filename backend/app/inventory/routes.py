@@ -61,6 +61,7 @@ from app.inventory.schemas import (
     SupplierRead,
     SupplierUpdate,
 )
+from app.kitting import recompute as kit_recompute
 from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import ItemStockLocationCell, ItemStockLocationRead
@@ -1363,6 +1364,19 @@ async def update_lot(
         raise
     after = inv_repo.lot_to_audit_snapshot(updated)
 
+    # RPT-003 — a price correction follows the material. Every kit that was
+    # charged this lot is re-costed and the lots it produced are re-stamped,
+    # cascading into any kit that consumed *those*. Without this the edit
+    # changed one row and left every finished good built from it carrying a
+    # price the system itself no longer believed (client, 2026-08-31).
+    #
+    # Only on a real change: PATCHing a lot's notes must not re-cost a kit.
+    recost = None
+    if "unit_price_amount" in patch and before.get("unit_price_amount") != after.get(
+        "unit_price_amount"
+    ):
+        recost = await kit_recompute.recompute_kits_for_lot(db, lot_id=updated.id)
+
     # A qty correction re-syncs the Order line's received total (the lot maps
     # one-to-one to a receive-event draw) and re-derives the Order status
     # (e.g. dropping below ordered flips received → partially_received).
@@ -1426,7 +1440,28 @@ async def update_lot(
         subject_label=updated.lot_number,
         before=before,
         after=after,
-        context={"reason": reason},
+        context={
+            "reason": reason,
+            # RPT-003 — what the price correction moved downstream. A finished
+            # lot's cost changing is exactly the kind of thing an inspector
+            # asks about, so it is recorded on the edit that caused it rather
+            # than left to be inferred from two timestamps.
+            **(
+                {
+                    "recosted": {
+                        "requirement": "RPT-003",
+                        "kits": recost.kits_visited,
+                        "batches": recost.batches_updated,
+                        "lots_repriced": {
+                            lot_no: [str(old), str(new)]
+                            for lot_no, (old, new) in recost.lots_repriced.items()
+                        },
+                    }
+                }
+                if recost is not None and recost.changed
+                else {}
+            ),
+        },
         signature_id=evidence_uuid,
     )
 

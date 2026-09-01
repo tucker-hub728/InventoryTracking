@@ -42,10 +42,13 @@ the pool. What makes the customer pay for it is the **divisor** —
 ``material_cost_amount / good_qty``, good units only. Dividing by
 ``good_qty + scrap_qty`` would be CellReady absorbing the loss.
 
-``scrap_value_amount`` therefore reports a *portion* of ``material_cost_amount``
-(``scrap_qty × unit_cost_amount``), so the loss is visible on screen and in the
-export. The CHECK ``scrap_value_amount <= material_cost_amount`` is what stops a
-future reader from treating it as a fourth number to add.
+The loss is still reported — as ``material_cost × scrap_qty / (good_qty +
+scrap_qty)`` — but it is **derived at read time**, not stored. It was a column
+here briefly and did not survive review: every input to it sits in the same row
+and is frozen alongside it, so storing it bought nothing a computation does not.
+What stops a future reader treating it as a fourth number to add is now
+``costing.scrap_value()`` being a proration, which cannot exceed the total by
+construction, plus ``test_scrap_value_never_exceeds_the_batch_cost``.
 
 Note this only covers **process** scrap (failed output units, ``kits.scrap_qty``).
 There is no material-scrap column anywhere in the schema — spilled material is
@@ -129,10 +132,7 @@ def upgrade() -> None:
         # material_cost_amount / good_qty — what one finished unit cost, and
         # what gets stamped onto lots.unit_price_amount.
         sa.Column("unit_cost_amount", sa.Numeric(14, 6), nullable=True),
-        # scrap_qty x unit_cost_amount. A REPORTED SLICE of
-        # material_cost_amount, never an addend to it. See the module docstring.
-        sa.Column("scrap_value_amount", sa.Numeric(18, 6), nullable=True),
-        # False when any input lot feeding this batch had no price. The three
+        # False when any input lot feeding this batch had no price. Both
         # money columns are then NULL — never a partial sum, which would read
         # as a complete one (RPT-001's blank-is-not-zero rule, one level up).
         sa.Column(
@@ -198,17 +198,8 @@ def upgrade() -> None:
         # customer-owned cells arrive on a 0$ PO) and NULL means "not known".
         sa.CheckConstraint(
             "(material_cost_amount IS NULL OR material_cost_amount >= 0) "
-            "AND (unit_cost_amount IS NULL OR unit_cost_amount >= 0) "
-            "AND (scrap_value_amount IS NULL OR scrap_value_amount >= 0)",
+            "AND (unit_cost_amount IS NULL OR unit_cost_amount >= 0)",
             name="ck_kit_production_batches_money_nonneg",
-        ),
-        # Scrap value is a PORTION of the batch's material cost, not an extra
-        # charge on top of it. This constraint is the encoding of that rule.
-        sa.CheckConstraint(
-            "scrap_value_amount IS NULL "
-            "OR material_cost_amount IS NULL "
-            "OR scrap_value_amount <= material_cost_amount",
-            name="ck_kit_production_batches_scrap_is_slice",
         ),
         # A batch mints a lot exactly when it made something.
         sa.CheckConstraint(
@@ -218,9 +209,7 @@ def upgrade() -> None:
         # An incomplete cost carries no numbers at all.
         sa.CheckConstraint(
             "cost_is_complete OR ("
-            "material_cost_amount IS NULL "
-            "AND unit_cost_amount IS NULL "
-            "AND scrap_value_amount IS NULL)",
+            "material_cost_amount IS NULL AND unit_cost_amount IS NULL)",
             name="ck_kit_production_batches_incomplete_is_blank",
         ),
         schema="app",
@@ -260,13 +249,11 @@ def upgrade() -> None:
         ),
         sa.Column("batch_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("kit_line_id", postgresql.UUID(as_uuid=True), nullable=False),
-        # Denormalised from the line so the export can group by component
-        # without joining back through kit_lines.
-        sa.Column("item_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("qty", sa.Integer(), nullable=False),
-        # The line's moving weighted average AT THIS INSTANT, frozen. Lot prices
-        # are editable after receive, so re-deriving this later would silently
-        # change what a customer was charged.
+        # The line's moving weighted average at the moment this batch consumed
+        # it. **Recomputed** if an input lot's price is later corrected — see
+        # ``kitting/recompute.py`` — so it stays the cost of what was actually
+        # bought rather than a snapshot of a price since found wrong.
         sa.Column("unit_cost_amount", sa.Numeric(14, 6), nullable=True),
         sa.Column("extended_value_amount", sa.Numeric(18, 6), nullable=True),
         sa.Column(
@@ -293,12 +280,6 @@ def upgrade() -> None:
             ["app.kit_lines.id"],
             name="fk_kit_batch_consumptions_line",
             ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["item_id"],
-            ["app.items.id"],
-            name="fk_kit_batch_consumptions_item",
-            ondelete="RESTRICT",
         ),
         # A consumption row records material actually consumed. Zero is not an
         # event; the row simply is not written.
