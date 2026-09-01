@@ -131,27 +131,6 @@ export const FLAT_CATEGORIES: [FlatCategory, ...FlatCategory[]] = [
 ];
 
 /**
- * The liquid-nitrogen levels — the display-side mirror of the backend's
- * ``LN2_LEVELS`` (REQ-2026-08-13-LOC-003).
- *
- * Only ``box`` can hold stock today, so as a SOURCE test the other three are
- * inert. They are listed anyway because REQ-2026-07-22-LOC-004's configurable
- * cascade is meant to add levels back, and a `=== 'box'` spelling would then
- * silently stop guarding them.
- *
- * This is NOT the rule. The server refuses a transfer out of LN2 to anywhere
- * but another box regardless (``transfer_blocked_cold_chain``); reading this on
- * the client only spares the operator signing for something already doomed —
- * the signature is collected before the request goes out.
- */
-export const LN2_NODE_TYPES: ReadonlySet<string> = new Set([
-  'tank',
-  'tank_quadrant',
-  'rack',
-  'box',
-]);
-
-/**
  * Allowed child types for each level. Every level now has a single child type;
  * an empty array = leaf (the Box stores units in its grid cells). Cassette and
  * Cryo Box Rack are retired, so a Rack holds Boxes directly.

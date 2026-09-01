@@ -66,7 +66,6 @@ import {
   parentTypesOf,
   subtreeStats,
   CHILD_TYPES_OF,
-  LN2_NODE_TYPES,
   MAX_GRID_DIM,
   NODE_TYPE_LABEL,
   type Allocation,
@@ -77,7 +76,6 @@ import {
   type NodeType,
 } from '@/lib/api/location-nodes';
 import {
-  selectIsAdminOrAbove,
   selectIsSuperAdmin,
   useAuthStore,
 } from '@/stores/auth.store';
@@ -90,10 +88,6 @@ import {
 import { CellGridPicker } from '@/components/reconciliation/cell-grid-picker';
 import type { CellOption } from '@/lib/api/kits';
 import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
-import {
-  ReleaseStateDialog,
-  type ReleaseLotChoice,
-} from '@/components/inventory/release-state-dialog';
 
 import { BoxGrid, rowLabel } from './box-grid';
 
@@ -201,21 +195,6 @@ export function NodeDetailPanel({
   const childType = CHILD_TYPES_OF[node.node_type];
 
   const [allocations, setAllocations] = React.useState<Allocation[]>([]);
-  /** The release-tracked batches sitting in this node, one entry per LOT even
-   *  when it occupies twenty cells — a release decision is about the batch. */
-  const releaseCandidates = React.useMemo<ReleaseLotChoice[]>(() => {
-    const byLot = new Map<string, ReleaseLotChoice>();
-    for (const a of allocations) {
-      if (!a.is_active || !a.release_state || byLot.has(a.lot_id)) continue;
-      byLot.set(a.lot_id, {
-        id: a.lot_id,
-        lot_number: a.lot_number ?? a.lot_id.slice(0, 8),
-        release_state: a.release_state,
-        hint: a.item_number ?? undefined,
-      });
-    }
-    return [...byLot.values()];
-  }, [allocations]);
   const [lots, setLots] = React.useState<Lot[]>([]);
   const [targets, setTargets] = React.useState<LocationNode[]>([]);
   // Full area trees for the transfer-destination picker and Relocate.
@@ -234,11 +213,6 @@ export function NodeDetailPanel({
   const [batchLotId, setBatchLotId] = React.useState<string | null>(null);
   // The allocation whose full details are shown in the side sheet.
   const [detailAlloc, setDetailAlloc] = React.useState<Allocation | null>(null);
-  /** Set when a specific batch was named (a row action); null when the header
-   *  button opened the dialog and the operator still has to choose. Held as a
-   *  lot rather than an allocation because the state belongs to the batch. */
-  const [releaseLot, setReleaseLot] = React.useState<ReleaseLotChoice | null>(null);
-  const [releaseOpen, setReleaseOpen] = React.useState(false);
   const [placeLot, setPlaceLot] = React.useState('');
   const [placeAvail, setPlaceAvail] = React.useState<LotAvailability | null>(null);
   const [placeQty, setPlaceQty] = React.useState(isBox ? '1' : '');
@@ -247,7 +221,6 @@ export function NodeDetailPanel({
   const [showMove, setShowMove] = React.useState(false);
   // Relocating a node is super-admin-only (LOC-004, enforced by the API).
   const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
-  const isAdminOrAbove = useAuthStore(selectIsAdminOrAbove);
   // Can this node type be re-hung AT ALL? A root cannot — a tank is the top of
   // its cascade (LOC-001) with nothing above it, so ``PARENT_OF`` has no entry
   // and the API returns ``node_not_movable``.
@@ -694,20 +667,11 @@ export function NodeDetailPanel({
             </>
           )}
 
-          {/* No Quality status control in this header (client 2026-08-19).
-
-              This page is the LN2 hierarchy — a tank, its quadrants, racks and
-              boxes — and a header button here would have to open by asking
-              "which batch?" about everything stored anywhere below the node you
-              happen to be looking at. On a tank that is hundreds of vials across
-              dozens of boxes: a question the page has not put you in a position
-              to answer.
-
-              Nothing is lost. Every lot row in a box carries its own Change
-              action (see ``canSetReleaseState`` below), where the batch is
-              already named and its current status is on screen beside it — and
-              the item page keeps its header control, where "which batch" is a
-              short list. */}
+          {/* No Quality status anywhere on this page (client 2026-08-19 for the
+              header, 2026-09-01 for the allocation sheet): the LN2 hierarchy
+              shows WHERE a batch sits, and a release decision is made from the
+              item page, where "which batch" is a short list. The badge on each
+              contents row still REPORTS the state — only the control is gone. */}
         </div>
       </div>
 
@@ -1058,43 +1022,6 @@ export function NodeDetailPanel({
         allocation={detailAlloc}
         locationName={node.name}
         onClose={() => setDetailAlloc(null)}
-        // Admin-only, mirroring the backend's ``_require_admin``: releasing a
-        // batch is a release decision, and an operator holding ``inventory:sign``
-        // must not be able to sign off their own production (STS-002).
-        canSetReleaseState={isAdminOrAbove}
-        onSetReleaseState={(a) => {
-          setDetailAlloc(null);
-          setReleaseLot({
-            id: a.lot_id,
-            lot_number: a.lot_number ?? a.lot_id.slice(0, 8),
-            release_state: a.release_state,
-          });
-          setReleaseOpen(true);
-        }}
-      />
-
-      <ReleaseStateDialog
-        open={releaseOpen}
-        onOpenChange={(o) => {
-          if (!o) {
-            setReleaseOpen(false);
-            setReleaseLot(null);
-          }
-        }}
-        // From the header: every release-tracked batch in this box, so the
-        // operator picks. From a row: the one they already named.
-        lots={releaseLot ? [releaseLot] : releaseCandidates}
-        scopeLabel={node.name}
-        onDone={() => {
-          setReleaseOpen(false);
-          setReleaseLot(null);
-          // ``reload()``, not ``onChanged()``: the badge in Contents and the
-          // unit map is read off each ALLOCATION, and only this refetches them.
-          // ``onChanged`` refreshes the hierarchy in the sidebar, whose counts a
-          // release decision never moves — so it left the list showing the old
-          // state (client 2026-08-17).
-          void reload();
-        }}
       />
 
       <EditDialog
@@ -1339,15 +1266,10 @@ function AllocationDetailSheet({
   allocation,
   locationName,
   onClose,
-  canSetReleaseState = false,
-  onSetReleaseState,
 }: {
   allocation: Allocation | null;
   locationName: string;
   onClose: () => void;
-  /** Admin / super-admin only — mirrors the backend guard (STS-002). */
-  canSetReleaseState?: boolean;
-  onSetReleaseState?: (allocation: Allocation) => void;
 }) {
   const [lot, setLot] = React.useState<Lot | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -1429,28 +1351,6 @@ function AllocationDetailSheet({
                         are only telling you apart if each says WHICH status it
                         is. This one is procurement — on order, available. */}
                     <DetailRow label="Stock status" value={lot.status} />
-                    {/* Only for batches that carry one. A consumable lot has no
-                        release workflow and gets no row at all, rather than an
-                        empty one inviting the question. */}
-                    {lot.release_state && (
-                      <DetailRow
-                        label="Quality status"
-                        value={
-                          <span className="flex flex-wrap items-center gap-2">
-                            <ReleaseStateBadge state={lot.release_state} />
-                            {canSetReleaseState && (
-                              <Button
-                                size="sm"
-                                onClick={() => onSetReleaseState?.(allocation)}
-                                aria-label="Change this lot's quality status"
-                              >
-                                <ShieldCheck size={13} /> Change
-                              </Button>
-                            )}
-                          </span>
-                        }
-                      />
-                    )}
                     <DetailRow label="Supplier" value={lot.supplier_name ?? '—'} />
                     <DetailRow label="PO reference" value={lot.po_reference ?? '—'} />
                     <DetailRow
@@ -1691,9 +1591,6 @@ function AllocationActions({
             {trees ? (
               <LocationLeafPicker
                 trees={trees}
-                // LOC-003: out of LN2, only another LN2 box is a legal
-                // destination — don't offer what the server will refuse.
-                ln2Source={LN2_NODE_TYPES.has(allocation.location_node_type ?? '')}
                 onChange={(leaf) => {
                   setDestNode(leaf);
                   setDestCells(new Set());
@@ -1866,9 +1763,6 @@ function BatchOutPanel({
                 {trees ? (
                   <LocationLeafPicker
                     trees={trees}
-                    // LOC-003. A batch is one lot at ONE node, so any selected
-                    // allocation answers "is the source in LN2?".
-                    ln2Source={LN2_NODE_TYPES.has(selected[0]?.location_node_type ?? '')}
                     onChange={(leaf) => {
                       setDestNode(leaf);
                       setDestCells(new Set());
