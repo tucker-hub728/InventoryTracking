@@ -94,6 +94,10 @@ export interface ApiItem {
   is_consumable: boolean;
   /** Consumed to the kit, never back-flushed (KIT-003) when true. */
   consumed_in_kit: boolean;
+  /** Grown or expressed rather than assembled (client 2026-09-01). A kit for
+   *  this item is not held to the recipe: the amount made is measured, not
+   *  derived, so the same material may yield 200 one run and 350 the next. */
+  variable_yield: boolean;
   /** Tier (REQ-2026-07-15-ITM-001). ``tier_type`` drives the Type column:
    *  sub_assembly / finished_good may have a BOM; raw_material is bought as-is. */
   tier_id: string;
@@ -200,6 +204,9 @@ export interface ItemCreateInput {
   /** The media twin: consumed to the kit and never back-flushed (KIT-003).
    *  Mutually exclusive with `is_consumable` — the server 422s on both. */
   consumed_in_kit?: boolean;
+  /** Grown/expressed: kits for this item drop the recipe yield constraint.
+   *  Mutually exclusive with `is_consumable` — the server 422s on both. */
+  variable_yield?: boolean;
   /** Assigned suppliers (zero-or-more). The only suppliers the item can later
    *  be received against. */
   supplier_ids?: string[];
@@ -218,6 +225,7 @@ export interface ItemUpdateInput {
   uom?: string | null;
   is_consumable?: boolean;
   consumed_in_kit?: boolean;
+  variable_yield?: boolean;
   /** Re-assign the item to another prefix (its tier is derived). Blocked
    *  server-side if moving a BOM-bearing item to a raw-material prefix. */
   prefix_id?: string;

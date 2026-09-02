@@ -208,6 +208,10 @@ class ItemCreate(BaseModel):
     # back-flushed. Mutually exclusive with ``is_consumable`` — enforced in the
     # route and by a DB CHECK.
     consumed_in_kit: bool = False
+    # Grown or expressed, not assembled (client 2026-09-01). Set on the AY/FG a
+    # kit BUILDS — the recipe stops being a floor on how much a batch may yield.
+    # Mutually exclusive with ``is_consumable``, same reason as above.
+    variable_yield: bool = False
     # No lot-control flag (REQ-003): every item may be received without a lot
     # number, so there is nothing per-item to decide.
     supplier_ids: list[str] = Field(default_factory=list, max_length=100)
@@ -244,6 +248,7 @@ class ItemUpdate(BaseModel):
     # Order line or corrected at receive, never on the item.
     is_consumable: bool | None = None
     consumed_in_kit: bool | None = None
+    variable_yield: bool | None = None
     # Re-assign an item to another prefix. The prefix's tier (derived server-side)
     # still governs BOM eligibility — the route blocks moving a BOM-bearing item
     # to a raw-material prefix, and a stocked item to a built prefix.
@@ -280,6 +285,8 @@ class ItemRead(BaseModel):
     is_consumable: bool = False
     # Consumed to the kit, never back-flushed (KIT-003) when true.
     consumed_in_kit: bool = False
+    # Grown/expressed: a kit for this item is not held to the recipe's yield.
+    variable_yield: bool = False
     # Tier (requirements v2 §6). ``tier_type`` drives the UI "Type"
     # column: sub_assembly/finished_good may have a BOM; raw_material is bought as-is.
     tier_id: str

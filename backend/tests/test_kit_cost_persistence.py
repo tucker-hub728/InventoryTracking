@@ -666,6 +666,7 @@ async def test_create_kit_persists_every_required_column(kit_fixture):
         target_qty=7,
         production_location_node_id=kit.production_location_node_id,
         notes="round-trip",
+        variable_yield=True,
         created_by_user_id=user.id,
     )
     await s.flush()
@@ -675,6 +676,10 @@ async def test_create_kit_persists_every_required_column(kit_fixture):
     assert created.production_location_node_id == kit.production_location_node_id
     assert created.created_by_user_id == user.id
     assert created.status == "draft"
+    # varyield01: a snapshot dropped on the way in would silently hold every kit
+    # for a grown item to the recipe again — the exact defect YLD-001 removed,
+    # and invisible until someone tried to record a good run.
+    assert created.variable_yield is True
 
 
 async def test_add_kit_line_persists_its_component(kit_fixture):

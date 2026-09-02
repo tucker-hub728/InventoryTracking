@@ -1,6 +1,6 @@
 'use client';
 
-import { FlaskConical, Recycle } from 'lucide-react';
+import { FlaskConical, Recycle, Sprout } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -26,6 +26,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
  *
  * The two are mutually exclusive, enforced by
  * `ck_items_consumable_xor_consumed_in_kit`.
+ *
+ * `VariableYieldBadge` lives here too, though it is a different kind of fact —
+ * about how an item is MADE rather than how it is consumed — because the reason
+ * for a shared module is the same: it appears on the item list, the item header
+ * and the kit screens, and those must not word it three ways.
  */
 
 /** The consumable classification. Only meaningful on raw materials — a built
@@ -68,6 +73,30 @@ export function ConsumedInKitBadge({ consumedInKit }: { consumedInKit: boolean }
       </TooltipTrigger>
       <TooltipContent className="max-w-xs">
         Never returned to stock — the leftover is discarded at close.
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * Grown or expressed rather than assembled (client 2026-09-01). Renders nothing
+ * unless the flag is set, like the badge above.
+ *
+ * Only meaningful on a built tier — it describes what a kit for this item is
+ * allowed to yield — but the flag can only be set there in the first place, so
+ * callers need no extra condition.
+ */
+export function VariableYieldBadge({ variableYield }: { variableYield: boolean }) {
+  if (!variableYield) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge tone="accent">
+          <Sprout size={11} aria-hidden /> Variable yield
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        Grown, not assembled — the recipe doesn&apos;t limit how much a batch can make.
       </TooltipContent>
     </Tooltip>
   );

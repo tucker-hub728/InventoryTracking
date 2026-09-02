@@ -221,6 +221,26 @@ def _reject_consumable_and_consumed_in_kit(
         )
 
 
+def _reject_consumable_and_variable_yield(
+    *, is_consumable: bool, variable_yield: bool
+) -> None:
+    """Same shape as the pair above, and the same reason (varyield01).
+
+    ``variable_yield`` says the recipe does not predict this item's output, which
+    only ever means anything for the AY/FG a kit BUILDS. A consumable can never
+    be that: consumables are barred from bills of material, and a kit is built
+    from one. The DB CHECK ``ck_items_consumable_xor_variable_yield`` is the
+    backstop; this is the sentence the operator reads.
+    """
+    if is_consumable and variable_yield:
+        raise ValidationError(
+            "An item can't be both a consumable and variable-yield. Variable "
+            "yield describes something a kit builds, and a consumable is never "
+            "built — it's bought and consumed.",
+            code="consumable_and_variable_yield",
+        )
+
+
 def _item_to_read(
     item: Item,
     valuation: tuple[Decimal, Decimal, Decimal] | None = None,
@@ -255,6 +275,7 @@ def _item_to_read(
         uom=item.uom,
         is_consumable=item.is_consumable,
         consumed_in_kit=item.consumed_in_kit,
+        variable_yield=item.variable_yield,
         tier_id=str(item.tier_id),
         tier_name=tier.name if tier else "",
         tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
@@ -750,6 +771,10 @@ async def create_item(
         is_consumable=payload.is_consumable,
         consumed_in_kit=payload.consumed_in_kit,
     )
+    _reject_consumable_and_variable_yield(
+        is_consumable=payload.is_consumable,
+        variable_yield=payload.variable_yield,
+    )
 
     try:
         item = await inv_repo.create_item(
@@ -761,6 +786,7 @@ async def create_item(
             uom=payload.uom,
             is_consumable=payload.is_consumable,
             consumed_in_kit=payload.consumed_in_kit,
+            variable_yield=payload.variable_yield,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
@@ -867,6 +893,10 @@ async def update_item(
     _reject_consumable_and_consumed_in_kit(
         is_consumable=bool(patch.get("is_consumable", item.is_consumable)),
         consumed_in_kit=bool(patch.get("consumed_in_kit", item.consumed_in_kit)),
+    )
+    _reject_consumable_and_variable_yield(
+        is_consumable=bool(patch.get("is_consumable", item.is_consumable)),
+        variable_yield=bool(patch.get("variable_yield", item.variable_yield)),
     )
 
     if not patch and supplier_uuids is None:

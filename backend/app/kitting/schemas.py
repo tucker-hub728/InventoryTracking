@@ -248,6 +248,12 @@ class KitRead(BaseModel):
     output_location_node_id: str | None = None
     good_qty: int | None = None
     scrap_qty: int | None = None
+    #: Snapshotted from the built item at creation (varyield01). When true this
+    #: kit's output is measured rather than derived, so the recipe is not a floor
+    #: on how much a batch may produce. From the KIT, never the item — see
+    #: ``Kit.variable_yield``. The UI reads it to relax the same gate client-side
+    #: and to show a non-blocking variance note instead.
+    variable_yield: bool = False
     notes: str | None = None
     issued_at: datetime | None = None
     closed_at: datetime | None = None

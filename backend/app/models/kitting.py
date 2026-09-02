@@ -117,6 +117,22 @@ class Kit(Base):
     )
     good_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scrap_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # SNAPSHOT of ``items.variable_yield`` for the item above, taken at creation
+    # (varyield01), exactly as ``kit_lines.consumed_in_kit`` snapshots a
+    # component's flag and ``qty_per_unit`` snapshots the BOM's. When true,
+    # ``_produce_batch`` drops the ``used_below_need`` gate: the output of a
+    # grown or expressed item is measured, not derived from the recipe.
+    #
+    # It must be a snapshot rather than a live read of the item. Someone editing
+    # the item months later would otherwise retroactively legalise batches this
+    # kit refused, or invalidate batches it signed — changing the meaning of a
+    # closed record without changing a single quantity. Every read path takes
+    # the KIT's value, never the item's.
+    variable_yield: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

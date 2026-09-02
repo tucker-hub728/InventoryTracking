@@ -14,7 +14,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { StockStatusBadge } from '@/components/shared/stock-status-badge';
-import { ConsumedInKitBadge } from './item-kind-badges';
+import { ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
 import { STICKY_CELL, STICKY_HEAD } from '@/components/ui/sticky-column';
@@ -164,6 +164,7 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                     {item.desc}
                   </Link>
                   <ConsumedInKitBadge consumedInKit={item.consumedInKit} />
+                  <VariableYieldBadge variableYield={item.variableYield} />
                 </span>
               </TableCell>
               <TableCell className="truncate" title={item.tierName}>

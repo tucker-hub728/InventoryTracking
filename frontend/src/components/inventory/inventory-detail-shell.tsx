@@ -44,7 +44,7 @@ import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
-import { ConsumableBadge, ConsumedInKitBadge } from './item-kind-badges';
+import { ConsumableBadge, ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 const TIER_CFGS = [RAW_MATERIAL_TIER, SUB_ASSEMBLY_TIER, FINISHED_GOOD_TIER];
@@ -471,6 +471,7 @@ export function InventoryDetailShell({
               </>
             )}
             <ConsumedInKitBadge consumedInKit={item.consumedInKit} />
+            <VariableYieldBadge variableYield={item.variableYield} />
             {!built && (
               <>
                 <span aria-hidden>·</span>

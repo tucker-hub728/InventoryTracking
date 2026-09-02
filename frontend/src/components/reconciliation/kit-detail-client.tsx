@@ -519,7 +519,11 @@ export function KitDetailClient({
   // can't make N units with less than N units' worth — and no more than what's
   // on the floor. Leftover (= floor − used) back-flushes at close.
   const batchAttempt = (output.good_qty ?? 0) + (output.scrap_qty ?? 0);
-  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * batchAttempt);
+  // Mirrors the server: an ordinary kit scales the recipe by the batch, a
+  // variable-yield kit takes one unit's worth however much it yields. A batch
+  // producing nothing needs nothing, so a good=0 close still passes.
+  const recipeUnits = batchAttempt === 0 ? 0 : kit.variable_yield ? 1 : batchAttempt;
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * recipeUnits);
   const lineLeft = (l: ApiKitLine) => l.on_floor_qty - (used[l.id] ?? 0);
   // A media line's leftover is CONSUMED at sign-out, never handed back
   // (REQ-2026-07-31-KIT-003), so it needs no return destination — everywhere
@@ -527,6 +531,8 @@ export function KitDetailClient({
   // gates. This is the only thing that differs.
   const backFlushes = (l: ApiKitLine) => !l.consumed_in_kit && lineLeft(l) > 0;
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
+  // `lineNeed` already carries the variable-yield rule, so this gate stays on
+  // for every kit — it is what stops a batch being produced from no material.
   const usedBelowNeed = kit.lines.some(
     (l) => used[l.id] != null && (used[l.id] as number) < lineNeed(l),
   );
@@ -705,11 +711,16 @@ export function KitDetailClient({
   const enterCloseOut = () => {
     if (kit.status === 'issued' || kit.status === 'in_production') {
       const attempted = (output.good_qty ?? kit.target_qty) + (output.scrap_qty ?? 0);
+      // Nothing being made consumes nothing. A variable-yield kit otherwise
+      // pre-fills one run's worth, not the target's: seeding it off a planned
+      // quantity would put a number on the form that the recipe never claimed
+      // and the reactor never took.
+      const units = attempted === 0 ? 0 : kit.variable_yield ? 1 : attempted;
       setUsed((prev) => {
         const next = { ...prev };
         for (const l of kit.lines) {
           if (next[l.id] == null) {
-            next[l.id] = Math.ceil(Number(l.qty_per_unit) * attempted);
+            next[l.id] = Math.ceil(Number(l.qty_per_unit) * units);
           }
         }
         return next;
@@ -1975,15 +1986,32 @@ function CloseOutStep({
   // recipe minimum ceil(qty_per_unit × (good+scrap)). Used must be ≥ Needed and
   // ≤ on-floor; the leftover (floor − used) back-flushes at close.
   const attempted = (goodQty ?? 0) + (scrapQty ?? 0);
-  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * attempted);
+  // See the parent: an ordinary kit scales the recipe by the batch; a
+  // variable-yield kit takes one unit's worth however much it yields, because
+  // the output must not drive the input but nothing is made from nothing.
+  const recipeUnits = attempted === 0 ? 0 : kit.variable_yield ? 1 : attempted;
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * recipeUnits);
   // Changing good/scrap re-syncs each line's Used to the recipe need, so the
   // Used column tracks the target (client 2026-07-23). The operator can still
   // override a line afterwards.
   const setBatch = (next: OutputDraft) => {
     onOutputChange(next);
     const att = (next.good_qty ?? 0) + (next.scrap_qty ?? 0);
+    // The same `recipeUnits` rule the gate and the Min / run column use, so the
+    // number that lands in Used is exactly the minimum shown beside it:
+    //
+    //   nothing made        → 0. A batch making nothing consumes nothing, and
+    //                         this clears even a typed figure — closing with
+    //                         good 0 means "back-flush the rest", so material
+    //                         left here would be destroyed rather than returned.
+    //   variable-yield kit  → one run's worth. It does NOT scale with the
+    //                         quantity made (that coupling is what YLD-001
+    //                         removed), so it stays a small, stable seed the
+    //                         operator adjusts to what the run actually took.
+    //   ordinary kit        → the recipe scaled by the batch, unchanged.
+    const units = att === 0 ? 0 : kit.variable_yield ? 1 : att;
     for (const l of kit.lines) {
-      onUsed(l.id, Math.ceil(Number(l.qty_per_unit) * att));
+      onUsed(l.id, Math.ceil(Number(l.qty_per_unit) * units));
     }
   };
   const usedOf = (l: ApiKitLine) => (editable ? used[l.id] : l.used_qty);
@@ -1991,7 +2019,7 @@ function CloseOutStep({
     editable &&
     kit.lines.some((l) => {
       const u = used[l.id];
-      return u == null || u < lineNeed(l) || u > l.on_floor_qty;
+      return u == null || u > l.on_floor_qty || u < lineNeed(l);
     });
   const consumeTotal = kit.lines.reduce((a, l) => a + (usedOf(l) ?? 0), 0);
   const leftTotal = kit.lines.reduce(
@@ -2200,10 +2228,25 @@ function CloseOutStep({
           <div className="mb-3">
             <h2 className="text-sm font-medium text-text">Material this batch consumes</h2>
             <p className="mt-0.5 text-xs text-text-3">
-              Enter how much of each component you used. It must be at least the recipe{' '}
-              <span className="text-text-2">Needs</span> — making {attempted} unit
-              {attempted === 1 ? '' : 's'} takes at least that much — and no more than what&apos;s on
-              the floor. The leftover back-flushes when you <span className="text-text-2">close</span>.
+              {kit.variable_yield ? (
+                <>
+                  Enter how much of each component you used. This item is{' '}
+                  <span className="text-text-2">grown</span>, so how much comes out
+                  doesn&apos;t change what goes in —{' '}
+                  <span className="text-text-2">Min / run</span> is what a single run
+                  takes whether it yields a little or a lot, and it stays the minimum. No
+                  more than what&apos;s on the floor. The leftover back-flushes when you{' '}
+                  <span className="text-text-2">close</span>.
+                </>
+              ) : (
+                <>
+                  Enter how much of each component you used. It must be at least the recipe{' '}
+                  <span className="text-text-2">Needs</span> — making {attempted} unit
+                  {attempted === 1 ? '' : 's'} takes at least that much — and no more than
+                  what&apos;s on the floor. The leftover back-flushes when you{' '}
+                  <span className="text-text-2">close</span>.
+                </>
+              )}
               {kit.lines.some((l) => l.consumed_in_kit) && (
                 <>
                   {' '}
@@ -2219,7 +2262,12 @@ function CloseOutStep({
                 <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                   <th className="px-3 py-2 font-medium">Component</th>
                   <th className="px-3 py-2 text-right font-medium">Per unit</th>
-                  <th className="px-3 py-2 text-right font-medium">Needs</th>
+                  {/* On a variable-yield kit this column is one run's worth, not
+                      a figure scaled to the batch — "Needs" would read as though
+                      it still tracked the quantity made. */}
+                  <th className="px-3 py-2 text-right font-medium">
+                    {kit.variable_yield ? 'Min / run' : 'Needs'}
+                  </th>
                   <th className="px-3 py-2 text-right font-medium">On floor</th>
                   <th className="px-3 py-2 text-right font-medium">Used</th>
                   <th className="px-3 py-2 text-right font-medium">Left</th>
@@ -2236,10 +2284,20 @@ function CloseOutStep({
                   const floor = line.on_floor_qty;
                   const u = used[line.id];
                   const left = floor - (u ?? 0);
+                  // `need` already carries the variable-yield rule, so both
+                  // checks stay live: on such a kit they simply measure against
+                  // one run's worth instead of the batch's, which is what keeps
+                  // the client's 350-off-200 example green while still refusing
+                  // a batch recorded as consuming nothing.
                   const cantMake = need > floor; // even the minimum doesn't fit
                   const belowNeed = u != null && u < need;
                   const overFloor = u != null && u > floor;
                   const rowBad = cantMake || belowNeed || overFloor;
+                  // Nothing is being made, yet material is recorded as used —
+                  // legitimate for a run that died consuming its charge, but the
+                  // consequence is easy to miss: it is CONSUMED, not returned.
+                  // Advisory, so `rowBad` deliberately excludes it.
+                  const consumedForNothing = attempted === 0 && (u ?? 0) > 0;
                   return (
                     <React.Fragment key={line.id}>
                       <tr className={cn('border-b border-border/60', rowBad && 'bg-danger-soft/30')}>
@@ -2307,10 +2365,25 @@ function CloseOutStep({
                         <tr className="bg-danger-soft/30">
                           <td colSpan={7} className="px-3 pb-2 text-xs text-danger">
                             {cantMake
-                              ? `Not enough on the floor — ${need} needed to make ${attempted}, only ${floor} here. Issue more first.`
+                              ? kit.variable_yield
+                                ? `Not enough on the floor — one run takes ${need}, only ${floor} here. Issue more first.`
+                                : `Not enough on the floor — ${need} needed to make ${attempted}, only ${floor} here. Issue more first.`
                               : belowNeed
-                                ? `Use at least ${need} to make ${attempted} unit${attempted === 1 ? '' : 's'}.`
+                                ? kit.variable_yield
+                                  ? `Use at least ${need} — one run takes that much whatever it yields.`
+                                  : `Use at least ${need} to make ${attempted} unit${attempted === 1 ? '' : 's'}.`
                                 : `Only ${floor} on the floor.`}
+                          </td>
+                        </tr>
+                      )}
+                      {/* Not an error — a failed run writing off its charge is a
+                          real thing to record. It just must not happen by
+                          accident, because the material does not come back. */}
+                      {!rowBad && consumedForNothing && (
+                        <tr className="bg-warning-soft/30">
+                          <td colSpan={7} className="px-3 pb-2 text-xs text-warning">
+                            Nothing is being made, so this {u} will be consumed, not
+                            returned. Leave it at 0 to back-flush it instead.
                           </td>
                         </tr>
                       )}

@@ -1057,6 +1057,7 @@ async def create_kit(
     target_qty: int,
     production_location_node_id: uuid.UUID,
     notes: str | None,
+    variable_yield: bool,
     created_by_user_id: uuid.UUID,
 ) -> Kit:
     kit = Kit(
@@ -1066,6 +1067,7 @@ async def create_kit(
         status="draft",
         production_location_node_id=production_location_node_id,
         notes=notes,
+        variable_yield=variable_yield,
         created_by_user_id=created_by_user_id,
     )
     session.add(kit)

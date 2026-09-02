@@ -331,6 +331,13 @@ class Item(Base):
             "NOT (is_consumable AND consumed_in_kit)",
             name="ck_items_consumable_xor_consumed_in_kit",
         ),
+        # Same shape, same reason: a consumable is banned from bills of material
+        # and so can never be the parent a kit builds, which is the only place
+        # ``variable_yield`` means anything.
+        CheckConstraint(
+            "NOT (is_consumable AND variable_yield)",
+            name="ck_items_consumable_xor_variable_yield",
+        ),
         # The full SKU is derived as ``<prefix code>-<sku_suffix>`` — the number
         # is not stored, it follows the prefix (rename CR→CRX re-labels every
         # item). Uniqueness is therefore per (prefix, suffix); since prefix codes
@@ -392,6 +399,28 @@ class Item(Base):
     # non-consumable one, and an item that were both would be banned from the
     # very BOM this flag only means anything inside of.
     consumed_in_kit: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    # Grown or expressed rather than assembled (client 2026-09-01, varyield01):
+    # "one TREX reactor with 4 media feedings could result in a yield of 200
+    # grams. The next time it is produced it could consume the exact same raw
+    # materials but yield 350 grams." For such an item the recipe does not
+    # predict the output, so kitting's ``used_below_need`` gate — which requires
+    # the material used to cover ``ceil(qty_per_unit × (good + scrap))`` — is a
+    # false constraint that makes the better run unrecordable.
+    #
+    # This flag marks the item the kit BUILDS, not a component: variable yield
+    # is a fact about the process, and the process is named by what is being
+    # grown. Contrast ``consumed_in_kit`` above, which marks a component.
+    # ``kits.variable_yield`` snapshots it at creation.
+    #
+    # It relaxes that ONE recipe-derived gate. The physical ones stay: the
+    # operator must still record what was consumed, and still cannot consume
+    # what is not on the floor. The BOM still decides the components and still
+    # drives the issue quantity — it stops being a floor on output, not the plan.
+    variable_yield: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         server_default=text("FALSE"),
