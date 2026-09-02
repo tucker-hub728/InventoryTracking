@@ -452,20 +452,29 @@ async def _kit_cost_view(
         charged, credited, _unpriced = charge_credit.get(
             line.id, (Decimal("0"), Decimal("0"), 0)
         )
+        consumed = consumed_prior.get(line.id)
         unit_cost = costing.line_unit_cost(
             charged=charged,
             credited=credited,
-            consumed=consumed_prior.get(line.id, Decimal("0")),
+            # Zero is the arithmetic identity for "no earlier batch carried
+            # anything away", and that is all this term is for. An UNKNOWN
+            # consumed value only arises when ``charged`` is unknown too, and
+            # ``line_unit_cost`` has already returned None by then — so the
+            # unknown travels on the published figure below, never through the
+            # subtraction, where it would read as free material.
+            consumed=consumed if consumed is not None else Decimal("0"),
             residual_qty=_on_floor(line),
         )
-        line_costs[line.id] = (unit_cost, consumed_prior.get(line.id))
+        line_costs[line.id] = (unit_cost, consumed)
         if charged is None:
             complete = False
         else:
             net += charged - credited
     if not complete:
         return None, None, False, line_costs
-    consumed_total = sum(consumed_prior.values(), Decimal("0"))
+    consumed_total = sum(
+        (v for v in consumed_prior.values() if v is not None), Decimal("0")
+    )
     return net, consumed_total, True, line_costs
 
 
@@ -1356,10 +1365,13 @@ async def _attribute_batch_cost(
         charged, credited, _unpriced_qty = charge_credit.get(
             line.id, (Decimal("0"), Decimal("0"), 0)
         )
+        consumed = consumed_prior.get(line.id)
         unit_cost = costing.line_unit_cost(
             charged=charged,
             credited=credited,
-            consumed=consumed_prior.get(line.id, Decimal("0")),
+            # See ``_kit_cost_view``: None here can only accompany an unknown
+            # ``charged``, which short-circuits first. Zero is the identity.
+            consumed=consumed if consumed is not None else Decimal("0"),
             residual_qty=residual_before.get(line.id, 0),
         )
         extended = costing.line_extended_value(unit_cost, used)

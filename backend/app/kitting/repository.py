@@ -566,16 +566,31 @@ async def line_charge_credit_values(
 
 async def consumed_values_by_line(
     session: AsyncSession, kit_id: uuid.UUID
-) -> dict[uuid.UUID, Decimal]:
+) -> dict[uuid.UUID, Decimal | None]:
     """Per kit line, the value already attributed to earlier batches — RPT-003.
 
     The third term of the moving average. Without it, batch 2 would re-spend the
     value batch 1 already carried away into its own finished lot.
+
+    ``None`` — never ``0`` — when the line's consumption rows are all unvalued,
+    which is what an unpriced input leaves behind. The two are different
+    answers and this system has real money riding on the difference: ``0`` means
+    the material was free (the customer-owned cells arrive on a $0 PO), ``None``
+    means nobody knows what it cost. Coalescing here published ``$0.00`` on the
+    kit page for a component the batch drill-down was correctly calling ``—``,
+    on the same screen (client, 2026-09-01).
+
+    ``SUM`` skips NULLs rather than poisoning on them, so a line with one valued
+    batch and one unvalued one still reports the valued part. That mixed state
+    is not reachable in practice — ``charged`` is all-or-nothing per line, and a
+    price correction replays every batch (``recompute``) — but if it ever is,
+    under-reporting the total is the safe direction for a figure that becomes an
+    invoice.
     """
     stmt = (
         select(
             KitBatchConsumption.kit_line_id,
-            func.coalesce(func.sum(KitBatchConsumption.extended_value_amount), 0),
+            func.sum(KitBatchConsumption.extended_value_amount),
         )
         .select_from(KitBatchConsumption)
         .join(KitProductionBatch, KitProductionBatch.id == KitBatchConsumption.batch_id)
@@ -583,7 +598,8 @@ async def consumed_values_by_line(
         .group_by(KitBatchConsumption.kit_line_id)
     )
     return {
-        line_id: Decimal(value) for line_id, value in (await session.execute(stmt)).all()
+        line_id: (None if value is None else Decimal(value))
+        for line_id, value in (await session.execute(stmt)).all()
     }
 
 

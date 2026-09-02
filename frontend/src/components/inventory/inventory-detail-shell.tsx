@@ -259,20 +259,24 @@ export function InventoryDetailShell({
     async (signal?: AbortSignal) => {
       setLoading(true);
       setLoadError(null);
+      let row: InventoryItem | null;
       try {
-        const row = await fetchOne(itemKey, { signal });
-        if (signal?.aborted) return;
-        if (row === null) {
-          notFound();
-          return;
-        }
-        setItem(row);
+        row = await fetchOne(itemKey, { signal });
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof Error ? err.message : 'Failed to load item.');
+        return;
       } finally {
         if (!signal?.aborted) setLoading(false);
       }
+      if (signal?.aborted) return;
+      // Deliberately OUTSIDE the catch. `notFound()` signals Next by throwing a
+      // plain Error (message `NEXT_HTTP_ERROR_FALLBACK;404`), so calling it inside
+      // the try swallowed it as an ordinary load failure: a deleted item rendered
+      // "Couldn't load item - NEXT_HTTP_ERROR_FALLBACK;404" and the 404 page was
+      // never reached.
+      if (row === null) notFound();
+      setItem(row);
     },
     [fetchOne, itemKey],
   );

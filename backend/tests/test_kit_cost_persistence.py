@@ -25,6 +25,7 @@ from app.models.identity import User
 from app.models.inventory import Item, ItemPrefix, ItemTier, Lot, StockMovement
 from app.models.kitting import Kit, KitLine, KitProductionBatch
 from app.models.locations import LocationNode
+from scripts import backfill_kit_lot_costs as backfill
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -822,3 +823,155 @@ async def test_each_batch_is_charged_only_what_it_recorded(kit_fixture):
     )
     assert second == Decimal("12")
     assert first + second == charged, "every dollar issued reaches a finished lot"
+
+
+# ── Unknown is not zero ─────────────────────────────────────────────────
+
+
+async def test_an_unvalued_consumption_reads_none_not_zero(kit_fixture):
+    """The client saw ``$0.00`` and ``—`` for the SAME line on one screen.
+
+    A batch that could not be costed writes its consumption rows with no
+    ``extended_value_amount``. Summing those with a ``coalesce(..., 0)`` turned
+    "nobody knows" into "it was free" — and $0 is a real price here, because the
+    customer-owned cells arrive on a $0 PO. The kit page published the zero
+    while the batch drill-down, reading the row directly, correctly showed a
+    dash (2026-09-01).
+    """
+    s, kit, line, user, make_lot, issue, _credit = kit_fixture
+    await issue(await make_lot(None), 50)
+
+    batch = await kit_repo.create_batch(
+        s,
+        kit_id=kit.id,
+        batch_no=1,
+        # Scrap-only, so it mints no lot (``ck_..._lot_pairing``) — the batch is
+        # here for its consumption row, not its output.
+        output_lot_id=None,
+        good_qty=0,
+        scrap_qty=5,
+        material_cost_amount=None,
+        unit_cost_amount=None,
+        cost_is_complete=False,
+        performed_by_user_id=user.id,
+        reauth_evidence_id=None,
+    )
+    await kit_repo.create_batch_consumption(
+        s,
+        batch_id=batch.id,
+        kit_line_id=line.id,
+        qty=50,
+        unit_cost_amount=None,
+        extended_value_amount=None,
+        cost_is_complete=False,
+    )
+
+    consumed = await kit_repo.consumed_values_by_line(s, kit.id)
+    assert consumed == {line.id: None}, "an unvalued batch must not read as free"
+
+
+# ── The legacy-lot repair (scripts/backfill_kit_lot_costs) ──────────────
+
+
+async def _legacy_output(s, kit, user, qty: int) -> Lot:
+    """A produced lot with no price and no batch rows — a pre-``kitcost01`` kit.
+
+    This is the state the client's KIT-0004 is in: the ``production_output``
+    movement is the only surviving record that the kit made anything, which is
+    why the repair finds its work through the ledger.
+    """
+    lot = Lot(
+        item_id=kit.item_id,
+        lot_number=f"OUT-{uuid.uuid4().hex[:8]}",
+        unit_price_amount=None,
+        created_by_user_id=user.id,
+        updated_by_user_id=user.id,
+    )
+    s.add(lot)
+    await s.flush()
+    s.add(
+        StockMovement(
+            item_id=kit.item_id,
+            lot_id=lot.id,
+            movement_type="production_output",
+            qty_delta=qty,
+            qty_abs=qty,
+            from_location_node_id=None,
+            to_location_node_id=kit.production_location_node_id,
+            kit_id=kit.id,
+            performed_by_user_id=user.id,
+        )
+    )
+    await s.flush()
+    return lot
+
+
+async def test_backfill_recovers_a_legacy_lot_price(kit_fixture):
+    """KIT-0004 exactly: $687.50 of material over 50 good units is $13.75."""
+    s, kit, _line, user, make_lot, issue, _credit = kit_fixture
+    await issue(await make_lot(Decimal("13.75")), 50)
+    kit.good_qty = 50
+    lot = await _legacy_output(s, kit, user, 50)
+
+    mine = [c for c in await backfill._scan(s) if c.lot_id == lot.id]
+    assert [c.price for c in mine] == [Decimal("13.750000")]
+
+    await backfill._apply(s, mine[0])
+    await s.flush()
+    assert lot.unit_price_amount == Decimal("13.750000")
+    assert not [c for c in await backfill._scan(s) if c.lot_id == lot.id]
+
+
+async def test_backfill_refuses_when_an_input_lot_is_unpriced(kit_fixture):
+    """Blank is the CORRECT answer here — the cost is unknown, not zero."""
+    s, kit, _line, user, make_lot, issue, _credit = kit_fixture
+    await issue(await make_lot(None), 50)
+    kit.good_qty = 50
+    lot = await _legacy_output(s, kit, user, 50)
+
+    mine = [c for c in await backfill._scan(s) if c.lot_id == lot.id]
+    assert [c.price for c in mine] == [None]
+    assert "no price" in mine[0].skip_reason
+
+
+async def test_backfill_never_overwrites_a_costed_kit(kit_fixture):
+    """A kit WITH batch rows was costed; a blank output means an unpriced INPUT.
+
+    Deriving a price from this end would replace a computed figure with a
+    reconstructed one and hide the input that actually needs fixing.
+    """
+    s, kit, _line, user, make_lot, issue, _credit = kit_fixture
+    await issue(await make_lot(Decimal("2")), 50)
+    kit.good_qty = 50
+    lot = await _legacy_output(s, kit, user, 50)
+    await kit_repo.create_batch(
+        s,
+        kit_id=kit.id,
+        batch_no=1,
+        output_lot_id=lot.id,
+        good_qty=50,
+        scrap_qty=0,
+        material_cost_amount=None,
+        unit_cost_amount=None,
+        cost_is_complete=False,
+        performed_by_user_id=user.id,
+        reauth_evidence_id=None,
+    )
+
+    mine = [c for c in await backfill._scan(s) if c.lot_id == lot.id]
+    assert [c.price for c in mine] == [None]
+    assert "batch records" in mine[0].skip_reason
+
+
+async def test_backfill_refuses_to_split_across_several_output_lots(kit_fixture):
+    """The per-lot split lived in the batch rows; averaging would invent it."""
+    s, kit, _line, user, make_lot, issue, _credit = kit_fixture
+    await issue(await make_lot(Decimal("2")), 50)
+    kit.good_qty = 50
+    first = await _legacy_output(s, kit, user, 25)
+    second = await _legacy_output(s, kit, user, 25)
+
+    mine = [c for c in await backfill._scan(s) if c.lot_id in {first.id, second.id}]
+    assert len(mine) == 2
+    assert [c.price for c in mine] == [None, None]
+    assert all("no per-lot split" in c.skip_reason for c in mine)

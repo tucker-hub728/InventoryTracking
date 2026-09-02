@@ -2462,6 +2462,15 @@ function ReviewStep({
     kit.material_cost_amount === null || kit.consumed_value_amount === null
       ? null
       : Number(kit.material_cost_amount) - Number(kit.consumed_value_amount);
+  // A kit closed BEFORE per-batch costing existed carries no batch rows at all,
+  // so nothing was ever attributed to a lot and the ENTIRE charge falls into the
+  // leftover above. It was not discarded — the units were made and stocked — it
+  // was never costed, and there is no record left from which to cost it. Saying
+  // "discarded" there reports real product cost as waste: KIT-0004 read
+  // "$687.50 discarded" three lines above "50 × AY-002 stocked" (client,
+  // 2026-09-01). Distinct from a kit that produced nothing and was cancelled,
+  // which never charged anything to fall through in the first place.
+  const neverCosted = kit.batches.length === 0;
   // RPT-003. Summed from the batches, not recomputed from the kit total: each
   // batch's scrap was valued at ITS unit cost, which differs between batches
   // when the material mix changed. `null` if any batch is unpriced — a partial
@@ -2623,7 +2632,11 @@ function ReviewStep({
                       <span className="font-mono tabular-nums">
                         {formatMoney(String(costUnattributed))}
                       </span>{' '}
-                      {finished ? 'discarded' : 'still on the floor'}
+                      {finished
+                        ? neverCosted
+                          ? 'never costed to a lot'
+                          : 'discarded'
+                        : 'still on the floor'}
                     </div>
                   )}
                 </>
@@ -2928,11 +2941,16 @@ function ComponentReviewTable({
             // cost, because the cost does not move.
             const discardedAtClose = isBatch && line.consumed_in_kit ? leftAfter : 0;
             // After the fact: what this line was recorded as using, minus what
-            // the batches actually charged to lots. Non-zero only for media.
+            // the batches actually charged to lots. Non-zero only for media —
+            // EXCEPT on a kit with no batch rows at all (produced before cost
+            // tracking), where it is the whole line and nothing was discarded.
+            // See ``neverCosted`` above: the difference is waste versus a
+            // missing record, and only one of them is the operator's problem.
             const discardedTotal = Math.max(
               0,
               (line.used_qty ?? 0) - consumedByLots(kit, line.id),
             );
+            const leftoverWord = kit.batches.length === 0 ? 'never costed' : 'discarded';
             return (
               <tr key={line.id} className="border-b border-border/60 align-top last:border-0">
                 <td className="max-w-[240px] px-4 py-2.5">
@@ -2978,7 +2996,8 @@ function ComponentReviewTable({
                   <QtyCell value={isBatch ? thisBatch || null : (line.used_qty ?? null)} />
                   {!isBatch && discardedTotal > 0 && (
                     <div className="text-[11px] text-text-3">
-                      {(line.used_qty ?? 0) - discardedTotal} to lots · {discardedTotal} discarded
+                      {(line.used_qty ?? 0) - discardedTotal} to lots · {discardedTotal}{' '}
+                      {leftoverWord}
                     </div>
                   )}
                 </td>
