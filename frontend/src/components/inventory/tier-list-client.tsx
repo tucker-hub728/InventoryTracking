@@ -10,7 +10,7 @@ import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { Badge } from '@/components/ui/badge';
-import { ConsumedInKitBadge } from './item-kind-badges';
+import { ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -425,6 +425,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="truncate">{row.desc}</span>
                           <ConsumedInKitBadge consumedInKit={row.consumedInKit} />
+                          <VariableYieldBadge variableYield={row.variableYield} />
                         </span>
                       </TableCell>
                       {showConsumable && (

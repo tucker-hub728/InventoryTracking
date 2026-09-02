@@ -77,6 +77,11 @@ const schema = z.object({
   // sit in a bill of materials. On a kit it is consumed to the kit as the unit
   // and never back-flushed. Mutually exclusive with `isConsumable`.
   consumedInKit: z.boolean().default(false),
+  // Grown or expressed rather than assembled (client 2026-09-01). Set on the
+  // AY/FG a kit BUILDS: for such an item the recipe does not predict the output,
+  // so kitting stops requiring the material used to cover the recipe need.
+  // Mutually exclusive with `isConsumable` — a consumable is never built.
+  variableYield: z.boolean().default(false),
   // Assigned suppliers — zero-or-more. The only suppliers this item can later be
   // received against. Optional: an item may start with none and add later.
   supplierIds: z.array(z.string()).default([]),
@@ -160,6 +165,7 @@ export function NewItemDialog({
       uom: '',
       isConsumable: false,
       consumedInKit: false,
+      variableYield: false,
       supplierIds: [],
       leadDays: 0,
       threshold: 0,
@@ -172,6 +178,7 @@ export function NewItemDialog({
   const prefixId = watch('prefixId');
   const isConsumable = watch('isConsumable');
   const consumedInKit = watch('consumedInKit');
+  const variableYield = watch('variableYield');
   const suffix = watch('suffix');
   // The tier whose prefixes scope the picker, and the chosen prefix within it.
   // A locked tier is re-resolved from the fetched list so a prefix added from
@@ -205,6 +212,12 @@ export function NewItemDialog({
   // finished goods, but nothing reads the window on AY/FG until manual
   // transact-in ships, so it is deferred rather than dropped.
   const showPurchasing = selectedTier?.type === 'raw_material';
+
+  // The mirror of the gate above: variable yield describes how a thing is MADE,
+  // so it only appears on a tier that is built. A raw material is bought, and no
+  // kit ever produces one.
+  const showBuilt =
+    selectedTier?.type === 'sub_assembly' || selectedTier?.type === 'finished_good';
 
   // ── Side effects ─────────────────────────────────────────────────────
 
@@ -311,6 +324,7 @@ export function NewItemDialog({
         uom: data.uom ? data.uom : null,
         is_consumable: data.isConsumable,
         consumed_in_kit: data.consumedInKit,
+        variable_yield: data.variableYield,
         supplier_ids: data.supplierIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
@@ -589,6 +603,25 @@ export function NewItemDialog({
                     </Field>
                   </div>
                 </>
+              )}
+
+              {/* Built tiers only — see `showBuilt`. No cross-clearing needed
+                  here: `isConsumable` lives in the raw-material block above, so
+                  the two switches can never be on screen together. */}
+              {showBuilt && (
+                <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ni-variable-yield">Variable yield</Label>
+                    <p className="text-xs text-text-3">
+                      Grown or expressed: the amount made isn&apos;t set by the recipe
+                    </p>
+                  </div>
+                  <Switch
+                    id="ni-variable-yield"
+                    checked={variableYield}
+                    onCheckedChange={(v) => setValue('variableYield', v)}
+                  />
+                </div>
               )}
 
               <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">

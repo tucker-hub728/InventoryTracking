@@ -39,6 +39,7 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     uom: api.uom ?? '',
     isConsumable: api.is_consumable,
     consumedInKit: api.consumed_in_kit,
+    variableYield: api.variable_yield,
     tierId: api.tier_id,
     tierName: api.tier_name,
     tierType: api.tier_type,

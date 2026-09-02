@@ -24,6 +24,8 @@ export interface InventoryItem {
   isConsumable: boolean;
   /** Consumed to the kit, never back-flushed (KIT-003) when true. */
   consumedInKit: boolean;
+  /** Grown/expressed: a kit for this item is not held to the recipe yield. */
+  variableYield: boolean;
   /** Tier (requirements v2 §6). ``tierType`` drives the Type column. */
   tierId: string;
   tierName: string;

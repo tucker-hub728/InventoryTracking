@@ -564,6 +564,73 @@ The frontier is **charges only**. A kit that merely handed the lot back never to
 
 ---
 
+## 13. Variable yield (YLD-001) — `varyield01`, 2026-09-01
+
+> "When growing virus or creating a protein, the constraint isn't the yield for the consumption of the raw material or assemblies. For example: one TREX reactor with 4 media feedings could result in a yield of 200 grams of material. The next time it is produced it could consume the exact same raw materials but yield 350 grams of material."
+> — Blane Larson, 2026-09-01
+
+For an item that is **grown or expressed**, the BOM stops predicting the output. It still sets the minimum material a run consumes.
+
+### 13.1 The gate, and which run it actually broke
+
+`_produce_batch` requires, per component, `used >= ceil(qty_per_unit × (good + scrap))` (`used_below_need`). The failing case is the **over**-yield run, which is worth stating explicitly because the error message points the other way. With 200 units of material issued against a 1:1 recipe:
+
+| Run | Operator enters | Result |
+|-----|-----------------|--------|
+| yields 200 | good 200, used 200 | passes |
+| **yields 350** | good 350, used 200 | **422 `used_below_need`** |
+
+There is no way around it from the floor either: `used_exceeds_issued` caps `used` at what is physically on the production node, so the operator cannot inflate `used` to satisfy the first gate. The *better* of the two runs is the one that could not be recorded.
+
+### 13.2 The mechanism
+
+`items.variable_yield` on the **item being built** — not on a component, which is the difference from KIT-003's `consumed_in_kit`. Variable yield is a fact about the process, and the process is named by the thing being grown. `create_kit` snapshots it onto `kits.variable_yield`, so an edit to the item months later cannot retroactively legalise a batch this kit refused or invalidate one it signed. Every read path takes the **kit's** value.
+
+The flag skips exactly one line of the pre-flight. Everything else is untouched:
+
+| Check | On a variable-yield kit | Why |
+|-------|------------------------|-----|
+| `used_below_need` | **stops scaling** — the floor is `ceil(qty_per_unit × 1)`, one run's worth | The output must not set the input. But a run still takes a charge of the recipe. |
+| `used_qty_missing` | applies | The paper record still drives what was consumed. |
+| `used_exceeds_issued` | applies | Physical — you cannot consume what is not on the floor. |
+| `ck_kit_lines_no_overuse` | applies | The DB backstop for the above. |
+
+**The floor is narrowed, not removed.** The first cut deleted the check outright and the consequence showed up immediately on the close-out screen: every component sat at `Used 0` and the batch was still accepted, so units could be produced from no material at all. That makes the BOM decorative — the same objection that corrected KIT-003 (§ "what's the purpose of the BOM?"). What is actually wrong for a grown item is the *coupling*: `need` scaling with `good + scrap`. Break that and keep the rest, so a recipe of CR 1 + AY 2 still demands at least 1 and 2 whether the run yields 200 g or 350 g.
+
+`attempted == 0` zeroes the floor on any kit, so a `good = 0` close-out still finalises a failed run.
+
+The BOM keeps every other job it has: it decides which components a kit has, drives the issue quantity, and its `Needs` column now reads "what one run takes" rather than a figure scaled to the batch.
+
+### 13.3 Costing needed no change
+
+`output_unit_cost` is `material_cost ÷ good_qty` (§12.2) and has always divided by the operator-entered good count. The 200 g and 350 g runs therefore price correctly and differently on their own, and `recompute.py` replays from each batch's stored `good_qty`, so a later lot-price correction stays right. This was the half of the client's scenario that was already built.
+
+### 13.4 What the screen shows
+
+The `Needs` column is labelled **`Min / run`** on a variable-yield kit, since it no longer scales with the quantity made — it is one run's worth of the recipe, and calling it "Needs" would imply it still tracked the output.
+
+There is **no yield-variance display**, deliberately. One was built and removed (2026-09-02): with the per-run floor in place nothing had asked for it, and an "on recipe" figure derived from the material entered reads too easily as a target the run missed. If it is wanted later, it is `min` over components of `floor(used / qty_per_unit)` against `good + scrap`, and it belongs on the close-out card as an advisory note — never a blocker, since beating the recipe is the point of the flag.
+
+### 13.5 A separate "extra made" quantity — built, then withdrawn
+
+The client asked (2026-09-02) for a second input capturing units made beyond the recipe, "with nothing to do with the BOM": `good_qty` staying fully recipe-gated, `extra_qty` free alongside it, both going into one lot. It was **built end-to-end as `varyield02`** and then **withdrawn by the client the same day** — *"I was wrong, no need for the extra field, the existing work is good enough."* The migration was downgraded off dev and test and the revision deleted; nothing of it remains.
+
+Recorded because the design was sound and may come back. What made it work, if it does:
+
+* `attempted` (the recipe need) excludes `extra` — that is the whole point.
+* `total = good + extra` drives the units placed, `output_unit_cost`'s divisor and `recompute.py`'s replay. One lot, one price: the split says where units came from, never what they cost.
+* `extra > 0` requires `good >= 1`, which is also what keeps `ck_kit_production_batches_lot_pairing` true without amendment.
+* Refused outright on a kit that is not `variable_yield`.
+
+### 13.5 Deliberately not built
+
+- **Fractional quantities.** The client's example is whole grams, and open question #4 below resolved quantities to whole units. "350 g" is 350 units of an item whose `uom` reads `g`. Widening `good_qty`/`scrap_qty`/`used_qty` from `Integer` to `Numeric` would reach the DB, ORM, schemas, placement and costing — its own job, and worth asking the client whether they ever report a fractional gram.
+- **A unit of measure on output.** `Item.uom` is free text and kitting never reads it (§12), so nothing distinguishes 350 grams from 350 vials but the item description.
+- **Planned-vs-actual reporting.** None exists; the existing yield badge is `good / (good + scrap)`, which is *quality* yield, not process yield. `kit-costs.csv` already exports `kit_target_qty` and `batch_good_qty`, so the raw data is there when a report is specified.
+- **A cap on output.** There never was one — nothing relates `good_qty` to `target_qty` anywhere. The 1:many behaviour the client described came entirely from the input-side floor.
+
+---
+
 ## 99. Open questions (need confirmation before implementation)
 
 1. ~~**E-signature scope.**~~ **RESOLVED (client, 2026-07-20): close-out only.** Issue / additional issue / cancel are unsigned; see §6.

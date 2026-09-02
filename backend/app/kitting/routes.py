@@ -215,6 +215,7 @@ def _kit_snapshot(kit: Kit) -> dict:
         "target_qty": kit.target_qty,
         "good_qty": kit.good_qty,
         "scrap_qty": kit.scrap_qty,
+        "variable_yield": kit.variable_yield,
         "production_location_node_id": str(kit.production_location_node_id),
         "output_location_node_id": (
             str(kit.output_location_node_id) if kit.output_location_node_id else None
@@ -452,20 +453,29 @@ async def _kit_cost_view(
         charged, credited, _unpriced = charge_credit.get(
             line.id, (Decimal("0"), Decimal("0"), 0)
         )
+        consumed = consumed_prior.get(line.id)
         unit_cost = costing.line_unit_cost(
             charged=charged,
             credited=credited,
-            consumed=consumed_prior.get(line.id, Decimal("0")),
+            # Zero is the arithmetic identity for "no earlier batch carried
+            # anything away", and that is all this term is for. An UNKNOWN
+            # consumed value only arises when ``charged`` is unknown too, and
+            # ``line_unit_cost`` has already returned None by then — so the
+            # unknown travels on the published figure below, never through the
+            # subtraction, where it would read as free material.
+            consumed=consumed if consumed is not None else Decimal("0"),
             residual_qty=_on_floor(line),
         )
-        line_costs[line.id] = (unit_cost, consumed_prior.get(line.id))
+        line_costs[line.id] = (unit_cost, consumed)
         if charged is None:
             complete = False
         else:
             net += charged - credited
     if not complete:
         return None, None, False, line_costs
-    consumed_total = sum(consumed_prior.values(), Decimal("0"))
+    consumed_total = sum(
+        (v for v in consumed_prior.values() if v is not None), Decimal("0")
+    )
     return net, consumed_total, True, line_costs
 
 
@@ -525,6 +535,7 @@ async def _kit_read(db, kit: Kit) -> KitRead:
         ),
         good_qty=kit.good_qty,
         scrap_qty=kit.scrap_qty,
+        variable_yield=kit.variable_yield,
         notes=kit.notes,
         issued_at=kit.issued_at,
         closed_at=kit.closed_at,
@@ -1173,6 +1184,19 @@ async def _produce_batch(
     floor (``used_exceeds_issued``). A component missing a value is
     ``used_qty_missing``.
 
+    On a VARIABLE-YIELD kit (``kit.variable_yield``, snapshotted from the built
+    item — varyield01) the recipe need stops SCALING with the output. Virus and
+    protein are grown rather than assembled, so the same charge of material
+    yields 200 g one run and 350 g the next, and a need of
+    ``qty_per_unit × 350`` would reject the larger run outright.
+
+    The floor becomes one unit's worth of the recipe instead of zero: a run that
+    makes anything consumes at least a single charge, and a floor of zero would
+    let a batch be produced from no material at all. ``used_qty_missing`` and
+    ``used_exceeds_issued`` are untouched. Nothing downstream changes — cost
+    still divides by the entered ``good``, which is what makes the two runs
+    price differently and correctly.
+
     A media line (``consumed_in_kit``, REQ-2026-07-31-KIT-003) gets no special
     treatment here at all: it needs, is entered and is validated exactly like
     any other component, and a batch consumes only what was recorded against it.
@@ -1206,8 +1230,31 @@ async def _produce_batch(
             )
         else:
             used = used_by_line[line.id]
-        need = kit_repo.default_issued_qty(line.qty_per_unit, attempted)
+        # The recipe floor. For an assembly it scales with the batch — physics,
+        # three units cannot come out of two units' worth of parts.
+        #
+        # For something grown or expressed (varyield01) the cells decide the
+        # yield, so the same charge that made 200 g last run may make 350 g this
+        # one. What is wrong there is specifically that the OUTPUT sets the
+        # input requirement: ``need`` becomes 350 while only 200 was used, and
+        # ``used_exceeds_issued`` below blocks "fixing" it with material that is
+        # not on the floor, so the better run is the unrecordable one.
+        #
+        # Only that coupling goes. The recipe still says what a run takes AT
+        # ALL — one unit's worth, however much it then yields — because nothing
+        # is made from nothing, and a floor of zero would make the BOM
+        # decorative. A batch that produces nothing is held to nothing either
+        # way, so a good=0 close still finalises.
+        recipe_units = 0 if attempted == 0 else (1 if kit.variable_yield else attempted)
+        need = kit_repo.default_issued_qty(line.qty_per_unit, recipe_units)
         if used < need:
+            if kit.variable_yield:
+                raise ValidationError(
+                    f"Line {line.line_no}: used {used} is below the {need} one run takes "
+                    f"by the recipe. How much comes out doesn't set this — but a batch "
+                    f"that makes anything consumes at least one unit's worth.",
+                    code="used_below_need",
+                )
             raise ValidationError(
                 f"Line {line.line_no}: used {used} is below the {need} needed to make "
                 f"{attempted} unit(s) — you can't make {attempted} with less than "
@@ -1356,10 +1403,13 @@ async def _attribute_batch_cost(
         charged, credited, _unpriced_qty = charge_credit.get(
             line.id, (Decimal("0"), Decimal("0"), 0)
         )
+        consumed = consumed_prior.get(line.id)
         unit_cost = costing.line_unit_cost(
             charged=charged,
             credited=credited,
-            consumed=consumed_prior.get(line.id, Decimal("0")),
+            # See ``_kit_cost_view``: None here can only accompany an unknown
+            # ``charged``, which short-circuits first. Zero is the identity.
+            consumed=consumed if consumed is not None else Decimal("0"),
             residual_qty=residual_before.get(line.id, 0),
         )
         extended = costing.line_extended_value(unit_cost, used)
@@ -1956,12 +2006,16 @@ async def create_kit(
             f'The kit name "{kit_number}" is already in use.',
             code="kit_number_conflict",
         )
-    # The KIT-003 flag is SNAPSHOTTED onto each line, so read it off the item
-    # here rather than at close-out. Via load_item_map, not bom.child_item —
+    # Both flags are SNAPSHOTTED at creation, so read them off the items here
+    # rather than at produce/close-out. Via load_item_map, not bom.child_item —
     # list_bom_children does not eager-load the child, so touching that
     # relationship inside an async route raises MissingGreenlet.
-    child_items = await kit_repo.load_item_map(
-        db, {c.child_item_id for c in children}
+    #
+    # The PARENT is in this map too, and only for its ``variable_yield``: unlike
+    # KIT-003's per-component flag, variable yield is a fact about the process
+    # and so lives on the item being built. One query covers both.
+    kit_items = await kit_repo.load_item_map(
+        db, {c.child_item_id for c in children} | {item_id}
     )
     kit = await kit_repo.create_kit(
         db,
@@ -1970,6 +2024,7 @@ async def create_kit(
         target_qty=payload.target_qty,
         production_location_node_id=prod_node,
         notes=payload.notes,
+        variable_yield=kit_items[item_id].variable_yield,
         created_by_user_id=current.id,
     )
     # No default source. Guessing "the first active shelf" was wrong more often
@@ -1983,7 +2038,7 @@ async def create_kit(
             line_no=line_no,
             item_id=bom.child_item_id,
             qty_per_unit=bom.qty_per_unit,
-            consumed_in_kit=child_items[bom.child_item_id].consumed_in_kit,
+            consumed_in_kit=kit_items[bom.child_item_id].consumed_in_kit,
             issued_qty=kit_repo.default_issued_qty(bom.qty_per_unit, payload.target_qty),
             source_location_node_id=None,
         )

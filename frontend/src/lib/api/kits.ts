@@ -224,6 +224,12 @@ export interface ApiKit {
   output_location_node_id: string | null;
   good_qty: number | null;
   scrap_qty: number | null;
+  /** Snapshotted from the built item when the kit was created (varyield01).
+   *  When true this kit's output is measured rather than derived, so the
+   *  per-component "used" no longer has to cover the recipe need. Read it from
+   *  the KIT, never the item — editing the item afterwards must not change how
+   *  a kit already running reconciles. */
+  variable_yield: boolean;
   notes: string | null;
   issued_at: string | null;
   closed_at: string | null;

@@ -62,6 +62,12 @@ const schema = z.object({
   // item plays that role is a decision people revise. Create-only would have
   // meant deleting and re-creating an item — and its part number — to change it.
   consumed_in_kit: z.boolean(),
+  // Variable yield (client 2026-09-01). Editable after creation for the same
+  // reason as the flag above: whether a process is grown or assembled is
+  // something people learn, and create-only would mean re-numbering the item to
+  // record it. Changing it does NOT disturb kits already running — each kit
+  // snapshots the flag at creation.
+  variable_yield: z.boolean(),
   });
 
 type FormValues = z.infer<typeof schema>;
@@ -128,12 +134,14 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       near_expiry_threshold_days: '',
       must_order_flag: false,
       consumed_in_kit: false,
+      variable_yield: false,
     },
   });
 
   const supplierIds = watch('supplier_ids');
   const mustOrder = watch('must_order_flag');
   const consumedInKit = watch('consumed_in_kit');
+  const variableYield = watch('variable_yield');
 
   // Supplier-side fields apply only to the raw-material tier (a built AY/FG is
   // manufactured, not bought) — suppliers, lead time, must-order. Near-expiry
@@ -141,6 +149,12 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
   // outside it: planning needs it on every tier. See ``new-item-dialog.tsx``
   // for the citations. Read off the item itself, since the tier is fixed.
   const showPurchasing = item?.tier_type === 'raw_material';
+
+  // Variable yield is the mirror image of the block above: it describes how a
+  // thing is MADE, so it only means anything on a tier that is built. A raw
+  // material is bought, and no kit ever produces one.
+  const showBuilt =
+    item?.tier_type === 'sub_assembly' || item?.tier_type === 'finished_good';
 
   // Load suppliers + the fresh item state every time the dialog opens.
   // ``activeOnly: false`` so a supplier that's since been deactivated still
@@ -183,6 +197,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               : '',
           must_order_flag: freshItem.must_order_flag,
           consumed_in_kit: freshItem.consumed_in_kit,
+          variable_yield: freshItem.variable_yield,
         });
         setSubmitError(null);
       })
@@ -218,6 +233,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     }
     if (dirtyFields.must_order_flag) patch.must_order_flag = values.must_order_flag;
     if (dirtyFields.consumed_in_kit) patch.consumed_in_kit = values.consumed_in_kit;
+    if (dirtyFields.variable_yield) patch.variable_yield = values.variable_yield;
 
     if (Object.keys(patch).length === 0) {
       setSubmitError('No changes to save.');
@@ -424,6 +440,27 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   <span>Flag as must-order for next PO</span>
                 </label>
               </>
+            )}
+
+            {/* Built tiers only — see `showBuilt`. Editing this does not touch
+                kits already open: each snapshots the flag when it is created,
+                so a kit's rules cannot change underneath it mid-build. */}
+            {showBuilt && (
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                <div className="space-y-0.5">
+                  <Label htmlFor="it-variable-yield">Variable yield</Label>
+                  <p className="text-xs text-text-3">
+                    Grown or expressed: the amount made isn&apos;t set by the recipe
+                  </p>
+                </div>
+                <Switch
+                  id="it-variable-yield"
+                  checked={variableYield}
+                  onCheckedChange={(v) =>
+                    setValue('variable_yield', v, { shouldDirty: true })
+                  }
+                />
+              </div>
             )}
 
             {submitError && (
