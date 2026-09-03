@@ -19,7 +19,12 @@ Verifies:
     "Stock by location" tab
   * an unpriced lot exports a BLANK extended value, never ``0``
   * item-level columns never appear on detail rows (the double-count guard)
-  * a ``read_only`` user — finance — can download it; an anonymous caller cannot
+  * a Super Admin can download it; an anonymous caller cannot. ``read_only``,
+    ``operator`` **and ``admin``** are all refused with 403 as of 2026-09-03 —
+    the file is the whole priced valuation, so it is gated more tightly than
+    the RPT-003 kit-cost export next door (which still allows ``admin``).
+    **Run this script with SUPER ADMIN credentials** or the download assertions
+    fail.
   * the download wrote an audit row
 
 The reconciliation section is the part worth running by hand after any change

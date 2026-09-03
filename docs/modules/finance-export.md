@@ -237,13 +237,39 @@ differences that matter here:
 |---|---|---|
 | Grain | current state, per (lot × location) | events over a **date range** |
 | Range | none — "as of now" | `occurred_from` / `occurred_to`, **half-open** |
-| Gate | `inventory:view` | `inventory:view` **+ Admin or Super Admin** |
+| Gate | `inventory:view` **+ Super Admin alone** | `inventory:view` **+ Super Admin alone** |
 | Audit subject | `app.inventory_exports` | `app.kit_cost_exports` |
 | Row kinds | 4 | 6 |
 
-The narrower gate is deliberate: this file says what each customer is charged
-for each finished lot, and `inventory:view` alone would hand it to every
-read-only account (dev seeds 513 of them).
+The narrow gate is deliberate: this file says what each customer is charged for
+each finished lot, and `inventory:view` alone would hand it to every read-only
+account (dev seeds 513 of them).
+
+**2026-09-03 — every priced export is now Super-Admin-only.** `inventory.csv`
+and `inventory.xlsx` carry unit prices, extended lot values and, since RPT-004,
+per-movement value amounts; `kit-costs.csv` carries per-customer charges. And
+`inventory:view` is held by *every* role — so all of it was downloadable by the
+349 active `read_only` accounts on dev. Open question 5 below is resolved in
+favour of a role gate rather than a separate `inventory:export` permission.
+
+It converged in two steps the same day: RPT-001 first went in as `ADMIN_ROLES`
+to match RPT-003, then the client narrowed **both** to `super_admin` alone. So
+`admin` is refused on all three endpoints and the gates are identical again.
+
+> **`admin` being refused is the load-bearing part.** "An admin should surely be
+> able to export" is the reasonable-sounding change that would undo this.
+> `backend/tests/test_export_authorization.py` has a test per endpoint whose
+> only job is to fail if `ADMIN_ROLES` comes back.
+
+> **Consequence still to confirm with the client.** RPT-001's stated audience is
+> finance, and finance hold `read_only` today — that is why the gate was
+> `inventory:view` in the first place. Super-Admin-only means **finance loses
+> the export until those accounts are given the `super_admin` role**, which is
+> a heavier promotion than `admin` and collides with the promotion rules in
+> ROL-005…009. If that is unacceptable, the alternatives are an
+> `inventory:export` action granted to the roles finance actually hold, or
+> returning blank money columns to lower roles while keeping column positions
+> intact (finance binds to positions — see the column contract above).
 
 **The export dialog offers scope only — which kit, which dates — never how
 much detail.** It used to carry an "Include" picker with three levels, and it
@@ -273,9 +299,14 @@ reads as the "of which" it is.
    the export and the item page.
 3. Exact or 2dp per row for `extended_value_amount`? Currently exact.
 4. Should the button export the current tier (today) or the whole catalogue?
-5. Should there be a separate `inventory:export` permission? Today anyone who
-   can view inventory can take a priced copy off-system. `audit:export` already
-   exists in `PERM_MATRIX` unused, if a split is ever wanted.
+5. ~~Should there be a separate `inventory:export` permission? Today anyone who
+   can view inventory can take a priced copy off-system.~~ **Resolved
+   2026-09-03** with a role gate instead of a new permission: `inventory:view`
+   **+ Super Admin alone**, on RPT-003's `kit-costs.csv` as well.
+   No new `PERM_MATRIX` action was added, so `audit:export` stays unused.
+   **Still needs a client answer:** finance hold `read_only`, so they need
+   promoting to `super_admin` to keep the export — see the note in "The sibling
+   export" above.
 6. The file carries supplier names, PO references and unit prices and lands
    unencrypted in a Downloads folder. Within the client's data-classification
    policy?

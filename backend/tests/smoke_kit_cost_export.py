@@ -25,9 +25,12 @@ Verifies:
     is excluded, one at ``occurred_from`` is included
   * an unpriced input exports BLANK, never ``0``; a $0 lot exports a real ``0``
   * money columns are disjoint across row kinds (the double-count guard)
-  * **the gate**: an ``admin``/``super_admin`` can download it, a ``read_only``
-    user gets 403, and an anonymous caller gets 401 — this file carries what
-    each customer is charged, unlike RPT-001 which finance may take
+  * **the gate**: a ``super_admin`` can download it; ``read_only``,
+    ``operator`` **and ``admin``** all get 403, and an anonymous caller gets
+    401. Narrowed from admin-and-above by the client on 2026-09-03, at the same
+    time RPT-001 was — both priced exports now carry the identical gate, so
+    **run this script with SUPER ADMIN credentials** or the download
+    assertions fail
   * the download wrote an audit row naming RPT-003
 
 The gate section is the one worth re-running after any change to permissions:

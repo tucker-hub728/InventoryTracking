@@ -65,7 +65,7 @@ import {
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { lotsApi } from '@/lib/api/lots';
 import { cn, formatMoney } from '@/lib/utils';
-import { selectIsAdminOrAbove, selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
@@ -205,9 +205,13 @@ export function KitDetailClient({
   // thing that tells them apart (`selectIsSuperAdmin`). The API enforces it
   // too — this only hides controls that would come back a 403.
   const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
-  /** The cost export is Admin + Super Admin only — it carries what each
-   *  customer is charged. Mirrors the endpoint's own RequireRole gate. */
-  const canExportCosts = useAuthStore(selectIsAdminOrAbove);
+  /** The cost export is Super-Admin-only too (client, 2026-09-03; it was Admin
+   *  and above until then) — it carries what each customer is charged. Mirrors
+   *  the endpoint's own RequireRole(SUPER_ADMIN_ROLE), and matches the RPT-001
+   *  finance export. Same raw-role reasoning as `isSuperAdmin` above, so it is
+   *  now the same value; kept as its own name because it answers a different
+   *  question and the two could diverge again. */
+  const canExportCosts = isSuperAdmin;
   /** The manual return (TRX-008) and the cancel that returns the whole floor. */
   const canReturn = canWrite && isSuperAdmin;
   /** The signed close, whose back-flush credits the leftover back to stock. */
