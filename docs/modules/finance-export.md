@@ -12,8 +12,8 @@ audited, neither e-signed:
 
 | Endpoint | Shape | Who uses it |
 |---|---|---|
-| `GET /v1/exports/inventory.xlsx` | Tabbed workbook — a summary tab matching the screen, then one tab per item | The **Export** button |
-| `GET /v1/exports/inventory.csv` | One flat sheet, all 55 columns | No button. The exact-decimal reconciliation artefact, and RPT-001 as literally written |
+| `GET /v1/exports/inventory.xlsx` | Tabbed workbook — a summary tab matching the screen, then one tab per item: its balances, then its transaction history | The **Export** button |
+| `GET /v1/exports/inventory.csv` | One flat sheet, all 70 columns | No button. The exact-decimal reconciliation artefact, and RPT-001 as literally written |
 
 Both are built by the same `_gather()` in `routes.py`, so they cannot disagree
 about the data — only about layout.
@@ -51,9 +51,9 @@ filter pills and is scoped to that tier plus the current search box. It is
 rows because *Below reorder* happened to be selected is the kind of thing
 finance discovers a quarter later.
 
-## The shape: four row kinds in one file
+## The shape: five row kinds in one file
 
-The client chose one row per (lot × location). Three facts finance needs do not
+The client chose one row per (lot × location). Four facts finance needs do not
 live at that grain, so each gets its own `row_kind` and its own columns, blank
 on the others:
 
@@ -62,6 +62,7 @@ on the others:
 | `on_hand` | active allocation, grouped to (lot × location) | `qty_on_hand` | `extended_value_amount` |
 | `awaiting_release` | lot that arrived but is not yet received to inventory | `qty_awaiting_release` | `extended_value_amount` |
 | `on_order` | open order line with quantity outstanding | `qty_on_order` / `qty_on_order_packs` | `extended_value_amount` |
+| `movement` | **stock-ledger event** (RPT-004) | `movement_qty_delta` / `movement_qty_abs` | `movement_value_amount` |
 | `item_valuation` | item (always, even with no stock) | `item_qty_*` | `item_ui_inv_value_amount`, `item_ui_po_value_amount` |
 
 Every money and quantity column is populated on **exactly one** row kind, so
@@ -71,6 +72,55 @@ Filter to one kind before summing.
 **Always filter by `row_kind` before you sum anything.** A `SUM` over the whole
 `extended_value_amount` column adds on-hand stock, unplaced arrivals and
 unfilled purchase orders into a number that means nothing.
+
+## The transaction rows (RPT-004)
+
+Added 2026-09-03. The first four kinds all describe a **balance right now**; a
+`movement` row describes a **flow through time** — one row per event in the
+append-only stock ledger. It is what turns the file from "what do we have" into
+"how did we get it, and what did it cost":
+
+> "We spent $135 to make five of them. So we're going to charge you now, $135
+> divided by 5."
+> — client review call, 2026-09-02
+
+That sum is only checkable if the components' issues and the batch's output are
+both in the file, priced, against item numbers finance recognises.
+
+All sixteen `MOVEMENT_TYPES` come through — `receipt`, `transfer_out`/`_in`,
+`kit_issue`, `kit_additional_issue`, `production_output`, `backflush`,
+`kit_return`, `kit_cancel_return`, `customer_shipment`, `consumable_issue`,
+`material_issue`, `adjustment`, `discard`, `dispense`.
+
+**This is the one query in the export that filters nothing.** No
+`not_floor_stock()`, no `qty > 0`, no `is_active`. Those exclusions are correct
+for current state — material on a production node is genuinely not on the shelf
+— but an event that happened does not stop having happened because the material
+moved on. Excluding kit issues here would delete exactly the story the rows
+exist to tell.
+
+| Column | What to know |
+|---|---|
+| `movement_qty_delta` | **Signed.** A transfer nets to zero across its `transfer_out`/`transfer_in` pair, which is the right answer for a location move. |
+| `movement_qty_abs` | The magnitude. `movement_value_amount` is built from this, so a `SUM` cannot silently net a receipt against a shipment. |
+| `movement_direction` | `in` / `out`, a label over the sign of `qty_delta`. Pivot on this. |
+| `movement_value_amount` | `qty_abs × the lot's unit price`, and **its own column** — never `extended_value_amount`. Adding "what moved this quarter" to "what is on the shelf" is not a number, so the two can never land in one `SUM`. Blank when the lot is unpriced, never `0`. |
+| `movement_from_location_path` / `_to_location_path` | The **frozen text snapshots** on the ledger row, not the live node path. Re-hanging a rack under a new quadrant rewrites the address of every box beneath it, and history that shifts under the reader is worse than none. The only place in the export where a location is deliberately not the live value. |
+| `movement_kit_number` | Without it, sixteen movement types are a list of quantities with no story joining them. |
+
+`occurred_from` / `occurred_to` bound these rows and nothing else — half-open
+(`>= from`, `< to`), matching the audit filters and RPT-003. Both default to
+**unset**, i.e. the whole ledger: a date default that silently truncated
+history is the kind of hidden filter this export exists to avoid.
+
+The 15 `movement_*` columns are **appended** to the original 55, never woven
+in, so a spreadsheet finance already built against a column position is
+unaffected. `test_the_original_columns_never_move` enforces that.
+
+In the workbook, each item's tab shows its balances first and then its ledger
+underneath, labelled **Transaction**. An item whose stock has all been consumed
+or shipped now earns a tab carrying the history that explains where it went —
+before RPT-004 it had nothing to show and dropped out of the workbook.
 
 ## Reconciling against the app
 
@@ -194,6 +244,15 @@ differences that matter here:
 The narrower gate is deliberate: this file says what each customer is charged
 for each finished lot, and `inventory:view` alone would hand it to every
 read-only account (dev seeds 513 of them).
+
+**The export dialog offers scope only — which kit, which dates — never how
+much detail.** It used to carry an "Include" picker with three levels, and it
+defaulted to the narrowest: two of the six row kinds. On dev that is 40 rows
+where the full file is 143, so the button most people pressed was quietly
+producing 28% of the data. Removed 2026-09-03 at the client's request ("we just
+need all raw data… the client wants every raw detail"). The endpoint still
+accepts `row_kinds` for a caller that wants a subset; the UI simply omits it,
+and omitting it means all six.
 
 **Both files inherit the conventions above** — blank is never `0`, companion
 `has_*` columns, unrounded decimals, the CSV-injection guard, the utf-8-sig BOM,

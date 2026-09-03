@@ -247,6 +247,61 @@ def test_numbers_are_written_as_numbers_not_text():
     assert value.value == pytest.approx(47.50)
 
 
+def _price_cell(row):
+    """The "Unit price (each)" cell on the first detail row of an item tab."""
+    book, _ = _build(
+        item_tabs=[
+            {
+                "sheet": "CR-1042",
+                "facts": {"item_number": "CR-1042"},
+                "detail_rows": [_detail_row(unit_price_per_consume_unit=row)],
+            }
+        ]
+    )
+    sheet = book["CR-1042"]
+    col = 1 + [k for _, k in DETAIL_HEADERS].index("unit_price_per_consume_unit")
+    header = next(
+        r for r in range(1, 20) if sheet.cell(row=r, column=1).value == "Type"
+    )
+    return sheet.cell(row=header + 1, column=col)
+
+
+@pytest.mark.parametrize(
+    ("price", "rendered"),
+    [
+        # The complaint: an ordinary price padded out to six decimals reads as
+        # false precision.
+        (Decimal("4.000000"), "4.00"),
+        (Decimal("0.040000"), "0.04"),
+        (Decimal("0.950000"), "0.95"),
+        # ...but a price that genuinely does not divide keeps every digit.
+        # "$95.00 over a pack of 3" is why the column is 6dp in the first place.
+        (Decimal("31.666667"), "31.666667"),
+        (Decimal("0.083333"), "0.083333"),
+    ],
+)
+def test_unit_price_shows_two_decimals_unless_it_needs_more(price, rendered):
+    """Display only. Excel renders per the number format; the cell still holds
+    the unrounded value, which is what a SUM or a multiplication reads."""
+    cell = _price_cell(price)
+    assert cell.number_format == "#,##0.00####"
+    # The stored value is untouched — this is a formatting change, not a
+    # rounding one.
+    assert cell.value == pytest.approx(float(price))
+    # What Excel will actually draw, derived from the format the same way.
+    whole, _, frac = rendered.partition(".")
+    assert len(frac) >= 2
+    assert f"{float(price):.6f}".startswith(f"{whole}.{frac}".rstrip("0") or whole)
+
+
+def test_price_format_never_hides_a_nonzero_price():
+    """A format that rounded to 2dp would render 0.004 as "0.00" — a real
+    price displayed as no price, next to a column where blank means unknown."""
+    cell = _price_cell(Decimal("0.004000"))
+    assert cell.value == pytest.approx(0.004)
+    assert cell.number_format.count("#", cell.number_format.index(".")) >= 4
+
+
 def test_dates_are_written_as_dates():
     book, _ = _build()
     sheet = book["Raw Materials"]

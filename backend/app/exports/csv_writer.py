@@ -37,8 +37,8 @@ MAX_EXPORT_ROWS = 250_000
 #
 # Grouping, in order: export metadata · item identity · lot identity ·
 # supplier/PO provenance · location · quantity · money · item-level
-# cross-check. A column is populated on some ``row_kind``s and blank on
-# others — see ``rows.py`` for which, and why that is what stops the
+# cross-check · transaction. A column is populated on some ``row_kind``s and
+# blank on others — see ``rows.py`` for which, and why that is what stops the
 # item-level figures being double-counted against the detail rows.
 COLUMNS: tuple[str, ...] = (
     # ── Export metadata ──
@@ -104,6 +104,32 @@ COLUMNS: tuple[str, ...] = (
     "item_status_code",
     "item_reorder_threshold",
     "item_last_movement_at",
+    # ── Transaction / ledger (``movement`` rows only, RPT-004) ──
+    #
+    # APPENDED, never interleaved. Finance builds spreadsheets against column
+    # positions, so the 55 columns above keep the indices they have always had
+    # and a pre-existing macro is unaffected by this block existing.
+    #
+    # Every one is prefixed ``movement_`` because these describe a FLOW over
+    # time, while everything above describes a BALANCE right now. The prefix is
+    # what stops someone summing a movement quantity into an on-hand total —
+    # and it is why the money here is ``movement_value_amount`` rather than
+    # another basis on ``extended_value_amount``.
+    "movement_id",
+    "movement_type",
+    "movement_direction",
+    "movement_qty_delta",
+    "movement_qty_abs",
+    "movement_value_amount",
+    "movement_from_location_path",
+    "movement_to_location_path",
+    "movement_kit_id",
+    "movement_kit_number",
+    "movement_customer_name",
+    "movement_reference_number",
+    "movement_performed_by",
+    "movement_performed_at",
+    "movement_notes",
 )
 
 

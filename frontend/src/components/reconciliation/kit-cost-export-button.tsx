@@ -7,38 +7,11 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { ApiError } from '@/lib/api/client';
-import { KIT_COST_DETAIL_KINDS, exportsApi, type KitCostDetail } from '@/lib/api/exports';
+import { exportsApi } from '@/lib/api/exports';
 import { kitsApi, type ApiKitListItem } from '@/lib/api/kits';
 import { saveBlob, timestampedFilename } from '@/lib/download';
-
-/** The three choices, in plain English. Row kinds are the API's vocabulary; a
- *  reader picks between "how much of the story do I want". */
-const DETAIL_OPTIONS: { value: KitCostDetail; label: string; hint: string }[] = [
-  {
-    value: 'summary',
-    label: 'Finished lots and totals',
-    hint: 'One row per finished lot, plus a total for each kit.',
-  },
-  {
-    value: 'costs',
-    label: 'Add components and shipments',
-    hint: 'Also what each component contributed, and which customer it went to.',
-  },
-  {
-    value: 'full',
-    label: 'Everything',
-    hint: 'Adds every material issue and return, one row each.',
-  },
-];
 
 const ALL_KITS = '__all__';
 
@@ -46,9 +19,19 @@ const ALL_KITS = '__all__';
  * The kit-cost CSV download (RPT-003).
  *
  * The client did not want a report — *"a data dump of all the information
- * captured over a date range into a .CSV file"* — so this offers scope, not
- * analysis: which kit, which dates, how much detail. Everything it produces is
- * still raw rows.
+ * captured over a date range into a .CSV file"* — so this offers **scope
+ * only**: which kit, which dates. Never how much.
+ *
+ * There used to be an "Include" picker offering three detail levels, and it
+ * defaulted to the narrowest of them: two of the six row kinds. So the button
+ * most people pressed quietly produced the *least* data, which is the opposite
+ * of what was asked for (2026-09-03) —
+ *
+ *     "we just need all raw data, we don't need Include […] since the client
+ *     wants every raw detail, so we are going to give that"
+ *
+ * The endpoint still accepts ``row_kinds`` for a caller that wants a subset;
+ * omitting it means all six, so this component simply never sends it.
  *
  * ``kitId`` pins it to one kit and hides the picker, so the button on a kit's
  * own page exports that kit the way the inventory Export button exports the
@@ -69,7 +52,6 @@ export function KitCostExportButton({
   const today = React.useMemo(() => new Date(), []);
   const [from, setFrom] = React.useState(() => isoDate(addDays(today, -30)));
   const [to, setTo] = React.useState(() => isoDate(today));
-  const [detail, setDetail] = React.useState<KitCostDetail>('summary');
   const [pickedKit, setPickedKit] = React.useState(ALL_KITS);
   const [kits, setKits] = React.useState<ApiKitListItem[]>([]);
 
@@ -112,7 +94,9 @@ export function KitCostExportButton({
         // conversion the audit filters make.
         occurredTo: to ? `${isoDate(addDays(new Date(`${to}T00:00:00`), 1))}T00:00:00` : undefined,
         kitId: scopedKitId,
-        rowKinds: KIT_COST_DETAIL_KINDS[detail],
+        // No ``rowKinds``: the endpoint defaults to all six. Every issue,
+        // every return, every component's contribution, every finished lot,
+        // every shipment, and the per-kit totals.
       });
       const name = filename ?? timestampedFilename('cellready-kit-costs', 'csv');
       saveBlob(blob, name);
@@ -126,8 +110,6 @@ export function KitCostExportButton({
       setBusy(false);
     }
   }
-
-  const detailHint = DETAIL_OPTIONS.find((o) => o.value === detail)?.hint;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -170,22 +152,10 @@ export function KitCostExportButton({
           </label>
         </div>
 
-        <label className="mt-3 block">
-          <span className="text-[11px] uppercase tracking-wider text-text-3">Include</span>
-          <Select value={detail} onValueChange={(v) => setDetail(v as KitCostDetail)}>
-            <SelectTrigger aria-label="How much detail to include">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {DETAIL_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </label>
-        {detailHint && <p className="mt-1 text-[11px] text-text-3">{detailHint}</p>}
+        <p className="mt-3 text-[11px] text-text-3">
+          Every row captured in this range: material issues and returns, what each
+          component contributed, finished lots, shipments, and a total per kit.
+        </p>
 
         <Button
           variant="primary"

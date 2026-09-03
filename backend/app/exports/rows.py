@@ -12,6 +12,8 @@ that grain and cannot be forced into it without breaking ``SUM()``:
 * **on-order** is per open *order line* — no lot, no location;
 * **awaiting release** is per *lot* that has arrived but is not yet received to
   inventory — no location;
+* a **transaction** is per *ledger event* — a flow through time rather than a
+  balance at a moment, and one lot can have hundreds;
 * the **valuation the UI shows** is per *item*.
 
 Stamping any of those onto every detail row multiplies them by the number of
@@ -49,15 +51,19 @@ from app.inventory.repository import is_synthetic_lot_number
 
 from .csv_writer import COLUMNS
 
-RowKind = Literal["on_hand", "awaiting_release", "on_order", "item_valuation"]
+RowKind = Literal[
+    "on_hand", "awaiting_release", "on_order", "movement", "item_valuation"
+]
 
 #: Emission order. ``on_hand`` first so the file opens on the rows finance
-#: reads most; ``item_valuation`` last because it is the cross-check, not the
-#: data.
+#: reads most; ``movement`` after the three current-state kinds because it is
+#: the history behind them; ``item_valuation`` last because it is the
+#: cross-check, not the data.
 ROW_KINDS: tuple[RowKind, ...] = (
     "on_hand",
     "awaiting_release",
     "on_order",
+    "movement",
     "item_valuation",
 )
 
@@ -67,6 +73,20 @@ VALUE_BASIS_ON_HAND = "allocation_qty_x_lot_price"
 VALUE_BASIS_AWAITING = "awaiting_qty_x_lot_price"
 VALUE_BASIS_ON_ORDER = "outstanding_packs_x_line_price"
 VALUE_BASIS_LEDGER = "ledger_movements_x_lot_price"
+#: ``movement`` rows put their money in ``movement_value_amount``, NOT in
+#: ``extended_value_amount``. The three bases above are all balances at the
+#: moment of export and can be reasoned about together; a movement is a flow,
+#: and adding "what moved this quarter" to "what is on the shelf" is not a
+#: number. Separate columns make that mistake impossible rather than merely
+#: documented.
+VALUE_BASIS_MOVEMENT = "movement_qty_x_lot_price"
+
+#: ``qty_delta`` sign → a word, because "-80" and "out" are not equally easy to
+#: pivot on and finance pivots on this. Same spirit as ``has_unit_price`` and
+#: ``is_expired``: a label over a value already in the row, so nobody has to
+#: re-derive it in Excel and get it wrong once.
+MOVEMENT_IN = "in"
+MOVEMENT_OUT = "out"
 
 
 @dataclass(frozen=True)
@@ -325,6 +345,84 @@ def on_order_row(
         unit_price=sql_row.unit_price_amount,
         basis=VALUE_BASIS_ON_ORDER,
     )
+    return row
+
+
+def movement_row(
+    facts: ItemFacts,
+    sql_row: Any,
+    *,
+    today: date,
+    generated_at: datetime,
+) -> dict[str, Any]:
+    """One row of the append-only stock ledger — the transaction grain.
+
+    This is the kind that answers "how did this item get here". The three
+    current-state kinds say what the balance IS; these say every event that
+    made it, in the client's own terms: a receipt in, a ``kit_issue`` out, a
+    ``production_output`` in, a ``customer_shipment`` out.
+
+        "We spent $135 to make five of them. So we're going to charge you now,
+        $135 divided by 5."
+        — client review call, 2026-09-02
+
+    That sum is only checkable if the components' issues and the batch's output
+    are both in the file, priced, against the same item numbers finance already
+    recognises. Hence ``movement_value_amount``, and hence
+    ``movement_kit_number`` — without the kit, sixteen movement types are just
+    a list of quantities with no story joining them.
+
+    **Locations come from the frozen path snapshots**, ``from_location_path`` /
+    ``to_location_path`` on the ledger row, not from the node ids. A rack
+    re-hung under a new quadrant rewrites the address of every box beneath it,
+    and history that shifts under the reader is worse than no history. This is
+    the one place in the export where a location string is deliberately NOT the
+    live ``<LocationPath>`` value.
+    """
+    row = _base(facts, "movement", generated_at)
+    if sql_row.lot_id is not None:
+        # Nullable on the ledger: an adjustment can be recorded against an item
+        # with no lot. The whole lot block stays blank there rather than
+        # half-filled.
+        _apply_lot(
+            row,
+            lot_id=sql_row.lot_id,
+            lot_number=sql_row.lot_number,
+            lot_status=sql_row.lot_status,
+            release_state=sql_row.release_state,
+            manufacture_date=sql_row.manufacture_date,
+            expiration_date=sql_row.expiration_date,
+            parent_lot_id=sql_row.parent_lot_id,
+            today=today,
+        )
+    row["movement_id"] = sql_row.movement_id
+    row["movement_type"] = sql_row.movement_type
+    row["movement_direction"] = MOVEMENT_IN if sql_row.qty_delta > 0 else MOVEMENT_OUT
+    row["movement_qty_delta"] = sql_row.qty_delta
+    row["movement_qty_abs"] = sql_row.qty_abs
+    row["movement_from_location_path"] = sql_row.from_location_path
+    row["movement_to_location_path"] = sql_row.to_location_path
+    row["movement_kit_id"] = sql_row.kit_id
+    row["movement_kit_number"] = sql_row.kit_number
+    row["movement_customer_name"] = sql_row.customer_name
+    row["movement_reference_number"] = sql_row.reference_number
+    row["movement_performed_by"] = sql_row.performed_by
+    row["movement_performed_at"] = sql_row.performed_at
+    row["movement_notes"] = sql_row.notes
+
+    # The lot's price, same column the on-hand rows use — a rate, not a
+    # quantity, so it does not double-count when both kinds are present.
+    row["unit_price_per_consume_unit"] = sql_row.unit_price_amount
+    row["has_unit_price"] = sql_row.unit_price_amount is not None
+    row["value_basis"] = VALUE_BASIS_MOVEMENT
+    if sql_row.unit_price_amount is not None:
+        # ``qty_abs``, not ``qty_delta``: the magnitude of what moved. The
+        # direction is already its own column, and a signed money column
+        # invites a SUM that silently nets a receipt against a shipment.
+        # Blank-not-zero still holds — an unpriced lot leaves this empty.
+        row["movement_value_amount"] = (
+            Decimal(sql_row.qty_abs) * sql_row.unit_price_amount
+        )
     return row
 
 

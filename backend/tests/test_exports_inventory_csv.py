@@ -91,7 +91,28 @@ EXPECTED_COLUMNS = (
     "item_status_code",
     "item_reorder_threshold",
     "item_last_movement_at",
+    # RPT-004 — appended, never interleaved, so the 55 above keep their indices.
+    "movement_id",
+    "movement_type",
+    "movement_direction",
+    "movement_qty_delta",
+    "movement_qty_abs",
+    "movement_value_amount",
+    "movement_from_location_path",
+    "movement_to_location_path",
+    "movement_kit_id",
+    "movement_kit_number",
+    "movement_customer_name",
+    "movement_reference_number",
+    "movement_performed_by",
+    "movement_performed_at",
+    "movement_notes",
 )
+
+#: The column count before RPT-004 appended the transaction block. Finance's
+#: existing spreadsheets bind to positions inside this prefix, so it is the
+#: half of the contract that must never move.
+ORIGINAL_COLUMN_COUNT = 55
 
 
 def test_column_contract_is_frozen():
@@ -102,6 +123,18 @@ def test_column_contract_is_frozen():
     deliberately means changing this list too — and telling finance.
     """
     assert COLUMNS == EXPECTED_COLUMNS
+
+
+def test_the_original_columns_never_move():
+    """RPT-004 appended; it must not have shifted anything finance already has.
+
+    Stronger than the frozen tuple above, which a careless edit could "fix" by
+    pasting in whatever the code now emits. This one says *where* the new block
+    is allowed to be: strictly after position 55, never woven in.
+    """
+    assert COLUMNS[:ORIGINAL_COLUMN_COUNT] == EXPECTED_COLUMNS[:ORIGINAL_COLUMN_COUNT]
+    assert COLUMNS.index("movement_id") == ORIGINAL_COLUMN_COUNT
+    assert all(c.startswith("movement_") for c in COLUMNS[ORIGINAL_COLUMN_COUNT:])
 
 
 def test_blank_row_covers_every_column():
@@ -347,8 +380,145 @@ def test_awaiting_release_row_has_no_location():
 # ── Row-kind column applicability: the double-count guard ───────────────
 
 
-def test_row_kinds_are_the_documented_four():
-    assert ROW_KINDS == ("on_hand", "awaiting_release", "on_order", "item_valuation")
+def test_row_kinds_are_the_documented_five():
+    assert ROW_KINDS == (
+        "on_hand",
+        "awaiting_release",
+        "on_order",
+        "movement",
+        "item_valuation",
+    )
+
+
+def test_item_valuation_stays_last():
+    """It is the cross-check, not the data, and readers expect it at the end."""
+    assert ROW_KINDS[-1] == "item_valuation"
+
+
+# ── The transaction rows (RPT-004) ──────────────────────────────────────
+
+
+class _Movement:
+    """Stand-in for one row of the ``movement_rows_by_item`` result."""
+
+    def __init__(self, **kw):
+        defaults = {
+            "movement_id": uuid.uuid4(),
+            "movement_type": "kit_issue",
+            "qty_delta": -80,
+            "qty_abs": 80,
+            "from_location_path": "Storage › Fridge 1 › Shelf A",
+            "to_location_path": "Production › Clean Room Three",
+            "notes": "Issued to kit",
+            "reference_number": None,
+            "performed_at": datetime(2026, 8, 20, 9, 30, tzinfo=UTC),
+            "kit_id": uuid.uuid4(),
+            "kit_number": "KIT-0007",
+            "customer_name": None,
+            "performed_by": "Dana Reyes",
+            "lot_id": uuid.uuid4(),
+            "lot_number": "PL-301-07",
+            "lot_status": "available",
+            "release_state": None,
+            "manufacture_date": None,
+            "expiration_date": None,
+            "parent_lot_id": None,
+            "unit_price_amount": Decimal("2.000000"),
+        }
+        self.__dict__.update(defaults | kw)
+
+
+def _movement(**kw):
+    from app.exports.rows import movement_row
+
+    return movement_row(FACTS, _Movement(**kw), today=TODAY, generated_at=GENERATED)
+
+
+def test_a_transaction_row_carries_its_quantity_and_value():
+    """The client's arithmetic: what moved, and what it was worth."""
+    row = _movement()
+    assert row["row_kind"] == "movement"
+    assert row["movement_type"] == "kit_issue"
+    assert row["movement_qty_delta"] == -80
+    assert row["movement_qty_abs"] == 80
+    # 80 × 2.00 — the magnitude, not the signed delta.
+    assert row["movement_value_amount"] == Decimal("160.000000")
+
+
+@pytest.mark.parametrize(
+    ("qty_delta", "expected"),
+    [(-80, "out"), (200, "in"), (5, "in")],
+)
+def test_direction_is_labelled_from_the_sign(qty_delta, expected):
+    """A word finance can pivot on, over a sign they would have to re-derive."""
+    assert _movement(qty_delta=qty_delta, qty_abs=abs(qty_delta))[
+        "movement_direction"
+    ] == expected
+
+
+def test_transaction_value_is_blank_when_the_lot_has_no_price():
+    """Blank-not-zero holds here too — an unpriced move is not a free move."""
+    row = _movement(unit_price_amount=None)
+    assert row["has_unit_price"] is False
+    assert row["movement_value_amount"] is None
+    assert format_cell(row["movement_value_amount"]) == ""
+
+
+def test_transaction_money_never_lands_in_the_balance_column():
+    """The guard that keeps a flow out of a balance.
+
+    ``SUM(extended_value_amount)`` must keep meaning "value on hand / on
+    order". If a movement ever populated it, that total would silently absorb
+    every receipt and shipment in the file.
+    """
+    row = _movement()
+    assert row["extended_value_amount"] is None
+    assert row["movement_value_amount"] is not None
+
+
+def test_transaction_rows_carry_no_balance_quantities():
+    """The disjointness rule, extended to the new kind."""
+    row = _movement()
+    for column in ("qty_on_hand", "qty_awaiting_release", "qty_on_order"):
+        assert row[column] is None, column
+
+
+def test_balance_rows_carry_no_transaction_columns():
+    """The mirror: the three existing kinds never fill the movement block."""
+    row = _awaiting()
+    for column in COLUMNS:
+        if column.startswith("movement_"):
+            assert row[column] is None, column
+
+
+def test_the_kit_is_named_so_a_cost_can_be_traced():
+    """Without the kit number, sixteen movement types are quantities with no
+    story joining them — and "$135 to make five" is uncheckable."""
+    assert _movement()["movement_kit_number"] == "KIT-0007"
+
+
+def test_locations_come_from_the_frozen_path_snapshots():
+    """History must not shift when a rack is re-hung under a new parent."""
+    row = _movement()
+    assert row["movement_from_location_path"] == "Storage › Fridge 1 › Shelf A"
+    assert row["movement_to_location_path"] == "Production › Clean Room Three"
+    # The live location block belongs to the balance kinds, not to history.
+    assert row["location_path"] is None
+    assert row["location_node_id"] is None
+
+
+def test_a_movement_without_a_lot_leaves_the_lot_block_blank():
+    """``stock_movements.lot_id`` is nullable — an item-level adjustment.
+
+    Half-filling the lot block would be worse than leaving it empty: a blank
+    ``lot_number`` beside a populated ``is_expired`` reads as a real lot with
+    an unknown number.
+    """
+    row = _movement(lot_id=None)
+    for column in ("lot_id", "lot_number", "lot_status", "is_expired"):
+        assert row[column] is None, column
+    # The event itself is still fully described.
+    assert row["movement_qty_abs"] == 80
 
 
 def test_quantity_columns_are_disjoint_across_row_kinds():
