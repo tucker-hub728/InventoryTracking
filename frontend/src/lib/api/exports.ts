@@ -4,8 +4,10 @@
  * RPT-001. Two shapes of the same data:
  *
  * * ``inventoryXlsx`` — the tabbed workbook the UI ships: a summary tab
- *   matching the screen, then one tab per item that has stock, an arrival or
- *   an open order.
+ *   matching the screen, then one tab per item that has stock, an arrival, an
+ *   open order, or a transaction. Since RPT-004 each item tab carries its
+ *   balances first and then its ledger history underneath, so a reader can see
+ *   what an item is worth AND how it got there.
  * * ``inventoryCsv`` — the flat, full-column CSV the requirement specifies.
  *   No button today; kept because it is the exact-decimal artefact to
  *   reconcile against, and because RPT-001 asks for a CSV in so many words.
@@ -16,11 +18,15 @@
 
 import { api, type DownloadResult } from './client';
 
-/** Which kinds of row to include in the CSV. Omit for all four. */
+/** Which kinds of row to include in the CSV. Omit for all five. */
 export type ExportRowKind =
   | 'on_hand'
   | 'awaiting_release'
   | 'on_order'
+  /** RPT-004 — one row per stock-ledger event: receipts, transfers, kit
+   *  issues, production output, back-flushes, shipments. The history behind
+   *  the balances. */
+  | 'movement'
   | 'item_valuation';
 
 export interface InventoryExportParams {
@@ -32,6 +38,12 @@ export interface InventoryExportParams {
   /** Same search text the list is filtered by. */
   q?: string;
   isConsumable?: boolean;
+  /** ISO datetime, INCLUSIVE. Bounds the TRANSACTION rows only — balances are
+   *  always current. Omit for the whole ledger. */
+  occurredFrom?: string;
+  /** ISO datetime, EXCLUSIVE — half-open, matching the audit filters. To
+   *  include a whole day, send the start of the next one. */
+  occurredTo?: string;
 }
 
 export interface InventoryXlsxParams extends InventoryExportParams {
@@ -43,7 +55,11 @@ export interface InventoryCsvParams extends InventoryExportParams {
   rowKinds?: readonly ExportRowKind[];
 }
 
-/** Row kinds in the kit-cost dump (RPT-003). Omit for all six. */
+/** Row kinds in the kit-cost dump (RPT-003). Omit for all six.
+ *
+ *  The export UI always omits it — the client wants every raw detail, and a
+ *  detail-level picker was only ever a way to ship less by accident. Kept on
+ *  the wrapper because the endpoint still supports the filter. */
 export type KitCostRowKind =
   | 'material_issue'
   | 'material_return'
@@ -51,31 +67,6 @@ export type KitCostRowKind =
   | 'batch_output'
   | 'output_shipment'
   | 'kit_summary';
-
-/** How much of the story to include — the choice the export dialog offers.
- *
- *  Row kinds are the API's vocabulary, not a reader's. These three are what a
- *  non-technical person actually wants to pick between, and each maps to a
- *  subset below. */
-export type KitCostDetail = 'summary' | 'costs' | 'full';
-
-/** Detail level → row kinds. Named here rather than in the component so the
- *  meaning of "Summary" lives with the API wrapper it parameterises. */
-export const KIT_COST_DETAIL_KINDS: Record<KitCostDetail, readonly KitCostRowKind[]> = {
-  /** One line per finished lot, plus a total per kit. What you send finance. */
-  summary: ['batch_output', 'kit_summary'],
-  /** Adds what each component contributed and where the lots went. */
-  costs: ['batch_output', 'kit_summary', 'batch_consumption', 'output_shipment'],
-  /** Everything, including every issue and return movement. */
-  full: [
-    'material_issue',
-    'material_return',
-    'batch_consumption',
-    'batch_output',
-    'output_shipment',
-    'kit_summary',
-  ],
-};
 
 export interface KitCostExportParams {
   /** ISO datetime, INCLUSIVE. */
@@ -95,6 +86,8 @@ function baseQuery(params: InventoryExportParams) {
     supplier_id: params.supplierId,
     q: params.q,
     is_consumable: params.isConsumable,
+    occurred_from: params.occurredFrom,
+    occurred_to: params.occurredTo,
   };
 }
 

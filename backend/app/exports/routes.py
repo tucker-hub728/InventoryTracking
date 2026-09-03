@@ -75,6 +75,7 @@ class _Bundle:
     on_hand: list[dict[str, Any]] = field(default_factory=list)
     awaiting: list[dict[str, Any]] = field(default_factory=list)
     on_order: list[dict[str, Any]] = field(default_factory=list)
+    movements: list[dict[str, Any]] = field(default_factory=list)
     valuation: dict[str, Any] | None = None
     inv_value: Decimal = Decimal("0")
     po_value: Decimal = Decimal("0")
@@ -83,12 +84,30 @@ class _Bundle:
 
     @property
     def detail_rows(self) -> list[dict[str, Any]]:
-        """Every row that describes actual material, summary rows excluded."""
+        """Every row that describes actual material, summary rows excluded.
+
+        ``movements`` are deliberately NOT here. This property feeds the
+        workbook's per-item totals and the smoke test's reconciliation, both of
+        which sum balances; folding a flow grain into them would double-count
+        every unit against its own history. The ledger rows are appended to
+        :attr:`csv_rows` instead, and the workbook gives them their own block.
+        """
         return [*self.on_hand, *self.awaiting, *self.on_order]
 
     @property
+    def sheet_rows(self) -> list[dict[str, Any]]:
+        """What an item's workbook tab shows: its balances, then its history.
+
+        Balances first so the tab opens on the same rows it always did, then
+        the ledger underneath in date order. An item with only history — every
+        unit received and then shipped — still earns a tab, which is the whole
+        point of showing transactions.
+        """
+        return [*self.detail_rows, *self.movements]
+
+    @property
     def csv_rows(self) -> list[dict[str, Any]]:
-        rows = self.detail_rows
+        rows = [*self.detail_rows, *self.movements]
         return [*rows, self.valuation] if self.valuation else rows
 
 
@@ -112,11 +131,16 @@ async def _gather(
     supplier_id: uuid.UUID | None,
     q: str | None,
     is_consumable: bool | None,
+    occurred_from: datetime | None = None,
+    occurred_to: datetime | None = None,
 ) -> _Export:
-    """Fetch everything both formats need, in six bulk queries.
+    """Fetch everything both formats need, in seven bulk queries.
 
     There is no per-item query in here. An export is the one endpoint where an
     N+1 turns a page load into a timeout.
+
+    ``occurred_from`` / ``occurred_to`` bound the ``movement`` rows only. Every
+    other kind is current state and has nothing to bound.
     """
     generated_at = datetime.now(UTC)
     # One date for the whole file, so ``is_expired`` and ``days_to_expiry``
@@ -146,6 +170,13 @@ async def _gather(
     open_orders = (
         await exp_repo.open_order_rows_by_item(db, item_ids)
         if "on_order" in wanted
+        else {}
+    )
+    movements = (
+        await exp_repo.movement_rows_by_item(
+            db, item_ids, occurred_from=occurred_from, occurred_to=occurred_to
+        )
+        if "movement" in wanted
         else {}
     )
     # Always fetched: the workbook's summary tab shows these figures for every
@@ -194,6 +225,12 @@ async def _gather(
             bundle.on_order.append(
                 builders.on_order_row(facts, sql_row, generated_at=generated_at)
             )
+        for sql_row in movements.get(item.id, []):
+            bundle.movements.append(
+                builders.movement_row(
+                    facts, sql_row, today=today, generated_at=generated_at
+                )
+            )
         if "item_valuation" in wanted:
             bundle.valuation = builders.item_valuation_row(
                 facts,
@@ -210,6 +247,7 @@ async def _gather(
         "on_hand": sum(len(b.on_hand) for b in bundles),
         "awaiting_release": sum(len(b.awaiting) for b in bundles),
         "on_order": sum(len(b.on_order) for b in bundles),
+        "movement": sum(len(b.movements) for b in bundles),
         "item_valuation": sum(1 for b in bundles if b.valuation),
     }
     total = sum(counts.values())
@@ -218,7 +256,7 @@ async def _gather(
         raise ValidationError(
             f"This export would be {total:,} rows, over the "
             f"{MAX_EXPORT_ROWS:,} limit. Narrow it with a tier or supplier "
-            f"filter.",
+            f"filter, or bound the transactions with occurred_from.",
             code="export_too_large",
         )
     return _Export(bundles=bundles, generated_at=generated_at, counts=counts)
@@ -303,7 +341,21 @@ async def inventory_csv(
     is_consumable: Annotated[bool | None, Query()] = None,
     row_kinds: Annotated[
         list[RowKind] | None,
-        Query(description="Which row kinds to include. Default: all four."),
+        Query(description="Which row kinds to include. Default: all five."),
+    ] = None,
+    occurred_from: Annotated[
+        datetime | None,
+        Query(description="Transactions at or after this instant. INCLUSIVE."),
+    ] = None,
+    occurred_to: Annotated[
+        datetime | None,
+        Query(
+            description=(
+                "Transactions strictly before this instant. EXCLUSIVE — to "
+                "include a whole day, send the start of the next one. Bounds "
+                "the movement rows only; every other kind is current state."
+            )
+        ),
     ] = None,
 ) -> Response:
     """RPT-001 as specified: one flat sheet, every column.
@@ -342,6 +394,8 @@ async def inventory_csv(
         supplier_id=supplier_id,
         q=q,
         is_consumable=is_consumable,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
     )
     csv_rows = export.csv_rows
     body = render_csv(csv_rows)
@@ -364,6 +418,8 @@ async def inventory_csv(
             "q": q,
             "is_consumable": is_consumable,
             "row_kinds": list(wanted),
+            "occurred_from": occurred_from.isoformat() if occurred_from else None,
+            "occurred_to": occurred_to.isoformat() if occurred_to else None,
         },
     )
 
@@ -395,14 +451,31 @@ async def inventory_xlsx(
             description="Name for the summary tab, e.g. the tier being exported.",
         ),
     ] = "Inventory",
+    occurred_from: Annotated[
+        datetime | None,
+        Query(description="Transactions at or after this instant. INCLUSIVE."),
+    ] = None,
+    occurred_to: Annotated[
+        datetime | None,
+        Query(
+            description=(
+                "Transactions strictly before this instant. EXCLUSIVE. Bounds "
+                "the transaction rows only; the balances are always current."
+            )
+        ),
+    ] = None,
 ) -> Response:
     """The tabbed workbook: summary tab, then one tab per item.
 
-    **Only items with something to show get a tab** — stock, an arrival, or an
-    open order. An item with none of those would get a tab containing a header
-    block and an empty table, and 20-odd of those make the workbook harder to
-    navigate without adding a fact. They still appear on the summary tab, so
-    nothing disappears; their SKU simply is not a link.
+    **Only items with something to show get a tab** — stock, an arrival, an
+    open order, or a transaction. An item with none of those would get a tab
+    containing a header block and an empty table, and 20-odd of those make the
+    workbook harder to navigate without adding a fact. They still appear on the
+    summary tab, so nothing disappears; their SKU simply is not a link.
+
+    Since RPT-004 an item whose stock has all been consumed or shipped still
+    earns a tab, carrying the history that explains where it went — previously
+    it had nothing to show and dropped out of the workbook entirely.
 
     Every row here is the same row the CSV emits, from the same
     :func:`_gather`. The workbook differs only in layout and in writing numbers
@@ -417,6 +490,8 @@ async def inventory_xlsx(
         supplier_id=supplier_id,
         q=q,
         is_consumable=is_consumable,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
     )
 
     used_names: set[str] = set()
@@ -429,7 +504,7 @@ async def inventory_xlsx(
         qty_on_hand = stock.qty_on_hand if stock else Decimal("0")
         qty_available = stock.qty_available if stock else Decimal("0")
         threshold = item.reorder_threshold or Decimal("0")
-        detail_rows = bundle.detail_rows
+        detail_rows = bundle.sheet_rows
         sheet = sheet_name_for(bundle.facts.item_number, used_names) if detail_rows else None
 
         status = summary_status_label(

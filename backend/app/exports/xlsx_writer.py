@@ -79,6 +79,24 @@ DETAIL_HEADERS: tuple[tuple[str, str], ...] = (
     ("Unit price (each)", "unit_price_per_consume_unit"),
     ("Unit price (pack)", "unit_price_per_order_unit"),
     ("Value", "extended_value_amount"),
+    # ── Transaction columns, blank on the three balance kinds ──
+    #
+    # Appended rather than woven in, so the balance half of the table still
+    # reads exactly as it did and a "Transaction" row is visibly a different
+    # kind of thing. This is the block that answers the question the client
+    # actually asked: not "what is on the shelf" but "how did it get there,
+    # and what did it cost".
+    ("Transaction", "movement_type"),
+    ("Direction", "movement_direction"),
+    ("Qty moved", "movement_qty_delta"),
+    ("Transaction value", "movement_value_amount"),
+    ("From", "movement_from_location_path"),
+    ("To", "movement_to_location_path"),
+    ("Kit", "movement_kit_number"),
+    ("Customer", "movement_customer_name"),
+    ("Reference", "movement_reference_number"),
+    ("By", "movement_performed_by"),
+    ("When", "movement_performed_at"),
 )
 
 #: Human labels for the row kinds. The machine names are fine in a CSV that a
@@ -87,6 +105,10 @@ ROW_KIND_LABELS = {
     "on_hand": "In stock",
     "awaiting_release": "Awaiting release",
     "on_order": "On order",
+    # Deliberately NOT "Movement". The ledger's word is ``movement``, but the
+    # people reading this tab are finance, and the thing they are looking at is
+    # a transaction against an item.
+    "movement": "Transaction",
 }
 
 #: Mirrors ``STOCK_STATUS_META`` in ``frontend/src/config/inventory.ts`` so the
@@ -131,7 +153,18 @@ def summary_status_label(
 
 
 _MONEY_FORMAT = "#,##0.00"
-_PRICE_FORMAT = "#,##0.000000"
+#: Two decimals always, up to six only when the price actually needs them.
+#:
+#: ``0`` is a mandatory digit and ``#`` a conditional one, so ``$4.00`` renders
+#: as ``4.00`` while ``$95.00`` over a pack of 3 still renders in full as
+#: ``31.666667``. A flat ``0.000000`` padded every ordinary price out to
+#: ``4.000000``, which reads as false precision and is what finance noticed
+#: first when they opened the file.
+#:
+#: Display only — the cell still holds the unrounded number, so a ``SUM`` or a
+#: multiplication over this column is unaffected. Same ``#``-suppression trick
+#: ``_QTY_FORMAT`` below already uses.
+_PRICE_FORMAT = "#,##0.00####"
 _QTY_FORMAT = "#,##0.###"
 _DATE_FORMAT = "yyyy-mm-dd"
 _DATETIME_FORMAT = "yyyy-mm-dd hh:mm"

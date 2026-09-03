@@ -13,21 +13,27 @@ in the route.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.inventory import repository as inv_repo
 from app.kitting.repository import not_floor_stock
+from app.models.identity import User
 from app.models.inventory import (
     Item,
     Lot,
     ReceiptTransaction,
     ReceiptTransactionLine,
+    StockMovement,
     Supplier,
 )
+from app.models.kitting import Kit
 from app.models.locations import LocationNode, LotAllocation
+from app.models.products import Customer
 
 
 async def filtered_items(
@@ -135,6 +141,89 @@ async def allocation_rows_by_item(
             LocationNode.code.asc(),
         )
     )
+    out: dict[uuid.UUID, list[Row[Any]]] = {}
+    for row in (await session.execute(stmt)).all():
+        out.setdefault(row.item_id, []).append(row)
+    return out
+
+
+async def movement_rows_by_item(
+    session: AsyncSession,
+    item_ids: list[uuid.UUID],
+    *,
+    occurred_from: datetime | None = None,
+    occurred_to: datetime | None = None,
+) -> dict[uuid.UUID, list[Row[Any]]]:
+    """``{item_id: [row, …]}`` — the stock ledger, one row per event.
+
+    **Unlike every other query in this module, this one filters nothing by
+    default.** No ``not_floor_stock()``, no ``qty > 0``, no ``is_active``. The
+    other helpers describe current state, where "material sitting on a
+    production node is not on the shelf" is a true and useful exclusion. This
+    one describes what *happened*, and an event that happened does not stop
+    having happened because the material has since moved on. Excluding kit
+    issues here would delete exactly the story the client asked to see.
+
+    So all sixteen ``MOVEMENT_TYPES`` come through, including both halves of a
+    transfer. That is intentional and it is why ``movement_qty_delta`` is
+    signed: a transfer nets to zero across its pair, which is the correct
+    answer for a location move.
+
+    ``occurred_from`` / ``occurred_to`` are the only filter, half-open
+    (``>= from``, ``< to``) to match the audit filters and RPT-003. Both
+    default to ``None`` — the whole ledger — because a date default that
+    silently truncated history is the kind of hidden filter this export exists
+    to avoid.
+
+    Lot columns are outer-joined: ``stock_movements.lot_id`` is nullable, so an
+    item-level adjustment yields a row with no lot rather than no row at all.
+    """
+    if not item_ids:
+        return {}
+
+    performer = aliased(User)
+    stmt = (
+        select(
+            StockMovement.item_id.label("item_id"),
+            StockMovement.id.label("movement_id"),
+            StockMovement.movement_type.label("movement_type"),
+            StockMovement.qty_delta.label("qty_delta"),
+            StockMovement.qty_abs.label("qty_abs"),
+            # The frozen text snapshots, NOT the node ids — see ``movement_row``.
+            StockMovement.from_location_path.label("from_location_path"),
+            StockMovement.to_location_path.label("to_location_path"),
+            StockMovement.notes.label("notes"),
+            StockMovement.reference_number.label("reference_number"),
+            StockMovement.performed_at.label("performed_at"),
+            StockMovement.kit_id.label("kit_id"),
+            Kit.kit_number.label("kit_number"),
+            Customer.name.label("customer_name"),
+            performer.full_name.label("performed_by"),
+            Lot.id.label("lot_id"),
+            Lot.lot_number.label("lot_number"),
+            Lot.status.label("lot_status"),
+            Lot.release_state.label("release_state"),
+            Lot.manufacture_date.label("manufacture_date"),
+            Lot.expiration_date.label("expiration_date"),
+            Lot.parent_lot_id.label("parent_lot_id"),
+            Lot.unit_price_amount.label("unit_price_amount"),
+        )
+        .select_from(StockMovement)
+        .outerjoin(Lot, Lot.id == StockMovement.lot_id)
+        .outerjoin(Kit, Kit.id == StockMovement.kit_id)
+        .outerjoin(Customer, Customer.id == StockMovement.customer_id)
+        .outerjoin(performer, performer.id == StockMovement.performed_by_user_id)
+        .where(StockMovement.item_id.in_(item_ids))
+        # Oldest first: this is a history, and a history reads forwards. The id
+        # tiebreak keeps two movements in the same transaction stable between
+        # exports so a diff of two files means something.
+        .order_by(StockMovement.performed_at.asc(), StockMovement.id.asc())
+    )
+    if occurred_from is not None:
+        stmt = stmt.where(StockMovement.performed_at >= occurred_from)
+    if occurred_to is not None:
+        stmt = stmt.where(StockMovement.performed_at < occurred_to)
+
     out: dict[uuid.UUID, list[Row[Any]]] = {}
     for row in (await session.execute(stmt)).all():
         out.setdefault(row.item_id, []).append(row)

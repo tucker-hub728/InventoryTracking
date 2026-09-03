@@ -253,7 +253,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
       variant="default"
       onClick={() => void handleExport()}
       disabled={exporting || !tier}
-      title={`Excel workbook — a ${config.title} summary tab, then one tab per item`}
+      title={`Excel workbook — a ${config.title} summary tab, then one tab per item with its stock and its full transaction history`}
     >
       {exporting ? (
         <Loader2 size={14} className="animate-spin" />
