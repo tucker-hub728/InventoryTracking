@@ -119,8 +119,12 @@ export function TierListClient({ config }: { config: TierConfig }) {
   // `super_admin` into the same `admin` RBAC bucket, and `operator` holds
   // `inventory:view` too, so the permission matrix cannot answer this.
   //
-  // NOTE: RPT-001's audience is finance, who currently hold `read_only` — they
-  // need a `super_admin` role to keep this button. Raised with the client.
+  // NOTE: RPT-001's audience is finance. Which ROLE finance hold is unknown —
+  // the requirement names the audience and nothing else, and no user in the
+  // system identifies as finance. The comment that used to sit here claimed
+  // they hold `read_only`; that was inference, not a stated requirement, and
+  // it is what justified the old view-only gate. Open with the client: if
+  // finance are not super admins they lose this button.
   const canExport = useAuthStore(selectIsSuperAdmin);
   const router = useRouter();
 

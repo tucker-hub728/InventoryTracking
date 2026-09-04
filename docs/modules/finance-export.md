@@ -261,15 +261,32 @@ to match RPT-003, then the client narrowed **both** to `super_admin` alone. So
 > `backend/tests/test_export_authorization.py` has a test per endpoint whose
 > only job is to fail if `ADMIN_ROLES` comes back.
 
-> **Consequence still to confirm with the client.** RPT-001's stated audience is
-> finance, and finance hold `read_only` today — that is why the gate was
-> `inventory:view` in the first place. Super-Admin-only means **finance loses
-> the export until those accounts are given the `super_admin` role**, which is
-> a heavier promotion than `admin` and collides with the promotion rules in
-> ROL-005…009. If that is unacceptable, the alternatives are an
-> `inventory:export` action granted to the roles finance actually hold, or
-> returning blank money columns to lower roles while keeping column positions
-> intact (finance binds to positions — see the column contract above).
+> **Open question for the client: which role does finance hold?**
+>
+> RPT-001 names its audience — "a CSV export (full data dump) **for finance**,
+> who apply their own downstream math" — and says nothing about roles. **No
+> requirement, client note or document anywhere maps finance onto a role**, and
+> there is no finance account in the system to read one off (zero users match
+> "finance" by name or email).
+>
+> Until 2026-09-03 the code asserted the mapping anyway. The `canExport`
+> comment in `tier-list-client.tsx` read *"RPT-001 is for finance, who hold the
+> ``read_only`` role — so the export is gated on view, not create"*, and
+> `smoke_finance_export.py` asserted a `read_only` download as a feature. Both
+> were **developer inference, not a stated requirement**, and both are now
+> corrected. Treat the `inventory:view` gate as having rested on an assumption
+> nobody confirmed.
+>
+> So the consequence of Super-Admin-only is genuinely unknown rather than known
+> to be bad: **if** finance turn out to hold `read_only` or `operator`, they
+> lose the export and need promoting to the system's most privileged role,
+> which collides with the promotion rules in ROL-005…009. If they hold
+> `super_admin` already, nothing changes for them. **Ask before assuming
+> either.** If a promotion is unacceptable, the alternatives are an
+> `inventory:export` action granted to whichever roles finance actually hold,
+> or returning blank money columns to lower roles while keeping column
+> positions intact (finance binds to positions — see the column contract
+> above).
 
 **The export dialog offers scope only — which kit, which dates — never how
 much detail.** It used to carry an "Include" picker with three levels, and it
@@ -304,9 +321,9 @@ reads as the "of which" it is.
    2026-09-03** with a role gate instead of a new permission: `inventory:view`
    **+ Super Admin alone**, on RPT-003's `kit-costs.csv` as well.
    No new `PERM_MATRIX` action was added, so `audit:export` stays unused.
-   **Still needs a client answer:** finance hold `read_only`, so they need
-   promoting to `super_admin` to keep the export — see the note in "The sibling
-   export" above.
+   **Still needs a client answer:** which role does finance hold? Nothing on
+   record says, and the old "finance are `read_only`" code comment was an
+   assumption — see the note in "The sibling export" above.
 6. The file carries supplier names, PO references and unit prices and lands
    unencrypted in a Downloads folder. Within the client's data-classification
    policy?
