@@ -1,7 +1,7 @@
 """Seed the Production areas (REQ-2026-07-22-LOC-003).
 
     Production                                  the group (flat_category)
-      Clean Room One … Clean Room Six           flat
+      CR 101 … CR 601                           flat
 
 Six clean rooms, and nothing else.
 
@@ -59,13 +59,27 @@ FLAT_CATEGORY = "production"
 # nothing else — see the module docstring for why Manufacturing Floor and the two
 # PD labs are not here. The admin "Add area" path derives codes from the name
 # instead, so these fixed codes stay stable and human-readable.
+#
+# The numbers are the client's own, confirmed 2026-09-04: 101, 201, 301, 401,
+# 501, 601 — one room per hundred-series, NOT 101-106. They replace the
+# placeholder "Clean Room One … Clean Room Six" the app shipped with, which
+# 07-22-LOC-001 always described as provisional "to be renamed to the client's
+# actual area names on input". This is that input.
+#
+# Renumbering an existing database is done by RESEED, never by rename, for two
+# reasons: ``code`` has no mutation path at all (``NodeUpdateRequest`` is
+# name-only with ``extra="forbid"``), and a rename would leave the live UI
+# showing the new name on every historical movement while the finance export
+# keeps reading the frozen ``stock_movements.from/to_location_path`` snapshots,
+# which a trigger makes unrepairable. ``scripts/renumber_production_areas.py``
+# retires the old rows first; this script then creates these.
 PRODUCTION_AREAS: list[tuple[str, str]] = [
-    ("PROD-CR1", "Clean Room One"),
-    ("PROD-CR2", "Clean Room Two"),
-    ("PROD-CR3", "Clean Room Three"),
-    ("PROD-CR4", "Clean Room Four"),
-    ("PROD-CR5", "Clean Room Five"),
-    ("PROD-CR6", "Clean Room Six"),
+    ("PROD-CR101", "CR 101"),
+    ("PROD-CR201", "CR 201"),
+    ("PROD-CR301", "CR 301"),
+    ("PROD-CR401", "CR 401"),
+    ("PROD-CR501", "CR 501"),
+    ("PROD-CR601", "CR 601"),
 ]
 
 

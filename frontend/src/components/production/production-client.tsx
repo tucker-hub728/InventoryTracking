@@ -282,7 +282,7 @@ function AddAreaDialog({
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && void submit()}
-              placeholder="e.g. Clean Room Three"
+              placeholder="e.g. CR 301"
               maxLength={128}
               aria-label="Area name"
             />

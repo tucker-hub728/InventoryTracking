@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/select';
 import { LocationPath } from '@/components/locations/location-path';
 import { usePermission } from '@/hooks/use-permission';
-import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -52,14 +52,16 @@ const OUTPUT_COL_HINT =
 
 export function ReconciliationPageClient() {
   const canCreate = usePermission('inventory', 'create');
-  // The cost export is Admin + Super Admin only: it carries what each customer
-  // is charged per finished lot, which `inventory:view` would hand to every
-  // read-only account. Mirrors the route's own RequireRole(*ADMIN_ROLES).
+  // The cost export is SUPER ADMIN ONLY (client, 2026-09-03; it was Admin and
+  // above until then). It carries what each customer is charged per finished
+  // lot, which `inventory:view` would hand to every read-only account. Mirrors
+  // the route's own RequireRole(SUPER_ADMIN_ROLE) — this only hides a button
+  // that would come back a 403. Same gate as the RPT-001 finance export.
   //
-  // `selectIsAdminOrAbove` reads the RAW backend role, not the collapsed RBAC
-  // bucket — `operator` also holds `inventory:create`, so a permission-matrix
-  // check could not tell the two apart.
-  const canExport = useAuthStore(selectIsAdminOrAbove);
+  // `selectIsSuperAdmin` reads the RAW backend role: the frontend collapses
+  // `super_admin` into the same `admin` RBAC bucket, and `operator` holds
+  // `inventory:create` too, so the permission matrix cannot answer this.
+  const canExport = useAuthStore(selectIsSuperAdmin);
 
   const [kits, setKits] = React.useState<ApiKitListItem[]>([]);
   const [total, setTotal] = React.useState(0);
@@ -135,9 +137,10 @@ export function ReconciliationPageClient() {
         subtitle="Gather material for a build, issue it to production, then reconcile what was actually used and back-flush the rest."
         actions={
           <span className="flex items-center gap-2">
-            {/* RPT-003. Admin-gated in the UI to match the endpoint — a button
-                that always 403s teaches people to ignore errors. The server is
-                still the authority; this only hides what cannot be used. */}
+            {/* RPT-003. Super-admin-gated in the UI to match the endpoint — a
+                button that always 403s teaches people to ignore errors. The
+                server is still the authority; this only hides what cannot be
+                used. */}
             {canExport && <KitCostExportButton />}
             {canCreate && (
               <Button variant="primary" onClick={() => setCreating(true)}>

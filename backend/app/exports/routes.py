@@ -19,7 +19,18 @@ Both are built by :func:`_gather`, so they cannot disagree about the data —
 only about layout. The UI ships the workbook; the CSV stays available for
 whoever needs the full column set or an exact-decimal reconciliation.
 
-Read-only, and gated on ``inventory:view`` rather than a signature. Every
+Read-only, and gated on ``inventory:view`` **plus Super Admin** rather than a
+signature. The role half was added 2026-09-03: the file carries unit prices,
+extended lot values and per-movement value amounts, and ``inventory:view`` is
+held by every role, so the priced valuation was downloadable by every read-only
+account. This resolves open question 5 in ``docs/modules/finance-export.md`` in
+favour of a role gate rather than a separate ``inventory:export`` permission.
+
+**``admin`` is refused as well as ``operator`` and ``read_only``** — the client
+narrowed this from Admin-and-above to Super-Admin-only the same day. It is
+therefore *stricter* than the RPT-003 kit-cost export next door, which stays
+``ADMIN_ROLES``; the two money exports do NOT share a gate, so do not "tidy"
+them into one. Every
 re-authentication in this system is bound to a record being changed
 (``record_table`` / ``record_id``, migration ``esignbind01``); a password
 prompt on a read would assert nothing, and prompts that assert nothing teach
@@ -44,7 +55,7 @@ from app.core.exceptions import ValidationError
 from app.core.search import MAX_SEARCH_LENGTH
 from app.inventory import repository as inv_repo
 from app.locations import repository as loc_repo
-from app.security.permissions import RequirePermission
+from app.security.permissions import SUPER_ADMIN_ROLE, RequirePermission, RequireRole
 
 from . import repository as exp_repo
 from . import rows as builders
@@ -328,7 +339,26 @@ async def _audit_export(
 @exports_router.get(
     "/inventory.csv",
     summary="Finance CSV export — current-state full data dump (RPT-001)",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "view")),
+        # Narrower than ``inventory:view`` alone on purpose. This file carries
+        # unit prices, extended lot values and per-movement value amounts, and
+        # ``inventory:view`` is held by every role — dev alone has 349 active
+        # ``read_only`` accounts, any one of which could take a fully priced
+        # copy of the whole valuation off-system.
+        #
+        # Narrower than the RPT-003 kit-cost export too: that one is Admin +
+        # Super Admin, this one is Super Admin ALONE (client decision,
+        # 2026-09-03). ``admin`` is refused. Single-role gates supply their own
+        # message — ``RequireRole``'s default names "an admin", which would send
+        # a refused admin to someone who cannot help them either.
+        Depends(
+            RequireRole(
+                SUPER_ADMIN_ROLE,
+                message="Only a super admin can export inventory data",
+            )
+        ),
+    ],
     response_class=Response,
 )
 async def inventory_csv(
@@ -433,7 +463,26 @@ async def inventory_csv(
 @exports_router.get(
     "/inventory.xlsx",
     summary="Finance Excel export — summary tab plus one tab per item",
-    dependencies=[Depends(RequirePermission("inventory", "view"))],
+    dependencies=[
+        Depends(RequirePermission("inventory", "view")),
+        # Narrower than ``inventory:view`` alone on purpose. This file carries
+        # unit prices, extended lot values and per-movement value amounts, and
+        # ``inventory:view`` is held by every role — dev alone has 349 active
+        # ``read_only`` accounts, any one of which could take a fully priced
+        # copy of the whole valuation off-system.
+        #
+        # Narrower than the RPT-003 kit-cost export too: that one is Admin +
+        # Super Admin, this one is Super Admin ALONE (client decision,
+        # 2026-09-03). ``admin`` is refused. Single-role gates supply their own
+        # message — ``RequireRole``'s default names "an admin", which would send
+        # a refused admin to someone who cannot help them either.
+        Depends(
+            RequireRole(
+                SUPER_ADMIN_ROLE,
+                message="Only a super admin can export inventory data",
+            )
+        ),
+    ],
     response_class=Response,
 )
 async def inventory_xlsx(

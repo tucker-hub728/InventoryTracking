@@ -29,12 +29,12 @@ CR item (is_consumable)
 ## 2. Kanban is a node, not a flag or a tab
 
 `LOC-006` says a Kanban is "representable as a **named location**". Client
-decision 2026-08-10: it is a **child of a production area**, so Clean Room Five
+decision 2026-08-10: it is a **child of a production area**, so CR 501
 can hold "Kanban 1" and "Kanban 2" as separate, separately-countable places.
 
 ```
 Production
-  └── Clean Room Five        flat, flat_category='production'
+  └── CR 501                 flat, flat_category='production'
         ├── Kanban 1         kanban          ← consumables land here
         └── Kanban 2         kanban
 ```

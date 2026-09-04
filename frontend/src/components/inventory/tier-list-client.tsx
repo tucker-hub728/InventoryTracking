@@ -39,6 +39,7 @@ import { itemsApi, type ListItemsParams } from '@/lib/api/items';
 import { tiersApi, isBuiltTier, type ApiTier, type TierType } from '@/lib/api/tiers';
 import { apiItemToInventoryItem } from '@/lib/api/items-adapter';
 import { cn } from '@/lib/utils';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import type { InventoryItem } from '@/types/inventory';
 
 import { NewItemDialog } from './new-item-dialog';
@@ -104,10 +105,27 @@ function findTier(tiers: ApiTier[], cfg: TierConfig): ApiTier | null {
 
 export function TierListClient({ config }: { config: TierConfig }) {
   const canCreate = usePermission('inventory', 'create');
-  // RPT-001 is for finance, who hold the ``read_only`` role — so the export is
-  // gated on view, not create. Everyone who can reach this page can take a
-  // copy of it, which is the point.
-  const canExport = usePermission('inventory', 'view');
+  // The export is SUPER ADMIN ONLY (client, 2026-09-03). It carries unit
+  // prices, extended lot values and per-movement value amounts, and
+  // ``inventory:view`` is held by every role, so gating on view handed a fully
+  // priced valuation to every read-only account. Mirrors the endpoint's own
+  // RequireRole(SUPER_ADMIN_ROLE) — this only hides a button that would 403.
+  //
+  // Stricter than the kit-cost export button, which is `selectIsAdminOrAbove`.
+  // That asymmetry is deliberate: this file is the WHOLE valuation in one
+  // download. Do not collapse the two onto one selector.
+  //
+  // `selectIsSuperAdmin` reads the RAW backend role — the frontend collapses
+  // `super_admin` into the same `admin` RBAC bucket, and `operator` holds
+  // `inventory:view` too, so the permission matrix cannot answer this.
+  //
+  // NOTE: RPT-001's audience is finance. Which ROLE finance hold is unknown —
+  // the requirement names the audience and nothing else, and no user in the
+  // system identifies as finance. The comment that used to sit here claimed
+  // they hold `read_only`; that was inference, not a stated requirement, and
+  // it is what justified the old view-only gate. Open with the client: if
+  // finance are not super admins they lose this button.
+  const canExport = useAuthStore(selectIsSuperAdmin);
   const router = useRouter();
 
   // The consumable flag is CR-only — Transaction Spec §1.1: "A CR item may be

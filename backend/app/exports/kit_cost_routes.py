@@ -9,10 +9,17 @@
     — Blane Larson, 2026-08-27
 
 A separate module from ``routes.py`` because it is a separate requirement with a
-separate audience and a **narrower gate** — the finance export is stock
-valuation, this one is what each customer is charged. It reuses that module's
-writer, row limit and audit helper, so the two files cannot drift apart on
-formatting or on the promise that every download is recorded.
+separate audience — the finance export is stock valuation, this one is what each
+customer is charged. It reuses that module's writer, row limit and audit helper,
+so the two files cannot drift apart on formatting or on the promise that every
+download is recorded.
+
+**Both priced exports are Super-Admin-only (client, 2026-09-03).** This one was
+``ADMIN_ROLES`` from the start and RPT-001 was widened to match it, then the
+client narrowed *both* to ``super_admin`` alone the same day. So ``admin`` is
+now refused here too, and the two gates are identical again — keep them that
+way; ``tests/test_export_authorization.py`` enforces it for every priced export
+in one table.
 
 Deliberately unaggregated: six row kinds, no ranking, no grouping, no
 summarising. The client explicitly deferred the report itself until the
@@ -34,7 +41,7 @@ from app.core.exceptions import ValidationError
 from app.kitting import costing
 from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
-from app.security.permissions import ADMIN_ROLES, RequirePermission, RequireRole
+from app.security.permissions import SUPER_ADMIN_ROLE, RequirePermission, RequireRole
 
 from . import kit_cost_repository as kc_repo
 from . import kit_cost_rows as kc_rows
@@ -54,11 +61,19 @@ KIT_COST_SUBJECT_TABLE = "app.kit_cost_exports"
     summary="Kit material cost CSV — date-ranged data dump (RPT-003)",
     dependencies=[
         Depends(RequirePermission("inventory", "view")),
-        # Narrower than RPT-001 on purpose. This file carries what each customer
-        # is charged for each finished lot, which is commercially sensitive in a
-        # way a stock valuation is not — and ``inventory:view`` alone would hand
-        # it to every read-only account (dev seeds 513 of them).
-        Depends(RequireRole(*ADMIN_ROLES)),
+        # This file carries what each customer is charged for each finished lot,
+        # and ``inventory:view`` alone would hand it to every read-only account
+        # (dev seeds 513 of them). Was ``ADMIN_ROLES``; narrowed to
+        # ``super_admin`` alone by the client on 2026-09-03, same as RPT-001 —
+        # ``admin`` is refused. Single-role gates supply their own message,
+        # because ``RequireRole``'s default names "an admin" and would send a
+        # refused admin to someone who cannot help them either.
+        Depends(
+            RequireRole(
+                SUPER_ADMIN_ROLE,
+                message="Only a super admin can export kit cost data",
+            )
+        ),
     ],
     response_class=Response,
 )
