@@ -2,7 +2,7 @@
 
 Run from the project root after ``docker compose up``:
 
-    SMOKE_EMAIL=admin@cellready.dev SMOKE_PASSWORD=... \
+    SMOKE_EMAIL=you@example SMOKE_PASSWORD='…' \
         python backend/tests/smoke_bom_batch.py
 
 Verifies (client decision 2026-07-28):
@@ -19,14 +19,15 @@ Verifies (client decision 2026-07-28):
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = "http://localhost:8000/v1"
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin@cellready.local")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "ChangeMe!Now123")
+EMAIL, PASSWORD = require_credentials()
+
 SAVE_ACTION = "bom.save"
 
 # [passed] — a list so ``check`` mutates without a ``global`` statement (same

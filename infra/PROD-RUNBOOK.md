@@ -196,18 +196,35 @@ the workflow exits non-zero. It cannot half-deploy silently.
 
 The app is running but the database is **empty** — you cannot log in yet.
 
-Run these on the EB instance (or locally with prod's `DATABASE_URL` exported), in order:
+Run these **on the EB instance**, in order. Connect with **Session Manager**
+(`aws ssm start-session`), then `docker exec` into the backend container — the
+RDS instance is `PubliclyAccessible: false` and its security group admits only
+that instance, so there is no route to it from a laptop.
+
+Every one of these is **idempotent** (a node whose `(parent, code)` already
+exists is skipped), so re-running after a release is safe.
+
+> A migration never inserts a location row (`created_by_user_id` is NOT NULL, and
+> the audit trail wants a real owner), so a release that adds a location AREA
+> ships the code but not the rows, and the screen reads "… isn't set up yet"
+> until this step runs. **Storage is not in this list** and needs nothing here:
+> its room is created by the server when the first location is added, precisely
+> so that a missed deploy step cannot strand the screen. Prefer that pattern for
+> any new area whose container the client never names.
 
 ```bash
 # Reference data
 python -m scripts.seed_item_tiers
 python -m scripts.seed_suppliers
-python -m scripts.seed_locations
-python -m scripts.seed_cold_storage
-python -m scripts.seed_analytical_lab
-python -m scripts.seed_materials_management
-python -m scripts.seed_production
+python -m scripts.seed_production      # the only location seed — six clean rooms
 ```
+
+> **Retired 2026-08-19 (client-approved).** Materials Management, Cold Storage
+> and Analytical Lab were removed in favour of Storage's generic template, and
+> `seed_cold_storage`, `seed_analytical_lab`, `seed_materials_management` and the
+> `seed_locations` aggregator were deleted with them. If you are following an
+> older copy of this runbook, those four commands no longer exist. Storage
+> locations and the LN2 tree are both built in the app, not seeded.
 
 Then the first administrator:
 

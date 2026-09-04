@@ -19,6 +19,7 @@ import {
   type Order,
   type OrderStatus,
 } from '@/lib/api/receiving';
+import { ReceiveProgress } from './receive-progress';
 
 const STATUS_TONE: Record<OrderStatus, BadgeTone> = {
   open: 'accent',
@@ -50,7 +51,17 @@ export function ReceiptTransactionsTable({
         <TableRow>
           <TableHead>Order #</TableHead>
           <TableHead className="text-right">Items</TableHead>
-          <TableHead className="text-right">Received</TableHead>
+          {/* The cell below is a fixed three-slot block (counts · meter ·
+              remainder) pinned to the right edge. The label is parked over the
+              METER, not over the whole block: the counts are right-aligned, so
+              their left edge is ragged and a header sitting there lines up with
+              nothing. The meter is the first edge that is identical on every
+              row, which is what makes the column read as a column.
+
+              9.125rem = meter (3rem) + gap (0.625rem) + remainder (5.5rem). */}
+          <TableHead className="text-right">
+            <span className="inline-block w-[9.125rem] text-left">Received</span>
+          </TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>
           <TableHead className="text-right">Actions</TableHead>
@@ -60,12 +71,6 @@ export function ReceiptTransactionsTable({
         {orders.map((order) => {
           const canReceiveRow =
             order.status === 'open' || order.status === 'partially_received';
-          const pct =
-            order.total_ordered_qty > 0
-              ? Math.round(
-                  (order.total_received_qty / order.total_ordered_qty) * 100,
-                )
-              : 0;
           return (
             <TableRow key={order.id}>
               <TableCell>
@@ -85,9 +90,8 @@ export function ReceiptTransactionsTable({
               <TableCell className="text-right tabular-nums">
                 {order.lines.length}
               </TableCell>
-              <TableCell className="text-right tabular-nums text-text-2">
-                {order.total_received_qty}/{order.total_ordered_qty}
-                <span className="ml-1 text-xs text-text-3">({pct}%)</span>
+              <TableCell className="text-right">
+                <ReceiveProgress order={order} />
               </TableCell>
               <TableCell>
                 <Badge tone={STATUS_TONE[order.status]} dot>

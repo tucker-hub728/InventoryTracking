@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from app.core.bounds import MAX_QTY
+from app.inventory.schemas import MovementType as InventoryMovementType
 
 # All node types accepted on read (includes retired ``cassette`` /
 # ``cryo_box_rack`` / ``cassette_rack`` / ``sub_slot`` / ``flat`` so any legacy
@@ -20,6 +21,11 @@ NodeType = Literal[
     "cryo_box_rack",
     "box",
     "room",
+    # REQ-2026-08-04-LOC-001 — the standard template's CATEGORY, the level that
+    # makes Storage four deep (storage01). Read-only here: a category comes with
+    # its groups, from ``POST /location-nodes/{room}/storage-categories``, so it
+    # is absent from ``CreatableNodeType`` below.
+    "storage_category",
     "room_location",
     "sub_location",
     "warehouse",
@@ -27,6 +33,8 @@ NodeType = Literal[
     "flat",
     "cassette_rack",
     "sub_slot",
+    # LOC-006 — a named Kanban station inside a production area (consum01).
+    "kanban",
 ]
 # Only these are creatable via the API (§4.1 — legacy types are retired).
 # ``flat`` is retired. Rooms and the warehouse (with its A–Z shelves) stay
@@ -45,13 +53,26 @@ CreatableNodeType = Literal[
     "sub_location",
 ]
 # Legacy — kept so pre-existing flat rows still read; not creatable.
-FlatCategory = Literal[
-    "kanban", "lab", "qc", "engineering", "materials", "production"
-]
+FlatCategory = Literal["kanban", "lab", "qc", "engineering", "materials", "production"]
 # Ledger movement kinds surfaced for a node's click-through history.
-MovementType = Literal[
-    "receipt", "dispense", "discard", "adjustment", "transfer_out", "transfer_in"
-]
+#
+# Reuses the canonical list rather than keeping a third hand-maintained copy.
+# This used to name only the six original types, but ``list_node_movements``
+# does not filter by type, so a node that had seen a kit issue or a production
+# output already failed to serialise — and a Kanban would have hit the same wall
+# with ``consumable_issue``. Any type the ledger can hold, this can render.
+MovementType = InventoryMovementType
+
+
+# Largest grid a Box may have, per axis (client 2026-08-17). Ten is the size of
+# the cryoboxes actually in use, and the unit map is drawn at a fixed cell size —
+# past this it stops being a map you can read at a glance and becomes a
+# spreadsheet that scrolls in both directions.
+#
+# A policy, not a data invariant, so it lives here rather than in a CHECK
+# constraint: raising it is a one-line change, not a migration. The DB still
+# enforces the real invariant (>= 1) on its own.
+MAX_GRID_DIM = 10
 
 
 def _trim_nonblank(field: str):
@@ -88,8 +109,8 @@ class NodeCreate(BaseModel):
     code: Annotated[str, _trim_nonblank("code")] = Field(max_length=64)
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
     parent_id: str | None = None
-    grid_rows: int | None = Field(default=None, ge=1, le=400)
-    grid_cols: int | None = Field(default=None, ge=1, le=400)
+    grid_rows: int | None = Field(default=None, ge=1, le=MAX_GRID_DIM)
+    grid_cols: int | None = Field(default=None, ge=1, le=MAX_GRID_DIM)
     dedicated_customer_id: str | None = None
     dedicated_product_id: str | None = None
     notes: str | None = Field(default=None, max_length=2048)
@@ -131,13 +152,147 @@ class ProductionAreaCreate(BaseModel):
     name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
 
 
+class KanbanCreate(BaseModel):
+    """Create one Kanban station inside a production area (LOC-006).
+
+    Free-text name (client 2026-08-10) — "Kanban 1", "Kanban 2", or "Glove
+    station" if that is what the floor calls it. The ``code`` is generated from
+    it, and the parent comes from the path. Super-admin only, for the same
+    reason shelves are (LOC-003): two spellings of one physical bin split the
+    register in half. Rename afterwards uses ``NodeUpdateRequest``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+
+
+class StorageCategoryCreate(BaseModel):
+    """Create one Storage location — bare, with no sub-types (LOC-001).
+
+    The client names it ("Materials Management") and says what happens to
+    material sent there. That is all: the location is created with NO shelves,
+    refrigerators or freezers, and they are added afterwards through
+    :class:`StorageGroupsUpdate`.
+
+    This used to carry ``shelf`` / ``refrigerator`` / ``freezer`` booleans and
+    provision the ticked ones. The client dropped that on 2026-08-19: sub-types
+    are configurable after creation, so ONE screen should decide them, and it
+    should be the same screen whether the location is a minute old or a year old.
+    Asking at create time was a second answer to the same question — and one that
+    could not express a location with two freezers, which is the case the amended
+    LOC-001 exists for.
+
+    ``is_scrap`` marks it a debit-and-gone destination (REQ-2026-08-04-TRX-001/
+    002) — the client's PD, R&D and QC labs. It is asked here and only here: the
+    flag is immutable after creation, because turning it on later would leave
+    stock sitting in a place now meant to consume everything sent to it, and
+    turning it off would imply already-issued material has a home.
+
+    Such a location is DISPOSITION-ONLY (client 2026-08-19): it takes no
+    sub-types, so nothing is ever stored there and its page shows what has been
+    issued to it instead of tabs. :func:`update_storage_groups` refuses to add
+    one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, _trim_nonblank("name")] = Field(max_length=128)
+    is_scrap: bool = False
+
+
+class StorageGroupRef(BaseModel):
+    """One entry in a location's desired sub-type list — an ``id`` OR a ``kind``.
+
+    ``id`` means "this existing sub-type stays". ``kind`` means "add a new one of
+    this kind", optionally under a ``name`` of the client's choosing (defaulting
+    to the kind's own name). Exactly one of id/kind, because an id WITH a kind
+    would be asking to change what an existing sub-type IS, which nothing
+    supports: the kind decides the code, and the code is in every link.
+
+    ``name`` is only meaningful alongside ``kind``. An id WITH a name would be a
+    rename, and renaming has its own endpoint and its own audit action
+    (``PATCH /location-nodes/{id}``); accepting it here would give one change two
+    ways in, which is how two audit trails start disagreeing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    kind: Literal["shelf", "refrigerator", "freezer"] | None = None
+    name: Annotated[str | None, _trim_nonblank("name")] = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> StorageGroupRef:
+        if (self.id is None) == (self.kind is None):
+            raise ValueError("Give either id (keep this sub-type) or kind (add one), not both")
+        if self.id is not None and self.name is not None:
+            raise ValueError("Renaming a sub-type uses PATCH /location-nodes/{id}, not this list")
+        return self
+
+
+#: Upper bound on a location's sub-types. Not a requirement — LOC-001 sets no
+#: limit — but an unbounded list is an unbounded number of tabs and an unbounded
+#: number of INSERTs in one request. High enough that nobody legitimately hits
+#: it; low enough that a runaway client cannot mint a thousand groups.
+MAX_STORAGE_GROUPS = 24
+
+
+class StorageGroupsUpdate(BaseModel):
+    """The sub-types a Storage location should have, after the fact (LOC-001).
+
+    DECLARATIVE, not a set of switches: send the list you want to end up with.
+    Entries carrying an ``id`` are kept, entries carrying a ``kind`` are added,
+    and any current sub-type whose id is absent is removed. One shape covers add
+    and remove, and it is idempotent — re-sending the same list changes nothing.
+
+    It replaced three booleans (``shelf`` / ``refrigerator`` / ``freezer``). A
+    boolean per sub-type cannot express the thing the amended LOC-001 exists to
+    allow: "an additional freezer (e.g. minus-80 alongside minus-20)" — two
+    freezers is not a state ``freezer: true`` can describe. There are still only
+    three KINDS; what changed is that a location may hold any number of each,
+    told apart by the names the client gives them.
+
+    An empty list is legal for ANY location, not only a scrap one. A location is
+    now CREATED with no sub-types, so zero is a state every location passes
+    through — refusing to return to it would make the first save irreversible.
+
+    Adding a kind under a name that a removed sub-type of that kind already had
+    REVIVES that node rather than minting a second one beside it. Both sibling
+    indexes are partial on ``is_active``, so the duplicate would be permitted —
+    and the result would be a tab that reads identically but is a different node
+    under a different code, silently breaking every link already built from the
+    old one. Removing a sub-type is refused by the route while it still holds
+    units: hiding the tab does not move the stock, and the ledger keeps counting
+    it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    groups: list[StorageGroupRef] = Field(default_factory=list, max_length=MAX_STORAGE_GROUPS)
+
+    @model_validator(mode="after")
+    def _no_duplicates(self) -> StorageGroupsUpdate:
+        ids = [g.id for g in self.groups if g.id is not None]
+        if len(set(ids)) != len(ids):
+            raise ValueError("The same sub-type is listed twice")
+        # Case-insensitively, to match the sibling-name index the route would
+        # otherwise trip on with a much worse message ("already exists here"
+        # naming a sub-type created moments earlier in the same request).
+        # Only the NAMED additions are checked — two unnamed adds of the same
+        # kind are legal, and the route numbers their default names apart.
+        names = [g.name.lower() for g in self.groups if g.kind is not None and g.name is not None]
+        if len(set(names)) != len(names):
+            raise ValueError("Two new sub-types have the same name")
+        return self
+
+
 class GridUpdateRequest(BaseModel):
     """Resize a Box's grid. Rejected if it would orphan a placed cell."""
 
     model_config = ConfigDict(extra="forbid")
 
-    grid_rows: int = Field(ge=1, le=400)
-    grid_cols: int = Field(ge=1, le=400)
+    grid_rows: int = Field(ge=1, le=MAX_GRID_DIM)
+    grid_cols: int = Field(ge=1, le=MAX_GRID_DIM)
 
 
 class DedicationUpdateRequest(BaseModel):
@@ -152,9 +307,7 @@ class DedicationUpdateRequest(BaseModel):
     @model_validator(mode="after")
     def _exclusive(self) -> DedicationUpdateRequest:
         if self.dedicated_customer_id and self.dedicated_product_id:
-            raise ValueError(
-                "A quadrant may be dedicated to a customer OR a product, not both"
-            )
+            raise ValueError("A quadrant may be dedicated to a customer OR a product, not both")
         return self
 
 
@@ -168,6 +321,9 @@ class NodeRead(BaseModel):
     code: str
     name: str
     is_active: bool
+    # Debit-and-gone destination (issue01). Only ever true on a
+    # ``storage_category``; the UI badges it and the Issue dialog lists it.
+    is_scrap: bool = False
     notes: str | None
     grid_rows: int | None = None
     grid_cols: int | None = None
@@ -204,6 +360,11 @@ class AllocationRead(BaseModel):
     id: str
     lot_id: str
     lot_number: str | None = None
+    # The lot's release state (STS-001), carried here so an LN2 box view can
+    # badge its cells without a second fetch per lot. Denormalised from the lot
+    # on read only — the lot remains the one place it is stored, because a
+    # release decision is about the batch, not about where a vial happens to sit.
+    release_state: str | None = None
     # The item's UUID — item detail URLs key on it, so the UI can link straight
     # to the canonical page instead of resolving the (derived) number first.
     item_id: str | None = None
@@ -252,6 +413,46 @@ class BatchCell(BaseModel):
 
     grid_row: int = Field(ge=1, le=400)
     grid_col: int = Field(ge=1, le=400)
+
+
+class ReceiveToInventoryRequest(BaseModel):
+    """Put received material away and release it, in one signed action (REQ-004).
+
+    Receiving is two steps. Arrival records what turned up and leaves the lot in
+    quarantine with no location; **this** is the second step — "the receive-to-
+    inventory step (setting location, expiration, sign-off) represents the move
+    from quarantine to accepted/released material and occurs at release, not at
+    physical arrival."
+
+    One request, one signature, because it is one decision: the person putting
+    the material on the shelf is attesting that it may be used. Splitting it
+    into place-then-release would take two signatures for one act, and would
+    leave a window where stock is on hand but still labelled quarantine.
+
+    ``cells`` is required for a Box (one unit per cell) and must be empty for a
+    flat location, where ``qty`` carries the whole amount — the same rule the
+    existing placement endpoints apply, and the same lifetime cap against the
+    lot's ``ordered_qty``.
+
+    ``expiration_date`` is confirmed rather than introduced here: it is usually
+    captured at arrival off the carton. Sending it overwrites what arrival
+    recorded; omitting it leaves that value alone. It cannot be *cleared* here —
+    dropping an expiry is a lot correction, which is separately signed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    node_id: str
+    # Box placement: exactly one unit per listed cell. Empty for a flat node.
+    cells: list[BatchCell] = Field(default_factory=list, max_length=400)
+    # Flat placement: how many units go to the node. Ignored for a Box, where
+    # the cell count is the quantity.
+    qty: int | None = Field(default=None, gt=0)
+    override: bool = False
+    expiration_date: date | None = None
+    evidence_id: str
+    notes: str | None = Field(default=None, max_length=2048)
 
 
 class PlaceBatchRequest(BaseModel):
@@ -399,6 +600,87 @@ class TransferMultiRequest(BaseModel):
         return self
 
 
+class StockAdjustRequest(BaseModel):
+    """Correct what is actually at one location, up or down (CTL-002).
+
+    The counting correction: the shelf holds 58 where the record says 60, or 3
+    turn up that were never recorded. It is deliberately NOT an edit of the
+    lot's received quantity — ``lots.ordered_qty`` records what *arrived*, and
+    a miscount months later does not change that. This moves the balance where
+    the discrepancy actually is, at one ``(lot × location)``, and says so in the
+    ledger with a location on the row.
+
+    Direction is explicit rather than a signed quantity: ``qty`` is always how
+    many units, and ``direction`` says which way. A minus sign is too easy to
+    lose in a form, and "adjust out 5" is what the operator is actually doing.
+
+    LN2 boxes carry one unit per cell, so a box adjustment names the cells and
+    ``qty`` is their count — ``cells`` (free positions to fill) going in,
+    ``cell_allocation_ids`` (the exact vials) coming out. Flat locations leave
+    both empty. Sending the wrong one for the direction is refused here rather
+    than half-applied.
+
+    Signed with ``movement.adjustment``; the comment stays optional, as every
+    e-signature's does (client 2026-06-29).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lot_id: str
+    node_id: str
+    direction: Literal["in", "out"]
+    qty: int = Field(gt=0, le=MAX_QTY)
+    cells: list[BatchCell] = Field(default_factory=list, max_length=400)
+    cell_allocation_ids: list[str] = Field(default_factory=list, max_length=400)
+    evidence_id: str
+    notes: str | None = Field(default=None, max_length=2048)
+
+    @model_validator(mode="after")
+    def _cells_match_direction(self) -> StockAdjustRequest:
+        if self.direction == "in":
+            if self.cell_allocation_ids:
+                raise ValueError(
+                    "cell_allocation_ids names vials to take OUT; adjusting in "
+                    "names free positions in 'cells'"
+                )
+            if self.cells:
+                if len(self.cells) != self.qty:
+                    raise ValueError(
+                        f"{len(self.cells)} cells selected but qty is {self.qty} — "
+                        f"for a box the quantity is the number of vials"
+                    )
+                seen = {(c.grid_row, c.grid_col) for c in self.cells}
+                if len(seen) != len(self.cells):
+                    raise ValueError("Destination cells must be distinct")
+        else:
+            if self.cells:
+                raise ValueError(
+                    "cells names free positions to fill; adjusting out names the "
+                    "vials to remove in 'cell_allocation_ids'"
+                )
+            if self.cell_allocation_ids and len(set(self.cell_allocation_ids)) != self.qty:
+                raise ValueError(
+                    f"{len(set(self.cell_allocation_ids))} vials selected but qty is "
+                    f"{self.qty} — for a box the quantity is the number of vials"
+                )
+        return self
+
+
+class StockAdjustResult(BaseModel):
+    """What the adjustment did, and where the balance landed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    movement_id: str
+    lot_id: str
+    node_id: str
+    #: Signed: positive going in, negative coming out.
+    qty_delta: int
+    #: The ``(lot × location)`` balance after the adjustment — what the operator
+    #: should now see on the row they adjusted.
+    qty_at_node: int
+
+
 class ItemStockLocationCell(BaseModel):
     """One occupied vial position in an LN2 box — exactly one unit of one lot
     (``uq_lot_allocations_cell``), so the transfer dialog can draw the box and
@@ -431,10 +713,20 @@ class ItemStockLocationRead(BaseModel):
 
     lot_id: str
     lot_number: str | None
+    # The lot's release state (STS-001), so the drill-down can badge a row
+    # without a fetch per lot. Null where no release workflow applies.
+    release_state: str | None = None
     expiration_date: date | None
     node_id: str
     # Human location path, e.g. "Warehouse One › Shelf B".
     location: str
+    # What KIND of place this is. Carried so the transfer dialog can apply the
+    # LOC-003 cold-chain rule client-side — an LN2 source may only be sent to
+    # another LN2 box, and the picker should not offer destinations the server
+    # will refuse after the operator has signed. Reading LN2-ness off ``is_grid``
+    # instead would be true only by the coincidence that the Box is today the
+    # single grid-bearing node type.
+    node_type: str
     qty: int
     is_grid: bool = False
     grid_rows: int | None = None

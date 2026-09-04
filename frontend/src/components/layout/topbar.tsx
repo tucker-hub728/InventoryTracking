@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import {
+  Bell,
   LogOut,
   Menu,
   PanelLeftClose,
@@ -11,8 +12,11 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { NotificationsPanel } from './notifications-panel';
 import { useAuthStore } from '@/stores/auth.store';
+import { useNotificationsStore, selectUnreadCount } from '@/stores/notifications.store';
 import { useUIStore } from '@/stores/ui.store';
 import { env } from '@/env';
 
@@ -22,6 +26,16 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const user = useAuthStore((s) => s.user);
   const clearSession = useAuthStore((s) => s.clear);
+
+  // NOTIF-001 (2026-08-25): the feed is no longer assembled here. Notifications
+  // are real per-user rows pushed over SSE by `RealtimeProvider`, which owns the
+  // connection at the route-group layout — a header component is the wrong place
+  // to own a connection's lifetime. This just reads the store.
+  //
+  // `unread` is the server's count over the whole feed, so the badge is a true
+  // number rather than the size of the page the panel happens to hold.
+  const unread = useNotificationsStore(selectUnreadCount);
+  const [bellOpen, setBellOpen] = React.useState(false);
 
   const handleSignOut = React.useCallback(async () => {
     try {
@@ -81,18 +95,44 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
 
       <div className="flex items-center gap-1.5">
         {/*
-          Theme toggle and notifications bell — temporarily hidden. Restore
-          both (plus the `Bell`/`Moon`/`Sun` icon imports, the `theme` /
-          `toggleTheme` / notifications-store selectors and the
-          `useNotificationsFeed()` call) from git history when they're wanted
-          again. The notifications feed is still mock-data-backed, so the bell
-          shows a fabricated unread count until it's wired to a real source.
+          Theme toggle — still hidden. Restore it (plus the `Moon`/`Sun` icon
+          imports and the `theme` / `toggleTheme` selectors) from git history
+          when it's wanted again.
 
           Role switcher (demo) — also hidden. The "Viewing as <role>" dropdown
           let you switch between mock roles; restore it from git history when
           the demo is needed again. Sign out is kept below so users can still
           log out.
         */}
+
+        {/* Notifications (PLN-001 + LOC-008 + NOTIF-001).
+            Controlled rather than uncontrolled so selecting a notification can
+            close the panel on its way to the target page — leaving a popover
+            hanging over the screen you just navigated to is disorienting. */}
+        <Popover open={bellOpen} onOpenChange={setBellOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              size="icon"
+              variant="default"
+              className="relative"
+              aria-label={`${unread} unread notifications`}
+            >
+              <Bell size={15} />
+              {unread > 0 && (
+                <span
+                  aria-hidden
+                  className="absolute -right-1 -top-1 grid min-w-4 place-items-center rounded-full border-2 border-bg-elev bg-accent px-1 text-[10px] font-semibold leading-none text-white"
+                >
+                  {unread}
+                </span>
+              )}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-[380px]">
+            <NotificationsPanel total={unread} onNavigate={() => setBellOpen(false)} />
+          </PopoverContent>
+        </Popover>
+
         {user && (
           <Tooltip>
             <TooltipTrigger asChild>

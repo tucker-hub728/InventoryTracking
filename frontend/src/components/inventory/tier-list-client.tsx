@@ -3,13 +3,14 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Plus, Search } from 'lucide-react';
+import { Download, Loader2, Plus, Search } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { Badge } from '@/components/ui/badge';
+import { ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -21,14 +22,24 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { SegmentedControl } from '@/components/ui/segmented-control';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { usePermission } from '@/hooks/use-permission';
+import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
+import { exportsApi } from '@/lib/api/exports';
+import { saveBlob, timestampedFilename } from '@/lib/download';
 import { itemsApi, type ListItemsParams } from '@/lib/api/items';
 import { tiersApi, isBuiltTier, type ApiTier, type TierType } from '@/lib/api/tiers';
 import { apiItemToInventoryItem } from '@/lib/api/items-adapter';
 import { cn } from '@/lib/utils';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import type { InventoryItem } from '@/types/inventory';
 
 import { NewItemDialog } from './new-item-dialog';
@@ -50,7 +61,10 @@ export interface TierFilter {
   /** Extra query params merged into the list request. Omit for "All".
    *  Filtering is server-side: the list is capped at 200 rows, so filtering
    *  in memory would quietly search only the first page. */
-  params?: Pick<ListItemsParams, 'is_consumable' | 'has_bom' | 'below_reorder'>;
+  params?: Pick<
+    ListItemsParams,
+    'is_consumable' | 'has_bom' | 'below_reorder' | 'awaiting_release'
+  >;
 }
 
 export interface TierConfig {
@@ -91,6 +105,27 @@ function findTier(tiers: ApiTier[], cfg: TierConfig): ApiTier | null {
 
 export function TierListClient({ config }: { config: TierConfig }) {
   const canCreate = usePermission('inventory', 'create');
+  // The export is SUPER ADMIN ONLY (client, 2026-09-03). It carries unit
+  // prices, extended lot values and per-movement value amounts, and
+  // ``inventory:view`` is held by every role, so gating on view handed a fully
+  // priced valuation to every read-only account. Mirrors the endpoint's own
+  // RequireRole(SUPER_ADMIN_ROLE) — this only hides a button that would 403.
+  //
+  // Stricter than the kit-cost export button, which is `selectIsAdminOrAbove`.
+  // That asymmetry is deliberate: this file is the WHOLE valuation in one
+  // download. Do not collapse the two onto one selector.
+  //
+  // `selectIsSuperAdmin` reads the RAW backend role — the frontend collapses
+  // `super_admin` into the same `admin` RBAC bucket, and `operator` holds
+  // `inventory:view` too, so the permission matrix cannot answer this.
+  //
+  // NOTE: RPT-001's audience is finance. Which ROLE finance hold is unknown —
+  // the requirement names the audience and nothing else, and no user in the
+  // system identifies as finance. The comment that used to sit here claimed
+  // they hold `read_only`; that was inference, not a stated requirement, and
+  // it is what justified the old view-only gate. Open with the client: if
+  // finance are not super admins they lose this button.
+  const canExport = useAuthStore(selectIsSuperAdmin);
   const router = useRouter();
 
   // The consumable flag is CR-only — Transaction Spec §1.1: "A CR item may be
@@ -111,6 +146,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
   const [hasLoaded, setHasLoaded] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [creating, setCreating] = React.useState(false);
+  const [exporting, setExporting] = React.useState(false);
   // Held briefly — the list returns in ~20ms locally, too fast to see.
   const showSkeleton = useMinDuration(!hasLoaded && !loadError);
 
@@ -192,6 +228,60 @@ export function TierListClient({ config }: { config: TierConfig }) {
     return () => ctrl.abort();
   }, [fetchRows]);
 
+  /**
+   * RPT-001 — download the finance CSV for this tier.
+   *
+   * Scoped to the tier and the current search, so the file matches the screen
+   * it was taken from. It is NOT scoped by the filter pill: the pills narrow
+   * to a subset ("Below reorder"), and a "full data dump" that silently
+   * dropped rows because a pill was active is the kind of thing finance finds
+   * out about a quarter later.
+   */
+  /**
+   * RPT-001 — download this tier as an Excel workbook.
+   *
+   * Scoped to the tier and the current search, so the file matches the screen
+   * it was taken from. It is NOT scoped by the filter pill: the pills narrow
+   * to a subset ("Below reorder"), and a "full data dump" that silently
+   * dropped rows because a pill was active is the kind of thing finance finds
+   * out about a quarter later.
+   */
+  const handleExport = React.useCallback(async () => {
+    setExporting(true);
+    try {
+      const { blob, filename } = await exportsApi.inventoryXlsx({
+        tierId: tier?.id,
+        q: query || undefined,
+        title: config.title,
+      });
+      const name = filename ?? timestampedFilename('cellready-inventory', 'xlsx');
+      saveBlob(blob, name);
+      toast.success('Export downloaded', { description: name });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : 'Failed to export. Please try again.',
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [tier, query, config.title]);
+
+  const exportButton = (
+    <Button
+      variant="default"
+      onClick={() => void handleExport()}
+      disabled={exporting || !tier}
+      title={`Excel workbook — a ${config.title} summary tab, then one tab per item with its stock and its full transaction history`}
+    >
+      {exporting ? (
+        <Loader2 size={14} className="animate-spin" />
+      ) : (
+        <Download size={14} />
+      )}
+      {exporting ? 'Exporting…' : 'Export'}
+    </Button>
+  );
+
   const newButton = (
     <Button variant="primary" onClick={() => setCreating(true)} disabled={!tier}>
       <Plus size={14} /> {config.newLabel}
@@ -243,17 +333,29 @@ export function TierListClient({ config }: { config: TierConfig }) {
               aria-label={`Search ${config.plural}`}
             />
           </div>
-          {config.filters.length > 1 && (
-            <SegmentedControl
-              aria-label={`Filter ${config.plural}`}
-              options={config.filters.map((f) => ({
-                value: f.id,
-                label: f.label,
-              }))}
-              value={filterId}
-              onChange={setFilterId}
-            />
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {/* A dropdown, not a segmented row (client 2026-09-01). The pill
+                row was fine at three filters; CR now has five, and they wrapped
+                under the Export button at laptop widths. A Select also keeps the
+                chosen filter readable when it is not the default — the header
+                says "Awaiting release" instead of making the reader find which
+                pill is highlighted. */}
+            {config.filters.length > 1 && (
+              <Select value={filterId} onValueChange={setFilterId}>
+                <SelectTrigger className="w-52" aria-label={`Filter ${config.plural}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {config.filters.map((f) => (
+                    <SelectItem key={f.id} value={f.id}>
+                      {f.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {canExport && exportButton}
+          </div>
         </div>
 
         <Card className="overflow-hidden">
@@ -332,7 +434,18 @@ export function TierListClient({ config }: { config: TierConfig }) {
                           {row.id}
                         </Link>
                       </TableCell>
-                      <TableCell className="text-text-2">{row.desc}</TableCell>
+                      <TableCell className="text-text-2">
+                        {/* The kit-consumption flag rides with the NAME rather
+                            than taking a column: it applies to a handful of rows
+                            and a column would be empty on almost all of them.
+                            The Consumable column beside it answers the other
+                            half of the question (client 2026-09-01). */}
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate">{row.desc}</span>
+                          <ConsumedInKitBadge consumedInKit={row.consumedInKit} />
+                          <VariableYieldBadge variableYield={row.variableYield} />
+                        </span>
+                      </TableCell>
                       {showConsumable && (
                         <TableCell>
                           {row.isConsumable ? (
@@ -363,7 +476,15 @@ export function TierListClient({ config }: { config: TierConfig }) {
                         {row.uom ? <span className="ml-1 text-text-3">{row.uom}</span> : null}
                       </TableCell>
                       <TableCell>
-                        <StatusBadge status={row.status} />
+                        {/* Awaiting-release aware, same as the item page and
+                            the all-items table: a delivery sitting in the
+                            receiving bay must not read as "go buy more". */}
+                        <StockStatusBadge
+                          status={row.status}
+                          qtyAvailable={row.qtyAvailable}
+                          reorderThreshold={row.threshold}
+                          qtyAwaitingRelease={row.qtyAwaitingRelease}
+                        />
                       </TableCell>
                       <TableCell className="text-text-3">
                         {row.updatedAt ? new Date(row.updatedAt).toLocaleDateString() : '—'}

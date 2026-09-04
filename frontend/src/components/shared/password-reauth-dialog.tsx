@@ -41,6 +41,27 @@ interface Props {
   recordId?: string;
   /** Sentence the user is attesting to — rendered verbatim. */
   meaning: string;
+  /**
+   * Optional control rendered above the attestation, for an action whose ONLY
+   * input is the thing being signed for — the quantity on a Kanban
+   * acknowledgment, say. It exists so such a flow is one dialog rather than a
+   * form followed by a signature, which is two steps for one decision.
+   *
+   * The caller keeps ``meaning`` in step with whatever is typed here; the
+   * sentence quotes the value, so a stale one would attest to a number the
+   * operator did not enter.
+   */
+  fields?: React.ReactNode;
+  /**
+   * Block signing while whatever is in ``fields`` is incomplete.
+   *
+   * Not cosmetic. Evidence is minted by the server the moment the password
+   * verifies, and it is single-use and bound to a record — so a caller that
+   * validated only in its own handler would burn a real signature on a form it
+   * then refused to submit, and the operator would be told to "sign again"
+   * for a mistake the dialog could see.
+   */
+  fieldsInvalid?: boolean;
   /** Called with the fresh evidence id when the password verifies. */
   onConfirmed: (evidence: ReauthResponse) => void;
   /** Headline above the password field. Defaults to "Confirm your password". */
@@ -77,6 +98,8 @@ export function PasswordReauthDialog({
   recordTable,
   recordId,
   meaning,
+  fields,
+  fieldsInvalid = false,
   onConfirmed,
   title = 'Confirm your password',
   submitLabel = 'Sign',
@@ -116,7 +139,7 @@ export function PasswordReauthDialog({
     }
   };
 
-  const submitDisabled = pending || rateLimited || !password;
+  const submitDisabled = pending || rateLimited || !password || fieldsInvalid;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -139,6 +162,19 @@ export function PasswordReauthDialog({
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="space-y-4">
+            {/* One field the signature is ABOUT, when the action has exactly
+                one and asking for it separately would mean two dialogs for one
+                decision. Rendered ABOVE the attestation deliberately: the
+                sentence being signed quotes this value, so it has to be
+                settled before it is read, not after.
+
+                Kept to a slot rather than a prop so callers own the label and
+                validation, and deliberately NOT a general form area — anything
+                needing more than one field is a step of its own before this
+                one, or the operator is reading an attestation about values
+                still scrolling past underneath it. */}
+            {fields}
+
             {/* The attestation text. Rendered as a quote so the user
                 clearly sees what they're signing. */}
             <blockquote className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs italic text-text-2">

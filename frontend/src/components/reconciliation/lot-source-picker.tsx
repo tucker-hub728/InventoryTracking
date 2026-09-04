@@ -25,6 +25,18 @@ import { NumberInput } from './recon-bits';
  */
 
 export interface LotPick {
+  /**
+   * Stable identity of this ROW, independent of whatever it currently points
+   * at. Assigned once when the row is created and carried through every edit.
+   *
+   * Per-row state a caller hangs off a pick — the transfer dialog's
+   * destination — must key on this and never on (lot × location). Callers that
+   * pass ``allowDuplicateLots`` put the same lot on the same shelf across
+   * several rows deliberately (splitting 5 vials into 3 here and 2 there), so
+   * lot × location names TWO rows; keying on it makes them share one entry and
+   * mirror each other.
+   */
+  rid: string;
   lot_id: string;
   node_id: string;
   /** Bulk lots: the quantity to pull. Box lots: mirrors `cells.length`. */
@@ -34,7 +46,25 @@ export interface LotPick {
   is_grid: boolean;
 }
 
-/** A lot is identified by (lot, location) — the same lot can sit on two shelves. */
+/** Fresh row identity. A counter rather than a random id: rows are only created
+ *  in event handlers and effects, so it stays stable across a render. */
+let ridSeq = 0;
+export const newPickRid = () => `pick-${++ridSeq}`;
+
+/** An empty row — a location dropdown with nothing chosen yet. */
+export const blankPick = (nodeId = ''): LotPick => ({
+  rid: newPickRid(),
+  lot_id: '',
+  node_id: nodeId,
+  qty: 0,
+  cells: [],
+  is_grid: false,
+});
+
+/** A LOT is identified by (lot, location) — the same lot can sit on two shelves.
+ *
+ *  This names a lot, NOT a row: two rows may draw from one lot × location. Use
+ *  {@link LotPick.rid} for anything that belongs to a single row. */
 export const pickKey = (lotId: string, nodeId: string) => `${lotId}:${nodeId}`;
 
 /** Effective quantity of a pick — cell count for a box, else the typed qty. */
@@ -76,6 +106,7 @@ function nextRow(lots: KitLineSourceLot[], used: Set<string>, remaining: number)
   const lot = lots.find((l) => l.qty > 0 && !used.has(pickKey(l.lot_id, l.node_id)));
   if (!lot) return null;
   return {
+    rid: newPickRid(),
     lot_id: lot.lot_id,
     node_id: lot.node_id,
     is_grid: lot.is_grid,
@@ -104,28 +135,45 @@ export function autoFillFifo(
     if (lot.is_grid) continue; // box lots need manual vial picks
     const take = Math.min(remaining, lot.qty);
     if (take <= 0) continue;
-    bulk.push({ lot_id: lot.lot_id, node_id: lot.node_id, qty: take, cells: [], is_grid: false });
+    bulk.push({
+      rid: newPickRid(),
+      lot_id: lot.lot_id,
+      node_id: lot.node_id,
+      qty: take,
+      cells: [],
+      is_grid: false,
+    });
     remaining -= take;
   }
   const rows = [...boxPicks, ...bulk];
   // Never render empty: if nothing pre-filled but stock exists, seed one blank
   // row so the operator has a location dropdown to start from.
   if (rows.length === 0 && lots.length > 0) {
-    rows.push({ lot_id: '', node_id: '', qty: 0, cells: [], is_grid: false });
+    rows.push(blankPick());
   }
   return rows;
 }
 
+/** The rows that will actually post — a row with no lot, or with nothing drawn
+ *  from it, is not an error, it simply doesn't post.
+ *
+ *  Exported alongside {@link pickToSource} so a caller that decorates each
+ *  source with per-row state can walk the rows themselves and read their
+ *  ``rid``, rather than trying to match a posted source back to a row. */
+export const filledPicks = (picks: LotPick[]) =>
+  picks.filter((p) => p.lot_id && (p.is_grid ? p.cells.length > 0 : p.qty > 0));
+
+/** One pick in the API `sources` shape. ``rid`` is UI-only and never sent. */
+export const pickToSource = (p: LotPick) => ({
+  node_id: p.node_id,
+  lot_id: p.lot_id,
+  qty: pickQty(p),
+  cell_allocation_ids: p.is_grid ? p.cells : undefined,
+});
+
 /** Convert picks to the API `sources` shape, dropping empty / zero rows. */
 export function picksToSources(picks: LotPick[]) {
-  return picks
-    .filter((p) => p.lot_id && (p.is_grid ? p.cells.length > 0 : p.qty > 0))
-    .map((p) => ({
-      node_id: p.node_id,
-      lot_id: p.lot_id,
-      qty: pickQty(p),
-      cell_allocation_ids: p.is_grid ? p.cells : undefined,
-    }));
+  return filledPicks(picks).map(pickToSource);
 }
 
 /** One lot dropdown option (within an already-chosen shelf) — lot #, expiry,
@@ -226,11 +274,24 @@ export function LotSourcePicker({
             .filter(Boolean),
         );
 
+  /** Vials every OTHER row already draws, as allocation ids. Only two rows on
+   *  one lot × box can collide, which needs ``allowDuplicateLots`` — but
+   *  allocation ids are unique per vial, so nothing else can match and the set
+   *  is safe to pass unconditionally. Without it both rows offer the same full
+   *  grid and the second pick of a vial only fails at submit, as "one or more
+   *  selected vials are no longer available". */
+  const vialsUsedBy = (skip: number) =>
+    new Set(picks.flatMap((p, j) => (j === skip ? [] : p.cells)));
+
   const fillRow = (i: number, lot: KitLineSourceLot) => {
     // Default the quantity to whatever is still needed (capped at the lot).
     const otherTotal = total - (picks[i]?.lot_id ? pickQty(picks[i]) : 0);
     const want = Math.max(0, needed - otherTotal);
     setRow(i, {
+      // Re-pointing a row at another lot keeps the row's identity: it is the
+      // same row of the form, and per-row state the caller hung off it (a
+      // destination) still belongs to it.
+      rid: picks[i]?.rid ?? newPickRid(),
       lot_id: lot.lot_id,
       node_id: lot.node_id,
       is_grid: lot.is_grid,
@@ -247,7 +308,7 @@ export function LotSourcePicker({
       fillRow(i, here[0]);
       return;
     }
-    setRow(i, { lot_id: '', node_id: nodeId, qty: 0, cells: [], is_grid: false });
+    setRow(i, { ...blankPick(nodeId), rid: picks[i]?.rid ?? newPickRid() });
   };
 
   const chooseLot = (i: number, key: string) => {
@@ -257,7 +318,7 @@ export function LotSourcePicker({
 
   const addRow = () => {
     const row = nextRow(lots, usedBy(-1), remaining);
-    onChange([...picks, row ?? { lot_id: '', node_id: '', qty: 0, cells: [], is_grid: false }]);
+    onChange([...picks, row ?? blankPick()]);
   };
 
   if (lots.length === 0) {
@@ -327,7 +388,11 @@ export function LotSourcePicker({
 
           return (
             <div
-              key={i}
+              // The row's own identity, not its index: removing a row shifts
+              // every index below it, and React would then hand the removed
+              // row's mounted state (an open cell grid, a caller's footer) to
+              // the row that slid up into its place.
+              key={row.rid}
               className={cn(
                 'rounded-md border bg-surface/30 px-2 py-1.5 transition-colors',
                 rowError ? 'border-danger/40' : 'border-transparent',
@@ -431,6 +496,10 @@ export function LotSourcePicker({
                     cells={lot.cells}
                     value={row.cells}
                     max={lot.qty}
+                    // Vials another row of this same form already draws. The
+                    // per-lot cap catches the over-draw at submit; this stops
+                    // the operator picking one vial twice in the first place.
+                    reserved={vialsUsedBy(i)}
                     disabled={disabled}
                     onChange={(cells) => setRow(i, { ...row, cells, qty: cells.length })}
                   />

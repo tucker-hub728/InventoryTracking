@@ -66,6 +66,7 @@ import {
   parentTypesOf,
   subtreeStats,
   CHILD_TYPES_OF,
+  MAX_GRID_DIM,
   NODE_TYPE_LABEL,
   type Allocation,
   type LocationNode,
@@ -74,12 +75,19 @@ import {
   type NodeTree,
   type NodeType,
 } from '@/lib/api/location-nodes';
-import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
+import {
+  selectIsSuperAdmin,
+  useAuthStore,
+} from '@/stores/auth.store';
 
 import {
   LocationLeafPicker,
   type AreaTrees,
 } from '@/components/inventory/receipt-admin/receive-location-picker';
+
+import { CellGridPicker } from '@/components/reconciliation/cell-grid-picker';
+import type { CellOption } from '@/lib/api/kits';
+import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
 
 import { BoxGrid, rowLabel } from './box-grid';
 
@@ -94,11 +102,17 @@ export const NODE_ICON: Record<NodeType, LucideIcon> = {
   // Freezer / warehouse nodes don't render in this (LN2) panel, but the map
   // must cover every NodeType.
   room: Container,
+  // A Storage location renders on its own page, not in this LN2 panel, but the
+  // map must cover every NodeType.
+  storage_category: Container,
   room_location: Container,
   sub_location: Box,
   warehouse: Package,
   shelf: Box,
   flat: Package,
+  // A Kanban renders on the production floor's own tab, not in this LN2 panel,
+  // but the map must cover every NodeType.
+  kanban: Boxes,
   cassette_rack: Container,
   sub_slot: Box,
 };
@@ -398,6 +412,34 @@ export function NodeDetailPanel({
     }
   };
 
+  /**
+   * Select every cell one lot occupies, from its legend chip.
+   *
+   * The batch flow is per-cell, which is right when you are picking four vials
+   * out of seventeen and wrong when you want the whole holding — nobody should
+   * click seventeen cells to move a lot (client 2026-08-17). Clicking the chip
+   * again clears it, so the same control both selects and deselects.
+   *
+   * Only active, placed cells count: an emptied allocation still has
+   * coordinates but nothing to move.
+   */
+  const handleSelectLot = (lotId: string) => {
+    if (batchLotId === lotId) {
+      setSelectedOccupied(new Set());
+      setBatchLotId(null);
+      return;
+    }
+    const cells = allocations
+      .filter((a) => a.is_active && a.lot_id === lotId && a.grid_row != null && a.grid_col != null)
+      .map((a) => `${a.grid_row}:${a.grid_col}`);
+    if (cells.length === 0) return;
+    // Unit-out and placement are different modes; entering one leaves the other.
+    setSelectedCells(new Set());
+    setPlaceLot('');
+    setSelectedOccupied(new Set(cells));
+    setBatchLotId(lotId);
+  };
+
   // The allocations behind the currently multi-selected occupied cells.
   const selectedOutAllocs = React.useMemo(
     () =>
@@ -576,8 +618,13 @@ export function NodeDetailPanel({
             </div>
           </div>
         </div>
-        {canManageStructure && (
-          <div className="flex shrink-0 items-center gap-2">
+        {/* ONE action bar. These used to be two sibling groups, which under
+            ``justify-between`` made the header a three-part layout and stranded
+            the middle group in the centre of the row. Structural actions and the
+            release decision keep their own permission gates inside it. */}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {canManageStructure && (
+            <>
             <Button size="sm" variant="ghost" onClick={() => setShowEdit(true)}>
               <Tag size={14} /> Edit
             </Button>
@@ -617,8 +664,15 @@ export function NodeDetailPanel({
               </Button>
             )}
             {/* Remove is hidden for now. */}
-          </div>
-        )}
+            </>
+          )}
+
+          {/* No Quality status anywhere on this page (client 2026-08-19 for the
+              header, 2026-09-01 for the allocation sheet): the LN2 hierarchy
+              shows WHERE a batch sits, and a release decision is made from the
+              item page, where "which batch" is a short list. The badge on each
+              contents row still REPORTS the state — only the control is gone. */}
+        </div>
       </div>
 
       {/* Stat cards */}
@@ -675,7 +729,15 @@ export function NodeDetailPanel({
         // carries its own ``overflow-x-auto``; it just never got the chance to
         // use it until its parent was allowed to be narrower than its contents.
         <div className="grid grid-cols-1 gap-4 [&>*]:min-w-0 lg:grid-cols-2">
-          <div className="min-w-0 rounded-lg border border-border bg-bg-elev p-4">
+          {/* Pinned while the contents list is read. The scrollport is the
+              ``<main>`` of the Location System (it owns ``overflow-y-auto``),
+              not the window, so sticky resolves against that pane. ``top-5``
+              matches the panel's own ``py-5`` so the card lands where it
+              normally sits rather than jammed against the edge. ``self-start``
+              is what gives it room to travel: stretched to the row it would be
+              exactly as tall as its grid area and sticky would have nowhere to
+              go (client 2026-08-17). */}
+          <div className="min-w-0 rounded-lg border border-border bg-bg-elev p-4 lg:sticky lg:top-5 lg:self-start">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-sm font-medium text-text-2">
                 Unit map · {gridRows}×{gridCols}
@@ -704,31 +766,15 @@ export function NodeDetailPanel({
               selectedCells={selectedCells}
               selectedOccupied={selectedOccupied}
               batchLotId={batchLotId}
+              showLegend
               onSelectCell={handleSelectCell}
+              onSelectLot={canWrite ? handleSelectLot : undefined}
             />
-            {/* Batch unit-out (transfer / consume) for the selected units. */}
-            {canWrite && selectedOutAllocs.length > 0 && (
-              <div className="mt-3">
-                <BatchOutPanel
-                  selected={selectedOutAllocs}
-                  targets={targets}
-                  trees={trees}
-                  busy={busy}
-                  onClear={() => {
-                    setSelectedOccupied(new Set());
-                    setBatchLotId(null);
-                  }}
-                  onTransfer={(p) => {
-                    setPending({ kind: 'transfer-batch', ...p });
-                    setShowReauth(true);
-                  }}
-                  onConsume={(p) => {
-                    setPending({ kind: 'consume-batch', ...p });
-                    setShowReauth(true);
-                  }}
-                />
-              </div>
-            )}
+            {/* The batch panel used to hang here, under the map, so selecting a
+                unit grew this card and pushed the page down — the map moved out
+                from under the cursor mid-selection (client 2026-08-17). It now
+                lives in the right-hand column, where it takes its space from
+                the contents list instead of from the layout. */}
             {/* Batch placement into empty cells — disabled: unit-in is done
                 only from Receipt Admin. */}
             {canWrite && LN2_UNIT_IN_ENABLED && selectedCells.size > 0 && (
@@ -774,46 +820,85 @@ export function NodeDetailPanel({
             )}
           </div>
 
-          <div className="rounded-lg border border-border bg-bg-elev">
-            <div className="border-b border-border px-4 py-3">
-              <p className="text-sm font-medium text-text-2">
-                Contents <span className="text-text-3">· {allocations.length} placed</span>
-                {loading && <span className="ml-2 text-text-3">loading…</span>}
-              </p>
-            </div>
-            {allocations.length === 0 ? (
-              <p className="px-4 py-10 text-center text-sm text-text-3">Nothing placed yet.</p>
-            ) : (
-              <ul className="max-h-[28rem] divide-y divide-border overflow-y-auto">
-                {[...allocations]
-                  .sort((a, b) => cellSort(a) - cellSort(b))
-                  .map((a) => (
-                    <li key={a.id}>
-                      <button
-                        type="button"
-                        className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface"
-                        onClick={() => setDetailAlloc(a)}
-                        title="View details"
-                      >
-                        <span className="w-8 shrink-0 font-mono text-xs text-text-3">
-                          {a.grid_row != null && a.grid_col != null
-                            ? `${rowLabel(a.grid_row)}${a.grid_col}`
-                            : '—'}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="text-text-1 block truncate text-sm">
-                            {a.item_number ?? '—'}
-                          </span>
-                          <span className="block truncate text-xs text-text-3">
-                            {a.lot_number ?? a.lot_id.slice(0, 8)}
-                          </span>
-                        </span>
-                        <ChevronRight size={15} className="shrink-0 text-text-3" />
-                      </button>
-                    </li>
-                  ))}
-              </ul>
+          {/* Right column. The batch panel lives here rather than under the map
+              so that selecting units never resizes the map card — and with the
+              map pinned alongside, it cannot move the map either. */}
+          <div className="flex min-w-0 flex-col gap-4">
+            {canWrite && selectedOutAllocs.length > 0 && (
+              <div className="shrink-0 rounded-lg border border-accent/40 bg-bg-elev p-3">
+                <BatchOutPanel
+                  selected={selectedOutAllocs}
+                  targets={targets}
+                  trees={trees}
+                  busy={busy}
+                  onClear={() => {
+                    setSelectedOccupied(new Set());
+                    setBatchLotId(null);
+                  }}
+                  onTransfer={(p) => {
+                    setPending({ kind: 'transfer-batch', ...p });
+                    setShowReauth(true);
+                  }}
+                  onConsume={(p) => {
+                    setPending({ kind: 'consume-batch', ...p });
+                    setShowReauth(true);
+                  }}
+                />
+              </div>
             )}
+
+            <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-bg-elev">
+              <div className="border-b border-border px-4 py-3">
+                <p className="text-sm font-medium text-text-2">
+                  Contents <span className="text-text-3">· {allocations.length} placed</span>
+                  {loading && <span className="ml-2 text-text-3">loading…</span>}
+                </p>
+              </div>
+              {allocations.length === 0 ? (
+                <p className="px-4 py-10 text-center text-sm text-text-3">Nothing placed yet.</p>
+              ) : (
+                // Always bounded, so a full box (100 units) scrolls INSIDE this
+                // card instead of running the pane down the page and taking the
+                // unit map off the top of it. The ceiling is the scrollport
+                // rather than a fixed 28rem on a wide screen: the pane is about
+                // a viewport tall, less the app header and this panel's own
+                // header, stats and padding.
+                <ul className="max-h-[28rem] min-h-0 flex-1 divide-y divide-border overflow-y-auto lg:max-h-[calc(100vh-16rem)]">
+                  {[...allocations]
+                    .sort((a, b) => cellSort(a) - cellSort(b))
+                    .map((a) => (
+                      <li key={a.id}>
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface"
+                          onClick={() => setDetailAlloc(a)}
+                          title="View details"
+                        >
+                          <span className="w-8 shrink-0 font-mono text-xs text-text-3">
+                            {a.grid_row != null && a.grid_col != null
+                              ? `${rowLabel(a.grid_row)}${a.grid_col}`
+                              : '—'}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="text-text-1 block truncate text-sm">
+                              {a.item_number ?? '—'}
+                            </span>
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className="truncate text-xs text-text-3">
+                                {a.lot_number ?? a.lot_id.slice(0, 8)}
+                              </span>
+                              {/* Renders nothing unless the lot actually has a
+                                  quality status, so consumable rows are unchanged. */}
+                              <ReleaseStateBadge state={a.release_state} size="xs" />
+                            </span>
+                          </span>
+                          <ChevronRight size={15} className="shrink-0 text-text-3" />
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1261,7 +1346,11 @@ function AllocationDetailSheet({
                       label="Item"
                       value={<ItemLink itemNumber={lot.item_number} itemId={lot.item_id} />}
                     />
-                    <DetailRow label="Status" value={lot.status} />
+                    {/* "Stock status", not "Status": it sits directly above the
+                        quality row, and two rows both called some kind of status
+                        are only telling you apart if each says WHICH status it
+                        is. This one is procurement — on order, available. */}
+                    <DetailRow label="Stock status" value={lot.status} />
                     <DetailRow label="Supplier" value={lot.supplier_name ?? '—'} />
                     <DetailRow label="PO reference" value={lot.po_reference ?? '—'} />
                     <DetailRow
@@ -1308,7 +1397,19 @@ function RemainingHint({ avail, selecting }: { avail: LotAvailability | null; se
   );
 }
 
-/** A target box's grid, used to click destination cells for a transfer. */
+/**
+ * A target box's grid, used to click destination cells for a transfer.
+ *
+ * Renders the SHARED {@link CellGridPicker} — the same compact grid every other
+ * destination picker in the app uses (Receive, the item-workspace transfer,
+ * kitting's split-output, back-flush and return-excess). It used to render
+ * {@link BoxGrid}, the large lot-labelled map, so the two LN2 transfer flows
+ * showed a different control from every other screen doing the identical job
+ * (client 2026-08-17).
+ *
+ * ``BoxGrid`` stays where it belongs: the unit map above, where reading which
+ * lot sits in which position IS the task.
+ */
 function DestGridPicker({
   node,
   value,
@@ -1334,30 +1435,36 @@ function DestGridPicker({
     };
   }, [node.id]);
 
+  // Occupied cells in the shape the shared grid reads. ``expiration_date`` is
+  // null because a destination grid never tints by expiry — that cue is for
+  // choosing which vial to TAKE.
+  const cells: CellOption[] = React.useMemo(
+    () =>
+      allocs
+        .filter((a) => a.is_active && a.grid_row != null && a.grid_col != null)
+        .map((a) => ({
+          allocation_id: a.id,
+          grid_row: a.grid_row as number,
+          grid_col: a.grid_col as number,
+          lot_id: a.lot_id,
+          lot_number: a.lot_number,
+          expiration_date: null,
+        })),
+    [allocs],
+  );
+
   return (
-    <div className="rounded-md border border-border bg-bg-elev p-2">
-      <BoxGrid
-        rows={node.grid_rows ?? 0}
-        cols={node.grid_cols ?? 0}
-        allocations={allocs}
-        selectedCells={value}
-        onSelectCell={(c) => {
-          if (c.occupant) return;
-          const key = `${c.row}:${c.col}`;
-          const next = new Set(value);
-          if (next.has(key)) {
-            next.delete(key);
-          } else {
-            if (next.size >= max) {
-              toast.error(`Select at most ${max} cell(s).`);
-              return;
-            }
-            next.add(key);
-          }
-          onChange(next);
-        }}
-      />
-    </div>
+    <CellGridPicker
+      mode="destination"
+      rows={node.grid_rows ?? 1}
+      cols={node.grid_cols ?? 1}
+      cells={cells}
+      // The grid enforces ``max`` by disabling the remaining free cells, so the
+      // "select at most N" toast this used to raise has nothing left to report.
+      max={max}
+      value={[...value]}
+      onChange={(next) => onChange(new Set(next))}
+    />
   );
 }
 
@@ -1781,6 +1888,7 @@ function ResizeDialog({
               <Input
                 type="number"
                 min={1}
+                max={MAX_GRID_DIM}
                 step="1"
                 value={rows}
                 onChange={(e) => setRows(e.target.value)}
@@ -1793,6 +1901,7 @@ function ResizeDialog({
               <Input
                 type="number"
                 min={1}
+                max={MAX_GRID_DIM}
                 step="1"
                 value={cols}
                 onChange={(e) => setCols(e.target.value)}

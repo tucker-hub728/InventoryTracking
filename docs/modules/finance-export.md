@@ -1,0 +1,329 @@
+# Finance CSV export (RPT-001)
+
+> The system shall provide a CSV export (full data dump) for finance, who apply
+> their own downstream math; the export is the current-state, full-column
+> output.
+>
+> — CellReady SRS Consolidated Amendment 9+10 by Release (Aug 13, 2026;
+> v2 rev. Blane Larson Aug 18, 2026)
+
+Two representations of the **same rows**, both gated on `inventory:view`, both
+audited, neither e-signed:
+
+| Endpoint | Shape | Who uses it |
+|---|---|---|
+| `GET /v1/exports/inventory.xlsx` | Tabbed workbook — a summary tab matching the screen, then one tab per item: its balances, then its transaction history | The **Export** button |
+| `GET /v1/exports/inventory.csv` | One flat sheet, all 70 columns | No button. The exact-decimal reconciliation artefact, and RPT-001 as literally written |
+
+Both are built by the same `_gather()` in `routes.py`, so they cannot disagree
+about the data — only about layout.
+
+> **The workbook is a deviation from RPT-001**, which says "CSV export (full
+> data dump) … full-column output". The client asked for tabs on 2026-08-25
+> after seeing the flat file. The CSV is kept unchanged alongside it so the
+> requirement is still satisfiable, and so there is always an artefact with
+> exact decimals to reconcile against (the workbook writes `Decimal` as
+> `float`, which is a real precision change even if it is safe at these
+> magnitudes).
+
+### Workbook structure
+
+* **Tab 1** — the tier summary: SKU, Name, Consumable, On hand, UoM, Stock
+  status, Awaiting release, On order, Inventory $, On PO $, Reorder at,
+  Updated. Each SKU is an internal hyperlink to that item's tab.
+* **Tabs 2…N** — one per item that has stock, an arrival, or an open order. A
+  header block of that item's facts and totals, then its detail rows. An item
+  with none of those gets a summary line but **no tab** (it would be empty) and
+  its SKU stays plain text rather than becoming a link that lands nowhere.
+
+Sheet names are the item number, subject to Excel's rules: ≤ 31 characters,
+none of `[ ] : * ? / \`, unique case-insensitively. Collisions get a `~2`
+suffix rather than being truncated into each other.
+
+Numbers and dates are written as **native Excel types** with display formats,
+not as strings — the main reason to ship a workbook at all, since finance can
+sum and sort without a text-to-columns pass. The blank-not-zero rule still
+holds: an unpriced lot is a genuinely empty cell.
+
+The button lives on each tier page (`/inventory/cr`, `/ay`, `/fg`) beside the
+filter pills and is scoped to that tier plus the current search box. It is
+**not** scoped by the filter pill — a "full data dump" that silently dropped
+rows because *Below reorder* happened to be selected is the kind of thing
+finance discovers a quarter later.
+
+## The shape: five row kinds in one file
+
+The client chose one row per (lot × location). Four facts finance needs do not
+live at that grain, so each gets its own `row_kind` and its own columns, blank
+on the others:
+
+| `row_kind` | one row per | quantity column | money column |
+|---|---|---|---|
+| `on_hand` | active allocation, grouped to (lot × location) | `qty_on_hand` | `extended_value_amount` |
+| `awaiting_release` | lot that arrived but is not yet received to inventory | `qty_awaiting_release` | `extended_value_amount` |
+| `on_order` | open order line with quantity outstanding | `qty_on_order` / `qty_on_order_packs` | `extended_value_amount` |
+| `movement` | **stock-ledger event** (RPT-004) | `movement_qty_delta` / `movement_qty_abs` | `movement_value_amount` |
+| `item_valuation` | item (always, even with no stock) | `item_qty_*` | `item_ui_inv_value_amount`, `item_ui_po_value_amount` |
+
+Every money and quantity column is populated on **exactly one** row kind, so
+`SUM(...) GROUP BY row_kind` is always meaningful and nothing double-counts.
+Filter to one kind before summing.
+
+**Always filter by `row_kind` before you sum anything.** A `SUM` over the whole
+`extended_value_amount` column adds on-hand stock, unplaced arrivals and
+unfilled purchase orders into a number that means nothing.
+
+## The transaction rows (RPT-004)
+
+Added 2026-09-03. The first four kinds all describe a **balance right now**; a
+`movement` row describes a **flow through time** — one row per event in the
+append-only stock ledger. It is what turns the file from "what do we have" into
+"how did we get it, and what did it cost":
+
+> "We spent $135 to make five of them. So we're going to charge you now, $135
+> divided by 5."
+> — client review call, 2026-09-02
+
+That sum is only checkable if the components' issues and the batch's output are
+both in the file, priced, against item numbers finance recognises.
+
+All sixteen `MOVEMENT_TYPES` come through — `receipt`, `transfer_out`/`_in`,
+`kit_issue`, `kit_additional_issue`, `production_output`, `backflush`,
+`kit_return`, `kit_cancel_return`, `customer_shipment`, `consumable_issue`,
+`material_issue`, `adjustment`, `discard`, `dispense`.
+
+**This is the one query in the export that filters nothing.** No
+`not_floor_stock()`, no `qty > 0`, no `is_active`. Those exclusions are correct
+for current state — material on a production node is genuinely not on the shelf
+— but an event that happened does not stop having happened because the material
+moved on. Excluding kit issues here would delete exactly the story the rows
+exist to tell.
+
+| Column | What to know |
+|---|---|
+| `movement_qty_delta` | **Signed.** A transfer nets to zero across its `transfer_out`/`transfer_in` pair, which is the right answer for a location move. |
+| `movement_qty_abs` | The magnitude. `movement_value_amount` is built from this, so a `SUM` cannot silently net a receipt against a shipment. |
+| `movement_direction` | `in` / `out`, a label over the sign of `qty_delta`. Pivot on this. |
+| `movement_value_amount` | `qty_abs × the lot's unit price`, and **its own column** — never `extended_value_amount`. Adding "what moved this quarter" to "what is on the shelf" is not a number, so the two can never land in one `SUM`. Blank when the lot is unpriced, never `0`. |
+| `movement_from_location_path` / `_to_location_path` | The **frozen text snapshots** on the ledger row, not the live node path. Re-hanging a rack under a new quadrant rewrites the address of every box beneath it, and history that shifts under the reader is worse than none. The only place in the export where a location is deliberately not the live value. |
+| `movement_kit_number` | Without it, sixteen movement types are a list of quantities with no story joining them. |
+
+`occurred_from` / `occurred_to` bound these rows and nothing else — half-open
+(`>= from`, `< to`), matching the audit filters and RPT-003. Both default to
+**unset**, i.e. the whole ledger: a date default that silently truncated
+history is the kind of hidden filter this export exists to avoid.
+
+The 15 `movement_*` columns are **appended** to the original 55, never woven
+in, so a spreadsheet finance already built against a column position is
+unaffected. `test_the_original_columns_never_move` enforces that.
+
+In the workbook, each item's tab shows its balances first and then its ledger
+underneath, labelled **Transaction**. An item whose stock has all been consumed
+or shipped now earns a tab carrying the history that explains where it went —
+before RPT-004 it had nothing to show and dropped out of the workbook.
+
+## Reconciling against the app
+
+The detail rows and the item page are computed by different code paths on
+purpose — one from allocations, one from the movement ledger. They agree while
+the data is consistent, and the file carries both so you can check rather than
+take it on faith:
+
+```
+SUM(extended_value_amount) WHERE row_kind='on_hand'  GROUP BY item_id
+    == item_ui_inv_value_amount  (on that item's row_kind='item_valuation' row)
+
+SUM(extended_value_amount) WHERE row_kind='on_order' GROUP BY item_id
+    == item_ui_po_value_amount
+```
+
+`backend/tests/smoke_finance_export.py` asserts both against live data.
+
+Three legitimate reasons the first equality can break:
+
+1. **Unpriced lots.** A lot with no `unit_price_amount` contributes nothing to
+   either side. Detectable: `has_unit_price = false`.
+2. **Work in progress.** Material issued to an open kit sits on a production
+   node. The export excludes production nodes and the ledger has already
+   debited it, so both sides agree — but that material is in the building and
+   neither number shows it. Open question with the client.
+3. **A real data-integrity bug** — an allocation with no matching ledger
+   movement, or the reverse. That is what this reconciliation is for.
+
+`awaiting_release` is in neither total by design, which is why it is its own
+row kind (see below).
+
+## Columns that are misread without their companion
+
+| Column | Companion | What the companion prevents |
+|---|---|---|
+| `extended_value_amount` | `has_unit_price`, `value_basis` | A blank is "no price recorded". It is **never** `0` — a zero would say the stock is worthless when what we know is nothing. |
+| `lot_number` | `lot_number_is_synthetic` | `AUTO-20260821-2` is a machine-minted placeholder meaning *no supplier lot number was captured*, not a vendor batch. |
+| `lot_release_state` | `release_state_applies` | An empty cell means *no release workflow applies* — the normal case for every consumable and raw material — not "not released". The most misreadable column in the file. |
+| `is_expired` | `has_expiration_date` | `false` can mean "in date" or "no date was ever recorded". |
+| `qty_on_order` | `qty_on_order_packs`, `units_per_pack` | `qty_on_order` is in consume units; the price is per **order** unit. Divide the wrong pair and the unit price looks wrong by a factor of `units_per_pack`. |
+
+**The two price columns are separate on purpose.** `unit_price_per_consume_unit`
+($0.95/Each) and `unit_price_per_order_unit` ($95.00/Box) never share a header.
+One `unit_price` column carrying both is a 100× error that reads as plausible.
+
+## Things worth knowing before you do arithmetic
+
+- **Values are unrounded.** A per-consume-unit price carries 6 decimal places
+  because "$95.00 over a pack of 3" does not divide evenly. Round at the end of
+  your calculation, not per row — rounding each row then summing gives a
+  different total.
+- **Inventory value includes expired stock.** It follows `qty_on_hand`, matching
+  the item page. Use `is_expired` to exclude it if your policy differs.
+- **Quantities are in consume units** (`uom`) everywhere except
+  `qty_on_order_packs`. A blank `uom` means nobody recorded one; the quantity is
+  still in consume units.
+- **`awaiting_release` rows have no location** — that is what "arrived, not yet
+  received to inventory" means. This stock is on site and paid for but is in
+  neither the on-hand total nor the item page's Inventory $. Whether it is an
+  asset at month-end is a finance policy call; the file gives you the quantity,
+  the price and the PO so you can make it.
+- **Free-text cells beginning with `=`, `+`, `-`, `@` or a tab are prefixed with
+  an apostrophe.** That is a CSV-injection guard (Excel would otherwise execute
+  them as formulas). Strip the leading `'` if you are matching on exact text.
+- **`export_generated_at`** is the same value on every row — the as-of stamp,
+  and it also names the file.
+
+## Implementation notes
+
+- `backend/app/exports/` — `csv_writer.py` (column contract + formatting),
+  `rows.py` (row builders), `repository.py` (five bulk queries), `routes.py`.
+- The on-hand query mirrors `kit_repo.item_stock_by_node_lot` predicate for
+  predicate, so the export cannot disagree with the item drill-down's
+  "Stock by location" tab.
+- On-order reuses `inv_repo.outstanding_order_units_expr()` — the same
+  expression `compute_item_valuations` uses — so the per-line rows sum to the
+  item-level total *by construction* rather than by coincidence.
+- Whole `Response`, not `StreamingResponse`: the BFF proxy buffers the body
+  anyway, a streaming response would hold a pool connection for its lifetime,
+  and an error mid-stream becomes a truncated file that claims success.
+- The BFF proxy forwards `Content-Disposition` (added for this) but deliberately
+  not `Content-Length` — undici decompresses gzip transparently, so the upstream
+  length would be the compressed count and would truncate the body.
+- Auditing: one `audit.audit_events` row per download, subject table
+  `app.inventory_exports`, carrying row count and byte count. This honours
+  `docs/backend-data-structure.md` §10.8 without building the `audit.export_jobs`
+  table specced there — its `file_url` / `completed_at` columns describe an
+  async job writing to object storage, and this system has neither.
+- `MAX_EXPORT_ROWS = 250_000` is an OOM backstop, not a page size; overflow is a
+  422, never a silent truncation.
+- `openpyxl` was added to the backend runtime dependencies for the workbook.
+- **Known duplication:** the summary tab's "Awaiting release beats Low stock"
+  rule now exists in three places — `summary_status_label` in
+  `xlsx_writer.py`, `coveredByArrivals` in
+  `frontend/src/components/shared/stock-status-badge.tsx`, and
+  `_covered_by_arrivals` in `backend/app/planning/repository.py` (a SQL
+  expression, so not callable on plain values). Worth collapsing; recorded here
+  rather than left silent.
+- **Dev-environment trap:** the backend runs `uvicorn --reload`. A reload
+  cannot complete while a long-lived SSE connection is open, and the
+  notifications bell holds one per browser tab — so editing a backend file with
+  the app open in a browser wedges the API (health times out; Postgres shows
+  only a couple of connections, so it is *not* pool exhaustion). Fix:
+  `docker restart cellready-backend`.
+
+## The sibling export — kit costs (RPT-003)
+
+`GET /v1/exports/kit-costs.csv` is a second export in the same module, built on
+the same writer. Read `docs/modules/kitting.md` §12 for the costing rules; the
+differences that matter here:
+
+| | RPT-001 `inventory.csv` | RPT-003 `kit-costs.csv` |
+|---|---|---|
+| Grain | current state, per (lot × location) | events over a **date range** |
+| Range | none — "as of now" | `occurred_from` / `occurred_to`, **half-open** |
+| Gate | `inventory:view` **+ Super Admin alone** | `inventory:view` **+ Super Admin alone** |
+| Audit subject | `app.inventory_exports` | `app.kit_cost_exports` |
+| Row kinds | 4 | 6 |
+
+The narrow gate is deliberate: this file says what each customer is charged for
+each finished lot, and `inventory:view` alone would hand it to every read-only
+account (dev seeds 513 of them).
+
+**2026-09-03 — every priced export is now Super-Admin-only.** `inventory.csv`
+and `inventory.xlsx` carry unit prices, extended lot values and, since RPT-004,
+per-movement value amounts; `kit-costs.csv` carries per-customer charges. And
+`inventory:view` is held by *every* role — so all of it was downloadable by the
+349 active `read_only` accounts on dev. Open question 5 below is resolved in
+favour of a role gate rather than a separate `inventory:export` permission.
+
+It converged in two steps the same day: RPT-001 first went in as `ADMIN_ROLES`
+to match RPT-003, then the client narrowed **both** to `super_admin` alone. So
+`admin` is refused on all three endpoints and the gates are identical again.
+
+> **`admin` being refused is the load-bearing part.** "An admin should surely be
+> able to export" is the reasonable-sounding change that would undo this.
+> `backend/tests/test_export_authorization.py` has a test per endpoint whose
+> only job is to fail if `ADMIN_ROLES` comes back.
+
+> **Open question for the client: which role does finance hold?**
+>
+> RPT-001 names its audience — "a CSV export (full data dump) **for finance**,
+> who apply their own downstream math" — and says nothing about roles. **No
+> requirement, client note or document anywhere maps finance onto a role**, and
+> there is no finance account in the system to read one off (zero users match
+> "finance" by name or email).
+>
+> Until 2026-09-03 the code asserted the mapping anyway. The `canExport`
+> comment in `tier-list-client.tsx` read *"RPT-001 is for finance, who hold the
+> ``read_only`` role — so the export is gated on view, not create"*, and
+> `smoke_finance_export.py` asserted a `read_only` download as a feature. Both
+> were **developer inference, not a stated requirement**, and both are now
+> corrected. Treat the `inventory:view` gate as having rested on an assumption
+> nobody confirmed.
+>
+> So the consequence of Super-Admin-only is genuinely unknown rather than known
+> to be bad: **if** finance turn out to hold `read_only` or `operator`, they
+> lose the export and need promoting to the system's most privileged role,
+> which collides with the promotion rules in ROL-005…009. If they hold
+> `super_admin` already, nothing changes for them. **Ask before assuming
+> either.** If a promotion is unacceptable, the alternatives are an
+> `inventory:export` action granted to whichever roles finance actually hold,
+> or returning blank money columns to lower roles while keeping column
+> positions intact (finance binds to positions — see the column contract
+> above).
+
+**The export dialog offers scope only — which kit, which dates — never how
+much detail.** It used to carry an "Include" picker with three levels, and it
+defaulted to the narrowest: two of the six row kinds. On dev that is 40 rows
+where the full file is 143, so the button most people pressed was quietly
+producing 28% of the data. Removed 2026-09-03 at the client's request ("we just
+need all raw data… the client wants every raw detail"). The endpoint still
+accepts `row_kinds` for a caller that wants a subset; the UI simply omits it,
+and omitting it means all six.
+
+**Both files inherit the conventions above** — blank is never `0`, companion
+`has_*` columns, unrounded decimals, the CSV-injection guard, the utf-8-sig BOM,
+one audit row per download, and 422-rather-than-truncate on overflow. They share
+`csv_writer.py`, so they cannot drift apart on formatting.
+
+One rule this file adds: **`batch_scrap_value_amount` is a slice of
+`batch_material_cost_amount`, not an addend.** Summing the two double-counts
+every kit. It has its own column rather than its own row kind precisely so it
+reads as the "of which" it is.
+
+---
+
+## Open questions for the client
+
+1. Is `awaiting_release` stock an asset at month-end?
+2. Should WIP on production floors appear at all? Today it is invisible in both
+   the export and the item page.
+3. Exact or 2dp per row for `extended_value_amount`? Currently exact.
+4. Should the button export the current tier (today) or the whole catalogue?
+5. ~~Should there be a separate `inventory:export` permission? Today anyone who
+   can view inventory can take a priced copy off-system.~~ **Resolved
+   2026-09-03** with a role gate instead of a new permission: `inventory:view`
+   **+ Super Admin alone**, on RPT-003's `kit-costs.csv` as well.
+   No new `PERM_MATRIX` action was added, so `audit:export` stays unused.
+   **Still needs a client answer:** which role does finance hold? Nothing on
+   record says, and the old "finance are `read_only`" code comment was an
+   assumption — see the note in "The sibling export" above.
+6. The file carries supplier names, PO references and unit prices and lands
+   unencrypted in a Downloads folder. Within the client's data-classification
+   policy?

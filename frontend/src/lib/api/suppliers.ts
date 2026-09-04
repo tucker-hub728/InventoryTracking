@@ -15,6 +15,10 @@ export interface Supplier {
   phone: string | null;
   is_active: boolean;
   notes: string | null;
+  /** Order-to-delivery days (PLN-001). `null` means it has not been recorded —
+   *  which is NOT zero. The reorder screen treats it as unknown and says so;
+   *  zero would read as same-day delivery and suppress the early warning. */
+  lead_time_days: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -25,6 +29,7 @@ export interface SupplierCreateInput {
   phone?: string | null;
   notes?: string | null;
   is_active?: boolean;
+  lead_time_days?: number | null;
 }
 
 /**
@@ -38,14 +43,55 @@ export interface SupplierUpdateInput {
   phone?: string | null;
   notes?: string | null;
   is_active?: boolean;
+  lead_time_days?: number | null;
+}
+
+export interface ListSuppliersParams {
+  /** Hide deactivated suppliers. Ignored when ``isActive`` is given. */
+  activeOnly?: boolean;
+  /** true = the Active tab, false = the Deactivated tab. */
+  isActive?: boolean;
+  /** Free-text over name + contact email. */
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface SupplierListResponse {
+  items: Supplier[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Unfiltered per-tab counts, so the tab strip can label both tabs. */
+  active_total: number;
+  inactive_total: number;
 }
 
 export const suppliersApi = {
-  list: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
-    api.get<Supplier[]>('/suppliers', {
-      query: { active_only: opts?.activeOnly ?? true },
+  list: (params: ListSuppliersParams = {}, opts?: { signal?: AbortSignal }) =>
+    api.get<SupplierListResponse>('/suppliers', {
+      query: {
+        active_only: params.activeOnly ?? true,
+        is_active: params.isActive,
+        q: params.q,
+        limit: params.limit,
+        offset: params.offset,
+      },
       signal: opts?.signal,
     }),
+
+  /**
+   * Every supplier, unpaged — for pickers that render the whole list in a
+   * searchable select and would otherwise silently show only the first page.
+   * 500 is the server's ceiling on ``limit`` for this endpoint.
+   */
+  listAll: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
+    api
+      .get<SupplierListResponse>('/suppliers', {
+        query: { active_only: opts?.activeOnly ?? true, limit: 500 },
+        signal: opts?.signal,
+      })
+      .then((r) => r.items),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<Supplier>(`/suppliers/${id}`, { signal: opts?.signal }),

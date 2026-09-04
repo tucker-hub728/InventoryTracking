@@ -52,7 +52,7 @@ import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog
 import { ItemLink } from '@/components/inventory/item-link';
 import { usePermission } from '@/hooks/use-permission';
 import type { ReauthResponse } from '@/lib/api/auth';
-import { cn } from '@/lib/utils';
+import { cn, formatUnitPrice } from '@/lib/utils';
 import type { BadgeTone } from '@/types/ui';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -66,6 +66,7 @@ import { ArchivePanel } from './archive-panel';
 import { ReceiptTransactionsTable } from './receipt-transactions-table';
 import { ReceiptIntakeDialog } from './receipt-intake-dialog';
 import { ReceiveDialog } from './receive-dialog';
+import { ReceivingHistory } from './receiving-history';
 import { OrderEditDialog } from './lot-edit-dialog';
 import { LotDetailEditDialog } from './lot-detail-edit-dialog';
 
@@ -788,100 +789,62 @@ function OrderDetailSheet({
                         {l.item_description && (
                           <p className="mt-0.5 text-text-2">{l.item_description}</p>
                         )}
+                        {/* Every quantity here is in ORDER units. Without the
+                            unit beside it, "3" on a boxed line reads as three
+                            vials — which is the number that would be wrong by
+                            a factor of the pack size (REQ-001). */}
                         <dl className="mt-2 grid grid-cols-4 gap-2 text-xs">
                           <div>
                             <dt className="text-text-3">Ordered</dt>
-                            <dd className="font-mono tabular-nums">{l.ordered_qty}</dd>
+                            <dd className="font-mono tabular-nums">
+                              {l.ordered_qty}
+                              {l.pack_uom ? ` ${l.pack_uom}` : ''}
+                            </dd>
                           </div>
                           <div>
                             <dt className="text-text-3">Received</dt>
-                            <dd className="font-mono tabular-nums">{l.received_qty}</dd>
+                            <dd className="font-mono tabular-nums">
+                              {l.received_qty}
+                              {l.pack_uom ? ` ${l.pack_uom}` : ''}
+                            </dd>
                           </div>
                           <div>
                             <dt className="text-text-3">Outstanding</dt>
-                            <dd className="font-mono tabular-nums">{l.outstanding_qty}</dd>
+                            <dd className="font-mono tabular-nums">
+                              {l.outstanding_qty}
+                              {l.pack_uom ? ` ${l.pack_uom}` : ''}
+                            </dd>
                           </div>
                           <div>
-                            <dt className="text-text-3">Unit price</dt>
-                            <dd className="font-mono tabular-nums">{l.unit_price_amount ?? '—'}</dd>
+                            <dt className="text-text-3">
+                              Unit price{l.pack_uom ? ` / ${l.pack_uom}` : ''}
+                            </dt>
+                            <dd className="font-mono tabular-nums">{formatUnitPrice(l.unit_price_amount)}</dd>
                           </div>
                         </dl>
+                        {l.pack_uom && l.units_per_pack != null && (
+                          <p className="mt-1 text-xs text-text-3">
+                            1 {l.pack_uom} = {l.units_per_pack.toLocaleString()} units ·{' '}
+                            {l.ordered_units.toLocaleString()} ordered,{' '}
+                            {l.outstanding_units.toLocaleString()} outstanding
+                          </p>
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* Receive lots */}
+                {/* Receiving history — see receiving-history.tsx for why this is a
+                    timeline and not the flat list it replaced. */}
                 <div>
                   <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-3">
-                    Receive lots
+                    Receiving history
                   </h3>
-                  {current.events.length === 0 ? (
-                    <p className="text-sm text-text-3">No receipts yet.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {current.events.map((ev) => (
-                        <div
-                          key={ev.id}
-                          className="rounded-md border border-border bg-surface p-3 text-sm"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-medium text-text-2">{ev.received_at}</span>
-                            <span className="text-xs text-text-3">
-                              by{' '}
-                              {ev.received_by_user_name ?? `${ev.received_by_user_id.slice(0, 8)}…`}
-                            </span>
-                          </div>
-                          <ul className="mt-2 space-y-1 text-xs">
-                            {ev.lines.map((el) => {
-                              const orderLine = current.lines.find((l) => l.id === el.line_id);
-                              return (
-                                <li key={el.id} className="flex flex-wrap items-center gap-2">
-                                  <span className="font-mono text-accent">
-                                    {el.lot_number ?? '—'}
-                                  </span>
-                                  {orderLine && (
-                                    <span className="text-text-2">
-                                      <ItemLink
-                                        itemNumber={orderLine.item_number}
-                                        itemId={orderLine.item_id}
-                                        className="font-mono"
-                                      />
-                                      {orderLine.item_description
-                                        ? ` — ${orderLine.item_description}`
-                                        : ''}
-                                    </span>
-                                  )}
-                                  <span className="tabular-nums text-text-2">
-                                    +{el.qty_received}
-                                  </span>
-                                  {orderLine?.supplier_name && (
-                                    <span className="text-text-3">({orderLine.supplier_name})</span>
-                                  )}
-                                  {el.over_receipt_reason && (
-                                    <span className="text-warning">
-                                      over: {el.over_receipt_reason}
-                                    </span>
-                                  )}
-                                  {canReceive && el.lot_id && (
-                                    <Button
-                                      size="icon-sm"
-                                      variant="ghost"
-                                      className="ml-auto"
-                                      onClick={() => setEditLotId(el.lot_id)}
-                                      aria-label={`Edit lot ${el.lot_number ?? ''}`}
-                                    >
-                                      <Pencil size={12} />
-                                    </Button>
-                                  )}
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <ReceivingHistory
+                    order={current}
+                    canEdit={canReceive}
+                    onEditLot={setEditLotId}
+                  />
                 </div>
               </SheetBody>
             </>

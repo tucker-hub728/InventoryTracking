@@ -27,7 +27,7 @@ and an existing local row for that ``sub`` is left as-is.
 
 Pairs with ``scripts/purge_users.py`` for a clean auth reset:
     python -m scripts.purge_users --yes
-    python -m scripts.seed_super_admins --yes --email you@example.com --password '...'
+    python -m scripts.seed_super_admins --yes --email you@example --password '…'
 
 Safety:
   * Dry-run by default — prints the plan and exits. Pass ``--yes`` to execute.
@@ -40,11 +40,11 @@ Safety:
 
 Usage (from ``backend/``):
     # Dry run — show the plan:
-    python -m scripts.seed_super_admins --email superadmin@cellready.dev --password '...'
+    python -m scripts.seed_super_admins --email you@example --password '…'
     # Create the user (dev/staging):
-    python -m scripts.seed_super_admins --yes --email superadmin@cellready.dev --password '...'
+    python -m scripts.seed_super_admins --yes --email you@example --password '…'
     # Production also needs the pool id echoed back:
-    python -m scripts.seed_super_admins --yes --email dan@example.com --password '...' \\
+    python -m scripts.seed_super_admins --yes --email you@example --password '…' \\
         --confirm-production us-east-1_ABC123
 """
 
@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import sys
 from typing import Any
 
@@ -72,9 +73,22 @@ from botocore.exceptions import ClientError
 # both explicit at the call site means the account you type is the account you
 # get, in every environment.
 #
-# The placeholder that used to ship in .env.example. Kept purely so the
-# production gate can recognise and refuse it — anyone holding the repo knows it.
-_PUBLISHED_PASSWORD = "ChangeMe!Now123"  # noqa: S105 - sentinel to refuse, not a credential
+# SHA-256 of the placeholder that used to ship in .env.example, so the
+# production gate can still recognise and refuse it.
+#
+# A HASH rather than the string, because the string is a working password on
+# every box that was ever seeded with it, and storing it here to blocklist it
+# put it back in the repository the guard exists to keep it out of. The hash
+# refuses exactly the same input and discloses nothing: a reader who does not
+# already know the value cannot learn it from this line.
+_PUBLISHED_PASSWORD_SHA256 = (
+    "c3cd9fdd03bd8669b7dd66b9763ab24f00e0f174f153834bb61e61b50e949e34"  # noqa: S105
+)
+
+
+def _is_published_password(candidate: str) -> bool:
+    """True if this is the well-known example value. Compared by digest."""
+    return hashlib.sha256(candidate.encode()).hexdigest() == _PUBLISHED_PASSWORD_SHA256
 
 
 def _seed_users(args: argparse.Namespace) -> list[dict[str, str]]:
@@ -195,6 +209,17 @@ async def _upsert_local_user(
         # a manual UPDATE.
         if not existing.is_seed and not await users_repo.seed_admin_exists(session):
             existing.is_seed = True
+        # …and repairs the ROLE, which is the case that actually bites. The app
+        # lazily mirrors a Cognito identity into ``app.users`` on first
+        # ``/auth/me``, and a lazily-created row arrives ``read_only`` by
+        # design. So on any box where the server was running before this script
+        # ran — which is every box, after a wipe, because a browser tab is
+        # usually still open — the account this seeder exists to create already
+        # exists, powerless, and the seeder reported "OK … db_row=exists" and
+        # left it that way. The symptom is a super admin who cannot add a
+        # Kanban or a location, with nothing on screen explaining why.
+        if existing.role != _ROLE:
+            existing.role = _ROLE
         return existing, False
     user = await users_repo.create(
         session,
@@ -272,7 +297,7 @@ async def main() -> int:
         ]
         # The old .env.example value is public — anyone with the repo has it.
         # Never let it reach a real pool, however strong it looks.
-        if any(u["password"] == _PUBLISHED_PASSWORD for u in users):
+        if any(_is_published_password(u["password"]) for u in users):
             weak.append(
                 (users[0]["email"], "is the published example value — choose a real one")
             )

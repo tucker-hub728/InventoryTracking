@@ -64,7 +64,16 @@ export function LotLink({ lotId, lotNumber, className }: Props) {
       const { items } = await movementsApi.list({ lotId, limit: 50 });
       const madeBy = items.find((m) => m.movement_type === 'production_output' && m.kit_id);
       if (madeBy?.kit_id) {
-        router.push(`/reconciliation/${madeBy.kit_id}`);
+        // Land on the batch that minted it, not just the kit. A kit can produce
+        // several lots (KIT-007), so "the kit" is an answer the reader then has
+        // to search through — this opens that lot's own page, cost breakdown
+        // already on screen (RPT-003).
+        const kitHref = `/reconciliation/${madeBy.kit_id}`;
+        router.push(
+          lot.lot_number
+            ? `${kitHref}/review/${encodeURIComponent(lot.lot_number)}`
+            : kitHref,
+        );
         return;
       }
       toast.info('No order or kit', {

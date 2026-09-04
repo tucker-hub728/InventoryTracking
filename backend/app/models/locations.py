@@ -37,7 +37,6 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     Text,
-    UniqueConstraint,
     func,
     text,
 )
@@ -83,11 +82,133 @@ LN2_LEVELS: tuple[str, ...] = (
 #   * ``room_location`` — Cold Storage (LOC-002: −20 °C, −80 °C, 2–8 °C fridges),
 #     whose leaves are the equipment units
 FREEZER_LEVELS: tuple[str, ...] = ("room", "room_location", "sub_location")
+
+# Storage (REQ-2026-08-04-LOC-001/004, the "standardized location template"): the
+# Room → CATEGORY → Group → Unit chain. It is FREEZER_LEVELS with one level
+# inserted above it, and that is the whole point — from the group down, Storage
+# is byte-identical to Cold Storage, so it reuses the same create route, the same
+# dialogs and the same components. The client intends Storage to replace the Cold
+# Storage structure later, so the two are deliberately the same idiom.
+#
+#   Storage            room              the room (seeded, code STG)
+#   └ Materials Mgmt   storage_category  what the client calls a "location"
+#     ├ Shelf          room_location     a template group
+#     │ └ T123213B     sub_location      the equipment unit — stock lives here
+#     ├ Refrigerator   room_location
+#     └ Freezer        room_location
+#
+# The category is a real node rather than a UI facet because LOC-001 says the
+# client "may rename these": a tab you can rename and that carries its own units
+# is a node. Which groups a category uses is simply WHICH GROUP NODES EXIST — an
+# unused sub-type is an absent node, and an empty tab is a group with no
+# children. There is deliberately no flag, no JSON blob and no second source of
+# truth to drift.
+STORAGE_LEVELS: tuple[str, ...] = (
+    "room",
+    "storage_category",
+    "room_location",
+    "sub_location",
+)
+# The room's seeded code. Every screen resolves a room by code, never by
+# position — ``/location-nodes/freezer-tree`` returns them all.
+STORAGE_ROOM_CODE = "STG"
+# The three KINDS of storage sub-type a location may have —
+# ``(kind, code base, default name)``.
+#
+# REQ-2026-08-04-LOC-001 named exactly these three ("a configurable shelf,
+# refrigerator, and freezer"). The 2026-08-13 amendment made them configurable
+# AFTER creation and allowed MORE THAN ONE of a kind: "an additional freezer
+# (e.g. minus-80 alongside minus-20)". So this is no longer a create-time
+# template — a location is now created with NO sub-types and an admin adds them
+# — and it is not a list of nodes either. It is the CATALOGUE of kinds you can
+# add, and a location may hold any number of each.
+#
+# What distinguishes two freezers is the NAME, which the client gives and may
+# change. The KIND is what the system knows: it decides the code, the icon and
+# the wording of the add-unit dialog, and nothing else.
+#
+# The CODE is the stable identity used in URLs. The first sub-type of a kind
+# takes the bare base (``FRZ``); the next takes ``FRZ-2``, and so on — see
+# ``repository.next_group_code``.
+STORAGE_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("shelf", "SHF", "Shelf"),
+    ("refrigerator", "REF", "Refrigerator"),
+    ("freezer", "FRZ", "Freezer"),
+)
+STORAGE_GROUP_CODES: tuple[str, ...] = tuple(code for _, code, _ in STORAGE_GROUPS)
+#: The kind keys, in tab order. Drives the API enum and the picker.
+STORAGE_GROUP_KINDS: tuple[str, ...] = tuple(kind for kind, _, _ in STORAGE_GROUPS)
+
+_BASE_BY_KIND: dict[str, str] = {kind: code for kind, code, _ in STORAGE_GROUPS}
+_DEFAULT_NAME_BY_KIND: dict[str, str] = {kind: name for kind, _, name in STORAGE_GROUPS}
+_KIND_BY_BASE: dict[str, str] = {code: kind for kind, code, _ in STORAGE_GROUPS}
+
+# Temperature is deliberately NOT modelled — not a column, not a kind, not a
+# parsed prefix. LOC-001's second sentence is that "freezers are identified by
+# unique equipment number regardless of temperature": a −20 and a −80 are two
+# sub-types of the SAME kind, differing only in the name the client types, which
+# the system never parses (the LOC-006 rule). Their units cannot collide because
+# ``sub_location`` names are unique INSTALLATION-WIDE
+# (``uq_location_nodes_unit_name_active``) whatever sub-type they hang under —
+# which is why that half of the requirement needed no code at all.
+
+
+def group_base_code(kind: str) -> str:
+    """The code base for a kind — ``freezer`` → ``FRZ``."""
+    return _BASE_BY_KIND[kind]
+
+
+def group_default_name(kind: str) -> str:
+    """The name a sub-type of this kind is created with when none is given."""
+    return _DEFAULT_NAME_BY_KIND[kind]
+
+
+def group_kind_for_code(code: str) -> str | None:
+    """The kind a group code belongs to — ``FRZ-2`` → ``freezer``.
+
+    None for anything unrecognised, rather than raising: a code is data, and one
+    odd row must not take out the page it appears on.
+    """
+    return _KIND_BY_BASE.get(code.upper().split("-", 1)[0])
+
+
+def group_code_seq(code: str) -> int:
+    """Which one of its kind this code is — ``FRZ`` → 1, ``FRZ-2`` → 2.
+
+    Orders the tabs within a kind, and picks the next free number. Anything
+    unparseable sorts last (a large sentinel) instead of raising.
+    """
+    parts = code.upper().split("-", 1)
+    if len(parts) == 1:
+        return 1
+    return int(parts[1]) if parts[1].isdigit() else 1 << 30
+
 # Warehouse (LOC-005): Warehouse One → Shelf (A–Z), the free-storage leaf. A
 # shelf holds units freely — no bins, positions or slots below it. Warehouse One
 # is no longer a root: LOC-005 places it INSIDE the Materials Management room,
 # as a peer of the Cold Storage locations.
 WAREHOUSE_LEVELS: tuple[str, ...] = ("warehouse", "shelf")
+
+# Kanban (REQ-2026-07-01-LOC-006, "a Kanban shall be representable as a named
+# location"; client 2026-08-10): a NAMED station inside a production area, so
+# one clean room can hold "Kanban 1" and "Kanban 2" as separate places. Its
+# parent is the ``flat``/``production`` area — see PARENT_OF below.
+#
+# **NOT a storage node**, and adding it to ``STORAGE_NODE_TYPES`` is the whole
+# of the switch if anyone is ever tempted. A Kanban holds no ``lot_allocations``:
+# issuing to one DEBITS the units out of inventory there and then, and the
+# Kanban is the ADDRESS the ``consumable_issue`` movement points at, not a
+# balance.
+#
+# KAN-001's restock loop does not change that — it records what was used
+# rather than drawing a balance down. The version that DID give the bin a live
+# count was built and rejected (client, 2026-08-27); the kan01 migration
+# docstring records why, and it is worth reading before proposing it again.
+#
+# NB the ``kanban`` entry in FLAT_CATEGORIES below is a DIFFERENT, legacy thing
+# and must stay unused — a ``flat`` node is forced to be a root by
+# ck_location_nodes_root_parentage, so it could never hang under a clean room.
+KANBAN_LEVELS: tuple[str, ...] = ("kanban",)
 
 # Retired but kept in the CHECK enum so any pre-existing rows still validate
 # (retire-not-drop). Not creatable: absent from ``PARENT_OF``.
@@ -105,7 +226,12 @@ LEGACY_NODE_TYPES: tuple[str, ...] = (
 NODE_TYPES: tuple[str, ...] = (
     *LN2_LEVELS,
     *FREEZER_LEVELS,
+    # Only the level STORAGE_LEVELS adds — the other three it names are already
+    # in FREEZER_LEVELS, and NODE_TYPES drives the CHECK constraint, so a
+    # duplicate would widen the enum with a repeat.
+    "storage_category",
     *WAREHOUSE_LEVELS,
+    *KANBAN_LEVELS,
     *LEGACY_NODE_TYPES,
 )
 
@@ -118,11 +244,23 @@ PARENT_OF: dict[str, tuple[str, ...] | None] = {
     "rack": ("tank_quadrant",),
     "box": ("rack",),
     "room": None,
-    "room_location": ("room",),
+    # LOC-001: a Storage category hangs under the Storage room. The route checks
+    # the parent really is the STG room — ``room`` alone would also match Cold
+    # Storage, which is exempt from the template.
+    "storage_category": ("room",),
+    # A group is a peer of a Cold Storage location; under Storage it hangs off a
+    # category instead of straight off the room. Same type, one level deeper.
+    "room_location": ("room", "storage_category"),
     "sub_location": ("room_location",),
     # LOC-005: Warehouse One is a location INSIDE a room, not a root of its own.
     "warehouse": ("room",),
     "shelf": ("warehouse",),
+    # LOC-006: a Kanban hangs under a production area. ``flat`` is retired for
+    # general creation but is still the type a production area carries, and a
+    # Kanban is only ever created through the dedicated super-admin route
+    # (``POST /location-nodes/{id}/kanbans``), which checks the parent really is
+    # a production area — ``flat`` alone would also match a legacy Lab/QC node.
+    "kanban": ("flat",),
 }
 
 # Node types that are roots (parent_id must be NULL). ``flat`` kept for legacy
@@ -138,7 +276,41 @@ MAX_QUADRANTS_PER_TANK = 4
 
 # Node types that can hold a lot allocation. The Box is the LN2 grid leaf;
 # freezer sub-locations and warehouse shelves are free (qty) storage leaves.
+# A Kanban is deliberately absent — see the note above KANBAN_LEVELS.
 STORAGE_NODE_TYPES: frozenset[str] = frozenset({"box", "sub_location", "shelf"})
+
+# Named because two places still have to reason about Kanbans specifically: the
+# issue destination check, and ``kit_repo.not_floor_stock``.
+#
+# That second one matters even though a Kanban can no longer hold an
+# allocation. kan01 briefly allowed it, so a database that ran that migration
+# can still carry allocation rows at a Kanban node, and an unfiltered picker
+# would offer those units as issuable stock. The filter is what keeps a
+# reverted schema from resurrecting stock that is physically on the floor.
+KANBAN_NODE_TYPE = "kanban"
+
+# The only node type that may carry ``is_scrap`` (issue01) — a LOCATION, the
+# level the client names "PD" or "QC 1".
+#
+# Debit-and-gone (REQ-2026-08-04-TRX-001/002) is a TRANSACTION, not a location
+# type — ``is_scrap`` is a marker on an ordinary location row, not a node type of
+# its own, and what it decides is whether Issue may target that location:
+#
+#     Issue    → QC 1                 stock leaves controlled inventory
+#     Transfer → Materials Mgmt › Freezer 1     stock stays tracked at the node
+#
+# It used to say a scrap location ALSO receives transfers into its own shelves
+# and freezers. The client settled that on 2026-08-19: it does not. A
+# debit-and-gone location is a DISPOSITION, not a place — it takes no sub-types
+# (enforced in ``update_storage_groups``), so it has no storage descendants for a
+# transfer to land in, and its page shows issue history instead of tabs.
+#
+# That the two destination sets are DISJOINT is what makes "issued and stored"
+# unrepresentable rather than merely rejected: a transfer takes a
+# STORAGE_NODE_TYPES node, an issue takes this one, and no node is both. The
+# disposition-only rule strengthens that — a scrap location now has no storage
+# descendants at all, so the two sets cannot even meet under one roof.
+SCRAP_NODE_TYPE = "storage_category"
 
 # Node types that carry a configurable rows×cols grid. Only the Box.
 GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
@@ -147,6 +319,12 @@ GRID_NODE_TYPES: frozenset[str] = frozenset({"box"})
 # kept for the DB CHECK + reading pre-existing flat rows. ``production`` was
 # added for kitting (docs/modules/kitting.md §4.1) — the advisory production
 # floors a kit is issued to (Clean Room 1/2, Manufacturing Floor, PD Lab One/Two).
+#
+# ``kanban`` here is DEAD and must stay that way (consum01). A real Kanban is the
+# ``kanban`` NODE TYPE, a child of a production area. Reviving this category
+# would make a Kanban a parent-less root — the root-parentage CHECK forces every
+# ``flat`` node to have no parent — which is exactly the model the client
+# rejected on 2026-08-10 ("always to the kanban", inside the room).
 FLAT_CATEGORIES: tuple[str, ...] = (
     "kanban",
     "lab",
@@ -167,6 +345,22 @@ def is_grid_node(node_type: str) -> bool:
     return node_type in GRID_NODE_TYPES
 
 
+def is_kanban_node(node_type: str) -> bool:
+    """True iff a node of this type is a Kanban station (LOC-006) — the only
+    legal destination for a consumable issue."""
+    return node_type in KANBAN_LEVELS
+
+
+def is_scrap_location(node: LocationNode) -> bool:
+    """True iff this node is a debit-and-gone destination (TRX-001/002).
+
+    Both halves are checked, not just the flag: the node type is what keeps the
+    Issue and Transfer destination sets disjoint, and a CHECK constraint alone
+    would not stop a caller reading the flag off the wrong row.
+    """
+    return bool(node.is_scrap) and node.node_type == SCRAP_NODE_TYPE
+
+
 class LocationNode(Base):
     """One node in the location tree (LN2 level or flat location).
 
@@ -178,9 +372,21 @@ class LocationNode(Base):
 
     __tablename__ = "location_nodes"
     __table_args__ = (
-        # Sibling codes are unique under a parent (NULLs distinct, so roots
-        # are checked in the repository instead).
-        UniqueConstraint("parent_id", "code", name="uq_location_nodes_parent_code"),
+        # Sibling codes are unique under a parent, among ACTIVE rows only (NULLs
+        # distinct, so roots are checked in the repository instead).
+        #
+        # Partial on ``is_active`` to match the two NAME indexes from
+        # ``locname01``, so a delete frees a unit's code and its name together
+        # (``loccode01``). It was unconditional until 2026-08-12, which meant a
+        # deleted equipment number could never be re-added — the name was freed,
+        # the code was not, and for a sub_location the name IS the code.
+        Index(
+            "uq_location_nodes_parent_code",
+            "parent_id",
+            "code",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
         Index("ix_location_nodes_parent_id", "parent_id"),
         Index("ix_location_nodes_node_type", "node_type"),
         Index("ix_location_nodes_flat_category", "flat_category"),
@@ -214,15 +420,21 @@ class LocationNode(Base):
             name="ck_location_nodes_grid_presence",
         ),
         CheckConstraint(
-            "(grid_rows IS NULL OR grid_rows >= 1) "
-            "AND (grid_cols IS NULL OR grid_cols >= 1)",
+            "(grid_rows IS NULL OR grid_rows >= 1) " "AND (grid_cols IS NULL OR grid_cols >= 1)",
             name="ck_location_nodes_grid_positive",
+        ),
+        # Only a LOCATION can be a scrap destination (issue01). Marking a shelf,
+        # a box or a room would put a node in the Issue destination list that is
+        # simultaneously a legal TRANSFER target — the exact ambiguity the
+        # disjoint-destination rule exists to prevent.
+        CheckConstraint(
+            f"NOT is_scrap OR node_type = '{SCRAP_NODE_TYPE}'",
+            name="ck_location_nodes_scrap_category_only",
         ),
         # Quadrant dedication: at most one of customer / product, and only on a
         # tank_quadrant. Advisory — placement is never blocked by it.
         CheckConstraint(
-            "NOT (dedicated_customer_id IS NOT NULL "
-            "AND dedicated_product_id IS NOT NULL)",
+            "NOT (dedicated_customer_id IS NOT NULL " "AND dedicated_product_id IS NOT NULL)",
             name="ck_location_nodes_dedication_exclusive",
         ),
         CheckConstraint(
@@ -258,9 +470,10 @@ class LocationNode(Base):
     flat_category: Mapped[str | None] = mapped_column(Text, nullable=True)
     code: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("TRUE")
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
+    # Debit-and-gone marker (REQ-2026-08-04-TRX-001/002, issue01) — see
+    # :func:`is_scrap_location`. Set at creation, immutable afterwards.
+    is_scrap: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("FALSE"))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Grid dimensions — only a Box carries them (CHECK above). A Box under a
     # Cassette is single-column (grid_cols = 1, enforced in the route).
@@ -301,9 +514,7 @@ class LocationNode(Base):
         onupdate=func.now(),
     )
 
-    parent: Mapped[LocationNode | None] = relationship(
-        remote_side="LocationNode.id", viewonly=True
-    )
+    parent: Mapped[LocationNode | None] = relationship(remote_side="LocationNode.id", viewonly=True)
 
 
 class LotAllocation(Base):
@@ -369,9 +580,7 @@ class LotAllocation(Base):
     # 1-based cell within the parent Box's grid. NULL for flat allocations.
     grid_row: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     grid_col: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("TRUE")
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

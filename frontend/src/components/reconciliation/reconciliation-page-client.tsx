@@ -18,8 +18,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import { usePermission } from '@/hooks/use-permission';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -30,6 +31,7 @@ import {
   type KitStatus,
 } from '@/lib/api/kits';
 
+import { KitCostExportButton } from './kit-cost-export-button';
 import { NewKitDialog } from './new-kit-dialog';
 import { ItemCell, KitStatusBadge, RuleNote, formatDate } from './recon-bits';
 
@@ -50,6 +52,16 @@ const OUTPUT_COL_HINT =
 
 export function ReconciliationPageClient() {
   const canCreate = usePermission('inventory', 'create');
+  // The cost export is SUPER ADMIN ONLY (client, 2026-09-03; it was Admin and
+  // above until then). It carries what each customer is charged per finished
+  // lot, which `inventory:view` would hand to every read-only account. Mirrors
+  // the route's own RequireRole(SUPER_ADMIN_ROLE) — this only hides a button
+  // that would come back a 403. Same gate as the RPT-001 finance export.
+  //
+  // `selectIsSuperAdmin` reads the RAW backend role: the frontend collapses
+  // `super_admin` into the same `admin` RBAC bucket, and `operator` holds
+  // `inventory:create` too, so the permission matrix cannot answer this.
+  const canExport = useAuthStore(selectIsSuperAdmin);
 
   const [kits, setKits] = React.useState<ApiKitListItem[]>([]);
   const [total, setTotal] = React.useState(0);
@@ -124,11 +136,18 @@ export function ReconciliationPageClient() {
         title="Kitting"
         subtitle="Gather material for a build, issue it to production, then reconcile what was actually used and back-flush the rest."
         actions={
-          canCreate ? (
-            <Button variant="primary" onClick={() => setCreating(true)}>
-              <Plus size={14} /> New kit
-            </Button>
-          ) : undefined
+          <span className="flex items-center gap-2">
+            {/* RPT-003. Super-admin-gated in the UI to match the endpoint — a
+                button that always 403s teaches people to ignore errors. The
+                server is still the authority; this only hides what cannot be
+                used. */}
+            {canExport && <KitCostExportButton />}
+            {canCreate && (
+              <Button variant="primary" onClick={() => setCreating(true)}>
+                <Plus size={14} /> New kit
+              </Button>
+            )}
+          </span>
         }
       />
 
@@ -270,17 +289,15 @@ export function ReconciliationPageClient() {
                         {/* ``kitStatus`` so a production floor opens on the tab
                             that actually holds this kit — a closed kit is not
                             on the In-production tab. */}
-                        <LocationLink
+                        <LocationPath
                           nodeId={kit.production_location_node_id}
-                          name={kit.production_location}
                           path={kit.production_location}
                           kitStatus={kit.status}
                         />
                       </td>
                       <td className="max-w-[200px] truncate px-3 py-2.5 text-xs text-text-2">
-                        <LocationLink
+                        <LocationPath
                           nodeId={kit.output_location_node_id}
-                          name={kit.output_location}
                           path={kit.output_location}
                         />
                       </td>
@@ -385,3 +402,4 @@ function OutputCell({ target, good }: { target: number; good: number | null }) {
     </div>
   );
 }
+

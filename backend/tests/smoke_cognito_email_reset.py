@@ -147,7 +147,9 @@ def main() -> int:
     sub_before = _sub_of(b.get("access_token", "")) if s == 200 else None
 
     # /auth/me above provisioned the local mirror, so the member is now listed.
-    users = _req("GET", "/users", token=token)[1]
+    # ``GET /users`` is paginated; search for the scratch member directly rather
+    # than paging the whole directory looking for them.
+    users = _req("GET", f"/users?q={old_email}", token=token)[1]["items"]
     target = next((u for u in users if u["email"] == old_email), None)
     assert target is not None, "scratch user missing from the directory"
 

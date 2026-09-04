@@ -10,9 +10,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.search import like_contains
 from app.models.invitations import Invitation
 
 
@@ -63,9 +64,47 @@ async def get_pending_by_email(session: AsyncSession, email: str) -> Invitation 
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def list_all(session: AsyncSession, *, status: str | None = None) -> list[Invitation]:
-    """All invitations (optionally filtered by status), newest first."""
-    stmt = select(Invitation).order_by(Invitation.created_at.desc())
+async def list_all(
+    session: AsyncSession,
+    *,
+    status: str | None = None,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[Invitation], int]:
+    """Return ``(rows, total)`` of invitations, newest first.
+
+    ``status`` filters on the *stored* column. That is not quite the status the
+    UI shows — ``service.effective_status`` reads a pending-but-past-expiry row
+    as ``expired`` — but the Invitations tab only ever asks for ``pending``, and
+    an expired invite is still stored as pending, so the tab keeps showing it.
+    Filtering on the derived value would need the expiry predicate inlined here;
+    it is not worth the duplication until a tab actually asks for ``expired``.
+
+    ``limit=None`` returns every matching row.
+    """
+    conditions = []
     if status is not None:
-        stmt = stmt.where(Invitation.status == status)
-    return list((await session.execute(stmt)).scalars().all())
+        conditions.append(Invitation.status == status)
+    if q:
+        like = like_contains(q.lower())
+        conditions.append(
+            or_(
+                func.lower(Invitation.email).like(like, escape="\\"),
+                func.lower(Invitation.first_name).like(like, escape="\\"),
+                func.lower(Invitation.last_name).like(like, escape="\\"),
+            )
+        )
+
+    total = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(Invitation).where(*conditions)
+            )
+        ).scalar_one()
+    )
+
+    stmt = select(Invitation).where(*conditions).order_by(Invitation.created_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
+    return list((await session.execute(stmt)).scalars().all()), total

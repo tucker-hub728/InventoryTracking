@@ -17,14 +17,21 @@ from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.search import like_contains
 from app.models.inventory import Item, ItemPrefix, Lot, StockMovement
 from app.models.locations import (
+    SCRAP_NODE_TYPE,
+    STORAGE_GROUP_KINDS,
+    STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
+    group_base_code,
+    group_code_seq,
+    group_kind_for_code,
 )
 from app.models.products import Customer
+from app.notifications.pending import mark_item
 
 # ── Nodes ───────────────────────────────────────────────────────────────
 
@@ -60,16 +67,41 @@ async def node_label_map(
     return {n.id: (n.name, path_for(n)) for n in nodes}
 
 
+async def node_types_by_ids(
+    session: AsyncSession, node_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """``id → node_type`` for the given nodes.
+
+    Exists so a read model can say what KIND of place a row of stock sits in
+    without the client inferring it. The item drill-down needs it for the
+    LOC-003 cold-chain rule: the transfer dialog must know whether a source is
+    in LN2 to offer the right destinations, and the alternative — reading it off
+    ``is_grid`` — is true only by the coincidence that the Box is currently the
+    one grid-bearing type.
+    """
+    if not node_ids:
+        return {}
+    stmt = select(LocationNode.id, LocationNode.node_type).where(LocationNode.id.in_(node_ids))
+    return dict((await session.execute(stmt)).all())  # type: ignore[arg-type]
+
+
 async def get_sibling_by_code(
     session: AsyncSession, *, parent_id: uuid.UUID | None, code: str
 ) -> LocationNode | None:
-    """Find a sibling (same parent) with the same code, case-insensitive.
+    """Find an ACTIVE sibling (same parent) with the same code, case-insensitive.
 
-    Mirrors the ``uq_location_nodes_parent_code`` constraint and also
-    covers the root case (parent_id IS NULL), which the unique constraint
-    can't (NULLs are distinct).
+    Mirrors the ``uq_location_nodes_parent_code`` index and also covers the root
+    case (parent_id IS NULL), which the index can't (NULLs are distinct).
+
+    Deactivated nodes are excluded, exactly as :func:`get_sibling_by_name` excludes
+    them: a retired unit must not reserve its equipment number forever. Both halves
+    are needed — for a ``sub_location`` the name IS the code, so filtering only the
+    name check still left the code check refusing the re-add (``loccode01``).
     """
-    stmt = select(LocationNode).where(func.lower(LocationNode.code) == code.lower())
+    stmt = select(LocationNode).where(
+        func.lower(LocationNode.code) == code.lower(),
+        LocationNode.is_active.is_(True),
+    )
     if parent_id is None:
         stmt = stmt.where(LocationNode.parent_id.is_(None))
     else:
@@ -161,6 +193,7 @@ async def create_node(
     grid_cols: int | None = None,
     dedicated_customer_id: uuid.UUID | None = None,
     dedicated_product_id: uuid.UUID | None = None,
+    is_scrap: bool = False,
     notes: str | None = None,
 ) -> LocationNode:
     """Insert a node. Caller has already validated the hierarchy. Commits."""
@@ -174,6 +207,7 @@ async def create_node(
         grid_cols=grid_cols,
         dedicated_customer_id=dedicated_customer_id,
         dedicated_product_id=dedicated_product_id,
+        is_scrap=is_scrap,
         notes=notes,
         created_by_user_id=created_by_user_id,
     )
@@ -221,6 +255,277 @@ async def create_production_area(
     )
 
 
+def _slugify_storage_code(name: str) -> str:
+    """A ``STG-`` code derived from a Storage category name (e.g. "Materials
+    Management" → ``STG-MATERIALS-MANAGEMENT``). Same shape as
+    :func:`_slugify_area_code`."""
+    slug = re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-") or "LOCATION"
+    return f"STG-{slug}"[:64]
+
+
+async def get_or_create_storage_room(
+    session: AsyncSession, *, created_by_user_id: uuid.UUID
+) -> LocationNode:
+    """The Storage room, created on first use if it isn't there yet.
+
+    Storage is a fixed screen, not something the client sets up: they never name
+    it, never see it as a row, and cannot have two of them. It exists only
+    because a ``storage_category`` needs a parent. Requiring it to be seeded per
+    environment therefore bought nothing and cost a manual deploy step that, when
+    missed, showed a working page reporting it "isn't set up yet".
+
+    Production makes the same point from the other side: its areas are
+    parent-less roots, so there is no Production room to seed, and nobody has
+    ever had to.
+
+    Creating a ``room`` bypasses the strict ``PARENT_OF`` engine on purpose, the
+    same deliberate exception ``create_production_area`` takes — ``room`` is not
+    in ``CreatableNodeType`` precisely so that nobody can mint one by hand.
+
+    Ordered by ``created_at`` so that if two super admins ever race the very
+    first create, both settle on the same room rather than splitting the tree.
+    Roots cannot be covered by ``uq_location_nodes_parent_code`` (its NULLs are
+    distinct), so this is the guard that keeps them together.
+    """
+    stmt = (
+        select(LocationNode)
+        .where(
+            LocationNode.node_type == "room",
+            func.upper(LocationNode.code) == STORAGE_ROOM_CODE,
+            LocationNode.parent_id.is_(None),
+        )
+        .order_by(LocationNode.created_at)
+    )
+    room = (await session.execute(stmt)).scalars().first()
+    if room is not None:
+        return room
+    return await create_node(
+        session,
+        node_type="room",
+        code=STORAGE_ROOM_CODE,
+        name="Storage",
+        created_by_user_id=created_by_user_id,
+        parent_id=None,
+    )
+
+
+async def create_storage_category(
+    session: AsyncSession,
+    *,
+    room_node_id: uuid.UUID,
+    name: str,
+    created_by_user_id: uuid.UUID,
+    is_scrap: bool = False,
+) -> LocationNode:
+    """Create one Storage location, with NO sub-types (LOC-001, 2026-08-13).
+
+    The category is the level the client calls a "location" — the thing you name
+    "Materials Management". It is created bare: sub-types are added afterwards
+    through ``PATCH /location-nodes/{id}/storage-groups``, which is what "location
+    sub-types shall be configurable after creation" asks for.
+
+    It used to provision three sub-types from a template and ask at create time
+    which of them to switch on. The client dropped that on 2026-08-19: one place
+    decides a location's sub-types, and it is the same place whether the location
+    is a minute old or a year old. A create dialog that also configured them was a
+    second answer to the same question, and the two drifted the moment a location
+    needed a second freezer — something the create form could not express at all.
+
+    Caller has already checked the parent is the Storage room and that the caller
+    is a Super Admin. Caller commits.
+
+    ``is_scrap`` marks the category as a debit-and-gone destination
+    (REQ-2026-08-04-TRX-001/002) — what the flag governs is whether the Issue
+    action may name this location. Set here at creation and never afterwards.
+    Such a location is disposition-only: it takes no sub-types at all (client
+    2026-08-19, enforced in ``update_storage_groups``), so nothing is ever stored
+    at it and no transfer has anywhere inside it to land."""
+    base = _slugify_storage_code(name)
+    code = base
+    n = 2
+    while await get_sibling_by_code(session, parent_id=room_node_id, code=code) is not None:
+        suffix = f"-{n}"
+        code = f"{base[: 64 - len(suffix)]}{suffix}"
+        n += 1
+    return await create_node(
+        session,
+        node_type="storage_category",
+        code=code,
+        name=name,
+        created_by_user_id=created_by_user_id,
+        parent_id=room_node_id,
+        is_scrap=is_scrap,
+    )
+
+
+async def count_active_children(session: AsyncSession, parent_id: uuid.UUID) -> int:
+    """How many active children a node has — the guard behind "you can't switch
+    off a sub-type that still holds units"."""
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(LocationNode)
+                .where(
+                    LocationNode.parent_id == parent_id,
+                    LocationNode.is_active.is_(True),
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def list_storage_groups(
+    session: AsyncSession, category_id: uuid.UUID
+) -> list[LocationNode]:
+    """A Storage category's active sub-types, in TAB order.
+
+    Grouped by KIND in the order LOC-001 names them (Shelf, Refrigerator,
+    Freezer), and within a kind by the order they were added — the code sequence.
+    So two freezers always sit together, and adding one never reshuffles the tabs
+    around it.
+
+    Not code order: that would sort ``FRZ`` before ``SHF`` and put the tabs in an
+    order the requirement doesn't name. And not ``created_at`` order either — it
+    cannot separate rows written in one transaction, since Postgres ``now()`` is
+    transaction-start time. The ordering is therefore applied in Python, against
+    :data:`STORAGE_GROUPS`. A code matching no kind sorts last, by name, rather
+    than vanishing."""
+    stmt = select(LocationNode).where(
+        LocationNode.parent_id == category_id,
+        LocationNode.is_active.is_(True),
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    rank = {kind: i for i, kind in enumerate(STORAGE_GROUP_KINDS)}
+
+    def sort_key(n: LocationNode) -> tuple[int, int, str]:
+        kind = group_kind_for_code(n.code)
+        if kind is None:
+            return (len(rank), 0, n.name.lower())
+        return (rank[kind], group_code_seq(n.code), "")
+
+    return sorted(rows, key=sort_key)
+
+
+async def next_group_code(session: AsyncSession, category_id: uuid.UUID, kind: str) -> str:
+    """The next free code for a sub-type of this kind — ``FRZ``, then ``FRZ-2``…
+
+    Counts INACTIVE sub-types too, and that is the point.
+    ``uq_location_nodes_parent_code`` is partial on ``is_active`` (``loccode01``),
+    so a removed ``FRZ-2`` would not stop a new one taking the same code — and a
+    link to ``/storage/{cat}/frz-2`` minted before the removal would then quietly
+    open a DIFFERENT sub-type. Numbers are cheap; a URL silently changing meaning
+    is not. So the sequence only ever goes up.
+    """
+    base = group_base_code(kind)
+    stmt = select(LocationNode.code).where(LocationNode.parent_id == category_id)
+    codes = [c for c in (await session.execute(stmt)).scalars().all() if c.upper() == base or c.upper().startswith(f"{base}-")]
+    if not codes:
+        return base
+    highest = max(group_code_seq(c) for c in codes)
+    return f"{base}-{highest + 1}"
+
+
+async def get_child_by_name(
+    session: AsyncSession, *, parent_id: uuid.UUID, name: str, active_only: bool = True
+) -> LocationNode | None:
+    """One child of ``parent_id`` with this name, case-insensitively.
+
+    Identity of a sub-type is its NAME here, not its code: one added after
+    creation is named by the client and numbered by the server (LOC-001,
+    2026-08-13), so there is no fixed code to look it up by and "have we seen
+    this one before?" can only be asked this way. This replaced a by-code twin
+    that could only ever find the template's three.
+
+    ``active_only=False`` finds a switched-off sub-type, which is what lets
+    re-adding "Minus-80 Freezer" REVIVE the node that name had instead of minting
+    a second one beside it. The indexes would permit the duplicate (both are
+    partial on ``is_active``), and the result would be a tab that reads
+    identically but carries a different code — breaking every link already built
+    from the old one, and leaving the retired node's ledger history pointing at
+    something the UI no longer shows.
+
+    That inactive search is why the ordering is explicit. Both the name and code
+    sibling indexes are partial on ``is_active`` (``locname01`` / ``loccode01``),
+    so a name is unique only among LIVE siblings: switch a sub-type off, add it
+    again, switch it off again, and one parent legitimately holds several
+    inactive rows with that name. Unordered, ``.first()`` would revive whichever
+    the planner happened to return. Live first, then newest — so a revive brings
+    back the group most recently in use, with its units.
+    """
+    stmt = select(LocationNode).where(
+        LocationNode.parent_id == parent_id,
+        func.lower(LocationNode.name) == name.strip().lower(),
+    )
+    if active_only:
+        stmt = stmt.where(LocationNode.is_active.is_(True))
+    stmt = stmt.order_by(
+        LocationNode.is_active.desc(),
+        LocationNode.created_at.desc(),
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+async def set_node_active(
+    session: AsyncSession, *, node: LocationNode, is_active: bool
+) -> LocationNode:
+    """Soft-delete or revive one node. Caller commits."""
+    node.is_active = is_active
+    await session.flush()
+    return node
+
+
+def _slugify_kanban_code(name: str) -> str:
+    """A ``KAN-`` code derived from a Kanban name (e.g. "Kanban 1" →
+    ``KAN-KANBAN-1``). Same shape as :func:`_slugify_area_code`."""
+    slug = re.sub(r"[^A-Z0-9]+", "-", name.upper()).strip("-") or "KANBAN"
+    return f"KAN-{slug}"[:64]
+
+
+async def create_kanban(
+    session: AsyncSession,
+    *,
+    area_node_id: uuid.UUID,
+    name: str,
+    created_by_user_id: uuid.UUID,
+) -> LocationNode:
+    """Create one Kanban station under a production area (LOC-006).
+
+    The ``code`` is derived from ``name`` and de-duplicated against the area's
+    other Kanbans, so two rooms may each hold a "Kanban 1" while one room may
+    not. Caller has already checked the parent is a production area, and that
+    the caller is a Super Admin. Caller commits."""
+    base = _slugify_kanban_code(name)
+    code = base
+    n = 2
+    while await get_sibling_by_code(session, parent_id=area_node_id, code=code) is not None:
+        suffix = f"-{n}"
+        code = f"{base[: 64 - len(suffix)]}{suffix}"
+        n += 1
+    return await create_node(
+        session,
+        node_type="kanban",
+        code=code,
+        name=name,
+        created_by_user_id=created_by_user_id,
+        parent_id=area_node_id,
+    )
+
+
+async def list_kanbans(session: AsyncSession, area_node_id: uuid.UUID) -> list[LocationNode]:
+    """The active Kanban stations inside one production area, in name order."""
+    stmt = (
+        select(LocationNode)
+        .where(
+            LocationNode.parent_id == area_node_id,
+            LocationNode.node_type == "kanban",
+            LocationNode.is_active.is_(True),
+        )
+        .order_by(LocationNode.name.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def list_roots(
     session: AsyncSession,
     *,
@@ -245,6 +550,25 @@ async def list_nodes_by_types(
     if active_only:
         stmt = stmt.where(LocationNode.is_active.is_(True))
     stmt = stmt.order_by(func.lower(LocationNode.code))
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def list_scrap_locations(
+    session: AsyncSession, *, active_only: bool = True
+) -> list[LocationNode]:
+    """Every location marked debit-and-gone (REQ-2026-08-04-TRX-001/002).
+
+    The Issue destination list. Ordered by NAME rather than code, because the
+    operator picks "QC 1 Analytical Lab" from a list of a handful of labs and the
+    ``STG-`` code is a generated handle they never see.
+    """
+    stmt = select(LocationNode).where(
+        LocationNode.node_type == SCRAP_NODE_TYPE,
+        LocationNode.is_scrap.is_(True),
+    )
+    if active_only:
+        stmt = stmt.where(LocationNode.is_active.is_(True))
+    stmt = stmt.order_by(func.lower(LocationNode.name))
     return list((await session.execute(stmt)).scalars().all())
 
 
@@ -357,7 +681,24 @@ async def list_flat(
 
 
 async def node_has_children(session: AsyncSession, node_id: uuid.UUID) -> bool:
-    stmt = select(LocationNode.id).where(LocationNode.parent_id == node_id).limit(1)
+    """Does this node still CONTAIN anything? Only active children count.
+
+    Deletion here is soft, so an inactive child is one that has already been
+    deleted — it does not render, does not appear in any tree, and holds no
+    stock. Counting it meant a node could never be removed once it had ever held
+    a child, however long ago and however empty it looks now: delete the last
+    unit off a shelf and the shelf itself was blocked forever, by contents
+    nobody could see. That stranded real rows on dev.
+
+    The rule this guard exists for — never delete something out from under its
+    contents — is unaffected: a live child still blocks, and the separate lot and
+    ledger-history guards are untouched.
+    """
+    stmt = (
+        select(LocationNode.id)
+        .where(LocationNode.parent_id == node_id, LocationNode.is_active.is_(True))
+        .limit(1)
+    )
     return (await session.execute(stmt)).first() is not None
 
 
@@ -384,6 +725,10 @@ def node_to_audit_snapshot(node: LocationNode) -> dict[str, object | None]:
             str(node.dedicated_product_id) if node.dedicated_product_id else None
         ),
         "is_active": node.is_active,
+        # The debit-and-gone decision (issue01). Set once at creation and never
+        # editable, so the audit trail's only record of it is this snapshot —
+        # which is exactly why it has to be here.
+        "is_scrap": node.is_scrap,
     }
 
 
@@ -512,24 +857,12 @@ async def node_has_any_allocations(session: AsyncSession, node_id: uuid.UUID) ->
     return (await session.execute(stmt)).first() is not None
 
 
-async def node_has_movement_history(session: AsyncSession, node_id: uuid.UUID) -> bool:
-    """True iff the GxP ledger has a movement referencing this node.
-
-    Movement history now lives in ``app.stock_movements`` (the location
-    system no longer keeps a separate log); a node with ledger history can't
-    be deleted, so its name still resolves on historical rows.
-    """
-    stmt = (
-        select(StockMovement.id)
-        .where(
-            or_(
-                StockMovement.from_location_node_id == node_id,
-                StockMovement.to_location_node_id == node_id,
-            )
-        )
-        .limit(1)
-    )
-    return (await session.execute(stmt)).first() is not None
+# ``node_has_movement_history`` lived here and gated deletion on the GxP ledger
+# referencing a node. Removed 2026-08-12: deletion is SOFT, the row is never
+# dropped, and ``node_label_map`` above reads every node regardless of
+# ``is_active`` — so a deleted location still names itself on every historical
+# movement. The guard protected nothing and made it impossible to decommission
+# any location that had ever been used. See ``delete_node`` for the full note.
 
 
 async def get_active_cell_occupant(
@@ -803,8 +1136,7 @@ async def reduce_allocation(
         # between our availability check and here. Both are the same story to
         # the caller: re-read and try again.
         raise ConflictError(
-            "Stock at this location changed while you were working. "
-            "Refresh and try again.",
+            "Stock at this location changed while you were working. " "Refresh and try again.",
             code="stock_conflict",
             details={"allocation_id": str(allocation.id), "requested": str(qty)},
         )
@@ -821,6 +1153,96 @@ async def reduce_allocation(
     # read ``allocation.qty`` afterwards (ledger rows, responses) see truth.
     await session.refresh(allocation)
     return allocation
+
+
+async def draw_lot_at_node(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    node_id: uuid.UUID,
+    qty: int,
+    cell_allocation_ids: list[str] | None,
+    line_no: int,
+    exceeds_code: str,
+) -> None:
+    """Draw ``qty`` of one lot at one node — the exact vials for an LN2 box, else
+    FIFO across that lot's allocations there. Reducing an allocation to zero
+    deactivates it (incl. box cells), which is what frees the source cell.
+
+    The unit-OUT half of every multi-source transaction: transfer, customer
+    shipment and material issue all start by taking stock off a source, and the
+    taking is identical in all three. It lived as three near-copies (the transfer
+    one even documented itself as "mirrors the shipment source drain; the
+    difference is only in the error codes"), so ``exceeds_code`` is that
+    difference, passed in — the caller names the action the operator was
+    performing and everything else is shared.
+
+    ``line_no`` prefixes the messages because these transactions are multi-source
+    and "Source 3: …" is the only thing that tells the operator which row of
+    their picker is the problem.
+    """
+    # Imported here rather than at module scope: this is the one place the
+    # location repository needs kitting's allocation readers, and a top-level
+    # import would tie every location import to the kitting module.
+    from app.kitting import repository as kit_repo
+
+    allocs = [
+        a
+        for a in await kit_repo.allocations_for_item_at_node(
+            session, item_id, node_id, for_update=True
+        )
+        if a.lot_id == lot_id
+    ]
+    available = sum(int(a.qty) for a in allocs)
+    if available == 0:
+        raise NotFoundError(
+            f"Source {line_no}: that lot is no longer stored at that location",
+            code="no_stock_at_location",
+        )
+
+    if cell_allocation_ids:
+        wanted: list[uuid.UUID] = []
+        for raw in cell_allocation_ids:
+            try:
+                wanted.append(uuid.UUID(raw))
+            except (ValueError, AttributeError) as exc:
+                raise ValidationError(
+                    "cell_allocation_ids is not a valid UUID",
+                    code="invalid_cell_allocation_ids",
+                ) from exc
+        if qty != len(set(wanted)):
+            raise ValidationError(
+                f"Source {line_no}: {len(set(wanted))} vials selected but qty is {qty} — "
+                f"for a box the quantity is the number of vials.",
+                code="cell_count_mismatch",
+            )
+        chosen = await kit_repo.allocations_by_ids(session, wanted)
+        found = {a.id for a in chosen}
+        if [str(w) for w in wanted if w not in found] or any(
+            a.lot_id != lot_id or a.location_node_id != node_id for a in chosen
+        ):
+            raise ValidationError(
+                f"Source {line_no}: one or more selected vials are no longer available.",
+                code="invalid_cell",
+            )
+        for alloc in chosen:
+            await reduce_allocation(session, allocation=alloc, qty=int(alloc.qty))
+        return
+
+    if qty > available:
+        raise ValidationError(
+            f"Source {line_no}: requested {qty} exceeds the {available} available for "
+            f"this lot here",
+            code=exceeds_code,
+        )
+    remaining = qty
+    for alloc in allocs:
+        if remaining <= 0:
+            break
+        take = min(remaining, int(alloc.qty))
+        await reduce_allocation(session, allocation=alloc, qty=take)
+        remaining -= take
 
 
 async def is_descendant_of(
@@ -866,9 +1288,7 @@ async def move_node(
     return node
 
 
-async def node_path_text(
-    session: AsyncSession, node_id: uuid.UUID | None
-) -> str | None:
+async def node_path_text(session: AsyncSession, node_id: uuid.UUID | None) -> str | None:
     """Root-to-leaf display address, e.g. ``Tank 2 / Quadrant 1 / Rack 1 / Box 1``.
 
     Walks parents in one recursive query. Used to freeze the address onto a
@@ -947,6 +1367,57 @@ async def create_node_receipt_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
+async def create_node_adjustment_movement(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    node_id: uuid.UUID,
+    qty_delta: int,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> StockMovement:
+    """The ledger row for a counting correction at one location (CTL-002).
+
+    ``adjustment`` is the one movement type exempt from both
+    ``ck_movements_type_sign`` and ``ck_movements_locations`` (see ``issue01``),
+    which is exactly what this needs: the delta goes either way, and only one
+    side of the move exists. Units appearing are an IN *to* the node with no
+    origin — they were never anywhere else, that is the whole point — and units
+    disappearing are an OUT *from* it with no destination.
+
+    Naming that one side matters. The first attempt at CTL-002 wrote an
+    adjustment with neither, and the Unit Ledger showed a bare ``Adjusted +60``
+    against a blank Location while every neighbouring row named one. A
+    correction the reader cannot place is not a correction they can trust.
+
+    ``qty_delta`` must be non-zero — ``ck_movements_qty_abs_positive`` refuses a
+    no-op row, and the route rejects a zero quantity before reaching here.
+    """
+    path = await node_path_text(session, node_id)
+    going_in = qty_delta > 0
+    movement = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=None if going_in else node_id,
+        to_location_node_id=node_id if going_in else None,
+        from_location_path=None if going_in else path,
+        to_location_path=path if going_in else None,
+        movement_type="adjustment",
+        qty_delta=qty_delta,
+        qty_abs=abs(qty_delta),
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -983,6 +1454,7 @@ async def create_node_dispense_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -1023,6 +1495,54 @@ async def create_node_shipment_movement(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
+async def create_node_issue_movement(
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    lot_id: uuid.UUID,
+    from_location_node_id: uuid.UUID,
+    to_location_node_id: uuid.UUID,
+    qty: int,
+    performed_by_user_id: uuid.UUID,
+    reauth_evidence_id: uuid.UUID | None = None,
+    notes: str | None = None,
+) -> StockMovement:
+    """Issue material to a scrap location — debit-and-gone
+    (REQ-2026-08-04-TRX-001/002). Unit-OUT from the storage node; the material
+    leaves controlled inventory and NO allocation is created at the destination.
+
+    ``to_location_node_id`` is set and required, which is the one thing that
+    separates this from :func:`create_node_shipment_movement`. A shipment leaves
+    the building and its destination is a customer, recorded elsewhere on the
+    row; an issue leaves *inventory* while staying in the building, so the
+    disposition — PD, R&D, QC 1 — is the destination and the ledger has to name
+    it. Reading a ``to`` node here as "stock is now there" would be a mistake:
+    the address is the record of where it went, not a balance.
+    """
+    from_path, to_path = await node_paths(
+        session, from_node_id=from_location_node_id, to_node_id=to_location_node_id
+    )
+    movement = StockMovement(
+        item_id=item_id,
+        lot_id=lot_id,
+        from_location_node_id=from_location_node_id,
+        to_location_node_id=to_location_node_id,
+        from_location_path=from_path,
+        to_location_path=to_path,
+        movement_type="material_issue",
+        qty_delta=-qty,
+        qty_abs=qty,
+        notes=notes,
+        reauth_evidence_id=reauth_evidence_id,
+        performed_by_user_id=performed_by_user_id,
+    )
+    mark_item(session, item_id)
     session.add(movement)
     await session.flush()
     return movement
@@ -1060,6 +1580,7 @@ async def create_node_transfer_pair(
         reauth_evidence_id=reauth_evidence_id,
         performed_by_user_id=performed_by_user_id,
     )
+    mark_item(session, item_id)
     session.add(out_leg)
     await session.flush()
 

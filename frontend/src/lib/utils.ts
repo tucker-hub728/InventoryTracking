@@ -22,26 +22,135 @@ const DATE_FMT = new Intl.DateTimeFormat('en-US', {
   day: 'numeric',
 });
 
+/** Matches a bare calendar date, "2026-09-23", with no time part. */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Parse an ISO string, treating a bare calendar date as LOCAL midnight.
+ *
+ * ``new Date("2026-09-23")`` is defined to parse as UTC midnight, so west of
+ * Greenwich it formats as the 22nd — a date-only value silently rendering as
+ * the day before. Every Postgres ``DATE`` column arrives in exactly this shape
+ * (expiry dates, an order's valid-from, a projected arrival), so the fix
+ * belongs here rather than at each call site.
+ *
+ * Strings that carry a time are left alone: those are real instants and their
+ * timezone conversion is correct.
+ */
+function parseIso(iso: string): Date {
+  if (DATE_ONLY.test(iso)) {
+    // Indexed rather than destructured: the regex guarantees three parts, but
+    // `noUncheckedIndexedAccess` cannot know that, and Number() on a substring
+    // keeps the intent obvious without a non-null assertion.
+    return new Date(
+      Number(iso.slice(0, 4)),
+      Number(iso.slice(5, 7)) - 1,
+      Number(iso.slice(8, 10)),
+    );
+  }
+  return new Date(iso);
+}
+
 /** Format an ISO date as "May 25, 2026". Returns input unchanged if unparseable. */
 export function formatDate(iso: string | null | undefined): string {
   if (!iso || iso === '—') return '—';
-  const d = new Date(iso);
+  const d = parseIso(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return DATE_FMT.format(d);
 }
 
-/** Days from today to the given ISO date. Negative = past. */
+/**
+ * Whole days from today to the given ISO date. Negative = past.
+ *
+ * Both sides are flattened to local midnight before subtracting, so the answer
+ * counts calendar days rather than 24-hour blocks. Without that, "due today"
+ * reads as −1 for most of the working day and an item tips to "overdue" at an
+ * arbitrary hour rather than at midnight.
+ */
 export function daysFromNow(iso: string | null | undefined): number | null {
   if (!iso || iso === '—') return null;
-  const d = new Date(iso);
+  const d = parseIso(iso);
   if (Number.isNaN(d.getTime())) return null;
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const now = new Date();
-  return Math.round((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 /** Format a number with thousands separators. */
 export function formatNumber(n: number): string {
   return new Intl.NumberFormat('en-US').format(n);
+}
+
+const MONEY_FORMAT = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+});
+
+/**
+ * Format a money amount that may be unknown.
+ *
+ * Decimals arrive from the API as strings (NUMERIC would lose precision as a
+ * JS number), so this takes one and hands back a display string.
+ *
+ * **`null` renders as an em dash, never as $0.00.** The two mean different
+ * things and the distinction is load-bearing: a blank says "no price recorded",
+ * a zero says "this cost nothing" — which is a real, correct answer for the
+ * customer-owned cells that arrive on a $0 PO. Collapsing them would report
+ * unpriced stock as free. Same rule the finance export follows (RPT-001).
+ */
+export function formatMoney(amount: string | null | undefined): string {
+  if (amount === null || amount === undefined || amount === '') return '—';
+  const n = Number(amount);
+  if (Number.isNaN(n)) return '—';
+  return MONEY_FORMAT.format(n);
+}
+
+/**
+ * A per-unit price, trimmed for reading.
+ *
+ * Prices are stored at six decimals because they are usually a division ($95.00
+ * over a case of 25). Printing all six turns "$3.80" into "$3.800000"; printing
+ * two would round $0.008333 to "$0.01", an eightfold overstatement on a cheap
+ * consumable. So: trim trailing zeros, but never round away a value that would
+ * otherwise read as zero.
+ *
+ * `null` is an em dash, not "0.00" — same load-bearing distinction `formatMoney`
+ * makes, and for the same reason.
+ */
+export function formatUnitPrice(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === '') return '—';
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return String(raw);
+  if (n === 0) return '0.00';
+  const fixed = n >= 0.01 ? n.toFixed(2) : n.toFixed(6);
+  return fixed.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
+/**
+ * The same price, as it should appear INSIDE an editable field.
+ *
+ * The storage scale is not the user's business: `NUMERIC(14, 6)` hands back
+ * "0.000000" for a price somebody typed as "0", and an input pre-filled with
+ * six zeros they never entered reads as a system that has decided something on
+ * their behalf. Show the shortest exact spelling of the same number.
+ *
+ * Differs from `formatUnitPrice` in two ways that matter for an input: no
+ * padding to two decimals (an input is a value, not a column of figures), and
+ * `null` becomes an EMPTY field rather than an em dash — "no price recorded" is
+ * a blank box the user can fill, not a character they would have to delete.
+ *
+ * Exact, never rounded: `toFixed` would silently truncate a price carrying more
+ * precision than it shows, and saving the field would then write the rounded
+ * number back over the real one.
+ */
+export function priceInputValue(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === '') return '';
+  if (!Number.isFinite(Number(raw))) return String(raw);
+  const trimmed = String(raw).includes('.')
+    ? String(raw).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+    : String(raw);
+  return trimmed === '' || trimmed === '-' ? '0' : trimmed;
 }
 
 /** Truncate a string with ellipsis. */

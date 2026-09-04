@@ -66,10 +66,22 @@ const schema = z.object({
   // Required prefix — assigned to the item (REQ-2026-07-09-ITM-001). Lives
   // inside the selected tier; pre-filled with that tier's default.
   prefixId: z.string().min(1, 'Prefix is required'),
-  // Free-text unit of measure (each, mL, box …). Optional.
+  // The CONSUME unit (each, mL …) — what stock is counted in. Optional.
   uom: z.string().trim().max(32, 'Unit is too long').optional().default(''),
+  // No ORDER unit here (REQ-001) — the pack an item is bought in is captured
+  // on the PO line and confirmed at receive, because it belongs to the
+  // purchase and not to the material.
   // Blind-consumed, no per-lot traceability.
   isConsumable: z.boolean().default(false),
+  // The media twin (REQ-2026-07-31-KIT-003): a non-consumable stand-in that CAN
+  // sit in a bill of materials. On a kit it is consumed to the kit as the unit
+  // and never back-flushed. Mutually exclusive with `isConsumable`.
+  consumedInKit: z.boolean().default(false),
+  // Grown or expressed rather than assembled (client 2026-09-01). Set on the
+  // AY/FG a kit BUILDS: for such an item the recipe does not predict the output,
+  // so kitting stops requiring the material used to cover the recipe need.
+  // Mutually exclusive with `isConsumable` — a consumable is never built.
+  variableYield: z.boolean().default(false),
   // Assigned suppliers — zero-or-more. The only suppliers this item can later be
   // received against. Optional: an item may start with none and add later.
   supplierIds: z.array(z.string()).default([]),
@@ -80,7 +92,7 @@ const schema = z.object({
     .int()
     .nonnegative('Must be ≥ 0')
     .max(3650, 'Must be ≤ 3650'),
-});
+  });
 
 type Values = z.infer<typeof schema>;
 
@@ -152,6 +164,8 @@ export function NewItemDialog({
       prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
       uom: '',
       isConsumable: false,
+      consumedInKit: false,
+      variableYield: false,
       supplierIds: [],
       leadDays: 0,
       threshold: 0,
@@ -163,8 +177,9 @@ export function NewItemDialog({
   const tierId = watch('tierId');
   const prefixId = watch('prefixId');
   const isConsumable = watch('isConsumable');
+  const consumedInKit = watch('consumedInKit');
+  const variableYield = watch('variableYield');
   const suffix = watch('suffix');
-
   // The tier whose prefixes scope the picker, and the chosen prefix within it.
   // A locked tier is re-resolved from the fetched list so a prefix added from
   // this dialog shows up immediately (the prop itself is a stale snapshot).
@@ -198,6 +213,12 @@ export function NewItemDialog({
   // transact-in ships, so it is deferred rather than dropped.
   const showPurchasing = selectedTier?.type === 'raw_material';
 
+  // The mirror of the gate above: variable yield describes how a thing is MADE,
+  // so it only appears on a tier that is built. A raw material is bought, and no
+  // kit ever produces one.
+  const showBuilt =
+    selectedTier?.type === 'sub_assembly' || selectedTier?.type === 'finished_good';
+
   // ── Side effects ─────────────────────────────────────────────────────
 
   // Load suppliers once when the dialog opens.
@@ -207,7 +228,9 @@ export function NewItemDialog({
     setSuppliersLoading(true);
     setSuppliersError(null);
     suppliersApi
-      .list({ activeOnly: true, signal: ctrl.signal })
+      // ``listAll``: this is a searchable picker over the whole active supplier
+      // master, so a paged response would hide everything past the first page.
+      .listAll({ activeOnly: true, signal: ctrl.signal })
       .then((rows) => setSuppliers(rows))
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
@@ -270,6 +293,7 @@ export function NewItemDialog({
         prefixId: lockedTier ? (defaultPrefix(lockedTier)?.id ?? '') : '',
         uom: '',
         isConsumable: false,
+        consumedInKit: false,
         supplierIds: [],
         leadDays: 0,
         threshold: 0,
@@ -299,6 +323,8 @@ export function NewItemDialog({
         prefix_id: data.prefixId,
         uom: data.uom ? data.uom : null,
         is_consumable: data.isConsumable,
+        consumed_in_kit: data.consumedInKit,
+        variable_yield: data.variableYield,
         supplier_ids: data.supplierIds,
         avg_lead_days: data.leadDays,
         reorder_threshold: data.threshold,
@@ -457,10 +483,14 @@ export function NewItemDialog({
                 they pair up here. The purchasing-only fields (consumable flag,
                 suppliers, lead time, near-expiry) live in the block below. */}
               <div className="grid gap-4 sm:grid-cols-2">
-                <Field id="ni-uom" label="Unit" error={errors.uom?.message}>
+                <Field
+                  id="ni-uom"
+                  label="Consume unit"
+                  error={errors.uom?.message}
+                >
                   <Input
                     id="ni-uom"
-                    placeholder="each, mL, box…"
+                    placeholder="each, mL, vial…"
                     aria-invalid={Boolean(errors.uom)}
                     {...register('uom')}
                   />
@@ -487,7 +517,30 @@ export function NewItemDialog({
                     <Switch
                       id="ni-consumable"
                       checked={isConsumable}
-                      onCheckedChange={(v) => setValue('isConsumable', v)}
+                      onCheckedChange={(v) => {
+                        setValue('isConsumable', v);
+                        // The two are mutually exclusive (the server 422s on
+                        // both), so turning one on turns the other off rather
+                        // than letting the operator build a rejected item.
+                        if (v) setValue('consumedInKit', false);
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="ni-consumed-in-kit">Consumed to the kit</Label>
+                      <p className="text-xs text-text-3">
+                        Media and the like: consumed when replaced, never back-flushed
+                      </p>
+                    </div>
+                    <Switch
+                      id="ni-consumed-in-kit"
+                      checked={consumedInKit}
+                      onCheckedChange={(v) => {
+                        setValue('consumedInKit', v);
+                        if (v) setValue('isConsumable', false);
+                      }}
                     />
                   </div>
 
@@ -550,6 +603,25 @@ export function NewItemDialog({
                     </Field>
                   </div>
                 </>
+              )}
+
+              {/* Built tiers only — see `showBuilt`. No cross-clearing needed
+                  here: `isConsumable` lives in the raw-material block above, so
+                  the two switches can never be on screen together. */}
+              {showBuilt && (
+                <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ni-variable-yield">Variable yield</Label>
+                    <p className="text-xs text-text-3">
+                      Grown or expressed: the amount made isn&apos;t set by the recipe
+                    </p>
+                  </div>
+                  <Switch
+                    id="ni-variable-yield"
+                    checked={variableYield}
+                    onCheckedChange={(v) => setValue('variableYield', v)}
+                  />
+                </div>
               )}
 
               <p className="rounded-md border border-border bg-surface px-3 py-2.5 text-xs text-text-2">

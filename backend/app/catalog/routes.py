@@ -155,10 +155,17 @@ def _tier_to_read(
     )
 
 
-def _bom_line_to_read(line: BomLine, *, child_has_bom: bool) -> BomLineRead:
+def _bom_line_to_read(
+    line: BomLine, *, child_has_bom: bool, awaiting_units: int
+) -> BomLineRead:
     """Serialise a BOM line. ``child_qty_available`` is the child's real
     available stock (on-hand minus expired) and ``child_status_code`` its real
-    stock status — the same numbers the inventory list shows."""
+    stock status — the same numbers the inventory list shows.
+
+    ``awaiting_units`` is required rather than defaulted on purpose: a caller
+    that forgets it fails loudly here instead of quietly rendering "Low stock"
+    for a component whose delivery has already landed.
+    """
     child = line.child_item
     stock = child.stock if child else None
     qty_on_hand = stock.qty_on_hand if stock else Decimal("0")
@@ -178,6 +185,8 @@ def _bom_line_to_read(line: BomLine, *, child_has_bom: bool) -> BomLineRead:
         child_qty_on_hand=qty_on_hand,
         child_qty_available=qty_available,
         child_status_code=status_code,  # type: ignore[arg-type]
+        child_reorder_threshold=child.reorder_threshold if child else Decimal("0"),
+        child_qty_awaiting_release=Decimal(awaiting_units),
         child_has_bom=child_has_bom,
         created_at=line.created_at,
         updated_at=line.updated_at,
@@ -187,7 +196,12 @@ def _bom_line_to_read(line: BomLine, *, child_has_bom: bool) -> BomLineRead:
 async def _line_read(db: DBSession, line: BomLine) -> BomLineRead:
     """Serialise one BOM line (child stock from the item's own v_item_stock)."""
     have_bom = await inv_repo.items_with_bom(db, [line.child_item_id])
-    return _bom_line_to_read(line, child_has_bom=line.child_item_id in have_bom)
+    awaiting = await inv_repo.awaiting_release_units(db, [line.child_item_id])
+    return _bom_line_to_read(
+        line,
+        child_has_bom=line.child_item_id in have_bom,
+        awaiting_units=awaiting.get(line.child_item_id, 0),
+    )
 
 
 # Defensive ceiling on how deep the nested-BOM walk recurses. BOM cycles are
@@ -210,10 +224,15 @@ async def _build_bom_subtree(
     if not lines:
         return []
     have_bom = await inv_repo.items_with_bom(db, [ln.child_item_id for ln in lines])
+    awaiting = await inv_repo.awaiting_release_units(db, [ln.child_item_id for ln in lines])
     reads: list[BomLineRead] = []
     for ln in lines:
         child_has_bom = ln.child_item_id in have_bom
-        read = _bom_line_to_read(ln, child_has_bom=child_has_bom)
+        read = _bom_line_to_read(
+            ln,
+            child_has_bom=child_has_bom,
+            awaiting_units=awaiting.get(ln.child_item_id, 0),
+        )
         if (
             child_has_bom
             and depth < _MAX_BOM_DEPTH
@@ -747,10 +766,15 @@ async def list_item_bom(
         return ItemBomResponse(item_id=str(item_id), lines=reads)
     lines = await cat_repo.list_bom_lines(db, item_id)
     have_bom = await inv_repo.items_with_bom(db, [ln.child_item_id for ln in lines])
+    awaiting = await inv_repo.awaiting_release_units(db, [ln.child_item_id for ln in lines])
     return ItemBomResponse(
         item_id=str(item_id),
         lines=[
-            _bom_line_to_read(ln, child_has_bom=ln.child_item_id in have_bom)
+            _bom_line_to_read(
+                ln,
+                child_has_bom=ln.child_item_id in have_bom,
+                awaiting_units=awaiting.get(ln.child_item_id, 0),
+            )
             for ln in lines
         ],
     )
@@ -1122,10 +1146,15 @@ async def save_item_bom(
 
     lines = await cat_repo.list_bom_lines(db, item_id)
     have_bom = await inv_repo.items_with_bom(db, [ln.child_item_id for ln in lines])
+    awaiting = await inv_repo.awaiting_release_units(db, [ln.child_item_id for ln in lines])
     result = BomBatchResult(
         item_id=str(item_id),
         lines=[
-            _bom_line_to_read(ln, child_has_bom=ln.child_item_id in have_bom)
+            _bom_line_to_read(
+                ln,
+                child_has_bom=ln.child_item_id in have_bom,
+                awaiting_units=awaiting.get(ln.child_item_id, 0),
+            )
             for ln in lines
         ],
         added=len(add_pairs),

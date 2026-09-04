@@ -1,7 +1,8 @@
 'use client';
 
 import * as React from 'react';
-import { Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import Link from 'next/link';
+import { ChevronRight, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Button } from '@/components/ui/button';
@@ -13,12 +14,21 @@ import { toast } from '@/components/ui/sonner';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { usePermission } from '@/hooks/use-permission';
 import { customersApi, type Customer } from '@/lib/api/customers';
+import { shipmentsApi, type CustomerShippedTotals } from '@/lib/api/shipments';
 import { ApiError } from '@/lib/api/client';
 
 import { CustomerFormDialog } from './customer-form-dialog';
+import { formatDay } from './customer-detail-shell';
 
 /**
  * Customers list — name, contact, email. Create / edit / delete inline.
+ *
+ * The shipped figures come from ONE grouped request for every customer rather
+ * than a call per row, and they load independently of the list: they are extra
+ * context, so a slow or failed totals request must never keep the customer names
+ * off the screen. A customer with no shipments is ABSENT from that response, and
+ * the dash is rendered from the gap — "never shipped to" is a different fact
+ * from "shipped, and it all came back".
  */
 export function CustomersPageClient() {
   const canCreate = usePermission('inventory', 'create');
@@ -30,8 +40,14 @@ export function CustomersPageClient() {
   const [creating, setCreating] = React.useState(false);
   const [editing, setEditing] = React.useState<Customer | null>(null);
   const [deleting, setDeleting] = React.useState<Customer | null>(null);
+  const [shipped, setShipped] = React.useState<CustomerShippedTotals[] | null>(null);
 
   const debounced = useDebouncedValue(query, 150);
+
+  const shippedById = React.useMemo(
+    () => new Map((shipped ?? []).map((s) => [s.customer_id, s])),
+    [shipped],
+  );
 
   const load = React.useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -52,6 +68,19 @@ export function CustomersPageClient() {
     void load(ctrl.signal);
     return () => ctrl.abort();
   }, [load]);
+
+  // Deliberately not folded into `load`: the totals are decoration on a list
+  // that must render without them. A failure here leaves the dashes in place
+  // and says nothing — there is no action the user could take about it, and an
+  // error banner over a working list would be noise.
+  React.useEffect(() => {
+    const ctrl = new AbortController();
+    shipmentsApi
+      .summaryByCustomer({ signal: ctrl.signal })
+      .then(setShipped)
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, []);
 
   const filtered = React.useMemo(() => {
     const q = debounced.trim().toLowerCase();
@@ -132,7 +161,7 @@ export function CustomersPageClient() {
           ) : !loading && customers.length === 0 ? (
             <EmptyState
               title="No customers yet"
-              hint="Add a customer and link the finished goods they order."
+              hint="Add a customer, then ship finished goods to them. Their shipping history builds up here."
               action={
                 canCreate ? (
                   <Button variant="primary" onClick={() => setCreating(true)}>
@@ -151,21 +180,55 @@ export function CustomersPageClient() {
                     <th className="px-3 py-2 font-medium">Customer</th>
                     <th className="px-3 py-2 font-medium">Contact</th>
                     <th className="px-3 py-2 font-medium">Email</th>
+                    <th className="px-3 py-2 text-right font-medium">Units shipped</th>
+                    <th className="px-3 py-2 font-medium">Last shipped</th>
                     {canCreate && <th className="px-3 py-2" />}
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((c) => (
+                  {filtered.map((c) => {
+                    const s = shippedById.get(c.id);
+                    return (
                     <tr
                       key={c.id}
-                      className="border-b border-border/60 transition-colors hover:bg-surface"
+                      className="group border-b border-border/60 transition-colors hover:bg-surface"
                     >
-                      <td className="px-3 py-2.5 font-medium">{c.name}</td>
+                      {/* The name is the way in. A whole-row click would fight
+                          the edit and delete buttons sharing the row, and a
+                          separate "view" action would be a second control for
+                          the thing the name already names. */}
+                      <td className="px-3 py-2.5 font-medium">
+                        <Link
+                          href={`/customers/${c.id}`}
+                          className="inline-flex items-center gap-1 rounded-sm underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                          title={`Open ${c.name}`}
+                        >
+                          {c.name}
+                          <ChevronRight
+                            size={13}
+                            aria-hidden
+                            className="text-text-3 opacity-0 transition-opacity group-hover:opacity-100"
+                          />
+                        </Link>
+                      </td>
                       <td className="px-3 py-2.5 text-xs text-text-2">
                         {c.contact_person ?? <span className="text-text-3">—</span>}
                       </td>
                       <td className="px-3 py-2.5 text-xs text-text-2">
                         {c.email ?? <span className="text-text-3">—</span>}
+                      </td>
+                      {/* Units that LEFT for this customer — never a balance
+                          they hold. The customer page says so in words; here
+                          the column heading has to carry it. */}
+                      <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
+                        {s ? (
+                          s.total_qty.toLocaleString()
+                        ) : (
+                          <span className="font-sans text-text-3">—</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2.5 text-xs text-text-2">
+                        {s ? formatDay(s.last_shipped_at) : <span className="text-text-3">—</span>}
                       </td>
                       {canCreate && (
                         <td className="px-3 py-2.5">
@@ -190,7 +253,8 @@ export function CustomersPageClient() {
                         </td>
                       )}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

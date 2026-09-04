@@ -3,7 +3,14 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { notFound, usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeft, ArrowLeftRight, Loader2, Pencil, Truck } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  Loader2,
+  MinusCircle,
+  Pencil,
+  ShieldCheck,
+} from 'lucide-react';
 
 import { PageHeader } from '@/components/shared/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,10 +18,18 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { EmptyState } from '@/components/shared/empty-state';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
+import { AwaitingPutAwayBanner } from '@/components/inventory/awaiting-put-away-banner';
+import { RestockRequestBanner } from '@/components/inventory/restock-request-banner';
 import { ItemEditDialog } from './item-edit-dialog';
-import { ShipToCustomerDialog } from './ship-to-customer-dialog';
+import { IssueToLocationDialog } from './issue-to-location-dialog';
+import {
+  ReleaseStateDialog,
+  type ReleaseLotChoice,
+} from './release-state-dialog';
+import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
+import { itemsApi } from '@/lib/api/items';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { cn, formatNumber, isUuid } from '@/lib/utils';
@@ -29,10 +44,60 @@ import { ApiError } from '@/lib/api/client';
 import type { InventoryItem, LedgerEntry } from '@/types/inventory';
 
 import { InventoryDetailProvider } from './inventory-detail-context';
+import { ConsumableBadge, ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 const TIER_CFGS = [RAW_MATERIAL_TIER, SUB_ASSEMBLY_TIER, FINISHED_GOOD_TIER];
 
-/** Breadcrumb for an item's tier — e.g. `Raw Materials` linking to
+/** How many suppliers to name in the header before collapsing to a count. */
+const HEADER_SUPPLIERS = 2;
+
+/**
+ * The item's suppliers, without letting a long list run away with the header.
+ *
+ * They arrive pre-joined as one string. Printing it whole is fine for the one
+ * or two suppliers most items have, but an item sourced from four vendors —
+ * "ATCC, Applied Cells, Becton Dickinson (BD), Bio-Techne" — pushed the stock
+ * badge onto a second line and made the subtitle the widest thing on the page
+ * (client 2026-09-01). So: name the first two, count the rest, and put the full
+ * list in a tooltip for whoever actually needs it.
+ *
+ * Deliberately not truncated with CSS: a mid-word ellipsis on "Becton Dickinso…"
+ * tells the reader neither who the supplier is nor how many were hidden.
+ */
+function SupplierSummary({ suppliers }: { suppliers: string }) {
+  const names = suppliers
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  if (names.length === 0) return <span className="text-text-3">No supplier</span>;
+  if (names.length <= HEADER_SUPPLIERS) return <span>{names.join(', ')}</span>;
+
+  const shown = names.slice(0, HEADER_SUPPLIERS);
+  const hidden = names.length - HEADER_SUPPLIERS;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="cursor-default">
+          {shown.join(', ')}
+          <span className="ml-1 text-text-3">+{hidden} more</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <span className="font-medium">Suppliers</span>
+        <ul className="mt-1 space-y-0.5">
+          {names.map((name) => (
+            <li key={name}>{name}</li>
+          ))}
+        </ul>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Breadcrumb for an item's tier
+ — e.g. `Raw Materials` linking to
  *  `/inventory/cr`. Null when the tier is unknown (the crumb is then omitted). */
 function tierCrumb(tierType: string | null | undefined) {
   const cfg = TIER_CFGS.find((c) => c.type === tierType);
@@ -54,6 +119,16 @@ const STOCK_TAB: DetailTab = { seg: 'stock', label: 'Stock by location' };
 const RAW_TABS: readonly DetailTab[] = [
   { seg: 'ledger', label: 'Unit Ledger' },
   STOCK_TAB,
+  { seg: 'audit', label: 'Audit History' },
+];
+
+// A consumable trades "Used in" — which it can never appear in — for "Restock
+// requests", which only it can ever have (KAN-001: only a consumable is issued
+// to a Kanban). Same rule in both directions: a tab exists where it can fill.
+const CONSUMABLE_TABS: readonly DetailTab[] = [
+  { seg: 'ledger', label: 'Unit Ledger' },
+  STOCK_TAB,
+  { seg: 'restock', label: 'Restock requests' },
   { seg: 'audit', label: 'Audit History' },
 ];
 
@@ -106,7 +181,7 @@ function tabsForItem(item: InventoryItem | null): readonly DetailTab[] {
   if (isBuiltTier(item.tierType)) {
     return item.tierType === 'finished_good' ? PRODUCT_TABS : PRODUCT_TABS_WITH_USED_IN;
   }
-  return item.isConsumable ? RAW_TABS : RAW_TABS_WITH_USED_IN;
+  return item.isConsumable ? CONSUMABLE_TABS : RAW_TABS_WITH_USED_IN;
 }
 
 /**
@@ -138,8 +213,31 @@ export function InventoryDetailShell({
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [editing, setEditing] = React.useState(false);
-  const [shipping, setShipping] = React.useState(false);
   const [transferring, setTransferring] = React.useState(false);
+  const [changingRelease, setChangingRelease] = React.useState(false);
+  // Admin / super admin only — mirrors the backend's ``_require_admin``.
+  const canDecideRelease = useAuthStore(selectIsAdminOrAbove);
+  /** The item's release-tracked batches, one entry per LOT however many
+   *  locations it is spread over. Read from the stock-by-location rows, which
+   *  already carry the state. */
+  const [releaseCandidates, setReleaseCandidates] = React.useState<ReleaseLotChoice[]>([]);
+  /** Bumped after a signed change so the header's list re-reads. */
+  const [releaseSeq, setReleaseSeq] = React.useState(0);
+  // ONE issue flag. There used to be two — a separate `issuing` for the
+  // consumable→Kanban transaction — because it had its own button and its own
+  // dialog. Both destinations now live inside `IssueToLocationDialog`, which
+  // picks the endpoint from the chosen destination kind (client 2026-08-27).
+  const [issuingToLocation, setIssuingToLocation] = React.useState(false);
+  /** Set when the dialog is opened FROM a restock request, so it can aim at the
+   *  Kanban that asked. Cleared on every plain Issue click, or the next issue
+   *  would silently inherit the last request's destination. */
+  const [issuePrefill, setIssuePrefill] = React.useState<{
+    kanbanNodeId: string;
+    qty: number | null;
+  } | null>(null);
+  /** Bumped after an issue so the restock banner re-reads — a fulfilled ask
+   *  should leave the screen without a page reload. */
+  const [restockSeq, setRestockSeq] = React.useState(0);
 
   // Land on a tab that has scrolled out of the strip — say Audit History,
   // reached from a bookmark — and nothing on screen says which one you are on.
@@ -161,20 +259,24 @@ export function InventoryDetailShell({
     async (signal?: AbortSignal) => {
       setLoading(true);
       setLoadError(null);
+      let row: InventoryItem | null;
       try {
-        const row = await fetchOne(itemKey, { signal });
-        if (signal?.aborted) return;
-        if (row === null) {
-          notFound();
-          return;
-        }
-        setItem(row);
+        row = await fetchOne(itemKey, { signal });
       } catch (err) {
         if ((err as DOMException)?.name === 'AbortError') return;
         setLoadError(err instanceof Error ? err.message : 'Failed to load item.');
+        return;
       } finally {
         if (!signal?.aborted) setLoading(false);
       }
+      if (signal?.aborted) return;
+      // Deliberately OUTSIDE the catch. `notFound()` signals Next by throwing a
+      // plain Error (message `NEXT_HTTP_ERROR_FALLBACK;404`), so calling it inside
+      // the try swallowed it as an ordinary load failure: a deleted item rendered
+      // "Couldn't load item - NEXT_HTTP_ERROR_FALLBACK;404" and the 404 page was
+      // never reached.
+      if (row === null) notFound();
+      setItem(row);
     },
     [fetchOne, itemKey],
   );
@@ -204,6 +306,35 @@ export function InventoryDetailShell({
       .finally(() => setLedgerLoading(false));
     return () => ctrl.abort();
   }, [item]);
+
+  // The item's release-tracked batches, for the header's Quality status control.
+  // Only fetched for admins on a BUILT tier — nobody else can act on it, and on
+  // a raw material there is no decision to make (see the control below) — and
+  // re-read after a change so the header reflects the new state.
+  React.useEffect(() => {
+    if (!item || !canDecideRelease || !isBuiltTier(item.tierType)) return;
+    const ctrl = new AbortController();
+    itemsApi
+      .stockLocations(item.uuid, { signal: ctrl.signal })
+      .then((rows) => {
+        const byLot = new Map<string, ReleaseLotChoice>();
+        for (const r of rows) {
+          if (!r.release_state || byLot.has(r.lot_id)) continue;
+          byLot.set(r.lot_id, {
+            id: r.lot_id,
+            lot_number: r.lot_number ?? r.lot_id.slice(0, 8),
+            release_state: r.release_state,
+            hint: r.location,
+          });
+        }
+        setReleaseCandidates([...byLot.values()]);
+      })
+      .catch(() => {
+        // The control simply doesn't appear; the Stock by location tab is the
+        // other way in and reports its own errors.
+      });
+    return () => ctrl.abort();
+  }, [item, canDecideRelease, releaseSeq]);
 
   // Forecast demand = Σ over the items that consume this one (where-used) of
   // (qty_per_unit × that parent's forecast runs this year). Temporarily hidden
@@ -328,12 +459,32 @@ export function InventoryDetailShell({
             <Badge tone={(item.tierTone as never) ?? 'neutral'} dot>
               {item.tierName}
             </Badge>
+            {/* What this item IS, before what it currently has. Both flags are
+                surfaced because the difference decides whether the item can go
+                in a recipe at all, and whether a kit ever gives it back
+                (client 2026-09-01). The consumable split is CR-only — a built
+                item is manufactured, never blind-consumed. */}
             {!built && (
               <>
                 <span aria-hidden>·</span>
-                <span>{item.supplier || '— No supplier —'}</span>
+                <ConsumableBadge isConsumable={item.isConsumable} />
+              </>
+            )}
+            <ConsumedInKitBadge consumedInKit={item.consumedInKit} />
+            <VariableYieldBadge variableYield={item.variableYield} />
+            {!built && (
+              <>
                 <span aria-hidden>·</span>
-                <StatusBadge status={item.status} />
+                <SupplierSummary suppliers={item.supplier} />
+                <span aria-hidden>·</span>
+                {/* Awaiting-release aware: a delivery sitting in quarantine
+                    must not read as "go buy more". */}
+                <StockStatusBadge
+                  status={item.status}
+                  qtyAvailable={item.qtyAvailable}
+                  reorderThreshold={item.threshold}
+                  qtyAwaitingRelease={item.qtyAwaitingRelease}
+                />
               </>
             )}
           </span>
@@ -360,12 +511,66 @@ export function InventoryDetailShell({
                 <ArrowLeftRight size={14} /> Transfer
               </Button>
             )}
-            {/* Ship-to-customer is the terminal transaction for a built item —
-                a finished good, or a sub-assembly sold directly (INV-004 /
-                CUST-001). E-signed, so gate on ``inventory:sign``. */}
-            {built && canSign && (
-              <Button variant="primary" onClick={() => setShipping(true)}>
-                <Truck size={14} /> Ship to customer
+            {/* Issue is the single way material leaves inventory
+                (REQ-2026-07-31-TRX-001): to a customer, or to PD / R&D / a QC
+                lab. It replaces the old Ship-to-customer button, which existed
+                only on built tiers — this one is offered on all three, since a
+                customer may take back raw material they supplied and those labs
+                receive every tier alike.
+
+                Still deliberately SEPARATE from Transfer, not a destination
+                inside it: the same lab is a valid target for both actions and
+                they mean opposite things, so which one happened has to be the
+                operator's explicit choice. E-signed.
+
+                **The only Issue button (client 2026-08-27.)** A consumable used
+                to get a second primary button here, "Issue to Kanban", sitting
+                a few pixels from this one. Both meant "issue", so the operator
+                had to classify the transaction before opening anything, from
+                two labels alone. Kanban is now the first destination option
+                INSIDE this dialog, where each option's consequence is written
+                next to it — and where the one that keeps the stock on the books
+                can say so.
+
+                The dialog handles the "no destination set up yet" cases; hiding
+                the button would leave nothing to explain the absence. */}
+            {canSign && (
+              <Button
+                variant="primary"
+                onClick={() => {
+                  // A plain Issue starts blank. Inheriting the last request's
+                  // destination is exactly the sort of thing nobody notices
+                  // until it has been signed for.
+                  setIssuePrefill(null);
+                  setIssuingToLocation(true);
+                }}
+              >
+                <MinusCircle size={14} /> Issue
+              </Button>
+            )}
+            {/* The release decision on a MANUFACTURED batch
+                (REQ-2026-07-31-STS-002). Its own header control, not a row
+                action buried in a tab: it is the thing someone comes to this
+                page to do. The dialog asks WHICH batch, because quality status
+                belongs to a lot and an item usually has several.
+
+                Admin / super admin only, mirroring the backend — an operator
+                holds ``inventory:sign`` and can transfer, but must not release
+                the batch they just produced.
+
+                **Built tiers only (client 2026-08-27).** A purchased raw
+                material has no release decision to make here: REQ-004 splits
+                receiving into arrival (quarantine, no location, nothing placed)
+                and receive-to-inventory, and that second step places AND
+                releases under one signature. Placement is the real gate —
+                every picker reads ``lot_allocations``, so unplaced stock is
+                already invisible — which makes a second manual control on a CR
+                item a way to contradict a decision that was signed for, not a
+                way to make one. A sub-assembly or finished good is different:
+                it is produced here, so somebody has to say it passed. */}
+            {canDecideRelease && built && releaseCandidates.length > 0 && (
+              <Button onClick={() => setChangingRelease(true)}>
+                <ShieldCheck size={14} /> Quality status
               </Button>
             )}
           </>
@@ -373,6 +578,60 @@ export function InventoryDetailShell({
       />
 
       <div className="px-6 py-5 sm:px-8">
+        {/* OUTSIDE the grid below, deliberately. Dropped inside it, this becomes
+            a third grid child: it takes column two and stretches to the row's
+            height, and the tab card wraps into the 280px sidebar column. It
+            spans the full width here, above everything, because it is a
+            page-level notice — material that has arrived but is not placed has
+            no allocation and no movement, so on-hand, the Unit Ledger and every
+            picker are blind to it, and this is the only surface that shows it
+            (REQ-004). Renders nothing when there is nothing waiting. */}
+        {/* The other half of the KAN-001 loop. A request is raised on a
+            production floor and answered here, by whoever holds the stock —
+            two people on two screens — so the ask has to surface on both.
+            Renders nothing when nothing is open. */}
+        {item && (
+          <RestockRequestBanner
+            itemId={item.uuid}
+            isConsumable={item.isConsumable}
+            reloadKey={restockSeq}
+            // Several open: the banner hands off to the tab that can show them
+            // all, rather than growing to hold them.
+            onViewAll={() => router.push(`/inventory/${item.uuid}/restock`)}
+            onIssue={(r) => {
+              setIssuePrefill({ kanbanNodeId: r.kanban_node_id, qty: r.requested_qty });
+              setIssuingToLocation(true);
+            }}
+          />
+        )}
+        {item && (
+          <AwaitingPutAwayBanner
+            // ``uuid`` is the backend id; ``id`` is the human item number that
+            // URLs key on — the endpoint takes the former.
+            itemId={item.uuid}
+            itemNumber={item.id}
+            itemDescription={item.desc}
+            // The same pair every other write on this page uses (see
+            // ReleaseStateDialog below), and both halves are needed.
+            //
+            // ``refresh`` re-fetches the item and its movements, which updates
+            // the Snapshot, the Ledger totals and the Unit Ledger — a receive-to-inventory
+            // is the first time this material becomes on-hand, so all three
+            // change at once.
+            //
+            // ``setReleaseSeq`` re-keys "Stock by location", which deliberately
+            // keys its own fetch on ``item.uuid`` so it does NOT reload on every
+            // parent render; without the bump it keeps showing the pre-receipt
+            // rows. ``router.refresh()`` was here and did neither: these tabs
+            // are client components fetching in an effect, so re-rendering the
+            // server tree leaves them untouched.
+            onPlaced={() => {
+              setReleaseSeq((s) => s + 1);
+              refresh();
+            }}
+          />
+        )}
+
         <div className={cn('grid gap-5', !built && 'lg:grid-cols-[280px_1fr]')}>
           {!built && (
             <aside className="space-y-3">
@@ -483,6 +742,16 @@ export function InventoryDetailShell({
                 },
                 onReverseRequest: undefined,
                 canSign,
+                // ONE signal for "a tab must re-read", summing every counter
+                // that means it. It only has to CHANGE, so overlapping bumps
+                // are harmless — and a tab keying on just one of them is how a
+                // fulfilled request stayed on screen after it was answered.
+                refreshSeq: releaseSeq + restockSeq,
+                onRestockChanged: () => setRestockSeq((s) => s + 1),
+                openIssue: (prefill) => {
+                  setIssuePrefill(prefill);
+                  setIssuingToLocation(true);
+                },
               }}
             >
               {children}
@@ -498,18 +767,37 @@ export function InventoryDetailShell({
         onUpdated={refresh}
       />
 
-      <ShipToCustomerDialog
-        open={shipping}
-        onOpenChange={setShipping}
-        item={{ uuid: item.uuid, id: item.id, desc: item.desc, tierType: item.tierType }}
-        onDone={refresh}
-      />
-
       <TransferDialog
         open={transferring}
         onOpenChange={setTransferring}
         item={{ uuid: item.uuid, id: item.id, desc: item.desc }}
         onDone={refresh}
+      />
+
+      <IssueToLocationDialog
+        open={issuingToLocation}
+        onOpenChange={setIssuingToLocation}
+        item={{ uuid: item.uuid, id: item.id, desc: item.desc, isConsumable: item.isConsumable }}
+        prefill={issuePrefill}
+        onDone={() => {
+          refresh();
+          // The banner reads `issued_since_qty` off the request, so it has to
+          // re-read for the row to show what just went out — or disappear, if
+          // the request was answered and then acknowledged.
+          setRestockSeq((s) => s + 1);
+        }}
+      />
+
+      <ReleaseStateDialog
+        open={changingRelease}
+        onOpenChange={setChangingRelease}
+        lots={releaseCandidates}
+        scopeLabel={item.id}
+        onDone={() => {
+          setChangingRelease(false);
+          setReleaseSeq((s) => s + 1);
+          refresh();
+        }}
       />
     </>
   );

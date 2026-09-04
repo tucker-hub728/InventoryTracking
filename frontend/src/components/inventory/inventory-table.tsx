@@ -13,7 +13,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { StatusBadge } from '@/components/shared/status-badge';
+import { StockStatusBadge } from '@/components/shared/stock-status-badge';
+import { ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/shared/empty-state';
 import { STICKY_CELL, STICKY_HEAD } from '@/components/ui/sticky-column';
@@ -149,13 +150,22 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                 </Link>
               </TableCell>
               <TableCell className="truncate">
-                <Link
-                  href={detailHref}
-                  title={item.desc}
-                  className="text-sm font-medium text-text transition-colors hover:text-accent"
-                >
-                  {item.desc}
-                </Link>
+                {/* The kit-consumption flag rides with the NAME, not in its own
+                    column: it applies to a handful of rows and a column would be
+                    empty on almost all of them. The Consumable column beside it
+                    already answers the other half, so only this badge appears
+                    here (client 2026-09-01). */}
+                <span className="flex min-w-0 items-center gap-2">
+                  <Link
+                    href={detailHref}
+                    title={item.desc}
+                    className="truncate text-sm font-medium text-text transition-colors hover:text-accent"
+                  >
+                    {item.desc}
+                  </Link>
+                  <ConsumedInKitBadge consumedInKit={item.consumedInKit} />
+                  <VariableYieldBadge variableYield={item.variableYield} />
+                </span>
               </TableCell>
               <TableCell className="truncate" title={item.tierName}>
                 {item.tierName ? (
@@ -203,7 +213,12 @@ export function InventoryTable({ rows }: { rows: InventoryItem[] }) {
                 {isBuilt ? (
                   <span className="text-text-3">—</span>
                 ) : (
-                  <StatusBadge status={item.status} />
+                  <StockStatusBadge
+                    status={item.status}
+                    qtyAvailable={item.qtyAvailable}
+                    reorderThreshold={item.threshold}
+                    qtyAwaitingRelease={item.qtyAwaitingRelease}
+                  />
                 )}
               </TableCell>
               <TableCell className="font-mono text-xs text-text-2">

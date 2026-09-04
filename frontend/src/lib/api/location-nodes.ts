@@ -16,6 +16,8 @@
  */
 
 import { api } from './client';
+import type { LotReleaseState } from './lots';
+import type { MovementType as LedgerMovementType } from './movements';
 
 export type NodeType =
   // LN2: tank → quadrant → rack → box (REQ-2026-07-15-LOC-001)
@@ -27,10 +29,20 @@ export type NodeType =
   | 'room'
   | 'room_location'
   | 'sub_location'
+  // Storage (REQ-2026-08-04-LOC-001): the standard template's CATEGORY, the one
+  // level that makes Storage four deep — room → storage_category →
+  // room_location → sub_location. What the client calls a "location"; its groups
+  // and units are the same two types Cold Storage uses. Created through its own
+  // super-admin route, so it is absent from `CreatableNodeType` below.
+  | 'storage_category'
   // Warehouse area: warehouse → shelf (free leaf)
   | 'warehouse'
   | 'shelf'
   | 'flat'
+  // A named Kanban station inside a production area (LOC-006, consum01).
+  // Created through its own super-admin route, never the generic create — so
+  // it is absent from `CreatableNodeType` below.
+  | 'kanban'
   // Retired (read-only — old rows only). Cassette / Cryo Box Rack sat between
   // Rack and Box until the client dropped them on 2026-07-29.
   | 'cassette'
@@ -68,13 +80,15 @@ export type CreatableNodeType =
 export const MAX_QUADRANTS_PER_TANK = 4;
 
 export type FlatCategory = 'kanban' | 'lab' | 'qc' | 'engineering' | 'materials' | 'production';
-export type MovementType =
-  | 'receipt'
-  | 'dispense'
-  | 'discard'
-  | 'adjustment'
-  | 'transfer_out'
-  | 'transfer_in';
+/**
+ * Movement kinds a node's click-through history can show.
+ *
+ * Re-exported from the canonical list rather than hand-maintained here: this
+ * used to name only the six original types, so a node that had seen a kit issue
+ * or a shipment rendered those rows as unknown. `/allocations/movements` does
+ * not filter by type, so anything the ledger can hold can arrive here.
+ */
+export type MovementType = LedgerMovementType;
 
 /** Human labels for each node level. */
 export const NODE_TYPE_LABEL: Record<NodeType, string> = {
@@ -85,11 +99,13 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   cassette: 'Cassette (retired)',
   cryo_box_rack: 'Cryo Box Rack (retired)',
   room: 'Room',
+  storage_category: 'Location',
   room_location: 'Location',
   sub_location: 'Sub-location',
   warehouse: 'Warehouse',
   shelf: 'Shelf',
   flat: 'Flat location',
+  kanban: 'Kanban',
   cassette_rack: 'Cassette Rack (legacy)',
   sub_slot: 'Sub-slot (legacy)',
 };
@@ -129,6 +145,11 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   // Materials Management — a room holds Cold Storage locations (LOC-002), each
   // holding its equipment units. The warehouse and its shelves are seeded.
   room: ['room_location'],
+  // A Storage category holds the template's groups, which are ``room_location``
+  // nodes exactly as Cold Storage's are — so a group's units are added with the
+  // same generic create the Cold Storage page uses. The CATEGORY itself is not
+  // creatable this way: it comes with its groups, from its own route.
+  storage_category: ['room_location'],
   room_location: ['sub_location'],
   sub_location: [],
   // LOC-005 fixes Warehouse One's contents at Shelf A through Shelf Z — a closed
@@ -136,6 +157,10 @@ export const CHILD_TYPES_OF: Record<NodeType, CreatableNodeType[]> = {
   warehouse: [],
   shelf: [],
   flat: [],
+  // A Kanban is a leaf: consumables are issued INTO it, nothing hangs below.
+  // It is also absent from CreatableNodeType — it has its own super-admin
+  // route (POST /location-nodes/{area}/kanbans), not the generic create.
+  kanban: [],
   cassette_rack: [],
   sub_slot: [],
 };
@@ -159,6 +184,16 @@ export interface LocationNode {
   code: string;
   name: string;
   is_active: boolean;
+  /**
+   * Debit-and-gone destination (REQ-2026-08-04-TRX-001/002) — the client's PD,
+   * R&D and QC labs. Only ever true on a `storage_category`.
+   *
+   * It marks the location as an ISSUE destination and nothing else. A scrap
+   * location is an ordinary location otherwise: same page, it may still carry
+   * shelves / refrigerators / freezers, and stock can still be TRANSFERRED into
+   * those. What leaves inventory is what is issued to the location itself.
+   */
+  is_scrap: boolean;
   notes: string | null;
   grid_rows: number | null;
   grid_cols: number | null;
@@ -201,10 +236,22 @@ export function subtreeStats(node: NodeTree): { capacity: number; occupied: numb
   return { capacity, occupied };
 }
 
+/**
+ * Largest grid a Box may have, per axis (client 2026-08-17).
+ *
+ * Mirrors ``MAX_GRID_DIM`` in ``app/locations/schemas.py`` — the API is the
+ * authority and rejects anything over it with a 422; this exists so the inputs
+ * cap before the operator gets there.
+ */
+export const MAX_GRID_DIM = 10;
+
 export interface Allocation {
   id: string;
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, denormalised on read so a box view can badge
+   *  its cells without a fetch per lot. Null where no release workflow applies. */
+  release_state: LotReleaseState | null;
   /** Item UUID — item detail URLs key on it, so links can go straight there. */
   item_id: string | null;
   item_number: string | null;
@@ -248,6 +295,46 @@ export interface NodeCreateInput {
   notes?: string | null;
 }
 
+/** The three kinds of storage sub-type (LOC-001). */
+export type StorageGroupKind = 'shelf' | 'refrigerator' | 'freezer';
+
+/**
+ * The sub-types a Storage location should end up with (LOC-001).
+ *
+ * DECLARATIVE: send the whole list. An entry with an `id` keeps that sub-type,
+ * an entry with a `kind` adds a new one (optionally under a `name`; the server
+ * defaults it to the kind's own name, numbered if that is taken), and any current
+ * sub-type not listed is removed. An empty list is legal — a location is created
+ * with no sub-types, so zero is a state every one starts in.
+ *
+ * Never `id` and `name` on one entry: that would be a rename, which has its own
+ * endpoint ({@link locationNodesApi.rename}) and its own audit action.
+ *
+ * It replaced three booleans, because a boolean per sub-type cannot express what
+ * the amended requirement exists to allow: "an additional freezer (e.g. minus-80
+ * alongside minus-20)". There are still only three KINDS; a location may hold
+ * several of each, told apart by the names the client gives them.
+ */
+export interface StorageGroupsInput {
+  groups: Array<{ id: string } | { kind: StorageGroupKind; name?: string }>;
+}
+
+export interface StorageCategoryInput {
+  name: string;
+  /**
+   * Mark this location debit-and-gone (REQ-2026-08-04-TRX-001/002).
+   *
+   * Asked at creation and only at creation — the server refuses to change it
+   * afterwards, because turning it on later would strand the stock already
+   * sitting there and turning it off would imply issued material has a home.
+   *
+   * A debit-and-gone location is DISPOSITION-ONLY: it takes no sub-types at all
+   * (the server refuses to add one), stores nothing, and its page shows what has
+   * been issued to it instead of tabs.
+   */
+  is_scrap?: boolean;
+}
+
 export interface GridUpdateInput {
   grid_rows: number;
   grid_cols: number;
@@ -281,6 +368,33 @@ export interface PlaceBatchInput {
   evidence_id: string;
   /** Required comment (§3). */
   notes: string;
+}
+
+/**
+ * Step two of receiving (REQ-004): put arrived material away and release it,
+ * in one signed action.
+ *
+ * Separate from `PlaceBatchInput` even though both end in an allocation,
+ * because they are different acts. `place` moves stock that the business has
+ * already accepted; this one IS the acceptance — it takes a quarantined lot
+ * that has never been anywhere and makes it usable stock. It signs a different
+ * verb (`receipt.release`), it refuses anything that did not arrive on a
+ * purchase order, and it flips the lot's release state.
+ */
+export interface ReceiveToInventoryInput {
+  lot_id: string;
+  node_id: string;
+  /** Box only — one unit per cell. Omit for a flat location. */
+  cells?: { grid_row: number; grid_col: number }[];
+  /** Flat location only — the whole quantity. Omit for a box. */
+  qty?: number;
+  override?: boolean;
+  /** Confirms or corrects what arrival recorded. Omitting leaves it alone;
+   *  it cannot be cleared here (that is a signed lot correction). */
+  expiration_date?: string | null;
+  /** E-signed once for the whole receive-to-inventory — action `receipt.release`. */
+  evidence_id: string;
+  notes?: string | null;
 }
 
 export interface TransferInput {
@@ -360,6 +474,34 @@ export interface LotAvailability {
   remaining: number | null;
 }
 
+/** Correct what is actually at one location, up or down (CTL-002).
+ *
+ *  Direction is explicit and ``qty`` is always positive — "adjust out 5" is
+ *  what the operator is doing, and a minus sign is too easy to lose in a form.
+ *  A box carries one unit per position, so ``cells`` names the free positions
+ *  to fill going in and ``cell_allocation_ids`` the exact vials coming out;
+ *  flat locations leave both empty. */
+export interface StockAdjustInput {
+  lot_id: string;
+  node_id: string;
+  direction: 'in' | 'out';
+  qty: number;
+  cells?: { grid_row: number; grid_col: number }[];
+  cell_allocation_ids?: string[];
+  evidence_id: string;
+  notes?: string | null;
+}
+
+export interface StockAdjustResult {
+  movement_id: string;
+  lot_id: string;
+  node_id: string;
+  /** Signed: positive going in, negative coming out. */
+  qty_delta: number;
+  /** The (lot × location) balance after the adjustment. */
+  qty_at_node: number;
+}
+
 export const locationNodesApi = {
   ln2Tree: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
     api.get<NodeTree[]>('/location-nodes/ln2-tree', {
@@ -405,6 +547,44 @@ export const locationNodesApi = {
   createProductionArea: (name: string) =>
     api.post<LocationNode>('/location-nodes/production-areas', { json: { name } }),
 
+  /** The Kanban stations inside a production area (LOC-006). Empty for an area
+   *  that has none — the UI reads that as "a super admin must add one" rather
+   *  than an error, since a consumable issue must target a Kanban. */
+  kanbans: (areaId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<LocationNode[]>(`/location-nodes/${areaId}/kanbans`, { signal: opts?.signal }),
+
+  /** Every Kanban, with `path` carrying its area ("Clean Room Four › Kanban 1").
+   *  One breadcrumbed list for the issue dialog's destination picker. */
+  allKanbans: (opts?: { signal?: AbortSignal }) =>
+    api.get<LocationNode[]>('/location-nodes/kanbans', { signal: opts?.signal }),
+
+  /** Add a Kanban to a production area — SUPER ADMIN only, same governance as
+   *  shelves (LOC-003): two spellings of one physical bin split its register.
+   *  Free-text name; the `KAN-` code is generated server-side. */
+  createKanban: (areaId: string, name: string) =>
+    api.post<LocationNode>(`/location-nodes/${areaId}/kanbans`, { json: { name } }),
+
+  /** Create one Storage location (LOC-001) — SUPER ADMIN only. It is created
+   *  BARE: no shelves, refrigerators or freezers. Add those with
+   *  {@link updateStorageGroups}, which is the whole of "sub-types shall be
+   *  configurable after creation". The response carries an empty `children` so
+   *  the page renders from one shape either way. The `STG-` code is generated
+   *  server-side; rename later via {@link rename}.
+   *
+   *  Takes no room id: there is only one Storage room, the client never names or
+   *  picks it, and the server creates it on first use. So this works on an
+   *  environment where nothing Storage-related exists yet. */
+  createStorageCategory: (input: StorageCategoryInput) =>
+    api.post<NodeTree>('/location-nodes/storage-categories', { json: input }),
+
+  /** Set which sub-types a Storage location has, after creation (LOC-001) —
+   *  SUPER ADMIN only. Adding a name a switched-off sub-type already had REVIVES
+   *  that node rather than minting a second one under a new code; removing one is
+   *  refused by the server while it still holds units (`storage_group_in_use`).
+   *  Returns the category with its remaining sub-types nested, in tab order. */
+  updateStorageGroups: (categoryId: string, input: StorageGroupsInput) =>
+    api.patch<NodeTree>(`/location-nodes/${categoryId}/storage-groups`, { json: input }),
+
   remove: (id: string) => api.delete<LocationNode>(`/location-nodes/${id}`),
 
   rename: (id: string, name: string) =>
@@ -428,6 +608,10 @@ export const locationNodesApi = {
   placeBatch: (input: PlaceBatchInput) =>
     api.post<Allocation[]>('/allocations/place-batch', { json: input }),
 
+  /** Put arrived material away and release it in one signed step (REQ-004). */
+  receiveToInventory: (input: ReceiveToInventoryInput) =>
+    api.post<Allocation[]>('/allocations/receive-to-inventory', { json: input }),
+
   transfer: (input: TransferInput) =>
     api.post<Allocation>('/allocations/transfer', { json: input }),
 
@@ -443,6 +627,11 @@ export const locationNodesApi = {
    *  destination allocations come back. */
   transferMulti: (input: TransferMultiInput) =>
     api.post<Allocation[]>('/allocations/transfer-multi', { json: input }),
+
+  /** Correct one (lot × location) balance in or out — the counting correction
+   *  (CTL-002). Does NOT touch the lot's received quantity. */
+  adjust: (input: StockAdjustInput) =>
+    api.post<StockAdjustResult>('/allocations/adjust', { json: input }),
 
   lotAvailability: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<LotAvailability>(`/allocations/lot-availability/${lotId}`, {

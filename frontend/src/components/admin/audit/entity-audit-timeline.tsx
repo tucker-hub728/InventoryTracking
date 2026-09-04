@@ -4,6 +4,7 @@ import * as React from 'react';
 import Link from 'next/link';
 import {
   ArrowDownToLine,
+  ArrowRight,
   ArrowRightLeft,
   ArrowUpFromLine,
   Factory,
@@ -11,6 +12,7 @@ import {
   Pencil,
   Plus,
   Scale,
+  ShieldCheck,
   Trash2,
   Truck,
   Undo2,
@@ -20,6 +22,8 @@ import type { LucideIcon } from 'lucide-react';
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
+import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
+import type { LotReleaseState } from '@/lib/api/lots';
 import {
   auditApi,
   type ApiAuditAction,
@@ -132,6 +136,20 @@ const MOVEMENT_ICON: Record<MovementType, IconStyle> = {
   // Terminal customer shipment — stock leaves to a customer (unit-out).
   customer_shipment: {
     Icon: Truck,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
+  // Leaves the shelf for the floor — same "out" tint as a kit issue.
+  consumable_issue: {
+    Icon: ArrowUpFromLine,
+    tint: 'text-warning',
+    pill: 'border-warning/30 bg-warning/5 text-warning',
+  },
+  // Debit-and-gone to PD / R&D / QC (TRX-001/002). Leaves controlled inventory
+  // for good, like a shipment — so it takes the shipment's tint rather than the
+  // Kanban issue's, even though it shares that one's "into a named place" shape.
+  material_issue: {
+    Icon: ArrowUpFromLine,
     tint: 'text-warning',
     pill: 'border-warning/30 bg-warning/5 text-warning',
   },
@@ -260,9 +278,20 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100, kitA
       kitAuditItemId && subjectTable === 'app.items'
         ? kitsApi.itemAudit(kitAuditItemId, { signal: ctrl.signal })
         : Promise.resolve({ events: [] as ApiItemKitAuditEvent[] });
+    // An item's history must include what was decided about its BATCHES —
+    // release state above all (STS-002). Those events are recorded against the
+    // lot, not the item, so filtering by the item's own id never finds them and
+    // a release decision silently never appeared on this tab.
+    const lotP =
+      subjectTable === 'app.items'
+        ? auditApi.list(
+            { subjectTable: 'app.lots', lotsOfItem: subjectId, limit },
+            { signal: ctrl.signal },
+          )
+        : Promise.resolve({ items: [] as ApiAuditEvent[] });
 
-    Promise.all([auditP, ledgerP, kitP])
-      .then(([auditResp, ledgerResp, kitResp]) => {
+    Promise.all([auditP, ledgerP, kitP, lotP])
+      .then(([auditResp, ledgerResp, kitResp, lotResp]) => {
         const moveTimes = new Set(
           ledgerResp.items.map((m) => new Date(m.performed_at).getTime()),
         );
@@ -299,6 +328,18 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100, kitA
             occurred_at: e.occurred_at,
             event: e,
           })),
+          // Lot events, folded in as ordinary audit entries. Only the ones that
+          // changed something a reader of the ITEM cares about: a lot's own
+          // creation and its expiry edits already show through the ledger and
+          // the lot page, whereas a release decision has nowhere else to appear.
+          ...lotResp.items
+            .filter((e) => Boolean(e.diff?.release_state))
+            .map<TimelineEntry>((e) => ({
+              kind: 'audit',
+              id: `l:${e.id}`,
+              occurred_at: e.occurred_at,
+              event: e,
+            })),
           ...kitEvents.map<TimelineEntry>((k) => ({
             kind: 'kit',
             id: `k:${k.id}`,
@@ -368,6 +409,9 @@ export function EntityAuditTimeline({ subjectTable, subjectId, limit = 100, kitA
         onOpenChange={(o) => {
           if (!o) setSelectedMovement(null);
         }}
+        // This timeline already fetched the full ledger row to render the
+        // list, so hand it over rather than making the sheet re-fetch it.
+        movementId={selectedMovement?.id ?? null}
         movement={selectedMovement}
       />
     </>
@@ -398,6 +442,19 @@ function TimelineRow({
   }
   if (entry.kind === 'kit') {
     return <KitEventRow event={entry.kit} index={index} />;
+  }
+  // A release decision is the one audit event on this page that a reader is
+  // usually LOOKING for, and the generic row buries it: "Updated ·
+  // inventory.lot.updated · 1 field changed" is true and unreadable, and in a
+  // list of eighty rows it is invisible. Show the transition itself.
+  if (entry.event.diff?.release_state) {
+    return (
+      <ReleaseRow
+        event={entry.event}
+        index={index}
+        onSelect={() => onSelectAudit(entry.event.id)}
+      />
+    );
   }
   return (
     <AuditRow event={entry.event} index={index} onSelect={() => onSelectAudit(entry.event.id)} />
@@ -491,6 +548,13 @@ function MovementRow({
       const cust = movement.customer_name ?? 'Catalog (no customer)';
       return fromCode ? `from ${fromCode} → ${cust}` : `→ ${cust}`;
     }
+    // An issue also leaves inventory, but its destination IS a location, so the
+    // plain "from → to" below would read as a transfer. Say where it went out
+    // to, so nobody mistakes the destination for a place holding stock.
+    if (movement.movement_type === 'material_issue') {
+      const dest = toCode ?? 'a location';
+      return fromCode ? `from ${fromCode} → out to ${dest}` : `→ out to ${dest}`;
+    }
     if (fromCode && toCode) return `${fromCode} → ${toCode}`;
     if (toCode) return `into ${toCode}`;
     if (fromCode) return `from ${fromCode}`;
@@ -552,6 +616,61 @@ function MovementRow({
         {movement.notes && <p className="mt-1 text-xs text-text-2">{movement.notes}</p>}
       </div>
       {movement.reauth_evidence_id && <ESignedBadge />}
+      <span className="font-mono text-[10px] text-text-3">#{index}</span>
+    </li>
+  );
+}
+
+const RELEASE_STATES: readonly string[] = ['quarantine', 'qc_hold', 'released', 'rejected'];
+
+function asReleaseState(value: unknown): LotReleaseState | null {
+  return typeof value === 'string' && RELEASE_STATES.includes(value)
+    ? (value as LotReleaseState)
+    : null;
+}
+
+/** A batch's release decision on the item's history (REQ-2026-07-31-STS-002).
+ *
+ *  These live on the LOT, not the item, so they reach this timeline through the
+ *  ``lots_of_item`` filter. Rendered as the transition — ``Quarantine →
+ *  Rejected`` — with the batch named, because "which batch, from what, to what"
+ *  is the whole content of the event and the generic row shows none of it. */
+function ReleaseRow({
+  event,
+  index,
+  onSelect,
+}: {
+  event: ApiAuditEvent;
+  index: number;
+  onSelect: () => void;
+}) {
+  const change = event.diff?.release_state;
+  const from = asReleaseState(change?.before);
+  const to = asReleaseState(change?.after);
+
+  return (
+    <li
+      onClick={onSelect}
+      className="group relative flex cursor-pointer items-start gap-3 rounded-md border border-border bg-surface px-3 py-2.5 transition-colors hover:bg-bg-elev"
+    >
+      <RowIcon Icon={ShieldCheck} pillClass="border-accent/30 bg-accent-soft text-accent" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-text-1 text-sm font-medium">Quality status</span>
+          {from && <ReleaseStateBadge state={from} size="xs" />}
+          {from && <ArrowRight size={12} className="shrink-0 text-text-3" />}
+          {to && <ReleaseStateBadge state={to} size="xs" />}
+          {event.subject_label && (
+            <span className="font-mono text-[11px] text-text-3">{event.subject_label}</span>
+          )}
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-xs text-text-3">
+          <span className="font-mono">{formatTime(event.occurred_at)}</span>
+          <span aria-hidden>·</span>
+          <span>{event.actor_user_name ?? event.actor_kind}</span>
+        </div>
+      </div>
+      {event.signature_id && <ESignedBadge />}
       <span className="font-mono text-[10px] text-text-3">#{index}</span>
     </li>
   );

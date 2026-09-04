@@ -278,8 +278,18 @@ async def resend_invitation(session: AsyncSession, *, invitation_id: uuid.UUID) 
 # ── Listing / display ─────────────────────────────────────────────────────────
 
 
-async def list_invitations(session: AsyncSession, *, status: str | None = None) -> list[Invitation]:
-    return await invitations_repo.list_all(session, status=status)
+async def list_invitations(
+    session: AsyncSession,
+    *,
+    status: str | None = None,
+    q: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[Invitation], int]:
+    """One page of invitations as ``(rows, total)``."""
+    return await invitations_repo.list_all(
+        session, status=status, q=q, limit=limit, offset=offset
+    )
 
 
 def effective_status(invite: Invitation) -> str:

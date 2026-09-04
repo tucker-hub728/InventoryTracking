@@ -26,14 +26,15 @@ Safety:
     creation must go through ``POST /v1/invitations``.
 
 Usage (from ``backend/``):
-    python -m scripts.seed_users            # dry run — show the plan
-    python -m scripts.seed_users --yes      # create the users (dev/staging only)
+    SEED_USER_PASSWORD='…' python -m scripts.seed_users --user you@example:admin
+    ...and again with --yes to create them (dev/staging only)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from typing import Any
 
@@ -43,17 +44,27 @@ from app.core.config import Environment, get_settings
 from app.db.session import dispose_engine, get_sessionmaker
 from botocore.exceptions import ClientError
 
-# ── Users to seed ───────────────────────────────────────────────────────────
-# Edit this list to change who gets seeded. Roles: admin | operator | read_only.
-# (Super admins are seeded by scripts.seed_super_admins.) Passwords are known
 # dev credentials — this script refuses to run against production.
-_USERS: list[dict[str, str]] = [
-    {"email": "admin.user@cellready.dev", "role": "admin", "password": "DevAdmin_123!"},
-    {"email": "operator@cellready.dev", "role": "operator", "password": "DevOperator_123!"},
-    {"email": "readonly@cellready.dev", "role": "read_only", "password": "DevReadOnly_123!"},
-]
+# NO user list, and no passwords. Both used to live here as a literal, which
+# put working logins for every seeded environment into version control — public
+# the moment the repo is cloned, and identical on every box that ran this
+# script. "It is only a dev password" is not a mitigation; it is the reason the
+# same string ends up in a staging box nobody re-seeded.
+#
+# Who gets seeded is now given per run, on the command line, and the password
+# comes from the environment so it never reaches shell history or ``ps``:
+#
+#     SEED_USER_PASSWORD='…' python -m scripts.seed_users --yes \
+#         --user you@example:admin
+#
+# ``--user`` repeats. One password covers the batch, which is right for what
+# this is — throwaway dev logins created together — and each is set PERMANENT
+# in Cognito so the account signs in immediately.
 
 _ASSIGNABLE_ROLES = {"admin", "operator", "read_only"}
+
+#: Populated from --user at run time; never a literal in this file.
+_USERS: list[dict[str, str]] = []
 
 
 def _full_name(email: str) -> str:
@@ -148,6 +159,41 @@ async def _upsert_local_user(
     return user, True
 
 
+def _collect_users(specs: list[str]) -> bool:
+    """Fill ``_USERS`` from ``--user EMAIL:ROLE`` plus the password in the
+    environment. ``False`` (having explained why) if the run is not usable.
+
+    The password is read here and nowhere else, and it is never echoed — not in
+    the plan, not in the per-user OK line. A seeding script that prints the
+    credential it just set has published it to the terminal scrollback and any
+    CI log capturing the job.
+    """
+    password = os.environ.get("SEED_USER_PASSWORD", "")
+    if not password:
+        print("REFUSING: SEED_USER_PASSWORD is not set.")
+        print(
+            "\nThis script stores no credentials. Supply one for the run — from the\n"
+            "environment rather than an argument, so it stays out of shell history:\n\n"
+            "    SEED_USER_PASSWORD='…' python -m scripts.seed_users --yes \\\n"
+            "        --user you@example:admin\n"
+        )
+        return False
+
+    _USERS.clear()
+    for spec in specs:
+        email, _, role = spec.partition(":")
+        if not email.strip() or not role.strip():
+            print(f"REFUSING: --user {spec!r} is not EMAIL:ROLE.")
+            return False
+        _USERS.append({"email": email.strip(), "role": role.strip(), "password": password})
+
+    if not _USERS:
+        print("REFUSING: no --user given. Nothing to seed.")
+        print("\n    --user you@example:admin   (repeatable)")
+        return False
+    return True
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Seed dev/staging test users.")
     parser.add_argument(
@@ -155,7 +201,17 @@ async def main() -> int:
         action="store_true",
         help="Actually create the users. Without this the script only prints the plan.",
     )
+    parser.add_argument(
+        "--user",
+        action="append",
+        default=[],
+        metavar="EMAIL:ROLE",
+        help="Repeatable. Role is one of: admin, operator, read_only.",
+    )
     args = parser.parse_args()
+
+    if not _collect_users(args.user):
+        return 1
 
     settings = get_settings()
 

@@ -17,8 +17,10 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Path, Query
 
 from app.api.deps import CurrentDbUserDep, DBSession
+from app.core.search import MAX_SEARCH_LENGTH
 from app.invitations import service
 from app.invitations.schemas import (
+    InvitationListResponse,
     InvitationRead,
     InviteCreateRequest,
     InviteResult,
@@ -82,16 +84,29 @@ async def create_invitation(
 
 @router.get(
     "",
-    response_model=list[InvitationRead],
-    summary="List invitations",
+    response_model=InvitationListResponse,
+    summary="List invitations (newest first, filtered + paginated)",
     dependencies=[Depends(RequirePermission("users", "view"))],
 )
 async def list_invitations(
     db: DBSession,
     status: Annotated[StatusFilter | None, Query()] = None,
-) -> list[InvitationRead]:
-    invites = await service.list_invitations(db, status=status)
-    return [_to_read(i) for i in invites]
+    q: Annotated[
+        str | None,
+        Query(description="Search email + name", max_length=MAX_SEARCH_LENGTH),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> InvitationListResponse:
+    invites, total = await service.list_invitations(
+        db, status=status, q=q, limit=limit, offset=offset
+    )
+    return InvitationListResponse(
+        items=[_to_read(i) for i in invites],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

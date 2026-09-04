@@ -17,6 +17,7 @@
 
 import { api } from './client';
 import type { CellOption } from './kits';
+import type { LotReleaseState } from './lots';
 
 // ── Wire shape ─────────────────────────────────────────────────────────
 
@@ -29,15 +30,44 @@ export type ApiItemStatus = 'available' | 'low_stock' | 'out_of_stock';
 export interface ApiItemStockLocation {
   lot_id: string;
   lot_number: string | null;
+  /** The lot's release state, or null where no release workflow applies. */
+  release_state: LotReleaseState | null;
   expiration_date: string | null;
   node_id: string;
   /** Human location path, e.g. "Warehouse One › Shelf B". */
   location: string;
+  /** What kind of place this is. Carried so the transfer dialog can apply the
+   *  LOC-003 cold-chain rule — an LN2 source may only be sent to another LN2
+   *  box — without inferring it from ``is_grid``, which matches only by the
+   *  coincidence that the Box is today the one grid-bearing node type. */
+  node_type: string;
   qty: number;
   is_grid: boolean;
   grid_rows: number | null;
   grid_cols: number | null;
   cells: CellOption[];
+}
+
+/**
+ * One lot that has arrived but has not been received to inventory (REQ-004).
+ *
+ * It exists, it is in the building, and it is deliberately NOT stock yet: no
+ * allocation, no ledger movement, so it is absent from on-hand, from the Unit
+ * Ledger, and from every transfer / kit / issue / ship picker — all of which
+ * read allocations. This is the only surface that shows it.
+ */
+export interface ApiAwaitingPutAway {
+  lot_id: string;
+  lot_number: string;
+  /** CONSUME units still to place — less than `received_units` when an earlier
+   *  earlier partial receipt already shelved some of it. */
+  remaining_units: number;
+  received_units: number;
+  expiration_date: string | null;
+  manufacture_date: string | null;
+  po_reference: string | null;
+  received_at: string | null;
+  supplier_name: string | null;
 }
 
 /** One supplier assigned to an item (part of ``ApiItem.suppliers``). */
@@ -55,10 +85,19 @@ export interface ApiItem {
   id: string;
   item_number: string;
   description: string;
-  /** Free-text unit of measure (each, mL, box …). ``null`` when unset. */
+  /** The CONSUME unit (each, mL …) — what stock is counted in. Null unset.
+   *  The only unit an item has: the ORDER unit ("Box" and its size) lives on
+   *  the Order line (REQ-001), because a pack describes a purchase rather
+   *  than a material. See `OrderLineInput` in `receiving.ts`. */
   uom: string | null;
   /** Blind-consumed (no per-lot traceability) when true. */
   is_consumable: boolean;
+  /** Consumed to the kit, never back-flushed (KIT-003) when true. */
+  consumed_in_kit: boolean;
+  /** Grown or expressed rather than assembled (client 2026-09-01). A kit for
+   *  this item is not held to the recipe: the amount made is measured, not
+   *  derived, so the same material may yield 200 one run and 350 the next. */
+  variable_yield: boolean;
   /** Tier (REQ-2026-07-15-ITM-001). ``tier_type`` drives the Type column:
    *  sub_assembly / finished_good may have a BOM; raw_material is bought as-is. */
   tier_id: string;
@@ -86,6 +125,9 @@ export interface ApiItem {
   updated_by_user_id: string;
   qty_on_hand: string;
   qty_on_order: string;
+  /** Units arrived but not yet placed on a shelf (REQ-004). Neither available
+   *  nor on-order: on site, but not pickable. */
+  qty_awaiting_release: string;
   /** Inventory $ — Σ(on-hand units × their lot's unit price). Lot-derived. */
   inv_value_amount: string;
   /** On-order $ — Σ(ordered qty × unit price) over ON_ORDER lots. Lot-derived. */
@@ -133,6 +175,12 @@ export interface ListItemsParams {
    * ``qty_available <= 0`` first, so those read as ``out_of_stock``).
    */
   below_reorder?: boolean | null;
+  /**
+   * `true` selects items with stock that has ARRIVED but is not yet placed and
+   * released (REQ-2026-07-31-STS-001) â material on site and paid for, which
+   * the reorder screen deliberately does not count as missing.
+   */
+  awaiting_release?: boolean | null;
   sort?: ApiSortField;
   direction?: ApiSortDirection;
   limit?: number;
@@ -147,10 +195,18 @@ export interface ItemCreateInput {
   /** Required — the item's prefix. The tier is derived from it server-side
    *  (a prefix lives inside one tier) and governs BOM eligibility. */
   prefix_id: string;
-  /** Free-text unit of measure (each, mL, box …). */
+  /** The CONSUME unit (each, mL …) — what stock is counted in. No order unit
+   *  here (REQ-001): the pack is set per Order line. The server `extra:
+   *  forbid`s, so sending one 422s rather than being silently dropped. */
   uom?: string | null;
   /** Blind-consumed with no per-lot traceability when true. */
   is_consumable?: boolean;
+  /** The media twin: consumed to the kit and never back-flushed (KIT-003).
+   *  Mutually exclusive with `is_consumable` — the server 422s on both. */
+  consumed_in_kit?: boolean;
+  /** Grown/expressed: kits for this item drop the recipe yield constraint.
+   *  Mutually exclusive with `is_consumable` — the server 422s on both. */
+  variable_yield?: boolean;
   /** Assigned suppliers (zero-or-more). The only suppliers the item can later
    *  be received against. */
   supplier_ids?: string[];
@@ -168,6 +224,8 @@ export interface ItemUpdateInput {
   description?: string;
   uom?: string | null;
   is_consumable?: boolean;
+  consumed_in_kit?: boolean;
+  variable_yield?: boolean;
   /** Re-assign the item to another prefix (its tier is derived). Blocked
    *  server-side if moving a BOM-bearing item to a raw-material prefix. */
   prefix_id?: string;
@@ -190,6 +248,7 @@ export const itemsApi = {
         prefix_id: params.prefix_id ?? undefined,
         status: params.status ?? undefined,
         is_consumable: params.is_consumable ?? undefined,
+        awaiting_release: params.awaiting_release ?? undefined,
         has_bom: params.has_bom ?? undefined,
         min_bom_lines: params.min_bom_lines ?? undefined,
         below_reorder: params.below_reorder ?? undefined,
@@ -212,6 +271,20 @@ export const itemsApi = {
    */
   stockLocations: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiItemStockLocation[]>(`/items/${id}/stock-locations`, {
+      signal: opts?.signal,
+    }),
+
+  /**
+   * What has ARRIVED for this item but has not been received to inventory yet (REQ-004).
+   *
+   * Deliberately a second call rather than a field on `stockLocations`: that
+   * one is allocation-derived and answers "where is this item", so material
+   * with no allocation is invisible to it by construction. This answers the
+   * different question — "what turned up that nobody has shelved" — which is
+   * exactly the material the other endpoint cannot see.
+   */
+  awaitingPutAway: (id: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiAwaitingPutAway[]>(`/items/${id}/awaiting-put-away`, {
       signal: opts?.signal,
     }),
 

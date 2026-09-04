@@ -20,14 +20,14 @@ them (a built item WITH a BOM, the PROD-CR1 node, an active shelf).
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 
+from _smoke_creds import require_credentials
+
 BASE = "http://localhost:8000/v1"
-EMAIL = os.environ.get("SMOKE_EMAIL", "admin@cellready.local")
-PASSWORD = os.environ.get("SMOKE_PASSWORD", "ChangeMe!Now123")
+EMAIL, PASSWORD = require_credentials()
 
 # A well-stocked 2-child sub-assembly (qty_per_unit 1): both components have a
 # single node holding far more than a small build needs, so the 2026-07-22 hard

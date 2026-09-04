@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import CurrentDbUserDep, DBSession
 from app.audit import record_entity_change
 from app.auth.reauth import consume_reauth_evidence
+from app.core.bounds import MAX_QTY
 from app.core.exceptions import (
     AuthorizationError,
     ConflictError,
@@ -30,6 +31,7 @@ from app.inventory.schemas import (
     ArchivePolicyRead,
     ArchivePolicyUpdate,
     ArchiveSweepResult,
+    AwaitingPutAwayRead,
     ItemCreate,
     ItemListResponse,
     ItemRead,
@@ -38,6 +40,7 @@ from app.inventory.schemas import (
     LotCreate,
     LotNumberAvailability,
     LotRead,
+    LotReleaseStateUpdate,
     LotStatus,
     LotUpdate,
     MovementListResponse,
@@ -54,9 +57,11 @@ from app.inventory.schemas import (
     ReceiveEventRequest,
     ReceivePlacement,
     SupplierCreate,
+    SupplierListResponse,
     SupplierRead,
     SupplierUpdate,
 )
+from app.kitting import recompute as kit_recompute
 from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import ItemStockLocationCell, ItemStockLocationRead
@@ -96,6 +101,8 @@ def _movement_to_read(
         lot_id=str(m.lot_id) if m.lot_id else None,
         lot_number=m.lot.lot_number if m.lot else None,
         lot_expiration_date=m.lot.expiration_date if m.lot else None,
+        lot_release_state=m.lot.release_state if m.lot else None,
+        lot_unit_price_amount=m.lot.unit_price_amount if m.lot else None,
         from_location_node_id=(
             str(m.from_location_node_id) if m.from_location_node_id else None
         ),
@@ -154,11 +161,21 @@ def _lot_to_read(lot: Lot) -> LotRead:
         manufacture_date=lot.manufacture_date,
         expiration_date=lot.expiration_date,
         status=lot.status,  # type: ignore[arg-type]
+        release_state=lot.release_state,  # type: ignore[arg-type]
         notes=lot.notes,
         unit_price_amount=lot.unit_price_amount,
         po_reference=lot.po_reference,
         receipt_transaction_id=(
             str(lot.receipt_transaction_id) if lot.receipt_transaction_id else None
+        ),
+        # Declared on ``LotRead`` since the v3 Order redesign but never set, so
+        # it always serialised as null. It matters from REQ-004 onward: it is
+        # what distinguishes a RECEIVED lot from kit output, and both now carry
+        # ``quarantine``, so the client cannot tell them apart without it.
+        receipt_transaction_line_id=(
+            str(lot.receipt_transaction_line_id)
+            if lot.receipt_transaction_line_id
+            else None
         ),
         parent_lot_id=str(lot.parent_lot_id) if lot.parent_lot_id else None,
         ordered_qty=lot.ordered_qty,
@@ -177,15 +194,58 @@ def _supplier_to_read(v: Supplier) -> SupplierRead:
         phone=v.phone,
         is_active=v.is_active,
         notes=v.notes,
+        lead_time_days=v.lead_time_days,
         created_at=v.created_at,
         updated_at=v.updated_at,
     )
+
+
+def _reject_consumable_and_consumed_in_kit(
+    *, is_consumable: bool, consumed_in_kit: bool
+) -> None:
+    """The two flags are mutually exclusive (REQ-2026-07-31-KIT-003).
+
+    ``consumed_in_kit`` marks the non-consumable TWIN of a consumable â the
+    thing that exists precisely so media can enter a BOM, which an
+    ``is_consumable`` item may never do (``_require_eligible_child``). An item
+    that were both would be barred from the only place the flag means anything.
+    The DB CHECK ``ck_items_consumable_xor_consumed_in_kit`` is the backstop;
+    this is the sentence the operator reads.
+    """
+    if is_consumable and consumed_in_kit:
+        raise ValidationError(
+            "An item can't be both a consumable and consumed-to-the-kit. "
+            "Consumables are never in a bill of materials â create a separate, "
+            "non-consumable item for the version that goes into kits.",
+            code="consumable_and_consumed_in_kit",
+        )
+
+
+def _reject_consumable_and_variable_yield(
+    *, is_consumable: bool, variable_yield: bool
+) -> None:
+    """Same shape as the pair above, and the same reason (varyield01).
+
+    ``variable_yield`` says the recipe does not predict this item's output, which
+    only ever means anything for the AY/FG a kit BUILDS. A consumable can never
+    be that: consumables are barred from bills of material, and a kit is built
+    from one. The DB CHECK ``ck_items_consumable_xor_variable_yield`` is the
+    backstop; this is the sentence the operator reads.
+    """
+    if is_consumable and variable_yield:
+        raise ValidationError(
+            "An item can't be both a consumable and variable-yield. Variable "
+            "yield describes something a kit builds, and a consumable is never "
+            "built — it's bought and consumed.",
+            code="consumable_and_variable_yield",
+        )
 
 
 def _item_to_read(
     item: Item,
     valuation: tuple[Decimal, Decimal, Decimal] | None = None,
     bom_line_count: int = 0,
+    awaiting_release: int = 0,
 ) -> ItemRead:
     # The eager ``Item.stock`` relationship joins ``app.v_item_stock``,
     # which is LEFT-joined on the items query so newly-created items
@@ -214,6 +274,8 @@ def _item_to_read(
         description=item.description,
         uom=item.uom,
         is_consumable=item.is_consumable,
+        consumed_in_kit=item.consumed_in_kit,
+        variable_yield=item.variable_yield,
         tier_id=str(item.tier_id),
         tier_name=tier.name if tier else "",
         tier_type=tier.type if tier else "raw_material",  # type: ignore[arg-type]
@@ -241,6 +303,7 @@ def _item_to_read(
         qty_on_hand=qty_on_hand,
         qty_available=qty_available,
         qty_on_order=qty_on_order,
+        qty_awaiting_release=Decimal(awaiting_release),
         inv_value_amount=inv_value_amount,
         po_value_amount=po_value_amount,
         status_code=status_code,  # type: ignore[arg-type]
@@ -253,7 +316,10 @@ async def _item_read_with_valuation(db: DBSession, item: Item) -> ItemRead:
     """Serialise a single item, computing its lot-derived valuation."""
     valuations = await inv_repo.compute_item_valuations(db, [item.id])
     counts = await inv_repo.bom_line_counts(db, [item.id])
-    return _item_to_read(item, valuations.get(item.id), counts.get(item.id, 0))
+    awaiting = await inv_repo.awaiting_release_units(db, [item.id])
+    return _item_to_read(
+        item, valuations.get(item.id), counts.get(item.id, 0), awaiting.get(item.id, 0)
+    )
 
 
 async def _resolve_item_supplier_ids(
@@ -283,16 +349,49 @@ async def _resolve_item_supplier_ids(
 
 @suppliers_router.get(
     "",
-    response_model=list[SupplierRead],
-    summary="List suppliers",
+    response_model=SupplierListResponse,
+    summary="List suppliers (by name, filtered + paginated)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
 async def list_suppliers(
     db: DBSession,
     active_only: bool = Query(default=True, description="Hide suppliers with is_active=false"),
-) -> list[SupplierRead]:
-    suppliers = await inv_repo.list_suppliers(db, active_only=active_only)
-    return [_supplier_to_read(v) for v in suppliers]
+    is_active: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Explicit active-flag filter — true = the Active tab, "
+                "false = the Deactivated tab. Overrides ``active_only``."
+            )
+        ),
+    ] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Search name + contact email", max_length=MAX_SEARCH_LENGTH),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> SupplierListResponse:
+    suppliers, total = await inv_repo.list_suppliers(
+        db,
+        active_only=active_only,
+        is_active=is_active,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
+    # Unfiltered per-tab counts, so the tab strip can label both tabs while the
+    # user is looking at one of them. Cheap: two COUNTs on a small table.
+    _, active_total = await inv_repo.list_suppliers(db, is_active=True, limit=1)
+    _, inactive_total = await inv_repo.list_suppliers(db, is_active=False, limit=1)
+    return SupplierListResponse(
+        items=[_supplier_to_read(v) for v in suppliers],
+        total=total,
+        limit=limit,
+        offset=offset,
+        active_total=active_total,
+        inactive_total=inactive_total,
+    )
 
 
 @suppliers_router.get(
@@ -340,6 +439,7 @@ async def create_supplier(
             phone=payload.phone,
             notes=payload.notes,
             is_active=payload.is_active,
+            lead_time_days=payload.lead_time_days,
         )
     except IntegrityError as exc:
         await db.rollback()
@@ -543,6 +643,17 @@ async def list_items(
             )
         ),
     ] = None,
+    awaiting_release: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "Filter to items with stock that has arrived but is not yet "
+                "placed and released (REQ-2026-07-31-STS-001). This material is "
+                "on site and paid for, so it is deliberately NOT counted as "
+                "missing by the reorder screen."
+            )
+        ),
+    ] = None,
     sort: Annotated[
         Literal["item_number", "description", "updated_at", "created_at"],
         Query(),
@@ -562,6 +673,7 @@ async def list_items(
         has_bom=has_bom,
         min_bom_lines=min_bom_lines,
         below_reorder=below_reorder,
+        awaiting_release=awaiting_release,
         sort=sort,
         direction=direction,
         limit=limit,
@@ -571,9 +683,12 @@ async def list_items(
     valuations = await inv_repo.compute_item_valuations(db, ids)
     # One grouped count for the page, not one query per row.
     bom_counts = await inv_repo.bom_line_counts(db, ids)
+    awaiting = await inv_repo.awaiting_release_units(db, ids)
     return ItemListResponse(
         items=[
-            _item_to_read(i, valuations.get(i.id), bom_counts.get(i.id, 0))
+            _item_to_read(
+                i, valuations.get(i.id), bom_counts.get(i.id, 0), awaiting.get(i.id, 0)
+            )
             for i in items
         ],
         total=total,
@@ -652,6 +767,15 @@ async def create_item(
             code="item_number_conflict",
         )
 
+    _reject_consumable_and_consumed_in_kit(
+        is_consumable=payload.is_consumable,
+        consumed_in_kit=payload.consumed_in_kit,
+    )
+    _reject_consumable_and_variable_yield(
+        is_consumable=payload.is_consumable,
+        variable_yield=payload.variable_yield,
+    )
+
     try:
         item = await inv_repo.create_item(
             db,
@@ -661,6 +785,8 @@ async def create_item(
             created_by_user_id=current.id,
             uom=payload.uom,
             is_consumable=payload.is_consumable,
+            consumed_in_kit=payload.consumed_in_kit,
+            variable_yield=payload.variable_yield,
             avg_lead_days=payload.avg_lead_days,
             reorder_threshold=payload.reorder_threshold,
             near_expiry_threshold_days=payload.near_expiry_threshold_days,
@@ -687,6 +813,10 @@ async def create_item(
         # the response carries the just-assigned suppliers.
         await db.refresh(item, attribute_names=["suppliers"])
 
+    # Valuation, BOM count and awaiting-release all default to zero, which is
+    # exactly right for an item created a moment ago: it has no lots, no recipe
+    # and nothing in the receiving bay. Querying for them would be three round
+    # trips guaranteed to return nothing.
     return _item_to_read(item)
 
 
@@ -756,6 +886,18 @@ async def update_item(
                     code="item_received",
                 )
         patch["prefix_id"] = prefix_uuid
+
+    # The pair is mutually exclusive, and ItemUpdate is PARTIAL — a request
+    # setting only one of them still has to be judged against the value the item
+    # already carries, which a Pydantic validator cannot see. Merge, then test.
+    _reject_consumable_and_consumed_in_kit(
+        is_consumable=bool(patch.get("is_consumable", item.is_consumable)),
+        consumed_in_kit=bool(patch.get("consumed_in_kit", item.consumed_in_kit)),
+    )
+    _reject_consumable_and_variable_yield(
+        is_consumable=bool(patch.get("is_consumable", item.is_consumable)),
+        variable_yield=bool(patch.get("variable_yield", item.variable_yield)),
+    )
 
     if not patch and supplier_uuids is None:
         raise ValidationError("No fields to update", code="empty_patch")
@@ -957,6 +1099,43 @@ async def list_item_lots(
 
 
 @items_router.get(
+    "/{item_id}/awaiting-put-away",
+    response_model=list[AwaitingPutAwayRead],
+    summary="Lots that have arrived but are not yet received to inventory (REQ-004)",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def item_awaiting_put_away(
+    db: DBSession,
+    item_id: Annotated[uuid.UUID, Path()],
+) -> list[AwaitingPutAwayRead]:
+    """The receive-to-inventory queue for one item.
+
+    Separate from ``/stock-locations`` on purpose: that endpoint answers "where
+    is this item", and it is allocation-derived, so material with no allocation
+    is invisible to it by construction. This answers the different question
+    "what has arrived that nobody has received to inventory yet" — which is exactly the
+    material the other endpoint cannot see.
+    """
+    if (await inv_repo.get_item(db, item_id)) is None:
+        raise NotFoundError(f"Item {item_id} not found")
+    rows = (await inv_repo.lots_awaiting_put_away(db, [item_id])).get(item_id, [])
+    return [
+        AwaitingPutAwayRead(
+            lot_id=str(lot.id),
+            lot_number=lot.lot_number,
+            remaining_units=remaining,
+            received_units=int(lot.ordered_qty or 0),
+            expiration_date=lot.expiration_date,
+            manufacture_date=lot.manufacture_date,
+            po_reference=lot.po_reference,
+            received_at=lot.created_at.date() if lot.created_at else None,
+            supplier_name=lot.supplier.name if lot.supplier else None,
+        )
+        for lot, remaining in rows
+    ]
+
+
+@items_router.get(
     "/{item_id}/stock-locations",
     response_model=list[ItemStockLocationRead],
     summary="Where one item is stocked — a row per lot × storage location",
@@ -1009,6 +1188,15 @@ async def item_stock_locations(
             if a.lot_id == lot_id
         ]
 
+    # Release states for the lots on show, in one query rather than threaded
+    # through ``item_stock_by_node_lot`` — that tuple feeds the kitting Issue
+    # picker and the shipment source list too, and widening it would ripple into
+    # both for a field only this view reads.
+    release_states = await inv_repo.lot_release_states(db, {r[0] for r in rows})
+    # What kind of place each row sits in, for the LOC-003 cold-chain rule in
+    # the transfer dialog. One query for the nodes on show.
+    node_types = await loc_repo.node_types_by_ids(db, {r[3] for r in rows})
+
     out: list[ItemStockLocationRead] = []
     for (lot_id, lot_number, exp, node_id, qty) in rows:
         dims = grid_meta.get(node_id)
@@ -1016,9 +1204,11 @@ async def item_stock_locations(
             ItemStockLocationRead(
                 lot_id=str(lot_id),
                 lot_number=lot_number,
+                release_state=release_states.get(lot_id),
                 expiration_date=exp,
                 node_id=str(node_id),
                 location=_label(node_id),
+                node_type=node_types.get(node_id, ""),
                 qty=qty,
                 is_grid=dims is not None,
                 grid_rows=dims[0] if dims else None,
@@ -1150,11 +1340,38 @@ async def update_lot(
     if lot is None or lot.deleted_at is not None:
         raise NotFoundError(f"Lot {lot_id} not found")
 
-    # Quantity may be corrected post-receipt, but never below what is already
-    # physically placed in locations — the operator must unplace first.
+    # Quantity may be corrected post-receipt, but never below what this lot has
+    # already put into inventory. TWO floors, because consumption moves them
+    # apart and only one of them can be undone:
+    #
+    #   * ``sum_received_qty_for_lot`` — lifetime received to inventory. Every
+    #     placement path caps against this (``place_exceeds_ordered``) precisely
+    #     so consumed units keep counting and cannot free up capacity. It never
+    #     shrinks, so the operator cannot get under it by unplacing.
+    #   * ``sum_active_alloc_qty_for_lot`` — what is sitting in locations right
+    #     now. This one DOES shrink when material is used, and unplacing clears
+    #     it, so its message tells the operator to unplace first.
+    #
+    # Checking only the second (as this did until 2026-08-28) lets consumption
+    # lower the floor under a lot that has already spent its units: 360 received
+    # and 300 consumed leaves 60 allocated, so a "correction" to 60 would pass
+    # while the placement paths still believe 360 were received to inventory,
+    # and the availability endpoint would report negative remaining capacity.
+    # The lifetime floor is checked first because it is the one the operator
+    # cannot work around.
     new_qty: int | None = None
+    origin_line = None
     if "ordered_qty" in patch:
         new_qty = patch["ordered_qty"]
+        received_ever = int(await loc_repo.sum_received_qty_for_lot(db, lot.id))
+        if new_qty < received_ever:
+            raise ConflictError(
+                f"{received_ever} unit(s) of this lot have already been "
+                f"received to inventory, and units that have since been used "
+                f"still count. The received quantity cannot be corrected below "
+                f"{received_ever}.",
+                code="qty_below_placed",
+            )
         placed = int(await loc_repo.sum_active_alloc_qty_for_lot(db, lot.id))
         if new_qty < placed:
             raise ConflictError(
@@ -1163,6 +1380,22 @@ async def update_lot(
                 f"at least {placed}.",
                 code="qty_below_placed",
             )
+        # The lot's quantity is in CONSUME units; the Order line it feeds counts
+        # PACKS (REQ-001). Validate the divide-back HERE, before anything is
+        # mutated — unwinding afterwards would mean rolling back mid-request,
+        # which expires every loaded ORM object and turns the next attribute
+        # read into a MissingGreenlet 500 instead of the 422 the operator needs.
+        origin_line = await inv_repo.get_order_line_for_lot(db, lot.id)
+        if origin_line is not None and origin_line.units_per_pack:
+            try:
+                inv_repo.units_to_packs(new_qty, origin_line.units_per_pack)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"{new_qty} units is not a whole number of "
+                    f"{origin_line.pack_uom}es of {origin_line.units_per_pack}. "
+                    f"Use a multiple of {origin_line.units_per_pack}.",
+                    code="qty_not_whole_packs",
+                ) from exc
 
     if "supplier_id" in patch:
         v = patch["supplier_id"]
@@ -1209,30 +1442,72 @@ async def update_lot(
         raise
     after = inv_repo.lot_to_audit_snapshot(updated)
 
+    # RPT-003 — a price correction follows the material. Every kit that was
+    # charged this lot is re-costed and the lots it produced are re-stamped,
+    # cascading into any kit that consumed *those*. Without this the edit
+    # changed one row and left every finished good built from it carrying a
+    # price the system itself no longer believed (client, 2026-08-31).
+    #
+    # Only on a real change: PATCHing a lot's notes must not re-cost a kit.
+    recost = None
+    if "unit_price_amount" in patch and before.get("unit_price_amount") != after.get(
+        "unit_price_amount"
+    ):
+        recost = await kit_recompute.recompute_kits_for_lot(db, lot_id=updated.id)
+
     # A qty correction re-syncs the Order line's received total (the lot maps
     # one-to-one to a receive-event draw) and re-derives the Order status
     # (e.g. dropping below ordered flips received → partially_received).
     if new_qty is not None:
         event_line = await inv_repo.get_event_line_by_lot(db, updated.id)
         if event_line is not None:
-            event_line.qty_received = new_qty
+            order = (
+                await inv_repo.get_order(db, updated.receipt_transaction_id)
+                if updated.receipt_transaction_id is not None
+                else None
+            )
+            # ``new_qty`` is the LOT's quantity, in CONSUME units. The event
+            # line it feeds is in ORDER units (REQ-001), so this must divide
+            # back — writing 300 straight into a column holding boxes would
+            # mark the order 100× over-received, silently and with a signature
+            # on it. Divisibility was already proven above, before any mutation,
+            # so this cannot raise.
+            units_per_pack = origin_line.units_per_pack if origin_line else None
+            event_line.qty_received = inv_repo.units_to_packs(new_qty, units_per_pack)
             await db.flush()
-            if updated.receipt_transaction_id is not None:
-                order = await inv_repo.get_order(db, updated.receipt_transaction_id)
-                if order is not None:
-                    recd = await inv_repo.received_qty_by_line(
-                        db, [ln.id for ln in order.lines]
+            if order is not None:
+                recd = await inv_repo.received_qty_by_line(
+                    db, [ln.id for ln in order.lines]
+                )
+                new_status = inv_repo.derive_order_status(list(order.lines), recd)
+                if new_status != order.status:
+                    await inv_repo.set_order_status(
+                        db,
+                        txn=order,
+                        status=new_status,
+                        received_by_user_id=current.id,
                     )
-                    new_status = inv_repo.derive_order_status(
-                        list(order.lines), recd
-                    )
-                    if new_status != order.status:
-                        await inv_repo.set_order_status(
-                            db,
-                            txn=order,
-                            status=new_status,
-                            received_by_user_id=current.id,
-                        )
+
+    # NOTE — a quantity correction writes NO stock movement, deliberately.
+    #
+    # It is tempting (this route did it for one day, 2026-08-28) to post an
+    # ``adjustment`` for the delta so CTL-002's "visible in the ledger" is
+    # satisfied here. It is wrong, because ``ordered_qty`` and the ledger count
+    # different things: ``ordered_qty`` is what ARRIVED, while every ledger
+    # unit-IN is written by *placement* (``receipt``, and per
+    # ``sum_received_qty_for_lot`` "place is the sole writer"). Correcting 360
+    # to 420 does not make 60 units exist — it makes 60 units *placeable*.
+    #
+    # Posting the delta therefore credits stock that is in no location, which is
+    # exactly what it looked like: an ``Adjusted +60`` row with a blank Location
+    # while every neighbouring row named one. Worse, it double-counts — placing
+    # those 60 writes its own ``receipt +60``, so a 420-unit lot reports 480.
+    #
+    # CTL-002 is satisfied without it, and more literally: the correction itself
+    # is signed and audited below (before/after plus the operator's comment),
+    # and the *re-receiving* the requirement actually names is the placement of
+    # the extra units — a real ``receipt`` row, with a real location and its own
+    # signature. Do not reintroduce a synthetic movement here.
 
     await record_entity_change(
         db,
@@ -1243,7 +1518,28 @@ async def update_lot(
         subject_label=updated.lot_number,
         before=before,
         after=after,
-        context={"reason": reason},
+        context={
+            "reason": reason,
+            # RPT-003 — what the price correction moved downstream. A finished
+            # lot's cost changing is exactly the kind of thing an inspector
+            # asks about, so it is recorded on the edit that caused it rather
+            # than left to be inferred from two timestamps.
+            **(
+                {
+                    "recosted": {
+                        "requirement": "RPT-003",
+                        "kits": recost.kits_visited,
+                        "batches": recost.batches_updated,
+                        "lots_repriced": {
+                            lot_no: [str(old), str(new)]
+                            for lot_no, (old, new) in recost.lots_repriced.items()
+                        },
+                    }
+                }
+                if recost is not None and recost.changed
+                else {}
+            ),
+        },
         signature_id=evidence_uuid,
     )
 
@@ -1265,6 +1561,102 @@ async def update_lot(
 
     await db.refresh(updated)
     response = _lot_to_read(updated)
+    await db.commit()
+    return response
+
+
+def _require_admin(user) -> None:
+    """Release state is a release decision, not an operator one (client 2026-08-17).
+
+    ``inventory:sign`` is not enough on its own — an operator holds it, and the
+    whole point of STS-002 is that the person who made the batch does not
+    thereby release it. Deciding a release is a job someone does, not a role in
+    this system (client 2026-08-17),
+    so the gate is the two admin roles rather than a fifth role.
+    """
+    if getattr(user, "role", None) not in ("admin", "super_admin"):
+        raise AuthorizationError(
+            "Only an admin or super admin can change a lot's release state",
+            code="permission_denied",
+            details={"required_role": "admin"},
+        )
+
+
+@lots_router.post(
+    "/{lot_id}/release-state",
+    response_model=LotRead,
+    summary="Set a lot's release state (e-signed; admin only)",
+    # ``sign`` is the baseline; ``_require_admin`` below narrows it further.
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def set_lot_release_state(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    lot_id: Annotated[uuid.UUID, Path()],
+    payload: LotReleaseStateUpdate,
+) -> LotRead:
+    """Move a batch between quarantine / QC hold / released / rejected.
+
+    Every transition is legal, including out of ``rejected`` (client
+    2026-08-17): no state is terminal, because a reversal is a normal signed
+    decision and the append-only audit trail is what makes it defensible. The
+    only thing rejected here is a no-op — signing a change that changes nothing
+    would put a meaningless attestation in the record.
+
+    The change is a pure label. It does not block transfers, issues, kitting or
+    shipment, and it touches no LN2 behaviour (STS-003).
+    """
+    _require_admin(current)
+
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+
+    lot = await inv_repo.get_lot(db, lot_id)
+    if lot is None or lot.deleted_at is not None:
+        raise NotFoundError(f"Lot {lot_id} not found")
+
+    if lot.release_state == payload.release_state:
+        raise ValidationError(
+            f"This lot is already {payload.release_state}",
+            code="release_state_unchanged",
+        )
+
+    before = inv_repo.lot_to_audit_snapshot(lot)
+    lot.release_state = payload.release_state
+    lot.updated_by_user_id = current.id
+    await db.flush()
+    after = inv_repo.lot_to_audit_snapshot(lot)
+
+    # STS-002's record: who, when, from → to, and the signature that backs it.
+    # ``audit.audit_events`` is append-only by trigger, which is why this needs
+    # no table of its own (same call ROL-009 made for role grants).
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.lots",
+        subject_id=lot.id,
+        subject_label=lot.lot_number,
+        before=before,
+        after=after,
+        context={"reason": payload.reason},
+        signature_id=evidence_uuid,
+    )
+
+    # Consumed last, so a replayed or expired ticket rolls back the state change
+    # and its audit row together.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="lot.release_state",
+        target_table="app.lots",
+        target_id=lot.id,
+        record_table="app.lots",
+        record_id=lot.id,
+    )
+
+    await db.refresh(lot)
+    response = _lot_to_read(lot)
     await db.commit()
     return response
 
@@ -1366,6 +1758,31 @@ async def list_movements(
     )
 
 
+@movements_router.get(
+    "/{movement_id}",
+    response_model=MovementRead,
+    summary="One stock movement by id",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def get_movement(
+    db: DBSession,
+    movement_id: Annotated[uuid.UUID, Path()],
+) -> MovementRead:
+    """Backs the audit viewer's movement detail sheet.
+
+    The timeline lists a movement as a summary row; opening it fetches the full
+    ledger entry here. Previously the viewer kept every fetched movement in a
+    client-side map to avoid this call — which only worked because it was
+    over-fetching the whole ledger, and that is exactly what server-side paging
+    removes.
+    """
+    movement = await inv_repo.get_movement(db, movement_id)
+    if movement is None:
+        raise NotFoundError(f"Movement {movement_id} not found")
+    labels = await loc_repo.node_label_map(db)
+    return _movement_to_read(movement, labels)
+
+
 @items_router.get(
     "/{item_id}/ledger",
     response_model=MovementListResponse,
@@ -1430,6 +1847,9 @@ def _order_to_read(
     total_received = 0
     for line in txn.lines:
         recd = received.get(line.id, 0)
+        # All three in ORDER units, so this subtraction is like-for-like and
+        # needs no conversion — that is the whole reason the received quantity
+        # is captured in packs (REQ-001).
         outstanding = max(0, line.ordered_qty - recd)
         total_ordered += line.ordered_qty
         total_received += recd
@@ -1446,6 +1866,17 @@ def _order_to_read(
                 unit_price_amount=line.unit_price_amount,
                 received_qty=recd,
                 outstanding_qty=outstanding,
+                pack_uom=line.pack_uom,
+                units_per_pack=line.units_per_pack,
+                # Served rather than left to the client so the multiplication
+                # exists in one language, not two. Note these are 0 only when
+                # the line itself is 0 — an unpacked line converts 1:1.
+                ordered_units=inv_repo.packs_to_units(
+                    line.ordered_qty, line.units_per_pack
+                ),
+                outstanding_units=inv_repo.packs_to_units(
+                    outstanding, line.units_per_pack
+                ),
             )
         )
 
@@ -1459,6 +1890,15 @@ def _order_to_read(
                 over_receipt_reason=el.over_receipt_reason,
                 lot_id=str(el.lot_id),
                 lot_number=el.lot.lot_number if el.lot else None,
+                # All off the eager-joined lot — no extra queries. ``ordered_qty``
+                # on a lot is the CONSUME units this draw placed (REQ-001), which
+                # is the figure a receiving log has to show: "+148" is Cases,
+                # and 148 Cases of 25 is 3,700 units.
+                units_received=el.lot.ordered_qty if el.lot else None,
+                manufacture_date=el.lot.manufacture_date if el.lot else None,
+                expiration_date=el.lot.expiration_date if el.lot else None,
+                unit_price_amount=el.lot.unit_price_amount if el.lot else None,
+                release_state=el.lot.release_state if el.lot else None,  # type: ignore[arg-type]
             )
             for el in ev.lines
         ]
@@ -1588,6 +2028,13 @@ async def _build_order_lines(
 ) -> list:
     """Resolve item + per-line supplier and insert the Order's lines (1-based
     ``line_no`` in payload order). Used by create + edit.
+
+    The line's pack (REQ-001) comes from the payload and nowhere else — there
+    is no item-level default to inherit, because a pack is a fact about a
+    purchase rather than about the material. Omitting it orders in the item's
+    consume unit, which is how every line behaved before REQ-001. Once written
+    the line owns it, so a supplier changing from Box/100 to Case/500 next year
+    cannot rewrite what this order says it bought.
     """
     created = []
     for idx, line in enumerate(lines_input, start=1):
@@ -1598,6 +2045,19 @@ async def _build_order_lines(
         supplier = await _resolve_item_supplier(
             db, item_id=item_uuid, supplier_id=line.supplier_id
         )
+        pack_uom = line.pack_uom
+        units_per_pack = line.units_per_pack
+        # A line ordered in packs is multiplied out at receive; guard the
+        # product here, at the edge, rather than letting a plausible-looking
+        # 20,000 Box × 500 reach the ledger as ten million units.
+        if units_per_pack is not None:
+            total_units = line.ordered_qty * units_per_pack
+            if total_units > MAX_QTY:
+                raise ValidationError(
+                    f"{line.ordered_qty} × {units_per_pack} is {total_units} "
+                    f"units, above the {MAX_QTY} limit for a single line",
+                    code="ordered_units_exceeds_max",
+                )
         row = await inv_repo.add_order_line(
             db,
             txn_id=txn_id,
@@ -1606,6 +2066,8 @@ async def _build_order_lines(
             supplier_id=supplier.id,
             ordered_qty=line.ordered_qty,
             unit_price_amount=line.unit_price,
+            pack_uom=pack_uom,
+            units_per_pack=units_per_pack,
         )
         await record_entity_change(
             db,
@@ -1613,7 +2075,11 @@ async def _build_order_lines(
             action="created",
             subject_table="app.receipt_transaction_lines",
             subject_id=row.id,
-            subject_label=f"{item.item_number} × {line.ordered_qty}",
+            subject_label=(
+                f"{item.item_number} × {line.ordered_qty} {pack_uom}"
+                if pack_uom
+                else f"{item.item_number} × {line.ordered_qty}"
+            ),
             before=None,
             after=inv_repo.order_line_to_audit_snapshot(row),
             context={"receipt_transaction_id": str(txn_id)},
@@ -1963,17 +2429,23 @@ async def _place_received_lot(
     db: DBSession,
     *,
     lot: Lot,
-    qty_received: int,
+    qty_units: int,
     placement: ReceivePlacement,
     evidence_uuid: uuid.UUID,
     user_id: uuid.UUID,
 ) -> None:
     """Unit-IN the freshly-received lot into its chosen destination.
 
-    Single destination, exactly ``qty_received`` units — one box (N distinct
+    Single destination, exactly ``qty_units`` units — one box (N distinct
     empty cells) or one free leaf (freezer sub-location / warehouse shelf, N
     units). Writes the allocations + a single ``+N`` receipt movement under the
     receive's e-signature (``evidence_uuid``). Caller commits.
+
+    ``qty_units`` is in CONSUME units and is **not** the quantity the receiver
+    typed: 3 Box of 100 arrives here as 300, and an LN2 box therefore needs 300
+    free cells, not 3. The parameter was renamed from ``qty_received`` when
+    REQ-001 landed precisely because the two numbers stopped being the same and
+    the old name invited the caller to pass the wrong one.
     """
     node_uuid = _parse_uuid_or_422(placement.node_id, field="node_id")
     node = await loc_repo.get_node(db, node_uuid)
@@ -1990,9 +2462,9 @@ async def _place_received_lot(
 
     if is_grid_node(node.node_type):
         cells = placement.cells
-        if len(cells) != qty_received:
+        if len(cells) != qty_units:
             raise ValidationError(
-                f"Select exactly {qty_received} cell(s) for the received quantity "
+                f"Select exactly {qty_units} cell(s) for the received quantity "
                 f"(got {len(cells)})",
                 code="placement_qty_mismatch",
             )
@@ -2033,7 +2505,7 @@ async def _place_received_lot(
             db,
             lot_id=lot.id,
             location_node_id=node.id,
-            qty=Decimal(qty_received),
+            qty=Decimal(qty_units),
             created_by_user_id=user_id,
         )
 
@@ -2043,7 +2515,7 @@ async def _place_received_lot(
         item_id=lot.item_id,
         lot_id=lot.id,
         to_location_node_id=node.id,
-        qty=Decimal(qty_received),
+        qty=Decimal(qty_units),
         performed_by_user_id=user_id,
         reauth_evidence_id=evidence_uuid,
     )
@@ -2110,24 +2582,114 @@ async def receive_order(
             )
         seen_lines.add(line_uuid)
 
+        # ── Resolve the pack, then convert once (REQ-001) ──────────────
+        # ``qty_received`` is in ORDER units. Everything from the lot onward is
+        # in CONSUME units. This block is the entire boundary between the two.
+        #
+        # The receiver may set or correct the pack here, not just supply a
+        # missing one: the PO is a plan, and what turned up on the dock is the
+        # fact. A line raised as a plain count can become "3 Box of 100" at the
+        # moment somebody is holding the boxes, which is the only point anyone
+        # actually knows. Whatever is used is written back to the line so the
+        # order, its audit trail and every later read agree.
+        # Omitted vs. explicitly null are different answers here, and both
+        # arrive as ``None``: omitted means "keep whatever the line has", null
+        # means "this line has no pack", which is the only way to clear one at
+        # receipt. ``model_fields_set`` is what tells them apart.
+        sent = line_in.model_fields_set
+        pack_uom = line_in.pack_uom if "pack_uom" in sent else line.pack_uom
+        units_per_pack = (
+            line_in.units_per_pack
+            if "units_per_pack" in sent
+            else line.units_per_pack
+        )
+        if pack_uom is not None:
+            pack_uom = pack_uom.strip() or None
+        if pack_uom is None:
+            if units_per_pack is not None:
+                raise ValidationError(
+                    f"Line {line_in.line_id}: a pack size needs an order unit "
+                    "(e.g. Box) to be a size of.",
+                    code="pack_factor_without_unit",
+                )
+        elif units_per_pack is None:
+            raise ValidationError(
+                f"Line {line_in.line_id} is ordered in {pack_uom} without a pack "
+                f"size. Enter how many units are in one {pack_uom}.",
+                code="units_per_pack_required",
+            )
+        if (pack_uom, units_per_pack) != (line.pack_uom, line.units_per_pack):
+            # Changing the pack re-labels the line's own totals, which are
+            # reported in packs; the units already placed by earlier draws keep
+            # whatever factor was in force when they landed, since each lot
+            # stored its own resolved quantity.
+            line.pack_uom = pack_uom
+            line.units_per_pack = units_per_pack
+
+        qty_units = inv_repo.packs_to_units(line_in.qty_received, units_per_pack)
+        if qty_units > MAX_QTY:
+            raise ValidationError(
+                f"{line_in.qty_received} × {units_per_pack} is {qty_units} "
+                f"units, above the {MAX_QTY} limit for a single receipt",
+                code="received_units_exceeds_max",
+            )
+        # Per CONSUME unit, because the inventory valuation multiplies the lot
+        # price by movement quantities, which are in consume units. The price
+        # the operator typed is per pack, like the order line's.
+        pack_price = (
+            line_in.unit_price_amount
+            if line_in.unit_price_amount is not None
+            else line.unit_price_amount
+        )
+        unit_price = (
+            pack_price / units_per_pack
+            if pack_price is not None and units_per_pack
+            else pack_price
+        )
+
         # Over-receipt (qty > the line's outstanding) is allowed with no reason.
 
+        # ── Lot number: always optional (REQ-003) ─────────────────────
+        # The client confirmed 2026-08-21 that ANY item may be received without
+        # one, so there is no per-item rule to consult and no case where this
+        # raises for a missing value. What a lot number is *not* allowed to be
+        # is the system's own prefix.
+        lot_number = line_in.lot_number
+        if inv_repo.uses_reserved_lot_prefix(lot_number):
+            # The AUTO- prefix is how every later reader tells a machine-made
+            # number from a vendor's. Letting a human type one would make that
+            # signal meaningless, so it is refused at the only door that writes
+            # lot numbers on receipt.
+            raise ValidationError(
+                f"'{lot_number}' uses the reserved "
+                f"'{inv_repo.SYNTHETIC_LOT_PREFIX}' prefix, which is generated "
+                "by the system. Enter the supplier's lot number, or leave it "
+                "blank to have one generated.",
+                code="reserved_lot_prefix",
+            )
+        if lot_number is None:
+            # Synthesized inside the same transaction, so it lands in the
+            # duplicate checks below exactly like a typed one.
+            lot_number = await inv_repo.next_synthetic_lot_number(
+                db, item_id=line.item_id, received_on=payload.received_at
+            )
+
         # Lot number is unique per item (within this request + against the DB).
-        lot_key = (line.item_id, line_in.lot_number.strip().lower())
+        lot_key = (line.item_id, lot_number.strip().lower())
         if lot_key in seen_lot_numbers:
             raise ValidationError(
-                f"Duplicate lot_number '{line_in.lot_number}' for the same item "
+                f"Duplicate lot_number '{lot_number}' for the same item "
                 "in this receive",
                 code="duplicate_lot_number_in_request",
             )
         seen_lot_numbers.add(lot_key)
         if (
             await inv_repo.get_lot_by_item_and_number(
-                db, item_id=line.item_id, lot_number=line_in.lot_number
+                db, item_id=line.item_id, lot_number=lot_number
             )
         ) is not None:
             raise ConflictError(
-                f"lot_number '{line_in.lot_number}' already exists for this item",
+                f"lot_number '{lot_number}' already exists for this item",
                 code="lot_number_conflict",
             )
 
@@ -2135,20 +2697,32 @@ async def receive_order(
             lot = await inv_repo.create_lot(
                 db,
                 item_id=line.item_id,
-                lot_number=line_in.lot_number,
+                # The resolved number — typed, or synthesized above.
+                lot_number=lot_number,
                 created_by_user_id=current.id,
                 supplier_id=line.supplier_id,
                 manufacture_date=line_in.manufacture_date,
                 expiration_date=line_in.expiration_date,
                 status="available",
-                unit_price_amount=(
-                    line_in.unit_price_amount
-                    if line_in.unit_price_amount is not None
-                    else line.unit_price_amount
-                ),
+                # ── Arrival, not acceptance (REQ-004) ─────────────────
+                # The material is in the building; nobody has said it may be
+                # used. It leaves quarantine at the receive-to-inventory step,
+                # which is the same action that places it.
+                #
+                # This does NOT make ``release_state`` a gate — STS-003's "the
+                # state is a label, a quarantined lot still transfers" stands
+                # untouched. A lot that has just arrived is unusable because it
+                # has no allocations, not because of its label: every picker in
+                # the system (transfer, kitting, issue, shipment) reads
+                # ``lot_allocations``, so unplaced material is simply not there
+                # to choose. Placement is the control; the label is the record.
+                release_state="quarantine",
+                # Per consume unit — see the derivation above.
+                unit_price_amount=unit_price,
                 po_reference=txn.po_reference,
-                # Lot holds the units that arrived in this draw (caps placement).
-                ordered_qty=line_in.qty_received,
+                # Lot holds the units that arrived in this draw (caps placement),
+                # in CONSUME units: 3 Box received stores 300 here.
+                ordered_qty=qty_units,
                 receipt_transaction_id=txn.id,
                 receipt_transaction_line_id=line.id,
             )
@@ -2156,8 +2730,18 @@ async def receive_order(
             await db.rollback()
             msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
             if "uq_lots_item_lot_number" in msg:
+                # A synthesized number can land here when two receivers book the
+                # same non-lot item in the same instant: the sequence is counted,
+                # not reserved, so the index is what actually decides. The
+                # operator retries and gets the next number.
                 raise ConflictError(
-                    f"lot_number '{line_in.lot_number}' already exists for this item",
+                    f"lot_number '{lot_number}' already exists for this item"
+                    + (
+                        " — a generated number collided with a concurrent "
+                        "receipt. Please submit again."
+                        if inv_repo.is_synthetic_lot_number(lot_number)
+                        else ""
+                    ),
                     code="lot_number_conflict",
                 ) from exc
             if "ck_lots_dates_ordered" in msg:
@@ -2171,20 +2755,16 @@ async def receive_order(
             db,
             event_id=event.id,
             line_id=line.id,
+            # ORDER units — this is the figure outstanding is measured against.
             qty_received=line_in.qty_received,
             lot_id=lot.id,
             over_receipt_reason=None,
         )
-        # Unit-IN the received units into their chosen destination, under this
-        # same receive signature (atomic; unit-in happens only here).
-        await _place_received_lot(
-            db,
-            lot=lot,
-            qty_received=line_in.qty_received,
-            placement=line_in.placement,
-            evidence_uuid=evidence_uuid,
-            user_id=current.id,
-        )
+        # Nothing is placed here (REQ-004). No allocation, no stock movement,
+        # so the material is not on hand and does not appear in the Unit Ledger
+        # — both are derived from ``app.stock_movements``, so deferring the
+        # movement excludes it from both without a flag to keep in sync.
+        # Placement happens at receive-to-inventory; see ``receive_lot_to_inventory``.
         await record_entity_change(
             db,
             actor_user_id=current.id,

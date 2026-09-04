@@ -30,13 +30,17 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { EmptyState } from '@/components/shared/empty-state';
+import { CustomerLink } from '@/components/customers/customer-link';
 import { LotLink } from '@/components/inventory/lot-link';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import type { ApiItemKitConsumption } from '@/lib/api/kits';
 import type { LedgerEntry } from '@/types/inventory';
 import type { BadgeTone } from '@/types/ui';
+import type { MovementType } from '@/lib/api/movements';
 import { expiryStatus } from '@/lib/inventory-helpers';
-import { cn, daysFromNow } from '@/lib/utils';
+import { cn, daysFromNow, formatMoney } from '@/lib/utils';
+import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
+import { RELEASE_STATE_OPTIONS, type LotReleaseState } from '@/lib/api/lots';
 
 interface LotGroup {
   lot: string;
@@ -55,6 +59,15 @@ interface LotGroup {
   exp: string | null;
   /** ``daysFromNow(exp)`` for the representative date; ``null`` if no date. */
   expDays: number | null;
+  /** The lot's CURRENT release state. A property of the batch, which is why it
+   *  belongs on the group and not on the rows — the rows are past events. */
+  releaseState: LotReleaseState | null;
+  /** The lot's CURRENT per-unit price (RPT-003), on the group for exactly the
+   *  same reason as `releaseState`. `null` = no price recorded, never zero. */
+  unitPrice: string | null;
+  /** `balance × unitPrice` — what this lot's remaining units are worth.
+   *  `null` when the lot has no price: unknown, not free. */
+  balanceValue: number | null;
 }
 
 /** Tri-state expiry sort: off → soonest-first → latest-first → off. */
@@ -67,7 +80,13 @@ type SortDir = 'asc' | 'desc' | null;
  * raw material's ledger reads better with it too — and it replaces the
  * "Transfer" badge that used to be crammed into the Location column.
  */
-const TXN_LABEL: Record<string, { label: string; tone: BadgeTone }> = {
+/// Keyed by ``MovementType``, not ``string``. It was ``string`` until a
+/// ``consumable_issue`` row rendered a bare "—" in a real ledger: the three
+/// sibling maps in ``lib/api/movements.ts`` and the audit views are all keyed
+/// by the union and failed to compile when the type was added, while this one
+/// silently fell through to the no-label branch. Typing it makes the next
+/// omission a build error instead of a blank cell.
+const TXN_LABEL: Record<MovementType, { label: string; tone: BadgeTone }> = {
   production_output: { label: 'Made', tone: 'success' },
   kit_issue: { label: 'Kitted', tone: 'danger' },
   kit_additional_issue: { label: 'Kitted +', tone: 'danger' },
@@ -83,10 +102,19 @@ const TXN_LABEL: Record<string, { label: string; tone: BadgeTone }> = {
   transfer_out: { label: 'Transfer out', tone: 'neutral' },
   // Terminal customer shipment (CUST-001) — the finished good leaves inventory.
   customer_shipment: { label: 'Shipped', tone: 'danger' },
+  // Consumable issued to a Kanban (TRX-003). Terminal for quantity like a kit
+  // issue, so it carries the same "stock left" tone.
+  consumable_issue: { label: 'Issued', tone: 'danger' },
+  // Debit-and-gone to PD / R&D / QC (TRX-001/002). Labelled "Issued out" rather
+  // than "Issued" so it reads apart from the Kanban issue above it — in a ledger
+  // the two would otherwise be one word covering two transactions.
+  material_issue: { label: 'Issued out', tone: 'danger' },
 };
 
 function TransactionCell({ entry }: { entry: LedgerEntry }) {
-  const meta = entry.movementType ? TXN_LABEL[entry.movementType] : undefined;
+  const meta = entry.movementType
+    ? TXN_LABEL[entry.movementType as MovementType]
+    : undefined;
   if (!meta) return <span className="text-xs text-text-3">—</span>;
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -109,6 +137,9 @@ function TransactionCell({ entry }: { entry: LedgerEntry }) {
 
 /** Expiry-status filter; ``all`` disables it. */
 type StatusFilter = 'all' | 'expired' | 'near' | 'ok';
+/** Release-state narrowing. A separate axis from expiry — a lot can be near
+ *  expiry AND quarantined, and the two filters compose. */
+type ReleaseFilter = LotReleaseState | 'all';
 
 const STATUS_LABEL: Record<Exclude<StatusFilter, 'all'>, string> = {
   expired: 'Expired',
@@ -150,15 +181,25 @@ function groupByLot(entries: LedgerEntry[]): LotGroup[] {
         exp = e.exp;
       }
     }
+    const balance = totalIn - totalOut;
+    // A lot has ONE price, so the first row carrying it speaks for the group.
+    // `?? null` rather than a truthiness check: "0.000000" is a real price (the
+    // customer-owned cells arrive on a $0 PO) and would be skipped by `find`
+    // on a falsy test, silently turning free into unknown.
+    const priced = rows.find((e) => e.lotUnitPrice != null);
+    const unitPrice = priced?.lotUnitPrice ?? null;
     return {
       lot,
       lotId: rows.find((e) => e.lotId)?.lotId ?? null,
       rows,
       totalIn,
       totalOut,
-      balance: totalIn - totalOut,
+      balance,
       exp,
       expDays,
+      releaseState: rows.find((e) => e.lotReleaseState)?.lotReleaseState ?? null,
+      unitPrice,
+      balanceValue: unitPrice === null ? null : Number(unitPrice) * balance,
     };
   });
 }
@@ -235,19 +276,43 @@ export function useLedgerExpiryControls(
   const [sortDir, setSortDir] = React.useState<SortDir>(null);
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('all');
   const [withinInput, setWithinInput] = React.useState('');
+  const [releaseFilter, setReleaseFilter] = React.useState<ReleaseFilter>('all');
 
   const allGroups = React.useMemo(() => groupByLot(entries), [entries]);
   const within = parseWithin(withinInput);
   const groups = React.useMemo(
-    () =>
-      sortGroups(
-        filterGroups(allGroups, statusFilter, within, nearExpiryThresholdDays),
-        sortDir,
-      ),
-    [allGroups, statusFilter, within, nearExpiryThresholdDays, sortDir],
+    () => {
+      const byExpiry = filterGroups(
+        allGroups,
+        statusFilter,
+        within,
+        nearExpiryThresholdDays,
+      );
+      // Narrowing by release state drops untracked lots outright — unlike the
+      // expiry filters, which keep a lot that simply has no date. Asking for
+      // "quarantine" is asking about release-tracked stock specifically, and a
+      // consumable has no answer to give.
+      const byRelease =
+        releaseFilter === 'all'
+          ? byExpiry
+          : byExpiry.filter((g) => g.releaseState === releaseFilter);
+      return sortGroups(byRelease, sortDir);
+    },
+    [allGroups, statusFilter, within, nearExpiryThresholdDays, releaseFilter, sortDir],
   );
 
-  const filtersActive = statusFilter !== 'all' || withinInput.trim() !== '';
+  // Which states the visible lots actually carry, so the dropdown never offers
+  // a state this item has never been in.
+  const presentReleaseStates = React.useMemo(
+    () =>
+      RELEASE_STATE_OPTIONS.filter((o) =>
+        allGroups.some((g) => g.releaseState === o.code),
+      ),
+    [allGroups],
+  );
+
+  const filtersActive =
+    statusFilter !== 'all' || withinInput.trim() !== '' || releaseFilter !== 'all';
   const cycleSort = React.useCallback(
     () => setSortDir((d) => (d === null ? 'asc' : d === 'asc' ? 'desc' : null)),
     [],
@@ -255,6 +320,7 @@ export function useLedgerExpiryControls(
   const resetFilters = React.useCallback(() => {
     setStatusFilter('all');
     setWithinInput('');
+    setReleaseFilter('all');
   }, []);
 
   return {
@@ -267,6 +333,9 @@ export function useLedgerExpiryControls(
     setStatusFilter,
     withinInput,
     setWithinInput,
+    releaseFilter,
+    setReleaseFilter,
+    presentReleaseStates,
     filtersActive,
     resetFilters,
   };
@@ -284,6 +353,9 @@ export function LedgerExpiryToolbar({
   setStatusFilter,
   withinInput,
   setWithinInput,
+  releaseFilter,
+  setReleaseFilter,
+  presentReleaseStates,
   filtersActive,
   resetFilters,
   visibleLots,
@@ -294,6 +366,9 @@ export function LedgerExpiryToolbar({
   | 'setStatusFilter'
   | 'withinInput'
   | 'setWithinInput'
+  | 'releaseFilter'
+  | 'setReleaseFilter'
+  | 'presentReleaseStates'
   | 'filtersActive'
   | 'resetFilters'
   | 'visibleLots'
@@ -315,6 +390,30 @@ export function LedgerExpiryToolbar({
           <SelectItem value="ok">OK</SelectItem>
         </SelectContent>
       </Select>
+
+      {/* Only for items that actually have release-tracked stock. On a
+          consumable the control would have nothing but "All" in it. */}
+      {presentReleaseStates.length > 0 && (
+        <Select
+          value={releaseFilter}
+          onValueChange={(v) => setReleaseFilter(v as ReleaseFilter)}
+        >
+          <SelectTrigger
+            className="w-[170px] [&>span]:min-w-0 [&>span]:truncate"
+            aria-label="Filter by quality status"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All quality statuses</SelectItem>
+            {presentReleaseStates.map((o) => (
+              <SelectItem key={o.code} value={o.code}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
 
       <Input
         type="number"
@@ -362,8 +461,9 @@ interface Props {
    * who lack the ``inventory:sign`` permission.
    */
   onReverseRequest?: (entry: LedgerEntry) => void;
-  /** Show the Customer column. Only built items (finished goods / sub-assemblies)
-   *  can ship to a customer, so raw materials omit it (it would always be —). */
+  /** Show the Customer column. Every tracked tier can ship to a customer
+   *  (TRX-001), so this is on for raw materials as well as built items; only a
+   *  consumable omits it, being consumed on issue and never shipped. */
   showCustomer?: boolean;
   /**
    * Per-kit reconciliation for this item — issued / used / returned.
@@ -448,8 +548,16 @@ export function LedgerTable({
   const grandIn = groups.reduce((s, g) => s + g.totalIn, 0);
   const grandOut = groups.reduce((s, g) => s + g.totalOut, 0);
   const grandBalance = grandIn - grandOut;
-  // Date, Transaction, In, Out, Balance, Location, [Customer], Lot, Expiry, By (+ actions)
-  const cols = 9 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0);
+  // Total value across the visible lots (RPT-003). Unpriced lots contribute
+  // NOTHING rather than zero, and `grandUnpriced` counts them so the figure can
+  // say it is partial — a total that silently omits half the stock while
+  // looking complete is the failure mode the finance export exists to avoid.
+  const pricedGroups = groups.filter((g) => g.balanceValue !== null);
+  const grandUnpriced = groups.length - pricedGroups.length;
+  const grandValue = pricedGroups.reduce((s, g) => s + (g.balanceValue ?? 0), 0);
+  // Date, Transaction, In, Out, Balance, Unit cost, Value, Location,
+  // [Customer], Lot, Expiry, By (+ actions)
+  const cols = 11 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0);
 
   const SortIcon = sortDir === 'asc' ? ArrowUp : sortDir === 'desc' ? ArrowDown : ChevronsUpDown;
   const sortAria = sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none';
@@ -471,6 +579,12 @@ export function LedgerTable({
           <TableHead className="w-[90px] text-right">Units In</TableHead>
           <TableHead className="w-[90px] text-right">Units Out</TableHead>
           <TableHead className="w-[100px] text-right">Balance</TableHead>
+          {/* Cost (RPT-003). Both are LOT facts, so they are populated on the
+              per-lot subtotal and the item total only — never against a
+              movement row, for the same reason the quality status isn't:
+              a movement is a past event and this is the price now. */}
+          <TableHead className="w-[100px] text-right">Unit cost</TableHead>
+          <TableHead className="w-[110px] text-right">Value</TableHead>
           <TableHead className="w-[160px]">Location</TableHead>
           {showCustomer && <TableHead className="w-[150px]">Customer</TableHead>}
           <TableHead className="w-[140px]">Lot</TableHead>
@@ -547,10 +661,15 @@ export function LedgerTable({
                   </TableCell>
                   {/* Per-row balance lives on the lot Total row, like the workbook. */}
                   <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
+                  {/* Cost is a lot fact and a PRESENT one; pricing a past
+                      movement with today's price would invent history. Both
+                      cells are filled on the lot subtotal below. */}
+                  <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
+                  <TableCell className="text-right font-mono text-xs text-text-3">—</TableCell>
                   {/* The storage location the movement touched. For a shipment
                       that's the source the finished good left from. */}
                   <TableCell className="text-xs text-text-2">
-                    <LocationLink
+                    <LocationPath
                       nodeId={e.locationId}
                       name={e.location}
                       path={e.locationPath}
@@ -562,17 +681,25 @@ export function LedgerTable({
                       className="block truncate"
                     />
                   </TableCell>
-                  {/* Customer — the named recipient a shipment left inventory to
-                      (CUST-001). Shown only for built items (raw materials never
-                      ship). Only shipments populate it; other rows are —. */}
+                  {/* Customer — the named recipient a shipment left inventory
+                      to (CUST-001). Only a shipment populates it; every other
+                      movement stays inside the building, so those rows are —. */}
                   {showCustomer && (
                     <TableCell className="text-xs text-text-2">
                       {e.movementType === 'customer_shipment' ? (
-                        <span
-                          className="block truncate"
-                          title={e.referenceNumber ? `Ref ${e.referenceNumber}` : undefined}
-                        >
-                          {e.customerName ?? (
+                        <span className="block truncate">
+                          {e.customerName ? (
+                            // Links to that customer's shipping history — the
+                            // same move the Lot and Location columns beside it
+                            // already make. Falls back to plain text when the
+                            // row names a customer the master data no longer
+                            // has; see CustomerLink.
+                            <CustomerLink
+                              customerName={e.customerName}
+                              customerId={e.customerId}
+                              className="block"
+                            />
+                          ) : (
                             <span className="italic text-text-3">Catalog (no customer)</span>
                           )}
                         </span>
@@ -630,7 +757,7 @@ export function LedgerTable({
                   <TableRow className="border-none bg-surface/50 hover:bg-surface/50">
                     <TableCell />
                     <TableCell
-                      colSpan={9 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0)}
+                      colSpan={11 + (showCustomer ? 1 : 0) + (showActions ? 1 : 0)}
                       className="py-1.5 text-[11px] text-text-3"
                     >
                       <span
@@ -667,10 +794,36 @@ export function LedgerTable({
                 {group.totalOut}
               </TableCell>
               <TableCell className="text-right font-mono text-xs">{group.balance}</TableCell>
+              {/* The lot's price and what its remaining units are worth
+                  (RPT-003). An em dash means no price recorded — NOT free.
+                  A kit-produced lot from before kitcost01 reads blank here,
+                  while customer-owned cells on a $0 PO read $0.00. */}
+              <TableCell className="text-right font-mono text-xs text-text-2">
+                {formatMoney(group.unitPrice)}
+              </TableCell>
+              <TableCell className="text-right font-mono text-xs">
+                {group.balanceValue === null ? (
+                  <span
+                    className="text-text-3"
+                    title="This lot has no price recorded — not the same as free"
+                  >
+                    —
+                  </span>
+                ) : (
+                  formatMoney(String(group.balanceValue))
+                )}
+              </TableCell>
               <TableCell />
               {showCustomer && <TableCell />}
+              {/* The one place a quality status belongs in this table: the
+                  subtotal is about the LOT, not about a moment, so "as it is
+                  now" is the right reading. Deliberately absent from the
+                  movement rows above (client 2026-08-17). */}
               <TableCell className="font-mono text-xs text-text-2">
-                <LotLink lotId={group.lotId} lotNumber={group.lot} />
+                <span className="flex flex-wrap items-center gap-1.5">
+                  <LotLink lotId={group.lotId} lotNumber={group.lot} />
+                  <ReleaseStateBadge state={group.releaseState} size="xs" />
+                </span>
               </TableCell>
               <TableCell />
               <TableCell />
@@ -701,8 +854,34 @@ export function LedgerTable({
           <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm">
             {grandBalance}
           </TableCell>
-          {/* label + spacer + the three totals = 5 cells already rendered. */}
-          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" colSpan={cols - 5} />
+          {/* No item-level unit cost: lots are priced individually and an
+              average across them would be a number nobody asked for. */}
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" />
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft text-right font-mono text-sm">
+            {pricedGroups.length === 0 ? (
+              <span
+                className="font-normal text-text-3"
+                title="No lot here has a price recorded"
+              >
+                —
+              </span>
+            ) : (
+              <span
+                title={
+                  grandUnpriced > 0
+                    ? `Excludes ${grandUnpriced} lot(s) with no price recorded`
+                    : undefined
+                }
+              >
+                {formatMoney(String(grandValue))}
+                {grandUnpriced > 0 && (
+                  <span className="ml-1 font-normal text-warning">*</span>
+                )}
+              </span>
+            )}
+          </TableCell>
+          {/* label + spacer + in/out/balance + unit cost + value = 7 rendered. */}
+          <TableCell className="sticky bottom-0 z-10 bg-accent-soft" colSpan={cols - 7} />
         </TableRow>
       </TableBody>
     </Table>

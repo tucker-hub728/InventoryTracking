@@ -1,13 +1,28 @@
 import type { BadgeTone } from '@/types/ui';
 import type { InventoryStatus } from '@/types/inventory';
 
+/**
+ * Status → colour. The ONE place a stock status gets a tone.
+ *
+ * The order below is a severity ladder, and it has to stay one: green is fine,
+ * amber is a warning, red is a stop. Anything that renders a status reads from
+ * here rather than choosing its own tone — an item cannot be grey on one screen
+ * and red on another, which is exactly what happened when the reorder screen
+ * picked its own colours (fixed 2026-08-24, client-reported).
+ *
+ * "Out of stock" was ``neutral`` (grey) until then. Grey put it BELOW "Low
+ * stock" on the ladder — an empty shelf reading as calmer than a thin one,
+ * which is backwards: low stock still lets you work, zero does not. It is
+ * ``danger`` now, the same tone as Expired and Quarantine, which are the other
+ * two states that stop you using the material.
+ */
 export const INVENTORY_STATUS_TONE: Record<InventoryStatus, BadgeTone> = {
   Available: 'success',
   'Low stock': 'warning',
   Expiring: 'warning',
   Quarantine: 'danger',
   Expired: 'danger',
-  'Out of stock': 'neutral',
+  'Out of stock': 'danger',
 };
 
 export const INVENTORY_STATUSES: readonly InventoryStatus[] = [
@@ -39,6 +54,23 @@ export const STOCK_STATUS_META: Record<
   low_stock: { label: 'Low stock', tone: INVENTORY_STATUS_TONE['Low stock'] },
   out_of_stock: { label: 'Out of stock', tone: INVENTORY_STATUS_TONE['Out of stock'] },
 };
+
+/**
+ * "Awaiting release" — arrived but not yet shelved (REQ-004).
+ *
+ * Lives here with the other statuses so all status presentation is in one file,
+ * but is deliberately NOT a member of ``InventoryStatus``: that union doubles as
+ * the filter enum (``INVENTORY_STATUSES``), and this is not a backend
+ * ``status_code`` you can filter on — it is a UI state layered on top of one.
+ *
+ * ``accent`` rather than a warning tone on purpose: material arriving and
+ * waiting to be received to inventory is the ordinary path, and colouring the ordinary path
+ * amber teaches people to ignore amber.
+ */
+export const AWAITING_RELEASE_META = {
+  label: 'Awaiting release',
+  tone: 'accent',
+} as const satisfies { label: string; tone: BadgeTone };
 
 export const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 export const DEFAULT_PAGE_SIZE = 25;

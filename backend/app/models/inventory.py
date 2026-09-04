@@ -27,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, JSONB, UUID
+from sqlalchemy.dialects.postgresql import CITEXT, ENUM, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -41,6 +41,10 @@ class Supplier(Base):
     __table_args__ = (
         Index("uq_suppliers_name", func.lower(text("name")), unique=True),
         Index("ix_suppliers_active", "is_active"),
+        CheckConstraint(
+            "lead_time_days IS NULL OR (lead_time_days >= 0 AND lead_time_days <= 3650)",
+            name="ck_suppliers_lead_time_days_range",
+        ),
         {"schema": "meta"},
     )
 
@@ -64,6 +68,15 @@ class Supplier(Base):
         server_default=text("TRUE"),
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Days from placing an order with this supplier to the goods arriving
+    # (PLN-001). NULL means "not asked yet" — deliberately NOT 0, which would
+    # read as same-day delivery and suppress the early warning the requirement
+    # exists to give. Planning shows an unknown lead time as unknown.
+    #
+    # This is the supplier-level answer; ``Item.avg_lead_days`` is a separate,
+    # independently-edited number that planning does not read. Migration
+    # ``pln01`` records why the item-level one was not folded into this.
+    lead_time_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -311,6 +324,20 @@ class Item(Base):
             "char_length(trim(sku_suffix)) > 0",
             name="ck_items_sku_suffix_not_blank",
         ),
+        # KIT-003's twin item is the NON-consumable stand-in for a consumable,
+        # so the two flags can never both be true. Enforced here as well as in
+        # the route because the pair decides whether an item may enter a BOM.
+        CheckConstraint(
+            "NOT (is_consumable AND consumed_in_kit)",
+            name="ck_items_consumable_xor_consumed_in_kit",
+        ),
+        # Same shape, same reason: a consumable is banned from bills of material
+        # and so can never be the parent a kit builds, which is the only place
+        # ``variable_yield`` means anything.
+        CheckConstraint(
+            "NOT (is_consumable AND variable_yield)",
+            name="ck_items_consumable_xor_variable_yield",
+        ),
         # The full SKU is derived as ``<prefix code>-<sku_suffix>`` — the number
         # is not stored, it follows the prefix (rename CR→CRX re-labels every
         # item). Uniqueness is therefore per (prefix, suffix); since prefix codes
@@ -339,9 +366,16 @@ class Item(Base):
     # instead of the full number so renaming a prefix re-labels its items.
     sku_suffix: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    # Free-text unit of measure (each, mL, box …). Optional — not every item
-    # carries one, and there is deliberately no controlled UOM list yet.
+    # The CONSUME unit (each, mL …) — REQ-001's "unit of inventory is the unit
+    # of consumption". Free-text; optional — not every item carries one, and
+    # there is deliberately no controlled UOM list yet. Everything downstream of
+    # receiving (stock, issue, transfer, kitting) is counted in this unit.
     uom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # An item has no ORDER unit (REQ-001, migration uom01). The pack — "Box",
+    # 100 — is a fact about a purchase, not about the material: the same glove
+    # comes by the Box from one supplier and by the Case from another, and
+    # either may re-pack next year. So it is captured on the Order line and
+    # confirmed at receive. See ``ReceiptTransactionLine.pack_uom``.
     # Consumables (gloves, pipette tips …) are blind-consumed to manufacturing
     # with no per-lot traceability (REQ-2026-07-01-TRX-003). Default: not a
     # consumable (one-for-one traceable material).
@@ -350,6 +384,54 @@ class Item(Base):
         nullable=False,
         server_default=text("FALSE"),
     )
+    # REQ-2026-07-31-KIT-003 — "consumables such as media are consumed when
+    # replaced and are not back-flushed". Media cannot BE an ``is_consumable``
+    # item, because those are banned from BOMs (``_require_eligible_child``) and
+    # a kit line only ever comes from a BOM. The client's answer (2026-08-31) is
+    # a non-consumable TWIN of the media, carrying its own part number and its
+    # own stock balance, which goes in the BOM like any other component. This
+    # flag is what marks that twin. A kit line for such an item behaves like
+    # any other while the kit is open — same recipe need, same operator entry —
+    # and differs at SIGN-OUT: whatever is still on the floor is poured rather
+    # than handed back, which is what pulls its $/unit into the kit's cost.
+    #
+    # Mutually exclusive with ``is_consumable`` — the twin is by definition the
+    # non-consumable one, and an item that were both would be banned from the
+    # very BOM this flag only means anything inside of.
+    consumed_in_kit: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    # Grown or expressed rather than assembled (client 2026-09-01, varyield01):
+    # "one TREX reactor with 4 media feedings could result in a yield of 200
+    # grams. The next time it is produced it could consume the exact same raw
+    # materials but yield 350 grams." For such an item the recipe does not
+    # predict the output, so kitting's ``used_below_need`` gate — which requires
+    # the material used to cover ``ceil(qty_per_unit × (good + scrap))`` — is a
+    # false constraint that makes the better run unrecordable.
+    #
+    # This flag marks the item the kit BUILDS, not a component: variable yield
+    # is a fact about the process, and the process is named by what is being
+    # grown. Contrast ``consumed_in_kit`` above, which marks a component.
+    # ``kits.variable_yield`` snapshots it at creation.
+    #
+    # It relaxes that ONE recipe-derived gate. The physical ones stay: the
+    # operator must still record what was consumed, and still cannot consume
+    # what is not on the floor. The BOM still decides the components and still
+    # drives the issue quantity — it stops being a floor on output, not the plan.
+    variable_yield: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+    )
+    # No lot-control flag here, deliberately (REQ-003). One was built and then
+    # removed: the client confirmed 2026-08-21 that ANY item may be received
+    # without a lot number, so there is no item for which one is mandatory and
+    # nothing for a per-item flag to decide. A lot number is optional at
+    # receipt for everything; when it is omitted the server synthesizes one,
+    # because ``lots.lot_number`` is NOT NULL and every unit of stock hangs off
+    # a lot. See ``next_synthetic_lot_number`` in the repository.
     # The item's type prefix (REQ-2026-07-09-ITM-001) — mandatory. The tier is
     # derived from it (a prefix lives inside exactly one tier), so there is no
     # separate ``tier_id`` column; the tier's ``type`` still governs BOM
@@ -563,6 +645,30 @@ LOT_STATUSES: tuple[str, ...] = (
     "available",
 )
 
+# Release state (REQ-2026-07-31-STS-001). NOT the same axis as
+# ``LOT_STATUSES`` above, which is procurement — a lot can perfectly well be
+# ``available`` and ``quarantine`` at once, and usually is. A native PG enum
+# ``app.lot_release_state`` (client 2026-08-17), like ``kit_status``.
+#
+# Declaration order is the workflow's reading order: held, under review, then
+# the two decided outcomes. No state is terminal — every transition is legal,
+# including out of ``rejected`` (client 2026-08-17), because a reversal is a
+# normal signed decision and the append-only audit trail is what makes it
+# defensible. There is deliberately no state machine to enforce.
+LOT_RELEASE_STATES: tuple[str, ...] = (
+    "quarantine",
+    "qc_hold",
+    "released",
+    "rejected",
+)
+
+lot_release_state_enum = ENUM(
+    *LOT_RELEASE_STATES,
+    name="lot_release_state",
+    schema="app",
+    create_type=False,
+)
+
 
 class Lot(Base):
     """Manufacturer batch of an item.
@@ -644,13 +750,27 @@ class Lot(Base):
         nullable=False,
         server_default=text("'available'"),
     )
+    # Release state (STS-001). NULL means "no release workflow applies" —
+    # consumables and raw materials never carry one. Only kit output starts with
+    # a value, and only a signed change moves it after that; nothing here
+    # defaults, on purpose (see relstate01).
+    release_state: Mapped[str | None] = mapped_column(
+        lot_release_state_enum,
+        nullable=True,
+    )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ── Receipt Admin v2 (docs/modules/receipt-admin.md §1.4) ──────────
     # The lot is the source of truth for the price paid and the PO it was
     # ordered against.
+    # Per CONSUME unit ($0.95 per Each), derived at receive as the order line's
+    # pack price ÷ units_per_pack. Six decimal places because that division is
+    # rarely exact: $95.00 over a pack of three is $31.666…, and rounding it to
+    # 2dp multiplies back to $95.01 — money invented by the storage type. The
+    # inventory valuation multiplies this by ``stock_movements.qty_delta``,
+    # which is why it must be per consume unit and not per pack.
     unit_price_amount: Mapped[Decimal | None] = mapped_column(
-        Numeric(14, 2),
+        Numeric(14, 6),
         nullable=True,
     )
     po_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -659,6 +779,12 @@ class Lot(Base):
     # quantity across all locations may not exceed ordered_qty. The *received*
     # / on-hand quantity stays ledger-derived (summed from app.stock_movements
     # via app.v_item_stock) — this is NOT that.
+    #
+    # **In CONSUME units** (REQ-001) — for a receipt this is
+    # ``ReceiptEventLine.qty_received × units_per_pack``: 3 Box received stores
+    # 300 here. Placement has always been unit-by-unit, so this column has
+    # always been in consume units; uom01 did not change its meaning, only made
+    # it possible for it to differ from the quantity the receiver typed.
     ordered_qty: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -744,6 +870,30 @@ MOVEMENT_TYPES: tuple[str, ...] = (
     # from a storage node with NO destination — stock leaves inventory. Does not
     # cascade to component stock (TRX-006).
     "customer_shipment",
+    # Consumable issue to a Kanban (TRX-003, Transaction Spec §4, consum01).
+    # Unit-OUT from a storage node INTO a Kanban node, so the ledger says which
+    # room the gloves went to. Terminal for QUANTITY — 07-09 TRX-001 ("kitting
+    # is terminal only for consumables") — and never reversed by a back-flush,
+    # per 07-09 TRX-004. Expiration keeps being tracked afterwards through
+    # ``app.consumable_issues`` (Transaction Spec §4.3).
+    #
+    # KAN-001's restock loop does NOT add a movement type. A restock request is
+    # an intent and an acknowledgment is a statement about material already
+    # debited here; neither moves stock, so neither belongs in this ledger. See
+    # the kan01 migration for the version that did add two, and why it went.
+    "consumable_issue",
+    # Debit-and-gone issue to a scrap location (REQ-2026-08-04-TRX-001/002,
+    # issue01). Unit-OUT from a storage node INTO the LOCATION it was issued to —
+    # PD, R&D, a QC lab. Terminal: no allocation is created at the destination
+    # and nothing back-flushes it, exactly like ``customer_shipment``.
+    #
+    # BOTH ends are set, unlike ``customer_shipment``, because "issued to QC 1"
+    # and "issued to PD" are different dispositions and the ledger has to say
+    # which one happened. Spelled ``material_issue`` rather than ``issue`` so it
+    # can never be misread as ``consumable_issue`` — that one is a consumable
+    # going to a Kanban and keeps an expiration flag; this one is any item
+    # leaving controlled inventory and keeps nothing.
+    "material_issue",
 )
 
 
@@ -1186,6 +1336,16 @@ class ReceiptTransactionLine(Base):
     on several lines (split sourcing) — there is intentionally no
     ``UNIQUE(receipt_transaction_id, item_id)``. Received quantity is derived
     (summed from ``receipt_event_lines``), never stored here.
+
+    **Units (REQ-001).** ``ordered_qty`` and ``unit_price_amount`` are both in
+    ORDER units — 3 Box at $95.00 *per Box* — as is ``ReceiptEventLine.qty_received``
+    (the receiver confirms boxes). Outstanding is therefore boxes minus boxes and
+    means what it always meant. The conversion to consume units happens exactly
+    once, when the lot is created at receive: ``Lot.ordered_qty = qty_received ×
+    units_per_pack``, and everything from there on — placement, stock movements,
+    issue, kitting — is in consume units. Do not mix the two: ``qty_received``
+    (3) and the ``Lot.ordered_qty`` it produces (300) sit one function call apart
+    and are not the same number.
     """
 
     __tablename__ = "receipt_transaction_lines"
@@ -1195,6 +1355,17 @@ class ReceiptTransactionLine(Base):
         CheckConstraint(
             "ordered_qty > 0",
             name="ck_receipt_transaction_lines_ordered_qty_pos",
+        ),
+        # The pack the PO was raised against — the only place it is recorded.
+        # The factor may be deferred to receive (order "3 Box" now, confirm "of
+        # 100" when it lands), so a unit may stand alone — but a factor may
+        # not, since a bare 100 with nothing to be 100 *of* would silently
+        # multiply a plain per-unit order.
+        CheckConstraint(
+            "(pack_uom IS NULL AND units_per_pack IS NULL) "
+            "OR (pack_uom IS NOT NULL AND char_length(trim(pack_uom)) > 0 "
+            "AND (units_per_pack IS NULL OR units_per_pack > 0))",
+            name="ck_receipt_transaction_lines_pack_pair",
         ),
         {"schema": "app"},
     )
@@ -1221,11 +1392,26 @@ class ReceiptTransactionLine(Base):
         ForeignKey("meta.suppliers.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    # In ORDER units (3 Box). See the class docstring.
     ordered_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Per ORDER unit ($95.00 per Box). Never divided, so 2dp is exact — it is
+    # ``lots.unit_price_amount`` that carries the divided per-consume-unit price
+    # and needs the extra scale.
     unit_price_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(14, 2),
         nullable=True,
     )
+    # ── Tiered unit of measure (REQ-001, migration uom01) ──────────────
+    # Copied from the item when the line is written and never re-read from it:
+    # a supplier moving from Box/100 to Case/500 must not rewrite what this
+    # order says it bought. NULL/NULL = ordered in the item's consume unit.
+    #
+    # ``units_per_pack`` may lag ``pack_uom`` — a PO can be raised for "3 Box"
+    # before the pack size is known, and receive then requires it and writes it
+    # back here. Once set it is never changed; a second receive against the same
+    # line reuses it rather than asking again.
+    pack_uom: Mapped[str | None] = mapped_column(Text, nullable=True)
+    units_per_pack: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1314,6 +1500,13 @@ class ReceiptEventLine(Base):
 
     Creates exactly one lot (``lot_id``). ``over_receipt_reason`` is set only
     when this draw pushes the line past its ordered quantity.
+
+    **``qty_received`` is in ORDER units** (REQ-001) — the receiver confirms
+    "3 Box arrived", matching ``ReceiptTransactionLine.ordered_qty`` so that
+    outstanding stays a like-for-like subtraction. The lot this draw creates
+    holds ``qty_received × units_per_pack`` consume units. A consequence worth
+    knowing: a part-pack delivery is not expressible here — 3 boxes with one
+    damaged cannot be recorded as 260 units.
     """
 
     __tablename__ = "receipt_event_lines"

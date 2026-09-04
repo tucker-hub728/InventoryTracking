@@ -20,7 +20,7 @@
  */
 
 import * as React from 'react';
-import { Boxes, Pencil, Plus, Search } from 'lucide-react';
+import { Boxes, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
 import { Badge } from '@/components/ui/badge';
@@ -29,8 +29,15 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 
-import { leafAnchorId } from './room-shortcuts';
 import type { NodeTree } from '@/lib/api/location-nodes';
+
+/** Anchor id for one storage leaf, so a caller can scroll to it.
+ *
+ *  Previously lived in ``room-shortcuts.tsx`` beside the A–Z LetterRail and the
+ *  GroupJumpChips. Both were UI-002 shortcuts whose only justification was
+ *  Warehouse One's Shelf A–Z (LOC-005); that room was retired 2026-08-19, so
+ *  they went with it and this was the one export left standing. */
+export const leafAnchorId = (leafId: string) => `loc-leaf-${leafId}`;
 
 /** Search appears once a grid is long enough to need it. 26 shelves do; three
  *  freezer units do not, and an empty search box on three cards is noise. */
@@ -77,6 +84,9 @@ export interface StorageLeafGridProps {
   onOpen: (leaf: NodeTree) => void;
   onAdd?: () => void;
   onRename?: (leaf: NodeTree) => void;
+  /** Remove an EMPTY leaf. Omit to offer no delete at all; the control hides
+   *  itself on any leaf holding stock, so passing it is safe everywhere. */
+  onDelete?: (leaf: NodeTree) => void;
 }
 
 export function StorageLeafGrid({
@@ -99,6 +109,7 @@ export function StorageLeafGrid({
   onOpen,
   onAdd,
   onRename,
+  onDelete,
 }: StorageLeafGridProps) {
   const plural = nounPlural ?? `${noun}s`;
   const [query, setQuery] = React.useState('');
@@ -225,6 +236,7 @@ export function StorageLeafGrid({
               canManage={canManage}
               onOpen={() => onOpen(leaf)}
               onRename={onRename ? () => onRename(leaf) : undefined}
+              onDelete={onDelete ? () => onDelete(leaf) : undefined}
             />
           ))}
         </div>
@@ -242,6 +254,7 @@ function LeafCard({
   canManage,
   onOpen,
   onRename,
+  onDelete,
 }: {
   leaf: NodeTree;
   tile?: React.ReactNode;
@@ -252,9 +265,11 @@ function LeafCard({
   canManage: boolean;
   onOpen: () => void;
   onRename?: () => void;
+  onDelete?: () => void;
 }) {
   const occupied = leaf.active_allocation_count > 0;
   const showRename = canManage && Boolean(onRename);
+  const showDelete = canManage && Boolean(onDelete) && !occupied;
   // The lot naming the match beats the bare count — it is why this card is here.
   const found = stock?.lots[0] ?? stock?.items[0];
 
@@ -324,16 +339,35 @@ function LeafCard({
           {leaf.name}
         </div>
       </button>
-      {showRename && (
-        <button
-          type="button"
-          title={`Rename ${leaf.name}`}
-          aria-label={`Rename ${leaf.name}`}
-          onClick={onRename}
-          className="absolute bottom-2 right-2 rounded p-1.5 text-text-3 transition-colors hover:bg-surface hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-        >
-          <Pencil size={14} />
-        </button>
+      {(showRename || showDelete) && (
+        <div className="absolute bottom-2 right-2 flex items-center gap-0.5">
+          {showRename && (
+            <button
+              type="button"
+              title={`Rename ${leaf.name}`}
+              aria-label={`Rename ${leaf.name}`}
+              onClick={onRename}
+              className="rounded p-1.5 text-text-3 transition-colors hover:bg-surface hover:text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <Pencil size={14} />
+            </button>
+          )}
+          {/* Only on an EMPTY card. The rule is "delete it if it holds nothing",
+              and a button that is present but always refuses teaches people to
+              distrust it — so an occupied card simply doesn't offer one. The
+              API enforces it regardless. */}
+          {showDelete && (
+            <button
+              type="button"
+              title={`Delete ${leaf.name}`}
+              aria-label={`Delete ${leaf.name}`}
+              onClick={onDelete}
+              className="rounded p-1.5 text-text-3 transition-colors hover:bg-danger/10 hover:text-danger focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

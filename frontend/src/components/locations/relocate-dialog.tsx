@@ -119,7 +119,10 @@ function buildTree(forest: NodeTree[], moving: NodeTree, allowedTypes: string[])
     // Sibling code clash — the destination's own uniqueness rule, applied
     // exactly as it would be on create.
     if (n.children.some((c) => c.code.toLowerCase() === moving.code.toLowerCase())) {
-      return { state: 'blocked', reason: `already contains “${moving.code}”` };
+      // The clash is on ``code``, but the reason is phrased with the NAME: a
+      // code is machine identity and is shown nowhere in the UI, so quoting one
+      // here would name something the reader cannot see anywhere else.
+      return { state: 'blocked', reason: `already contains “${moving.name}”` };
     }
     // REQ-2026-07-15-LOC-001: four quadrants per tank, a hard cap. Counted here
     // over the loaded tree; the API counts it authoritatively, inactive included.
@@ -392,8 +395,8 @@ export function RelocateDialog({
               <AlertCircle size={16} className="mt-0.5 shrink-0 text-text-3" aria-hidden />
               <p className="text-xs text-text-2">
                 Nowhere to put this yet — every {parentLabel} is either full, already holds
-                something coded “{node.code}”, or is where it already sits. Open the branches
-                below to see which.
+                something called “{node.name}”, or is where it already sits. Open the
+                branches below to see which.
               </p>
             </div>
           )}

@@ -13,7 +13,7 @@ This brief proposes the tables for the kit lifecycle **Draft → Issued → In P
 These are already settled in the mock and carry into the backend unless flagged in §99.
 
 1. **Three tiers, prefix-agnostic.** A kit builds a **sub-assembly (AY)** or a **finished good (FG)**; its BOM lines are **raw materials (CR)** and/or nested AYs. Eligibility comes from `item_tiers.type`, never the ID prefix.
-2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99).
+2. **Consumables are never in a BOM** (Transaction Spec §4.3). Therefore a **kit line is never a consumable** — no consumable columns on kit tables. Consumable Kanban reconciliation is a *separate* future feature (§99). **Amended 2026-08-31 (KIT-003):** media still reaches a kit — as a **non-consumable twin item** (its own part number, its own stock balance), which enters the BOM like any other component and carries `items.consumed_in_kit`. Such a line is an ordinary component while the kit is open — same recipe need, same operator entry, same gates — and differs at close-out, where its leftover is **consumed rather than back-flushed**; see the `consumed_in_kit` column on `app.kit_lines`.
 3. **Kitted material stops counting as available on-hand at issue time** (REQ-2026-07-09-TRX-001) **and physically moves to the production location** (`Transaction_Spec` §2). Issue is a stock-**out** of the *available* balance and a **relocation** of the material to the production node. See §0.3a.
 
 4. **Material is never bound to a production lot at kitting time** (REQ-2026-07-09-TRX-002) — which is exactly why a cancelled kit can always hand its material back with nothing stranded.
@@ -151,6 +151,7 @@ One row per BOM component of the kit, snapshotted at creation so a later BOM edi
 | `line_no` | `INTEGER NOT NULL` | display order |
 | `item_id` | `UUID NOT NULL FK → app.items(id)` `RESTRICT` | the component (CR or nested AY) — **never a consumable** (§0.2) |
 | `qty_per_unit` | `NUMERIC(14,3) NOT NULL` | **snapshot** of `bom_lines.qty_per_unit`; `ck_kit_lines_qty_per_unit_positive` (`> 0`) |
+| `consumed_in_kit` | `BOOLEAN NOT NULL DEFAULT FALSE` | **snapshot** of `items.consumed_in_kit` (KIT-003) — media: ordinary while the kit is open; at close-out its leftover is consumed, never back-flushed, so it needs no return location |
 | `issued_qty` | `INTEGER NOT NULL DEFAULT 0` | pulled at issue; `ck_kit_lines_issued_qty_nonneg` |
 | `additional_issued_qty` | `INTEGER NOT NULL DEFAULT 0` | mid-production top-ups (Transaction Spec §2.1); `ck_kit_lines_additional_issued_qty_nonneg` |
 | `used_qty` | `INTEGER NULL` | entered at close-out from the traveler; `ck_kit_lines_used_qty_nonneg` |
@@ -227,7 +228,27 @@ New partial index: `ix_movements_kit_id` on `kit_id` where `kit_id IS NOT NULL`.
 - **Status transitions** are enforced in the service layer (draft→issued→in_production→closed / any-active→cancelled). Editing `issued_qty`/`source` is allowed only while `draft`; `used_qty`/`return` only while `issued`/`in_production`.
 - **Close-out atomicity** (§0.6) — production output rows, back-flush rows, and the `kits` status/good_qty/scrap_qty/output update happen in **one transaction**, under **one e-signature**.
 - **Cancel — draft-only** (client, 2026-07-20). Cancel is allowed **only while `status = 'draft'`**: it sets `status='cancelled'` and writes **no movements** (nothing has been issued). Cancelling an issued/in-production kit (which would back-flush everything, §0.4) is **deferred** — see §99.8. The API rejects cancel on a non-draft kit.
-- **E-signature — close-out only** (client, 2026-07-20). Only the **Close-Out** transaction is e-signed: its `production_output` + `backflush` movement rows carry a `reauth_evidence_id`, consumed single-use via `audit.reauth_consumptions`. **Issue, Additional Issue, and Cancel are NOT e-signed** — their movement rows have `reauth_evidence_id = NULL`. (This relaxes the app-wide "sign every stock move" convention specifically for kitting, per client direction.)
+- **E-signature — close-out only** (client, 2026-07-20). Only the **Close-Out** transaction is e-signed: its `production_output` + `backflush` movement rows carry a `reauth_evidence_id`, consumed single-use via `audit.reauth_consumptions`. **Issue, Additional Issue, and Cancel are NOT e-signed** — their movement rows have `reauth_evidence_id = NULL`. (This relaxes the app-wide "sign every stock move" convention specifically for kitting, per client direction.) *(Later reversed for Cancel — it is e-signed now; see the `CANCEL_ACTION` verb in `app/kitting/routes.py`.)*
+
+- **Returning material to inventory is Super-Admin-only** — REQ-2026-08-13-**CTL-001**, scoped to kitting by the client on 2026-08-27. Every route that *credits stock back* is gated on the `super_admin` role **in addition to** its existing permission check:
+
+  | Route | Permission | Role | Why |
+  |--|--|--|--|
+  | `POST /kits/{id}/close-out` | `inventory:sign` | `super_admin` | the automatic back-flush returns the leftover |
+  | `POST /kits/{id}/lines/{lid}/return` | `inventory:create` | `super_admin` | the manual TRX-008 return |
+  | `POST /kits/{id}/cancel` | `inventory:create` | `super_admin` | a post-issue cancel returns the whole floor |
+  | `POST /kits/{id}/produce` | `inventory:sign` | *(any)* | consumes and mints — nothing comes back |
+  | `POST /kits/{id}/issue`, `…/additional-issue` | `inventory:create` | *(any)* | material goes **out** to the floor |
+
+  Both checks are needed: `operator` holds `inventory:create` **and** `inventory:sign`, so the permission matrix cannot tell an operator from an admin for write purposes — only the role can. Note `admin` is refused too; CTL-001 says Super Admin, and `admin` passes every other role gate in the codebase (`ADMIN_ROLES`).
+
+  **Produce is deliberately left open** so the floor is never blocked waiting on an admin — the split is "material coming back", not "the kit is important".
+
+  The gate is a route **dependency**, not a check inside the handler, so a refused close-out or cancel is rejected *before* `consume_reauth_evidence` runs and the operator's single-use signature ticket is not burned on a 403.
+
+  "…and recorded" needed no new code: all three already write an `app.kits` audit row (`operation` = `close_out` / `early_return` / `cancel`) alongside the ledger movement, and close-out and cancel additionally carry `signature_id`. The **manual return stays unsigned**, matching issue / additional issue (§6, e-signature scope) — it is recorded, not signed.
+
+  Guarded by `backend/tests/test_kit_super_admin_control.py`, which also fails if a *new* return-shaped route under `/kits` is mounted without the gate.
 
 ---
 
@@ -440,6 +461,173 @@ No data backfill — new feature, empty tables.
 - **Locations** (`docs/modules/locations.md`) — `production/output/source/return` are `meta.location_nodes`; finished-output placement into a Box cell is a Location System follow-up, not owned here.
 - **Movements ledger** — this module is a *writer* of `app.stock_movements`; on-hand stays `v_item_stock`.
 - **Receipt Admin** (`docs/modules/receipt-admin.md`) — the paired-header/line/event shape of `kits`→`kit_lines`→movements mirrors `receipt_transactions`→lines→`receipt_events`; reuse the service patterns.
+
+---
+
+## 12. Material cost flow (RPT-003) — `kitcost01`, 2026-08-28
+
+> "Cost shall flow through kitting: issued quantities carry their lot cost, so a closed kit can be costed (materials only)." — SRS Consolidated Amendment 9+10
+>
+> "The FG Lot-xxx should pull through all the costs. The Kit should capture the costs to that specific Lot — so the process scrap or material scrap and actual material costs are put to the Kit and the Kit is closed out to the FG Lot specifically so the Customer can be charged the actual cost for that particular FG Lot." — Blane Larson, 2026-08-27
+
+Materials only; labour and overhead are explicitly out of scope for phase one.
+
+### 12.1 The one-line defect this closed
+
+`_produce_batch` minted its output lot without passing `unit_price_amount`, which `inv_repo.create_lot` had always accepted. So **every kit-produced lot was unpriced** — cost stopped dead at the kit, and because `compute_item_valuations` filters `unit_price_amount IS NOT NULL`, every AY and FG on the shelf valued at **$0**. Passing that one argument is the whole cost flow.
+
+### 12.2 The formula
+
+```
+kit_material_cost = Σ charges − Σ credits
+```
+
+| Role | `movement_type` | `qty_delta` |
+|---|---|---|
+| CHARGE | `kit_issue`, `kit_additional_issue` | negative |
+| CREDIT | `backflush`, `kit_return`, `kit_cancel_return` | positive |
+| EXCLUDED | `production_output` | it is the output, not an input |
+
+Per batch, per line, the attribution is a **moving weighted average** over what the line still holds:
+
+```
+unit_cost_L = (charged_L − credited_L − consumed_L) / residual_qty_L
+```
+
+`Σ batch values + residual == charged − credited` holds exactly — the value identity mirrors the quantity identity close-out already enforces.
+
+**Cost is never read off the production floor.** `allocations_for_item_at_node` has no kit filter (material is never bound to a kit, TRX-002), so a floor-derived cost could bill one customer for another kit's material — plausibly, and silently. Only the kit's own `kit_id`/`kit_line_id`-tagged ledger rows are used.
+
+Credits are valued at the returned lot's own price (`costing.CREDIT_AT_LOT_PRICE`). The alternative — the line's average at return time — is arguably more correct but is not derivable after the fact; it would have to be computed and stored on every return, in three endpoints.
+
+### 12.3 Scrap is INCLUDED, and it is a slice
+
+The customer pays for scrap. **The mechanism is the divisor, not an extra line:**
+
+| | Divisor | $450 material, 5 attempted, 4 good | Who absorbs the scrap |
+|---|---|---|---|
+| **Included** ← implemented | `good_qty` | **$112.50/unit** → customer pays $450 | The customer |
+| Excluded | `good_qty + scrap_qty` | $90.00/unit → customer pays $360 | CellReady |
+
+Scrapped material was charged at issue and never credited back, so its value is **already inside** `material_cost_amount`; adding a scrap term double-counts it. `scrap_value_amount` reports the portion for visibility, prorated over units **attempted**:
+
+```
+scrap_value = material_cost × scrap_qty / (good_qty + scrap_qty)
+```
+
+and a DB CHECK keeps it `<= material_cost_amount` so no later reader can mistake it for a fourth number to add.
+
+**Not `scrap_qty × unit_cost_amount`** — that was the first cut and it is wrong twice over. `unit_cost_amount` is `material ÷ good`, so it *already* carries the scrap; multiplying it back out double-applies the absorption. At `good == scrap` it reports the entire batch cost as scrap, and at `scrap > good` it exceeds the batch total and trips the CHECK — a **500 on produce**, not merely a wrong number on a screen. Guarded by `test_scrap_value_never_exceeds_the_batch_cost`.
+
+Only **process** scrap (failed output units) gets a figure. There is no material-scrap column anywhere — spilled material is folded into `used_qty` — so material waste is real, charged, and invisible. Giving it a quantity would change the close-out identity and `ck_kit_lines_no_overuse`; deliberately deferred.
+
+### 12.4 Sub-assemblies
+
+Stamping the price at mint closes the nested-cost hole **with no recursive query**. A kit-produced AY lot is an ordinary priced lot; when a later kit issues it, the same charge sum picks the price up. The recursion already happened, once, at each mint.
+
+Lots produced **before** `kitcost01` keep a NULL price and are not backfilled — their input prices are editable and per-batch attribution never existed for them, so any figure would be one that was never true. A kit consuming a pre-change AY therefore mints a **blank-cost** FG, which is honest.
+
+`parent_lot_id` is **not** set: it is single-parent (split lineage) and a kit output has N parents. Lineage is the `production_output` `(kit_id, lot_id)` pair plus `kit_batch_consumptions`.
+
+### 12.5 Unknown is not zero
+
+If any lot feeding a line has no price, the whole batch is unknown: `material_cost_amount` and `unit_cost_amount` are both NULL, `cost_is_complete` is false, and the minted lot is left **unpriced**. A partial sum reads as a complete one, which for a billing artefact is the worst available outcome (RPT-001's blank-is-never-zero rule, one level up).
+
+**`$0` is a different fact** — a known price, and the correct one for the customer-owned cells that arrive on a $0 PO. It flows through as a real zero and keeps `cost_is_complete` true.
+
+### 12.6 Tables
+
+- `app.kit_production_batches` — one row per produce/close-out batch: its output lot, good/scrap, `material_cost_amount`, `unit_cost_amount`, `cost_is_complete`.
+- `app.kit_batch_consumptions` — one row per (batch × kit line): qty, `unit_cost_amount`, `extended_value_amount`.
+
+**No new movement type**, no column on `app.lots` or `app.kit_lines`, and no source-lot column on the consumption rows (under a moving average a batch consumes value from a pool, not identified lots — identified lots live in the ledger on the `kit_issue` rows).
+
+**Nothing derivable is stored.** A schema review on 2026-08-31 removed two columns that could be computed from their own row: `scrap_value_amount` (now prorated on read) and `kit_batch_consumptions.item_id` (the component is `kit_line.item_id`, one hop away). What survives is stored either because the derivation is *lossy* — `unit_cost_amount` is rounded to 6dp while `material_cost_amount` is exact, so neither recovers the other — or because it is path-dependent, like the moving average.
+
+### 12.7 A price correction follows the material
+
+> "when i update the price from the edit lot will it effect the price of the AY/FG which is already produce … it should be" — client, 2026-08-31
+
+It does now. Editing `lots.unit_price_amount` re-costs every kit **charged** that lot, re-stamps the lots those kits produced, and follows those lots into any kit that consumed *them* — see `app/kitting/recompute.py`. One price, everywhere, always current.
+
+It is a **replay, not a multiply**: the moving average is path-dependent, so each batch is re-run in order with charges and credits taken as of its own timestamp. Every input still exists — the movements carry current prices, each batch's per-line `qty` and `good_qty` are stored — so the result is deterministic.
+
+Before this, `KitRead.material_cost_amount` re-read prices while the per-batch figures did not, so the kit page could disagree with the table directly beneath it. That inconsistency is gone.
+
+**The accepted consequence:** a lot that has already shipped can change price. A figure cannot be both live and immutable, and the client chose live. Every recompute therefore writes its scope — kits touched, batches updated, and each lot's old and new price — into the `context` of the lot-edit audit row, under `recosted`.
+
+The frontier is **charges only**. A kit that merely handed the lot back never took its cost, so nothing it produced moves.
+
+### 12.8 Known adjacent defect
+
+`save_production` assigns `kits.good_qty`/`scrap_qty` **absolutely** while `_produce_batch` accumulates them, so anyone with `inventory:create` can rewrite a kit's produced total, unsigned. Costing is immune (the divisor is the batch's own `good_qty`) but the UI's "Produced so far" is not. Fix separately by rejecting the PATCH once the kit has batches.
+
+---
+
+## 13. Variable yield (YLD-001) — `varyield01`, 2026-09-01
+
+> "When growing virus or creating a protein, the constraint isn't the yield for the consumption of the raw material or assemblies. For example: one TREX reactor with 4 media feedings could result in a yield of 200 grams of material. The next time it is produced it could consume the exact same raw materials but yield 350 grams of material."
+> — Blane Larson, 2026-09-01
+
+For an item that is **grown or expressed**, the BOM stops predicting the output. It still sets the minimum material a run consumes.
+
+### 13.1 The gate, and which run it actually broke
+
+`_produce_batch` requires, per component, `used >= ceil(qty_per_unit × (good + scrap))` (`used_below_need`). The failing case is the **over**-yield run, which is worth stating explicitly because the error message points the other way. With 200 units of material issued against a 1:1 recipe:
+
+| Run | Operator enters | Result |
+|-----|-----------------|--------|
+| yields 200 | good 200, used 200 | passes |
+| **yields 350** | good 350, used 200 | **422 `used_below_need`** |
+
+There is no way around it from the floor either: `used_exceeds_issued` caps `used` at what is physically on the production node, so the operator cannot inflate `used` to satisfy the first gate. The *better* of the two runs is the one that could not be recorded.
+
+### 13.2 The mechanism
+
+`items.variable_yield` on the **item being built** — not on a component, which is the difference from KIT-003's `consumed_in_kit`. Variable yield is a fact about the process, and the process is named by the thing being grown. `create_kit` snapshots it onto `kits.variable_yield`, so an edit to the item months later cannot retroactively legalise a batch this kit refused or invalidate one it signed. Every read path takes the **kit's** value.
+
+The flag skips exactly one line of the pre-flight. Everything else is untouched:
+
+| Check | On a variable-yield kit | Why |
+|-------|------------------------|-----|
+| `used_below_need` | **stops scaling** — the floor is `ceil(qty_per_unit × 1)`, one run's worth | The output must not set the input. But a run still takes a charge of the recipe. |
+| `used_qty_missing` | applies | The paper record still drives what was consumed. |
+| `used_exceeds_issued` | applies | Physical — you cannot consume what is not on the floor. |
+| `ck_kit_lines_no_overuse` | applies | The DB backstop for the above. |
+
+**The floor is narrowed, not removed.** The first cut deleted the check outright and the consequence showed up immediately on the close-out screen: every component sat at `Used 0` and the batch was still accepted, so units could be produced from no material at all. That makes the BOM decorative — the same objection that corrected KIT-003 (§ "what's the purpose of the BOM?"). What is actually wrong for a grown item is the *coupling*: `need` scaling with `good + scrap`. Break that and keep the rest, so a recipe of CR 1 + AY 2 still demands at least 1 and 2 whether the run yields 200 g or 350 g.
+
+`attempted == 0` zeroes the floor on any kit, so a `good = 0` close-out still finalises a failed run.
+
+The BOM keeps every other job it has: it decides which components a kit has, drives the issue quantity, and its `Needs` column now reads "what one run takes" rather than a figure scaled to the batch.
+
+### 13.3 Costing needed no change
+
+`output_unit_cost` is `material_cost ÷ good_qty` (§12.2) and has always divided by the operator-entered good count. The 200 g and 350 g runs therefore price correctly and differently on their own, and `recompute.py` replays from each batch's stored `good_qty`, so a later lot-price correction stays right. This was the half of the client's scenario that was already built.
+
+### 13.4 What the screen shows
+
+The `Needs` column is labelled **`Min / run`** on a variable-yield kit, since it no longer scales with the quantity made — it is one run's worth of the recipe, and calling it "Needs" would imply it still tracked the output.
+
+There is **no yield-variance display**, deliberately. One was built and removed (2026-09-02): with the per-run floor in place nothing had asked for it, and an "on recipe" figure derived from the material entered reads too easily as a target the run missed. If it is wanted later, it is `min` over components of `floor(used / qty_per_unit)` against `good + scrap`, and it belongs on the close-out card as an advisory note — never a blocker, since beating the recipe is the point of the flag.
+
+### 13.5 A separate "extra made" quantity — built, then withdrawn
+
+The client asked (2026-09-02) for a second input capturing units made beyond the recipe, "with nothing to do with the BOM": `good_qty` staying fully recipe-gated, `extra_qty` free alongside it, both going into one lot. It was **built end-to-end as `varyield02`** and then **withdrawn by the client the same day** — *"I was wrong, no need for the extra field, the existing work is good enough."* The migration was downgraded off dev and test and the revision deleted; nothing of it remains.
+
+Recorded because the design was sound and may come back. What made it work, if it does:
+
+* `attempted` (the recipe need) excludes `extra` — that is the whole point.
+* `total = good + extra` drives the units placed, `output_unit_cost`'s divisor and `recompute.py`'s replay. One lot, one price: the split says where units came from, never what they cost.
+* `extra > 0` requires `good >= 1`, which is also what keeps `ck_kit_production_batches_lot_pairing` true without amendment.
+* Refused outright on a kit that is not `variable_yield`.
+
+### 13.5 Deliberately not built
+
+- **Fractional quantities.** The client's example is whole grams, and open question #4 below resolved quantities to whole units. "350 g" is 350 units of an item whose `uom` reads `g`. Widening `good_qty`/`scrap_qty`/`used_qty` from `Integer` to `Numeric` would reach the DB, ORM, schemas, placement and costing — its own job, and worth asking the client whether they ever report a fractional gram.
+- **A unit of measure on output.** `Item.uom` is free text and kitting never reads it (§12), so nothing distinguishes 350 grams from 350 vials but the item description.
+- **Planned-vs-actual reporting.** None exists; the existing yield badge is `good / (good + scrap)`, which is *quality* yield, not process yield. `kit-costs.csv` already exports `kit_target_qty` and `batch_good_qty`, so the raw data is there when a report is specified.
+- **A cap on output.** There never was one — nothing relates `good_qty` to `target_qty` anywhere. The 1:many behaviour the client described came entirely from the input-side floor.
 
 ---
 

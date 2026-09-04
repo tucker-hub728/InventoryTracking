@@ -38,6 +38,8 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     desc: api.description,
     uom: api.uom ?? '',
     isConsumable: api.is_consumable,
+    consumedInKit: api.consumed_in_kit,
+    variableYield: api.variable_yield,
     tierId: api.tier_id,
     tierName: api.tier_name,
     tierType: api.tier_type,
@@ -55,6 +57,7 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     qtyAvailable: num(api.qty_available),
     months: null, // forecast module
     onOrder: num(api.qty_on_order),
+    qtyAwaitingRelease: num(api.qty_awaiting_release),
     mustOrder: api.must_order_flag ? 1 : 0,
     nearExpiryThresholdDays: api.near_expiry_threshold_days ?? 30,
     bomLineCount: api.bom_line_count ?? 0,

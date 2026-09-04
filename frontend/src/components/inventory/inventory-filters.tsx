@@ -1,8 +1,9 @@
 'use client';
 
 import * as React from 'react';
-import { Search } from 'lucide-react';
+import { Download, Search } from 'lucide-react';
 
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   Select,
@@ -31,9 +32,7 @@ const STATUS_FILTER_OPTIONS: readonly InventoryStatus[] = [
   'Out of stock',
 ] as const;
 
-// `onExport` is wired through from the parent for the Export button below
-// (currently disabled); prefixed with `_` to mark it intentionally unused.
-export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps) {
+export function InventoryFilters({ onExport }: InventoryFiltersProps) {
   const query = useInventoryStore((s) => s.query);
   const status = useInventoryStore((s) => s.status);
   const tierId = useInventoryStore((s) => s.tierId);
@@ -110,9 +109,11 @@ export function InventoryFilters({ onExport: _onExport }: InventoryFiltersProps)
         </SelectContent>
       </Select>
 
-      {/* <Button variant="default" size="md" onClick={onExport}>
-        <Download size={14} /> Export
-      </Button> */}
+      {onExport && (
+        <Button variant="default" size="md" onClick={onExport}>
+          <Download size={14} /> Export
+        </Button>
+      )}
     </div>
   );
 }

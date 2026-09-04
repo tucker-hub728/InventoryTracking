@@ -118,6 +118,15 @@ function passthroughResponseHeaders(upstream: Response): Headers {
   if (ct) h.set('content-type', ct);
   const rid = upstream.headers.get('x-request-id');
   if (rid) h.set('x-request-id', rid);
+  // File downloads (the finance CSV, RPT-001) carry their filename here.
+  // Without it the browser names the file after the URL path and finance
+  // ends up with a folder of identical "inventory.csv" files.
+  //
+  // Deliberately NOT forwarding ``content-length``: undici transparently
+  // decompresses a gzipped upstream, so the upstream value is the COMPRESSED
+  // byte count and would truncate the body. Next recomputes it correctly.
+  const cd = upstream.headers.get('content-disposition');
+  if (cd) h.set('content-disposition', cd);
   // We never forward upstream Set-Cookie — token cookies are owned by
   // the BFF layer, not the backend.
   return h;

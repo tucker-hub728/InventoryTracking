@@ -1,23 +1,62 @@
 'use client';
 
 import * as React from 'react';
-import { ArrowLeftRight } from 'lucide-react';
+import { ArrowLeftRight, ShieldCheck } from 'lucide-react';
 
 import { useMinDuration } from '@/hooks/use-min-duration';
 import { EmptyState } from '@/components/shared/empty-state';
 import { TableSkeleton } from '@/components/shared/table-skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { LocationLink } from '@/components/locations/location-link';
+import { LocationPath } from '@/components/locations/location-path';
 import { TransferDialog } from '@/components/locations/transfer-dialog';
 import { LotLink } from '@/components/inventory/lot-link';
+import { ReleaseStateBadge } from '@/components/inventory/release-state-badge';
+import { ReleaseStateDialog } from '@/components/inventory/release-state-dialog';
+import { selectIsAdminOrAbove, useAuthStore } from '@/stores/auth.store';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItemStockLocation } from '@/lib/api/items';
+import { RELEASE_STATE_OPTIONS, type LotReleaseState } from '@/lib/api/lots';
+import { isBuiltTier } from '@/lib/api/tiers';
 import { expiryStatus } from '@/lib/inventory-helpers';
-import { formatNumber } from '@/lib/utils';
+import { cn, formatNumber } from '@/lib/utils';
+
+/** One release-state filter chip. Local to this tab — the only list where
+ *  narrowing by release state is a question anyone asks. */
+function FilterChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'rounded-full border px-2.5 py-0.5 text-[11px] transition-colors',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+        active
+          ? 'border-accent bg-accent/10 text-accent'
+          : 'border-border text-text-2 hover:border-accent/50 hover:bg-surface',
+      )}
+    >
+      {label}
+    </button>
+  );
+}
 
 interface Props {
   item: { uuid: string; id: string; desc: string };
+  /** The item's tier type. Quality status is a BUILT-tier question (AY/FG): a
+   *  raw material has no release decision to make here, which is why the page
+   *  header already hides its control on CR — this tab now agrees with it
+   *  (client 2026-09-01). */
+  tierType: string | null | undefined;
   /** Days before expiry at which a lot is flagged — the item's own setting. */
   nearExpiryThresholdDays: number;
   /** True when the operator may sign a transfer (``inventory:sign``). */
@@ -41,6 +80,7 @@ interface Props {
  */
 export function ItemStockLocationsTab({
   item,
+  tierType,
   nearExpiryThresholdDays,
   canSign,
   onChanged,
@@ -54,11 +94,41 @@ export function ItemStockLocationsTab({
   } | null>(null);
   // Held briefly — the fetch returns in ~20ms, too fast to see otherwise.
   const showSkeleton = useMinDuration(loading && rows.length === 0);
+  /** Release state to narrow to, or null for "everything" (STS-001). */
+  const [stateFilter, setStateFilter] = React.useState<LotReleaseState | null>(null);
+  /** The lot whose release state is being decided, or null. */
+  const [releaseLot, setReleaseLot] = React.useState<{
+    id: string;
+    lot_number: string;
+    release_state: LotReleaseState | null;
+  } | null>(null);
+  // Admin / super admin only — mirrors the backend's ``_require_admin``. An
+  // operator holds ``inventory:sign`` and can transfer, but must not release
+  // the batch they just made (STS-002).
+  const isAdminOrAbove = useAuthStore(selectIsAdminOrAbove);
+  /** Quality status is shown at all only on a built tier — see the tierType prop. */
+  const showRelease = isBuiltTier(tierType);
+  const canDecide = isAdminOrAbove && showRelease;
+
+  // Arrived-but-unplaced units (REQ-004). A second call rather than a field on
+  // the row set, because the two answer different questions from different
+  // sources: stock locations are allocation-derived, and this material has no
+  // allocation. Failing to load it must not break the tab, so it degrades to
+  // showing nothing rather than an error.
+  const [awaiting, setAwaiting] = React.useState<
+    { remaining_units: number }[]
+  >([]);
+  const awaitingUnits = awaiting.reduce((n, r) => n + r.remaining_units, 0);
+  const awaitingLots = awaiting.length;
 
   const load = React.useCallback(
     (signal?: AbortSignal) => {
       setLoading(true);
       setError(null);
+      itemsApi
+        .awaitingPutAway(item.uuid, { signal })
+        .then(setAwaiting)
+        .catch(() => setAwaiting([]));
       return itemsApi
         .stockLocations(item.uuid, { signal })
         .then(setRows)
@@ -80,6 +150,16 @@ export function ItemStockLocationsTab({
   }, [load]);
 
   const total = rows.reduce((sum, r) => sum + r.qty, 0);
+
+  // Which states this item actually has stock in. Offering the full four on an
+  // item that only ever sits in one of them is four dead controls; offering
+  // none at all (a consumable) hides the row of chips entirely.
+  const presentStates = RELEASE_STATE_OPTIONS.filter((o) =>
+    rows.some((r) => r.release_state === o.code),
+  );
+  const visibleRows = stateFilter
+    ? rows.filter((r) => r.release_state === stateFilter)
+    : rows;
 
   if (error) return <EmptyState title="Couldn't load stock" hint={error} />;
   if (showSkeleton) {
@@ -106,6 +186,29 @@ export function ItemStockLocationsTab({
   return (
     <>
       <div className="p-4">
+        {/* Only shown when this item has release-tracked stock at all, so the
+            common case (consumables, raw materials) is untouched. */}
+        {showRelease && presentStates.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[11px] uppercase tracking-wider text-text-3">
+              Quality status
+            </span>
+            <FilterChip
+              label={`All (${rows.length})`}
+              active={stateFilter === null}
+              onClick={() => setStateFilter(null)}
+            />
+            {presentStates.map((o) => (
+              <FilterChip
+                key={o.code}
+                label={`${o.label} (${rows.filter((r) => r.release_state === o.code).length})`}
+                active={stateFilter === o.code}
+                onClick={() => setStateFilter(stateFilter === o.code ? null : o.code)}
+              />
+            ))}
+          </div>
+        )}
+
         <div className="overflow-hidden rounded-lg border border-border">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -119,7 +222,7 @@ export function ItemStockLocationsTab({
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
+                {visibleRows.map((r) => {
                   const exp = expiryStatus(r.expiration_date, nearExpiryThresholdDays);
                   return (
                     <tr
@@ -127,19 +230,24 @@ export function ItemStockLocationsTab({
                       className="border-b border-border/60 last:border-b-0"
                     >
                       <td className="px-4 py-2.5">
-                        <LocationLink
-                          nodeId={r.node_id}
-                          // The API sends the full breadcrumb; show it whole so
-                          // "Shelf B" is never ambiguous between two areas.
-                          name={r.location}
-                          path={r.location}
-                        />
+                        {/* The API sends the full breadcrumb. It used to be
+                            printed whole, so that "Shelf B" was never ambiguous
+                            between two areas — but the cost was a column of
+                            near-identical prefixes truncating away the one part
+                            that identifies the place. The hover panel answers
+                            the ambiguity without spending the column on it. */}
+                        <LocationPath nodeId={r.node_id} path={r.location} />
                       </td>
                       <td className="px-4 py-2.5 font-mono text-xs text-text-2">
                         {/* Click through to the lot, as the Unit Ledger and a
                             location's contents already do — the lot is the
                             thing you follow when a row looks wrong. */}
-                        <LotLink lotId={r.lot_id} lotNumber={r.lot_number} />
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          <LotLink lotId={r.lot_id} lotNumber={r.lot_number} />
+                          {/* Nothing renders for a lot with no release
+                              workflow, which is most of them. */}
+                          <ReleaseStateBadge state={r.release_state} size="xs" />
+                        </span>
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono tabular-nums">
                         {formatNumber(r.qty)}
@@ -163,21 +271,70 @@ export function ItemStockLocationsTab({
                         )}
                       </td>
                       {canSign && (
-                        <td className="px-4 py-2.5 text-right">
-                          <Button
-                            size="sm"
-                            aria-label={`Transfer ${r.lot_number ?? 'stock'} from ${r.location}`}
-                            onClick={() =>
-                              setTransferFrom({ lot_id: r.lot_id, node_id: r.node_id })
-                            }
-                          >
-                            <ArrowLeftRight size={13} /> Transfer
-                          </Button>
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {/* The release action sits beside Transfer because this
+                                is the row an operator is already looking at
+                                when they ask "can this batch go out?". Shown
+                                only for release-tracked lots, and only to the
+                                roles the backend will accept (STS-002). */}
+                            {canDecide && r.release_state && (
+                              <Button
+                                size="sm"
+                                aria-label={`Change quality status of ${r.lot_number ?? 'this lot'}`}
+                                onClick={() =>
+                                  setReleaseLot({
+                                    id: r.lot_id,
+                                    lot_number: r.lot_number ?? r.lot_id.slice(0, 8),
+                                    release_state: r.release_state,
+                                  })
+                                }
+                              >
+                                <ShieldCheck size={13} /> Quality status
+                              </Button>
+                            )}
+                            <Button
+                              size="sm"
+                              aria-label={`Transfer ${r.lot_number ?? 'stock'} from ${r.location}`}
+                              onClick={() =>
+                                setTransferFrom({ lot_id: r.lot_id, node_id: r.node_id })
+                              }
+                            >
+                              <ArrowLeftRight size={13} /> Transfer
+                            </Button>
+                          </div>
                         </td>
                       )}
                     </tr>
                   );
                 })}
+
+                {/* Material that has arrived but is not placed (REQ-004).
+                    This tab answers "where is this item", and "in receiving,
+                    not received to inventory yet" is a true answer to that — leaving it out
+                    would let the tab imply the arrived units do not exist.
+                    It is deliberately NOT a location: no link, an em-dash name,
+                    and muted, so it never reads as somewhere you could pick
+                    stock from. The banner above the tabs carries the action. */}
+                {awaitingUnits > 0 && (
+                  // Neutral, like the banner: awaiting release is the ordinary
+                  // path for received material, not a fault. The muted text and
+                  // em-dash name already say "this is not a location".
+                  <tr className="border-t border-border bg-surface-2">
+                    <td className="px-4 py-2.5 text-text-3">
+                      — not yet placed —
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-text-3">
+                      {awaitingLots} lot{awaitingLots === 1 ? '' : 's'} awaiting
+                      release
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-text-2">
+                      {awaitingUnits.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-text-3">—</td>
+                    {canSign && <td className="px-4 py-2.5" />}
+                  </tr>
+                )}
               </tbody>
               <tfoot>
                 <tr className="border-t border-border bg-surface/60">
@@ -203,6 +360,19 @@ export function ItemStockLocationsTab({
         onDone={() => {
           void load();
           onChanged();
+        }}
+      />
+
+      <ReleaseStateDialog
+        open={releaseLot !== null}
+        onOpenChange={(o) => !o && setReleaseLot(null)}
+        // A row action already names the batch, so there is nothing to pick.
+        lots={releaseLot ? [releaseLot] : []}
+        onDone={() => {
+          setReleaseLot(null);
+          // A lot can sit in several locations, so re-read the whole tab rather
+          // than patching the one row that was clicked.
+          void load();
         }}
       />
     </>

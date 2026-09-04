@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     app_name: str = "cellready-ims-backend"
     app_env: Environment = Environment.development
     app_debug: bool = False
+    #: Log every SQL statement SQLAlchemy runs, with its full text and bound
+    #: parameters. Its own switch rather than riding on ``app_debug``, because
+    #: it is far more expensive than the rest of debug mode put together: the
+    #: notifications SSE stream re-reads the unread head per connection, so a
+    #: few open tabs turn an idle system into a steady stream of logged
+    #: statements. Turn it on to debug a query, not to develop.
+    sql_echo: bool = False
 
     # ── HTTP server ─────────────────────────────────────────────────────
     host: str = "0.0.0.0"  # noqa: S104 — intentional inside containers

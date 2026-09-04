@@ -3,7 +3,8 @@
 Strict validation (Requirements v2 §4.1): the LN2 parent-type rules are
 enforced here on every create; only ``box`` (the grid-bearing leaf) and
 ``flat`` nodes can hold lots; a Box cell is single-occupancy (override-gated);
-deletion is blocked when a node has children, active lots, or ledger history.
+deletion is blocked when a node still contains something or still holds stock —
+but NOT by ledger history, since deletion is soft and old rows keep resolving.
 
 Quantity-changing allocation ops go to the GxP ledger (``app.stock_movements``):
 ``consume`` posts a dispense/discard and ``transfer`` a transfer pair — both
@@ -30,7 +31,6 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.inventory import repository as inv_repo
-from app.kitting import repository as kit_repo
 from app.locations import repository as loc_repo
 from app.locations.schemas import (
     AllocationRead,
@@ -39,6 +39,7 @@ from app.locations.schemas import (
     ConsumeRequest,
     DedicationUpdateRequest,
     GridUpdateRequest,
+    KanbanCreate,
     LotAvailabilityRead,
     NodeCreate,
     NodeMovementRead,
@@ -49,6 +50,11 @@ from app.locations.schemas import (
     PlaceBatchRequest,
     PlaceRequest,
     ProductionAreaCreate,
+    ReceiveToInventoryRequest,
+    StockAdjustRequest,
+    StockAdjustResult,
+    StorageCategoryCreate,
+    StorageGroupsUpdate,
     TransferBatchRequest,
     TransferMultiRequest,
     TransferRequest,
@@ -57,9 +63,13 @@ from app.models.inventory import StockMovement
 from app.models.locations import (
     MAX_QUADRANTS_PER_TANK,
     PARENT_OF,
+    SCRAP_NODE_TYPE,
+    STORAGE_ROOM_CODE,
     LocationNode,
     LotAllocation,
     can_store,
+    group_default_name,
+    group_kind_for_code,
     is_grid_node,
 )
 from app.security.permissions import RequirePermission, has_permission
@@ -72,9 +82,7 @@ def _parse_uuid(value: str, *, field: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except ValueError as exc:
-        raise ValidationError(
-            f"{field} is not a valid UUID", code=f"invalid_{field}"
-        ) from exc
+        raise ValidationError(f"{field} is not a valid UUID", code=f"invalid_{field}") from exc
 
 
 # ── Serialisers ─────────────────────────────────────────────────────────
@@ -97,6 +105,7 @@ def _node_to_read(
         code=node.code,
         name=node.name,
         is_active=node.is_active,
+        is_scrap=node.is_scrap,
         notes=node.notes,
         grid_rows=node.grid_rows,
         grid_cols=node.grid_cols,
@@ -106,12 +115,8 @@ def _node_to_read(
         dedicated_product_id=(
             str(node.dedicated_product_id) if node.dedicated_product_id else None
         ),
-        inherited_customer_id=(
-            str(inherited_customer_id) if inherited_customer_id else None
-        ),
-        inherited_product_id=(
-            str(inherited_product_id) if inherited_product_id else None
-        ),
+        inherited_customer_id=(str(inherited_customer_id) if inherited_customer_id else None),
+        inherited_product_id=(str(inherited_product_id) if inherited_product_id else None),
         can_store=can_store(node.node_type),
         child_count=child_count,
         active_allocation_count=alloc_count,
@@ -126,6 +131,7 @@ def _alloc_to_read(a: LotAllocation) -> AllocationRead:
         id=str(a.id),
         lot_id=str(a.lot_id),
         lot_number=a.lot.lot_number if a.lot else None,
+        release_state=a.lot.release_state if a.lot else None,
         item_id=str(a.lot.item.id) if a.lot and a.lot.item else None,
         item_number=a.lot.item.item_number if a.lot and a.lot.item else None,
         location_node_id=str(a.location_node_id),
@@ -147,12 +153,8 @@ def _ledger_to_read(m: StockMovement) -> NodeMovementRead:
         item_id=str(m.item.id) if m.item else None,
         item_number=m.item.item_number if m.item else None,
         movement_type=m.movement_type,  # type: ignore[arg-type]
-        from_location_node_id=(
-            str(m.from_location_node_id) if m.from_location_node_id else None
-        ),
-        to_location_node_id=(
-            str(m.to_location_node_id) if m.to_location_node_id else None
-        ),
+        from_location_node_id=(str(m.from_location_node_id) if m.from_location_node_id else None),
+        to_location_node_id=(str(m.to_location_node_id) if m.to_location_node_id else None),
         qty_delta=m.qty_delta,
         notes=m.notes,
         performed_by_user_id=str(m.performed_by_user_id),
@@ -235,16 +237,20 @@ async def get_ln2_tree(
 @nodes_router.get(
     "/freezer-tree",
     response_model=list[NodeTreeRead],
-    summary="Freezer hierarchy as nested trees (room → location → sub-location)",
+    summary="Room hierarchies as nested trees (room → [category] → location → sub-location)",
     dependencies=[Depends(RequirePermission("inventory", "view"))],
 )
 async def get_freezer_tree(
     db: DBSession,
     active_only: Annotated[bool, Query()] = True,
 ) -> list[NodeTreeRead]:
-    from app.models.locations import FREEZER_LEVELS
+    # STORAGE_LEVELS is FREEZER_LEVELS plus ``storage_category``, so one query
+    # still returns every room. Storage's branch simply comes back one level
+    # deeper; the other rooms are unchanged, and each screen picks its own room
+    # out by code.
+    from app.models.locations import STORAGE_LEVELS
 
-    nodes = await loc_repo.list_nodes_by_types(db, FREEZER_LEVELS, active_only=active_only)
+    nodes = await loc_repo.list_nodes_by_types(db, STORAGE_LEVELS, active_only=active_only)
     # Free-storage leaves hold units (SUM qty), not one-per-cell — occupancy is
     # the unit total.
     units = await loc_repo.active_allocation_units_by_node(db)
@@ -263,9 +269,7 @@ async def get_warehouse_tree(
 ) -> list[NodeTreeRead]:
     from app.models.locations import WAREHOUSE_LEVELS
 
-    nodes = await loc_repo.list_nodes_by_types(
-        db, WAREHOUSE_LEVELS, active_only=active_only
-    )
+    nodes = await loc_repo.list_nodes_by_types(db, WAREHOUSE_LEVELS, active_only=active_only)
     units = await loc_repo.active_allocation_units_by_node(db)
     return _build_tree(nodes, units)
 
@@ -281,9 +285,7 @@ async def list_flat_locations(
     flat_category: Annotated[str | None, Query()] = None,
     active_only: Annotated[bool, Query()] = True,
 ) -> list[NodeRead]:
-    rows = await loc_repo.list_flat(
-        db, flat_category=flat_category, active_only=active_only
-    )
+    rows = await loc_repo.list_flat(db, flat_category=flat_category, active_only=active_only)
     # Flat occupancy = units held (SUM qty), since one allocation may carry many.
     units = await loc_repo.active_allocation_units_by_node(db)
     return [_node_to_read(n, alloc_count=units.get(n.id, 0)) for n in rows]
@@ -304,9 +306,26 @@ async def list_storage_targets(db: DBSession) -> list[NodeRead]:
     )
     # Attach the full breadcrumb so the UI can disambiguate same-named boxes.
     labels = await loc_repo.node_label_map(db)
-    return [
-        _node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows
-    ]
+    return [_node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows]
+
+
+@nodes_router.get(
+    "/kanbans",
+    response_model=list[NodeRead],
+    summary="Every Kanban station, with its production area in the path",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_all_kanbans(db: DBSession) -> list[NodeRead]:
+    """Every Kanban across every production area (LOC-006).
+
+    Feeds the issue dialog's destination picker as ONE breadcrumbed list
+    ("Clean Room Four › Kanban 1") rather than an area select chained to a
+    Kanban select — the tree is two levels deep and the second box was always
+    a formality. Declared above ``/{node_id}`` or that route swallows it.
+    """
+    rows = await loc_repo.list_nodes_by_types(db, ("kanban",), active_only=True)
+    labels = await loc_repo.node_label_map(db)
+    return [_node_to_read(n, path=labels.get(n.id, (n.name, n.name))[1]) for n in rows]
 
 
 @nodes_router.get(
@@ -409,14 +428,11 @@ async def create_node(
         if parent is None:
             raise NotFoundError(f"Parent node {payload.parent_id} not found")
         if not parent.is_active:
-            raise ValidationError(
-                "Parent node is inactive", code="parent_inactive"
-            )
+            raise ValidationError("Parent node is inactive", code="parent_inactive")
         if parent.node_type not in required_parents:
             allowed = " or ".join(f"'{p}'" for p in required_parents)
             raise ValidationError(
-                f"A '{node_type}' must hang under {allowed}, "
-                f"not a '{parent.node_type}'",
+                f"A '{node_type}' must hang under {allowed}, " f"not a '{parent.node_type}'",
                 code="invalid_parent_type",
             )
 
@@ -440,9 +456,7 @@ async def create_node(
     grid_cols: int | None = None
     if is_grid_node(node_type):
         if payload.grid_rows is None or payload.grid_cols is None:
-            raise ValidationError(
-                "A box requires grid_rows and grid_cols", code="grid_required"
-            )
+            raise ValidationError("A box requires grid_rows and grid_cols", code="grid_required")
         grid_rows, grid_cols = payload.grid_rows, payload.grid_cols
     elif payload.grid_rows is not None or payload.grid_cols is not None:
         raise ValidationError(
@@ -459,9 +473,7 @@ async def create_node(
 
     # Sibling code uniqueness (covers the root case the unique index can't).
     if (
-        await loc_repo.get_sibling_by_code(
-            db, parent_id=parent_uuid, code=payload.code
-        )
+        await loc_repo.get_sibling_by_code(db, parent_id=parent_uuid, code=payload.code)
     ) is not None:
         raise ConflictError(
             f"A sibling with code '{payload.code}' already exists here",
@@ -471,9 +483,7 @@ async def create_node(
     # …and sibling NAME uniqueness. The code is generated and rarely seen; the
     # name is what is written on the door, so two siblings sharing one are
     # indistinguishable to the operator choosing between them.
-    await _require_unique_name(
-        db, node_type=node_type, parent_id=parent_uuid, name=payload.name
-    )
+    await _require_unique_name(db, node_type=node_type, parent_id=parent_uuid, name=payload.name)
 
     node = await loc_repo.create_node(
         db,
@@ -494,7 +504,12 @@ async def create_node(
         action="created",
         subject_table="meta.location_nodes",
         subject_id=node.id,
-        subject_label=f"{node.node_type}:{node.code}",
+        # The name, not ``<type>:<code>``. The audit log is read by people and
+        # "Clean Room 1" is what they call it; the code is an internal handle
+        # that drifts from the name by design. Every recorder call in this
+        # module follows the same rule — the code is still in the snapshot for
+        # anyone who needs it.
+        subject_label=node.name,
         before=None,
         after=loc_repo.node_to_audit_snapshot(node),
     )
@@ -574,7 +589,7 @@ async def update_node(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -640,16 +655,23 @@ async def move_node(
     if new_parent.node_type not in required_parents:
         allowed = " or ".join(f"'{p}'" for p in required_parents)
         raise ValidationError(
-            f"A '{node.node_type}' must hang under {allowed}, "
-            f"not a '{new_parent.node_type}'",
+            f"A '{node.node_type}' must hang under {allowed}, " f"not a '{new_parent.node_type}'",
             code="invalid_parent_type",
+        )
+
+    # PARENT_OF can only say "a room"; it cannot say WHICH room. Cold Storage and
+    # the Analytical Lab are exempt from the standard template (LOC-002/LOC-003),
+    # so a category under either of them would be a shape no screen renders — the
+    # room pages read their locations straight off the room.
+    if node.node_type == "storage_category" and new_parent.code.upper() != STORAGE_ROOM_CODE:
+        raise ValidationError(
+            f"A Storage location belongs in the Storage room, not in '{new_parent.name}'",
+            code="invalid_parent_room",
         )
 
     # Dropping a node onto its own descendant would orphan the whole branch from
     # every root — it would still exist, but no tree walk could ever reach it.
-    if await loc_repo.is_descendant_of(
-        db, ancestor_id=node.id, candidate_id=new_parent_id
-    ):
+    if await loc_repo.is_descendant_of(db, ancestor_id=node.id, candidate_id=new_parent_id):
         raise ValidationError(
             f"'{new_parent.name}' sits inside '{node.name}' — "
             "a node cannot be moved into its own contents",
@@ -657,9 +679,7 @@ async def move_node(
         )
 
     # The destination's own rules apply exactly as they would on create.
-    clash = await loc_repo.get_sibling_by_code(
-        db, parent_id=new_parent_id, code=node.code
-    )
+    clash = await loc_repo.get_sibling_by_code(db, parent_id=new_parent_id, code=node.code)
     if clash is not None:
         raise ConflictError(
             f"'{new_parent.name}' already contains something coded '{node.code}'",
@@ -691,7 +711,7 @@ async def move_node(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=moved.id,
-        subject_label=f"{moved.node_type}:{moved.code}",
+        subject_label=moved.name,
         before={**before, "path": from_path},
         after={**loc_repo.node_to_audit_snapshot(moved), "path": to_path},
     )
@@ -711,8 +731,12 @@ async def move_node(
 # This deliberately overrides LOC-003's older sentence that "adding freezers,
 # refrigerators, and LN2 tanks remains available to the appropriate admin role":
 # LOC-006 is the later requirement and was signed off on 2026-07-29.
+#   * ``storage_category`` — REQ-2026-08-04-LOC-004, the standard template's
+#     sub-locations are "admin-configurable, consistent with the role-restricted
+#     location administration already defined". Its groups and units are
+#     ``room_location`` / ``sub_location``, so they are already covered above.
 SUPER_ADMIN_NODE_TYPES: frozenset[str] = frozenset(
-    {"shelf", "room_location", "sub_location"}
+    {"shelf", "room_location", "sub_location", "storage_category"}
 )
 
 # LN2 structure — the second, looser tier. LOC-003 draws an explicit contrast:
@@ -803,7 +827,318 @@ async def add_production_area(
         action="created",
         subject_table="meta.location_nodes",
         subject_id=node.id,
-        subject_label=f"{node.node_type}:{node.code}",
+        subject_label=node.name,
+        before=None,
+        after=loc_repo.node_to_audit_snapshot(node),
+    )
+    response = _node_to_read(node)
+    await db.commit()
+    return response
+
+
+async def _default_group_name(db: DBSession, *, category_id: uuid.UUID, kind: str) -> str:
+    """The name a sub-type gets when the client doesn't type one.
+
+    The kind's own name ("Freezer"), numbered if the location already has a live
+    one ("Freezer 2"). Without the numbering, adding a second freezer without
+    renaming it would fail on the sibling-name index — the client would be told
+    to pick a different name for a button that offered no name field.
+
+    Only ACTIVE siblings count. A dormant "Freezer" should be re-used, not
+    stepped over: leaving the default at "Freezer" is what lets the add revive it.
+    """
+    base = group_default_name(kind)
+    name = base
+    n = 2
+    while await loc_repo.get_child_by_name(db, parent_id=category_id, name=name) is not None:
+        name = f"{base} {n}"
+        n += 1
+    return name
+
+
+@nodes_router.post(
+    "/storage-categories",
+    response_model=NodeTreeRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a Storage location — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_storage_category(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: StorageCategoryCreate,
+) -> NodeTreeRead:
+    """Create one location in the Storage room (LOC-001).
+
+    Takes no parent id, because there is only ever one Storage room and the
+    client neither names it nor chooses it — the server resolves it, creating it
+    on first use. It used to be a seeded row addressed by id here, which meant a
+    release could ship this whole screen and still leave it reporting "isn't set
+    up yet" until someone ran a script by hand on that environment.
+
+    The location is created BARE — no shelves, refrigerators or freezers. Those
+    are added afterwards through ``PATCH /{id}/storage-groups``, which is the
+    whole of "location sub-types shall be configurable after creation". The
+    response still carries an (empty) ``children`` list so the page renders its
+    tab strip from one shape whether the location has sub-types or not.
+
+    Super-admin only per LOC-004, on the same rationale as LOC-003's shelf rule:
+    two spellings of one physical place split its register in half.
+    """
+    _require_super_admin(current, what="Storage locations")
+    room = await loc_repo.get_or_create_storage_room(db, created_by_user_id=current.id)
+    await _require_unique_name(
+        db, node_type="storage_category", parent_id=room.id, name=payload.name
+    )
+    category = await loc_repo.create_storage_category(
+        db,
+        room_node_id=room.id,
+        name=payload.name,
+        created_by_user_id=current.id,
+        is_scrap=payload.is_scrap,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="meta.location_nodes",
+        subject_id=category.id,
+        subject_label=category.name,
+        before=None,
+        after=loc_repo.node_to_audit_snapshot(category),
+    )
+    response = NodeTreeRead(**_node_to_read(category).model_dump(), children=[])
+    await db.commit()
+    return response
+
+
+@nodes_router.patch(
+    "/{node_id}/storage-groups",
+    response_model=NodeTreeRead,
+    summary="Set which sub-types a Storage location has — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def update_storage_groups(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: StorageGroupsUpdate,
+) -> NodeTreeRead:
+    """Reconfigure a Storage location's sub-types after creation (LOC-001).
+
+    The payload is the list the location should END UP with: entries with an
+    ``id`` stay, entries with a ``kind`` are added, and any current sub-type not
+    listed is removed. Sending the same list twice changes nothing.
+
+    This used to take three booleans, one per sub-type. The amended LOC-001 is
+    precisely the case that shape cannot express — "add an additional freezer
+    (e.g. minus-80 alongside minus-20)" — because a location may hold several
+    sub-types of the SAME kind. There are still only the three kinds LOC-001
+    names; what tells two freezers apart is the ``name`` the client gives them,
+    and the server numbers their codes (``FRZ``, then ``FRZ-2``).
+
+    An empty list is accepted for any location: a location is created with no
+    sub-types at all, so zero is a state each one starts in, and refusing to
+    return to it would make the first save a one-way door.
+
+    Adding a kind under a name a REMOVED sub-type of that kind already had
+    revives that node rather than minting a second one beside it. Both sibling
+    indexes are partial on ``is_active``, so the duplicate would be allowed
+    through — leaving a tab that reads identically but is a different node under
+    a different code, and silently breaking every link built from the old one.
+    Removing a sub-type soft-deletes it and is REFUSED while it still holds
+    units: hiding a tab does not move the stock, and the ledger keeps counting it.
+    """
+    _require_super_admin(current, what="Storage locations")
+    category = await loc_repo.get_node(db, node_id)
+    if category is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+    if category.node_type != "storage_category":
+        raise ValidationError(
+            "Sub-types are configured on a Storage location.",
+            code="node_not_storage_category",
+        )
+
+    before = loc_repo.node_to_audit_snapshot(category)
+    existing = await loc_repo.list_storage_groups(db, category.id)
+    before_groups = [g.code for g in existing]
+    by_id = {g.id: g for g in existing}
+
+    keep: set[uuid.UUID] = set()
+    for entry in payload.groups:
+        if entry.id is None:
+            continue
+        gid = _parse_uuid(entry.id, field="groups[].id")
+        if gid not in by_id:
+            # Deliberately not "revive it for them": ``list_storage_groups``
+            # returns only ACTIVE sub-types, so an id we don't recognise is either
+            # a stale tree the client is holding or one someone removed meanwhile.
+            # Bringing a removed one back is the ADD path — silently reviving here
+            # would resurrect a sub-type the client's screen never showed them.
+            raise ValidationError(
+                "That sub-type is not on this location.",
+                code="storage_group_not_found",
+                details={"group_id": entry.id},
+            )
+        keep.add(gid)
+    additions = [e for e in payload.groups if e.kind is not None]
+
+    # A debit-and-gone location is a DISPOSITION, not a place (client
+    # 2026-08-19). Nothing is stored at one: material issued there leaves
+    # inventory, and its page shows that history instead of tabs.
+    #
+    # This closes a gap rather than adding a restriction. The UI already
+    # suppressed a scrap location's tabs and hid "Configure sub-types" from its
+    # menu, so sub-types on one were unreachable — but the old create dialog left
+    # its three switches ON behind the debit-and-gone choice and sent them
+    # anyway, which is how R&D and Scrap ended up carrying three ``room_location``
+    # nodes no screen rendered and no control could remove.
+    #
+    # Removals stay legal, so those orphans can still be cleared out.
+    if additions and category.is_scrap:
+        raise ValidationError(
+            f"'{category.name}' is a debit-and-gone location — material issued there "
+            "leaves inventory, so it has nowhere to put things and takes no sub-types.",
+            code="storage_groups_scrap",
+        )
+
+    changed = False
+    # Removals FIRST, so a name freed in this request is available to an add in
+    # the same request — otherwise replacing a sub-type with a like-named one
+    # would collide with the row it is replacing.
+    for group in existing:
+        if group.id in keep:
+            continue
+        units = await loc_repo.count_active_children(db, group.id)
+        if units:
+            raise ConflictError(
+                f"'{group.name}' still holds {units} "
+                f"{'unit' if units == 1 else 'units'}. Move or remove them before "
+                f"removing it.",
+                code="storage_group_in_use",
+                details={"group_code": group.code, "units": units},
+            )
+        await loc_repo.set_node_active(db, node=group, is_active=False)
+        changed = True
+
+    for entry in additions:
+        kind = entry.kind
+        assert kind is not None  # the schema guarantees id XOR kind
+        name = entry.name or await _default_group_name(db, category_id=category.id, kind=kind)
+        prior = await loc_repo.get_child_by_name(
+            db, parent_id=category.id, name=name, active_only=False
+        )
+        if prior is not None and prior.is_active:
+            # Still active after the removals above means it is one the caller
+            # asked to KEEP — so this entry would be a second sub-type with the
+            # same name, which is exactly what the sibling-name index forbids.
+            raise ConflictError(
+                f"'{prior.name}' already exists here.",
+                code="node_name_conflict",
+                details={"existing_id": str(prior.id), "name": prior.name},
+            )
+        # Revive only when the retired node is the SAME KIND. A dormant freezer
+        # called "Cold Store" must not come back as the refrigerator someone just
+        # asked for: its code is FRZ, and the code drives the icon, the add-unit
+        # wording and the URL. Different kind, same name ⇒ a new node, which the
+        # partial index permits precisely because the old one is inactive.
+        if prior is not None and group_kind_for_code(prior.code) == kind:
+            await loc_repo.set_node_active(db, node=prior, is_active=True)
+        else:
+            await loc_repo.create_node(
+                db,
+                node_type="room_location",
+                code=await loc_repo.next_group_code(db, category.id, kind),
+                name=name,
+                created_by_user_id=current.id,
+                parent_id=category.id,
+            )
+        changed = True
+
+    groups = await loc_repo.list_storage_groups(db, category.id)
+    if changed:
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="updated",
+            subject_table="meta.location_nodes",
+            subject_id=category.id,
+            subject_label=category.name,
+            before={**before, "storage_groups": before_groups},
+            after={
+                **loc_repo.node_to_audit_snapshot(category),
+                "storage_groups": [g.code for g in groups],
+            },
+        )
+    response = NodeTreeRead(
+        **_node_to_read(category).model_dump(),
+        children=[NodeTreeRead(**_node_to_read(g).model_dump()) for g in groups],
+    )
+    await db.commit()
+    return response
+
+
+@nodes_router.get(
+    "/{node_id}/kanbans",
+    response_model=list[NodeRead],
+    summary="The Kanban stations inside a production area",
+    dependencies=[Depends(RequirePermission("inventory", "view"))],
+)
+async def list_kanbans(db: DBSession, node_id: Annotated[uuid.UUID, Path()]) -> list[NodeRead]:
+    """Feeds the issue dialog's destination picker and the floor's Kanban tab.
+    Returns an empty list for an area with no Kanban yet — the UI turns that
+    into "ask a super admin to add one" rather than an error."""
+    return [_node_to_read(n) for n in await loc_repo.list_kanbans(db, node_id)]
+
+
+@nodes_router.post(
+    "/{node_id}/kanbans",
+    response_model=NodeRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a Kanban station inside a production area — super-admin only",
+    dependencies=[Depends(RequirePermission("inventory", "create"))],
+)
+async def add_kanban(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    node_id: Annotated[uuid.UUID, Path()],
+    payload: KanbanCreate,
+) -> NodeRead:
+    """Add one Kanban to a production area (REQ-2026-07-01-LOC-006, "a Kanban
+    shall be representable as a named location"; client 2026-08-10).
+
+    A room may hold several — "Kanban 1", "Kanban 2" — and a consumable issue
+    always targets one of them rather than the room itself, so two stations in
+    one clean room stay separately countable.
+
+    Super-admin only, on the same rationale as LOC-003's shelf restriction: an
+    operator-created "Kanban1" alongside "Kanban 1" silently splits one physical
+    bin's register in two.
+    """
+    _require_super_admin(current, what="Kanban stations")
+    area = await loc_repo.get_node(db, node_id)
+    if area is None:
+        raise NotFoundError(f"Location node {node_id} not found")
+    # ``flat`` alone would also match a legacy Lab / QC / Materials node, and a
+    # Kanban belongs to a production area specifically.
+    if area.node_type != "flat" or area.flat_category != "production":
+        raise ValidationError(
+            "A Kanban is added inside a production area.",
+            code="parent_not_production_area",
+        )
+    if not area.is_active:
+        raise ValidationError("That production area is inactive", code="node_inactive")
+    await _require_unique_name(db, node_type="kanban", parent_id=area.id, name=payload.name)
+    node = await loc_repo.create_kanban(
+        db, area_node_id=area.id, name=payload.name, created_by_user_id=current.id
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="created",
+        subject_table="meta.location_nodes",
+        subject_id=node.id,
+        subject_label=node.name,
         before=None,
         after=loc_repo.node_to_audit_snapshot(node),
     )
@@ -828,9 +1163,7 @@ async def update_node_grid(
     if node is None:
         raise NotFoundError(f"Location node {node_id} not found")
     if not is_grid_node(node.node_type):
-        raise ValidationError(
-            "Only a box has a resizable grid", code="grid_not_allowed"
-        )
+        raise ValidationError("Only a box has a resizable grid", code="grid_not_allowed")
     # The single-column rule for a box under a cassette is gone with the
     # cassette level itself (client 2026-07-29) — a box now hangs off a rack and
     # carries whatever grid it is given.
@@ -850,7 +1183,7 @@ async def update_node_grid(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -893,7 +1226,7 @@ async def update_node_dedication(
         action="updated",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -905,10 +1238,49 @@ async def update_node_dedication(
     return response
 
 
+async def _require_node_empty(
+    db: DBSession,
+    node: LocationNode,
+    *,
+    skip_children: bool = False,
+) -> None:
+    """Refuse unless this node holds nothing (§4.1 block rules).
+
+    Three independent reasons a node is not empty, each with its own error code
+    so the UI can say which one applies: it still contains something, it still
+    holds stock, or the ledger refers to it. Errors name the NODE, because a
+    cascade validates several and "cannot delete a node" would not say which.
+    """
+    if not skip_children and await loc_repo.node_has_children(db, node.id):
+        raise ValidationError(
+            f"'{node.name}' still contains other locations", code="node_has_children"
+        )
+    if await loc_repo.node_has_any_allocations(db, node.id):
+        raise ValidationError(
+            f"'{node.name}' still holds stock", code="node_has_active_lots"
+        )
+    # Ledger history deliberately does NOT block (client, 2026-08-12).
+    #
+    # It used to, on the reasoning that a node must survive "so its name still
+    # resolves on historical rows". That reasoning does not apply to a SOFT
+    # delete: ``is_active=false`` hides the node from trees and pickers but never
+    # removes the row, and ``node_label_map`` reads every node regardless of
+    # ``is_active``, so a deleted location still names itself on every movement
+    # it ever appeared on. Nothing in the audit trail changes.
+    #
+    # What the old rule actually did was make decommissioning impossible: every
+    # real freezer picks up history the first time it is used, so only a location
+    # created by mistake and never touched could ever be removed.
+    #
+    # The guards that remain are the ones that protect something real — you
+    # cannot delete a node that still CONTAINS anything, or that still holds
+    # stock.
+
+
 @nodes_router.delete(
     "/{node_id}",
     response_model=NodeRead,
-    summary="Soft-delete a node (blocked if it has children / lots / history)",
+    summary="Soft-delete a node (blocked only if it still holds something; a Storage location takes its empty sub-types with it)",
     dependencies=[Depends(RequirePermission("inventory", "create"))],
 )
 async def delete_node(
@@ -922,21 +1294,46 @@ async def delete_node(
     if not node.is_active:
         return _node_to_read(node)
 
-    # Block rules (§4.1) — strict, no cascade.
-    if await loc_repo.node_has_children(db, node_id):
-        raise ValidationError(
-            "Cannot delete a node that has child nodes", code="node_has_children"
-        )
-    if await loc_repo.node_has_any_allocations(db, node_id):
-        raise ValidationError(
-            "Cannot delete a node that holds active lots", code="node_has_active_lots"
-        )
-    if await loc_repo.node_has_movement_history(db, node_id):
-        raise ValidationError(
-            "Cannot delete a node with ledger history", code="node_has_history"
-        )
+    # Deletion is gated exactly as CREATION is — super admin for the room levels
+    # (LOC-003 / LOC-006 / LOC-004), admin for LN2 structure. This route used to
+    # sit on the bare ``inventory:create`` dependency, which operators also hold,
+    # so an operator could remove a Cold Storage unit they were never allowed to
+    # add. Removing a location is not the lesser act.
+    _require_super_admin_for_node_type(current, node.node_type)
+
+    # A Storage location's sub-type groups were put there by the TEMPLATE, not by
+    # hand (LOC-001), so they go with it. "Empty" for a location means it holds no
+    # units anywhere — making the client switch all three sub-types off first
+    # would be ceremony over a structure they never chose to build.
+    #
+    # Every group is held to exactly the same emptiness rules as the location
+    # itself, and they are validated BEFORE anything is written, so a location
+    # with one occupied shelf fails whole rather than half-deleted.
+    cascade: list[LocationNode] = []
+    if node.node_type == "storage_category":
+        cascade = await loc_repo.list_storage_groups(db, node.id)
+        for group in cascade:
+            await _require_node_empty(db, group)
+
+    # ``skip_children`` because the category's children ARE the groups just
+    # cleared above — checking them again would refuse a delete over nodes that
+    # are going with it. Everything else (lots, ledger history) still applies.
+    await _require_node_empty(db, node, skip_children=bool(cascade))
 
     before = loc_repo.node_to_audit_snapshot(node)
+    for group in cascade:
+        group_before = loc_repo.node_to_audit_snapshot(group)
+        deleted_group = await loc_repo.soft_delete_node(db, node=group)
+        await record_entity_change(
+            db,
+            actor_user_id=current.id,
+            action="deleted",
+            subject_table="meta.location_nodes",
+            subject_id=deleted_group.id,
+            subject_label=deleted_group.name,
+            before=group_before,
+            after=loc_repo.node_to_audit_snapshot(deleted_group),
+        )
     updated = await loc_repo.soft_delete_node(db, node=node)
     await record_entity_change(
         db,
@@ -944,7 +1341,7 @@ async def delete_node(
         action="deleted",
         subject_table="meta.location_nodes",
         subject_id=updated.id,
-        subject_label=f"{updated.node_type}:{updated.code}",
+        subject_label=updated.name,
         before=before,
         after=loc_repo.node_to_audit_snapshot(updated),
     )
@@ -994,8 +1391,7 @@ async def _require_unique_name(
         if clash is not None:
             where = clash.parent.name if clash.parent is not None else None
             raise ConflictError(
-                f"'{clash.name}' already exists"
-                + (f" in {where}." if where else " elsewhere."),
+                f"'{clash.name}' already exists" + (f" in {where}." if where else " elsewhere."),
                 code="node_name_conflict",
                 details={"existing_id": str(clash.id), "name": clash.name},
             )
@@ -1020,9 +1416,21 @@ async def _resolve_storage_node(db: DBSession, node_id: str) -> LocationNode:
     if not node.is_active:
         raise ValidationError("Location node is inactive", code="node_inactive")
     if not can_store(node.node_type):
+        # A LOCATION is the common mistake here, and it is a meaningful one:
+        # "QC 1" is a legitimate destination for an Issue and never for a
+        # transfer, so the message names both the fix and the other action
+        # rather than leaving the operator to guess which they wanted.
+        # Keeping these two destination sets disjoint is what makes it
+        # impossible to both issue a quantity and store it (client rule 5).
+        if node.node_type == SCRAP_NODE_TYPE:
+            raise ValidationError(
+                f"'{node.name}' is a location, not a storage place — pick the shelf, "
+                f"refrigerator or freezer inside it. To remove the material from "
+                f"inventory instead, use Issue.",
+                code="node_not_storable",
+            )
         raise ValidationError(
-            f"A '{node.node_type}' cannot store lots — only boxes and "
-            "flat locations can",
+            f"A '{node.node_type}' cannot store lots — only boxes and " "flat locations can",
             code="node_not_storable",
         )
     return node
@@ -1164,6 +1572,196 @@ async def place_lot(
 
 
 @alloc_router.post(
+    "/receive-to-inventory",
+    response_model=list[AllocationRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="Put received material away and release it, in one e-signed action (REQ-004)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def receive_to_inventory(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: ReceiveToInventoryRequest,
+) -> list[AllocationRead]:
+    """Step two of receiving: choose the location, sign, and release.
+
+    Lives here rather than in the inventory module because everything it needs
+    already does — cell validation with the override path, the lifetime cap
+    against ``ordered_qty``, allocation writing and the single ``+N`` receipt
+    movement. Re-implementing that next to the receive route is how the two
+    copies drift; ``_place_received_lot`` used to be exactly that copy, and had
+    quietly lost both the cap and the override.
+
+    Deliberately narrow: it only accepts a lot that ARRIVED against a purchase
+    order and is still quarantined. Manufactured output is quarantined too and
+    is placed by kitting under its own signature — releasing that is a quality
+    decision made on ``/lots/{id}/release-state``, not a receive-to-inventory step.
+    """
+    lot_uuid = _parse_uuid(payload.lot_id, field="lot_id")
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+
+    lot = await inv_repo.get_lot(db, lot_uuid)
+    if lot is None:
+        raise NotFoundError(f"Lot {payload.lot_id} not found")
+
+    # Received material only. A kit-produced lot reaching this endpoint means a
+    # caller has confused receiving to inventory with quality release; say so rather than
+    # quietly placing it.
+    if lot.receipt_transaction_line_id is None:
+        raise ValidationError(
+            "This lot was not received against a purchase order. Only received "
+            "material is received to inventory this way; manufactured output is placed at "
+            "close-out and released from the lot's release-state action.",
+            code="lot_not_received",
+        )
+    if lot.release_state != "quarantine":
+        # Covers the double-submit (already released) and the material that has
+        # since been rejected — neither should silently place stock.
+        raise ConflictError(
+            f"Lot {lot.lot_number} is '{lot.release_state or 'not quarantined'}', "
+            "so it is not awaiting receive-to-inventory.",
+            code="lot_not_quarantined",
+        )
+
+    node = await _resolve_storage_node(db, payload.node_id)
+    grid = is_grid_node(node.node_type)
+
+    # One unit per cell for a box; a single N-unit allocation for a flat leaf.
+    # Rejecting the wrong shape here beats accepting it and placing the wrong
+    # amount — the two carry the quantity in different fields.
+    if grid:
+        if not payload.cells:
+            raise ValidationError(
+                f"{node.name} is a box — select one cell per unit.",
+                code="cells_required",
+            )
+        if payload.qty is not None:
+            raise ValidationError(
+                "A box takes cells, not a quantity — the cell count is the quantity.",
+                code="qty_not_allowed_for_box",
+            )
+        qty = len(payload.cells)
+    else:
+        if payload.cells:
+            raise ValidationError(
+                f"{node.name} has no grid; don't send cells.",
+                code="cells_not_allowed",
+            )
+        if payload.qty is None:
+            raise ValidationError(
+                "Enter how many units go to this location.", code="qty_required"
+            )
+        qty = payload.qty
+
+    for cell in payload.cells:
+        await _validate_cell_target(
+            db,
+            node=node,
+            grid_row=cell.grid_row,
+            grid_col=cell.grid_col,
+            qty=Decimal("1"),
+            override=payload.override,
+            role=current.role,
+        )
+
+    # Lifetime cap — total placed for the lot may not exceed what arrived.
+    # Measured against the append-only receipt ledger, so a partial receipt
+    # followed by another still adds up correctly.
+    if lot.ordered_qty is not None:
+        already = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
+        if already + qty > lot.ordered_qty:
+            remaining = max(0, lot.ordered_qty - already)
+            raise ValidationError(
+                f"Placing {qty} would exceed the {lot.ordered_qty} unit(s) "
+                f"received for this lot — {remaining} still to place.",
+                code="place_exceeds_ordered",
+            )
+
+    before = inv_repo.lot_to_audit_snapshot(lot)
+
+    allocs: list[AllocationRead] = []
+    if grid:
+        for cell in payload.cells:
+            alloc = await loc_repo.create_allocation(
+                db,
+                lot_id=lot_uuid,
+                location_node_id=node.id,
+                qty=Decimal("1"),
+                grid_row=cell.grid_row,
+                grid_col=cell.grid_col,
+                created_by_user_id=current.id,
+                notes=payload.notes,
+            )
+            allocs.append(_alloc_to_read(alloc))
+    else:
+        alloc = await loc_repo.create_allocation(
+            db,
+            lot_id=lot_uuid,
+            location_node_id=node.id,
+            qty=Decimal(qty),
+            created_by_user_id=current.id,
+            notes=payload.notes,
+        )
+        allocs.append(_alloc_to_read(alloc))
+
+    # A single +N receipt for the whole receive-to-inventory — one logical, singly-signed
+    # event. This is also the row that makes the material on-hand and puts it in
+    # the Unit Ledger for the first time.
+    movement = await loc_repo.create_node_receipt_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot_uuid,
+        to_location_node_id=node.id,
+        qty=Decimal(qty),
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=payload.notes,
+    )
+
+    if payload.expiration_date is not None:
+        lot.expiration_date = payload.expiration_date
+
+    # Released only once everything is placed. A partial receipt leaves the lot
+    # quarantined so the remainder stays visible as outstanding work — and so
+    # the label never says "accepted" while material is still on the dock.
+    placed_after = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
+    fully_placed = lot.ordered_qty is None or placed_after >= lot.ordered_qty
+    if fully_placed:
+        lot.release_state = "released"
+    await db.flush()
+
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="receipt.release",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+        # The signature is about the LOT — the movement is what it produced.
+        record_table="app.lots",
+        record_id=lot_uuid,
+    )
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="updated",
+        subject_table="app.lots",
+        subject_id=lot_uuid,
+        subject_label=lot.lot_number,
+        before=before,
+        after=inv_repo.lot_to_audit_snapshot(lot),
+        context={
+            "placed_qty": qty,
+            "node_id": str(node.id),
+            "fully_placed": fully_placed,
+        },
+        signature_id=evidence_uuid,
+    )
+    await db.commit()
+    return allocs
+
+
+@alloc_router.post(
     "/place-batch",
     response_model=list[AllocationRead],
     status_code=status.HTTP_201_CREATED,
@@ -1275,8 +1873,7 @@ async def transfer_allocation(
 
     to_node = await _resolve_storage_node(db, payload.to_node_id)
     if to_node.id == alloc.location_node_id and (
-        payload.to_grid_row == alloc.grid_row
-        and payload.to_grid_col == alloc.grid_col
+        payload.to_grid_row == alloc.grid_row and payload.to_grid_col == alloc.grid_col
     ):
         raise ValidationError(
             "Source and destination cell are the same",
@@ -1419,9 +2016,7 @@ async def _load_batch_sources(
     if len({a.lot_id for a in allocs}) != 1:
         raise ValidationError("A batch must be a single lot", code="batch_multi_lot")
     if len({a.location_node_id for a in allocs}) != 1:
-        raise ValidationError(
-            "A batch must come from a single location", code="batch_multi_node"
-        )
+        raise ValidationError("A batch must come from a single location", code="batch_multi_node")
     return allocs, allocs[0].lot_id, allocs[0].location_node_id
 
 
@@ -1531,13 +2126,9 @@ async def transfer_batch(
             )
     else:
         if payload.to_cells:
-            raise ValidationError(
-                "A flat destination takes no cells", code="cells_not_allowed"
-            )
+            raise ValidationError("A flat destination takes no cells", code="cells_not_allowed")
         if payload.qty is None:
-            raise ValidationError(
-                "A flat destination needs qty", code="qty_required"
-            )
+            raise ValidationError("A flat destination needs qty", code="qty_required")
         move_qty = Decimal(payload.qty)
 
     if move_qty > available:
@@ -1634,61 +2225,23 @@ async def _draw_transfer_source(
     cell_allocation_ids: list[str] | None,
     line_no: int,
 ) -> None:
-    """Draw ``qty`` of one lot at one node — the exact vials for an LN2 box,
-    else FIFO across that lot's allocations there. Reducing an allocation to
-    zero deactivates it (incl. box cells), which is what frees the source cell.
+    """Draw ``qty`` of one lot at one node for a transfer.
 
-    Mirrors the shipment source drain; the difference is only in the error
-    codes, which name a transfer so the dialog can phrase its message.
+    The drain itself is shared with the shipment and material-issue paths
+    (:func:`loc_repo.draw_lot_at_node`) — it was three near-identical copies, and
+    this one's own comment used to say so. All that is transfer-specific is the
+    over-draw error code, which the dialog matches on to phrase its message.
     """
-    allocs = [
-        a
-        for a in await kit_repo.allocations_for_item_at_node(
-            db, item_id, node_uuid, for_update=True
-        )
-        if a.lot_id == lot_uuid
-    ]
-    available = sum(int(a.qty) for a in allocs)
-    if available == 0:
-        raise NotFoundError(
-            f"Source {line_no}: that lot is no longer stored at that location",
-            code="no_stock_at_location",
-        )
-
-    if cell_allocation_ids:
-        wanted = [_parse_uuid(c, field="cell_allocation_ids") for c in cell_allocation_ids]
-        if qty != len(set(wanted)):
-            raise ValidationError(
-                f"Source {line_no}: {len(set(wanted))} vials selected but qty is {qty} — "
-                f"for a box the quantity is the number of vials.",
-                code="cell_count_mismatch",
-            )
-        chosen = await kit_repo.allocations_by_ids(db, wanted)
-        found = {a.id for a in chosen}
-        if [str(w) for w in wanted if w not in found] or any(
-            a.lot_id != lot_uuid or a.location_node_id != node_uuid for a in chosen
-        ):
-            raise ValidationError(
-                f"Source {line_no}: one or more selected vials are no longer available.",
-                code="invalid_cell",
-            )
-        for alloc in chosen:
-            await loc_repo.reduce_allocation(db, allocation=alloc, qty=int(alloc.qty))
-        return
-
-    if qty > available:
-        raise ValidationError(
-            f"Source {line_no}: requested {qty} exceeds the {available} available for "
-            f"this lot here",
-            code="transfer_exceeds_available",
-        )
-    remaining = qty
-    for alloc in allocs:
-        if remaining <= 0:
-            break
-        take = min(remaining, int(alloc.qty))
-        await loc_repo.reduce_allocation(db, allocation=alloc, qty=take)
-        remaining -= take
+    await loc_repo.draw_lot_at_node(
+        db,
+        item_id=item_id,
+        lot_id=lot_uuid,
+        node_id=node_uuid,
+        qty=qty,
+        cell_allocation_ids=cell_allocation_ids,
+        line_no=line_no,
+        exceeds_code="transfer_exceeds_available",
+    )
 
 
 @alloc_router.post(
@@ -1716,6 +2269,10 @@ async def transfer_multi(
     # one signature covers one item's move and the ledger rows agree.
     item_id: uuid.UUID | None = None
     legs: list[_TransferLeg] = []
+    # Source node ids already proved to exist. Nothing else on this path loads
+    # the source node (the payload carries only its id), and one request commonly
+    # draws several lots out of the SAME box, so each node is checked once.
+    seen_from_nodes: set[uuid.UUID] = set()
     for i, src in enumerate(payload.sources, start=1):
         lot_uuid = _parse_uuid(src.lot_id, field="lot_id")
         node_uuid = _parse_uuid(src.node_id, field="node_id")
@@ -1725,9 +2282,7 @@ async def transfer_multi(
         if item_id is None:
             item_id = lot.item_id
         elif lot.item_id != item_id:
-            raise ValidationError(
-                "All sources must be for the same item", code="mixed_items"
-            )
+            raise ValidationError("All sources must be for the same item", code="mixed_items")
 
         to_node = await _resolve_storage_node(db, src.to_node_id)
         # Moving inside one box / shelf is the single-allocation ``/transfer``
@@ -1737,6 +2292,10 @@ async def transfer_multi(
                 f"Source {i}: the destination is the location it is already in",
                 code="transfer_same_location",
             )
+        if node_uuid not in seen_from_nodes:
+            if await loc_repo.get_node(db, node_uuid) is None:
+                raise NotFoundError(f"Source {i}: location node {src.node_id} not found")
+            seen_from_nodes.add(node_uuid)
         if is_grid_node(to_node.node_type):
             if not src.to_cells:
                 raise ValidationError(
@@ -1864,6 +2423,181 @@ async def transfer_multi(
     )
     await db.commit()
     return results
+
+
+@alloc_router.post(
+    "/adjust",
+    response_model=StockAdjustResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Correct the stock at one location, in or out, signed (CTL-002)",
+    dependencies=[Depends(RequirePermission("inventory", "sign"))],
+)
+async def adjust_stock(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    payload: StockAdjustRequest,
+) -> StockAdjustResult:
+    """Move a ``(lot × location)`` balance to what is actually there.
+
+    REQ-2026-08-13-CTL-002 asks that an error be corrected by a transaction
+    carrying an explanatory comment, visible in the ledger, rather than by a
+    silent edit. This is that transaction for a counting discrepancy: the shelf
+    holds 58 where the record says 60, or 3 vials turn up that were never
+    recorded. One signed ``adjustment`` row, with the location on it.
+
+    **Not an edit of the lot's received quantity.** ``lots.ordered_qty`` records
+    what arrived; a miscount later does not change that, and rewriting it would
+    put the lot at odds with the placement cap every placement path enforces.
+    So an adjustment IN is not capped by ``ordered_qty`` — finding more than the
+    paperwork claimed is precisely the discrepancy being recorded, and refusing
+    it would leave the operator with no way to make the record true.
+
+    Two rules, and they come from the material rather than from a label:
+
+    * **Out cannot overdraw.** The draw is the same one transfer, shipment and
+      material issue use (``draw_lot_at_node``), so a box gives up the exact
+      vials selected and a flat location goes FIFO, and taking more than is
+      there is refused with ``adjust_exceeds_available``.
+    * **In needs the lot to have been received to inventory already.** Otherwise
+      this becomes a second, uncapped receiving door that skips the
+      ``ordered_qty`` cap and the release step. Deliberately checked against
+      placement (``sum_received_qty_for_lot``) and not against
+      ``release_state`` — the state is a label (STS-003), it can be moved back
+      to quarantine by a signed decision, and a partial receipt stays
+      quarantined while holding real material, so gating on it would be both
+      bypassable and wrong for partial receipts.
+
+    The signature's subject is the lot the operator opened, while the ticket
+    targets the ledger row it authorised — the split VR-006 asks for.
+    """
+    lot_uuid = _parse_uuid(payload.lot_id, field="lot_id")
+    evidence_uuid = _parse_uuid(payload.evidence_id, field="evidence_id")
+
+    lot = await inv_repo.get_lot(db, lot_uuid)
+    if lot is None or lot.deleted_at is not None:
+        raise NotFoundError(f"Lot {payload.lot_id} not found")
+
+    node = await _resolve_storage_node(db, payload.node_id)
+    grid = is_grid_node(node.node_type)
+
+    # A box carries one unit per cell, so which vials is not a detail the
+    # operator may skip — without it the adjustment cannot say which positions
+    # it emptied or filled, and the grid would silently disagree with the count.
+    if grid and not (payload.cells or payload.cell_allocation_ids):
+        raise ValidationError(
+            f"{node.name} stores one unit per position, so an adjustment must "
+            f"name the {'positions to fill' if payload.direction == 'in' else 'vials to remove'}.",
+            code="cells_required",
+        )
+    if not grid and (payload.cells or payload.cell_allocation_ids):
+        raise ValidationError(
+            f"{node.name} is not a box, so it has no vial positions.",
+            code="cells_not_supported",
+        )
+
+    if payload.direction == "out":
+        await loc_repo.draw_lot_at_node(
+            db,
+            item_id=lot.item_id,
+            lot_id=lot_uuid,
+            node_id=node.id,
+            qty=payload.qty,
+            cell_allocation_ids=payload.cell_allocation_ids or None,
+            line_no=1,
+            exceeds_code="adjust_exceeds_available",
+        )
+    else:
+        received_ever = int(await loc_repo.sum_received_qty_for_lot(db, lot_uuid))
+        if received_ever <= 0:
+            raise ConflictError(
+                f"Lot {lot.lot_number} has not been received to inventory yet, so "
+                f"there is no balance to correct. Receive it to inventory first.",
+                code="lot_not_in_inventory",
+            )
+        if payload.cells:
+            for cell in payload.cells:
+                await _validate_cell_target(
+                    db,
+                    node=node,
+                    grid_row=cell.grid_row,
+                    grid_col=cell.grid_col,
+                    qty=Decimal("1"),
+                    override=False,
+                    role=current.role,
+                )
+                await loc_repo.create_allocation(
+                    db,
+                    lot_id=lot_uuid,
+                    location_node_id=node.id,
+                    qty=Decimal("1"),
+                    grid_row=cell.grid_row,
+                    grid_col=cell.grid_col,
+                    created_by_user_id=current.id,
+                    notes=payload.notes,
+                )
+        else:
+            # One allocation per (location, lot), as the transfer path does: two
+            # rows for the same lot on the same shelf is a split with no meaning.
+            await loc_repo.create_allocation(
+                db,
+                lot_id=lot_uuid,
+                location_node_id=node.id,
+                qty=Decimal(payload.qty),
+                created_by_user_id=current.id,
+                notes=payload.notes,
+            )
+    await db.flush()
+
+    qty_delta = payload.qty if payload.direction == "in" else -payload.qty
+    direction_word = "in" if payload.direction == "in" else "out"
+    note = (
+        f"Adjusted {payload.qty} {direction_word} at {node.name}"
+        # The comment is optional on every e-signature (client 2026-06-29), so
+        # the note states the correction on its own and only carries the
+        # rationale when the operator gave one.
+        + (f" — {payload.notes}" if payload.notes else "")
+    )
+    movement = await loc_repo.create_node_adjustment_movement(
+        db,
+        item_id=lot.item_id,
+        lot_id=lot_uuid,
+        node_id=node.id,
+        qty_delta=qty_delta,
+        performed_by_user_id=current.id,
+        reauth_evidence_id=evidence_uuid,
+        notes=note,
+    )
+
+    from app.kitting import repository as kit_repo
+
+    qty_at_node = sum(
+        int(a.qty)
+        for a in await kit_repo.allocations_for_item_at_node(db, lot.item_id, node.id)
+        if a.lot_id == lot_uuid
+    )
+
+    # Consumed LAST so a replay or an expiry rolls the adjustment back with it.
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="movement.adjustment",
+        target_table="app.stock_movements",
+        target_id=movement.id,
+        # Subject is the lot: it is the record the operator opened and signed
+        # about, while the target above is the row the signature authorised.
+        record_table="app.lots",
+        record_id=lot_uuid,
+    )
+    await db.commit()
+
+    return StockAdjustResult(
+        movement_id=str(movement.id),
+        lot_id=str(lot_uuid),
+        node_id=str(node.id),
+        qty_delta=qty_delta,
+        qty_at_node=qty_at_node,
+    )
 
 
 @alloc_router.get(

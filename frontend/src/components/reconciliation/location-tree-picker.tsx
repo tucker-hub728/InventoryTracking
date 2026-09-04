@@ -26,6 +26,15 @@ export interface PNode {
   code: string;
   nodeType: string;
   canStore: boolean;
+  /** Debit-and-gone location (TRX-001/002). Only ever true on a
+   *  `storage_category`.
+   *
+   *  Such a node is HIDDEN by this picker entirely — see ``isHidden`` — because
+   *  it is a destination for material LEAVING inventory, never a place to put
+   *  anything. It is still carried on the node because the forest is shared:
+   *  ``locationHref`` reads it to route a link to the disposition log rather
+   *  than a storage tab. */
+  isScrap: boolean;
   isGroup: boolean;
   area: LocationArea | null;
   /** Real breadcrumb (excludes any synthetic group), e.g. "Warehouse One › Shelf A". */
@@ -45,7 +54,7 @@ export interface Forest {
  * navigation agree. Anything not named here sorts after, by name — a new room
  * appears without a code change.
  */
-const ROOM_CODE_ORDER = ['MM', 'CS', 'AL'];
+const ROOM_CODE_ORDER = ['STG'];
 
 // ── Cached forest (fetched once, shared across all picker instances) ─────────
 
@@ -69,6 +78,7 @@ function convertTree(
     code: n.code,
     nodeType: n.node_type,
     canStore: n.can_store,
+    isScrap: Boolean(n.is_scrap),
     isGroup: false,
     area,
     path: path.join(' › '),
@@ -100,17 +110,28 @@ function convertTree(
  * reads the way the structure diagram does.
  */
 async function buildForest(): Promise<Forest> {
-  const [ln2, rooms, warehouses, production] = await Promise.all([
+  const [ln2, rooms, warehouses, production, kanbans] = await Promise.all([
     locationNodesApi.ln2Tree(),
     locationNodesApi.freezerTree(),
     locationNodesApi.warehouseTree(),
     // Production floors — a kit's production location must be one of these
-    // (Transaction_Spec §2). Root `flat` nodes, so they have no children.
+    // (Transaction_Spec §2). Root `flat` nodes, whose only children are Kanbans.
     locationNodesApi.flat({ category: 'production' }),
+    // Kanban stations hang under a production area (LOC-006, consum01). They
+    // are fetched separately because the flat endpoint returns roots only, and
+    // grafted on below so an area renders as an expandable parent.
+    locationNodesApi.allKanbans(),
   ]);
   const byId = new Map<string, PNode>();
   const parentOf = new Map<string, string | null>();
   const real: PNode[] = [];
+
+  const kanbansByArea = new Map<string, NodeTree[]>();
+  for (const k of kanbans) {
+    if (!k.parent_id) continue;
+    const asTree: NodeTree = { ...k, children: [] };
+    kanbansByArea.set(k.parent_id, [...(kanbansByArea.get(k.parent_id) ?? []), asTree]);
+  }
 
   const warehousesByRoom = new Map<string, NodeTree[]>();
   for (const w of warehouses) {
@@ -125,6 +146,9 @@ async function buildForest(): Promise<Forest> {
       code: '',
       nodeType: 'group',
       canStore: false,
+      // A synthetic heading, not a real node — it can be neither storage nor a
+      // debit-and-gone destination.
+      isScrap: false,
       isGroup: true,
       area,
       path: '',
@@ -136,8 +160,7 @@ async function buildForest(): Promise<Forest> {
     return g;
   };
 
-  // Rooms, warehouses grafted in ahead of the cold-storage groups so the order
-  // matches the Materials Management page's tabs (Warehouse, then freezers).
+  // Rooms in sidebar order — Storage first, anything else after it by name.
   const roomNodes = [...rooms]
     .sort((a, b) => {
       const ai = ROOM_CODE_ORDER.indexOf(a.code);
@@ -178,7 +201,16 @@ async function buildForest(): Promise<Forest> {
       'Production',
       'production',
       production.map((n) =>
-        convertTree({ ...n, children: [] }, [], null, 'production', byId, parentOf, real),
+        convertTree(
+          { ...n, children: [] },
+          [],
+          null,
+          'production',
+          byId,
+          parentOf,
+          real,
+          kanbansByArea.get(n.id) ?? [],
+        ),
       ),
     ),
   ].filter((r) => r.isGroup ? r.children.length > 0 : true);
@@ -257,6 +289,7 @@ export function LocationTreePicker({
   onChange,
   areas = ALL_AREAS,
   allowedNodeIds,
+  excludeNodeTypes,
   nodeQty,
   // Storage leaves, plus production floors (which are `flat` nodes, so
   // `can_store` is false even though a kit legitimately targets them).
@@ -276,6 +309,10 @@ export function LocationTreePicker({
   /** If given, only these node ids are selectable AND the tree is pruned to the
    *  branches leading to them (e.g. locations holding an item). */
   allowedNodeIds?: ReadonlySet<string> | null;
+  /** Node types to drop from the tree and from search, subtree and all. Use it
+   *  when a branch is real but irrelevant to the flow — a kit is destined for a
+   *  production area, so the Kanbans hanging under one are noise there. */
+  excludeNodeTypes?: ReadonlyArray<string>;
   /** Optional per-node quantity to show next to a pickable node. */
   nodeQty?: Record<string, number>;
   /** Which nodes may be picked. Default: storage leaves. */
@@ -301,10 +338,48 @@ export function LocationTreePicker({
     };
   }, []);
 
+  const excluded = React.useMemo(
+    () => new Set(excludeNodeTypes ?? []),
+    // A new array literal every render is the normal way this prop is passed, so
+    // key the memo on the contents rather than the identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [(excludeNodeTypes ?? []).join(',')],
+  );
+
+  /**
+   * Rows this picker never renders.
+   *
+   * ``excludeNodeTypes`` is the caller's own list. ``isScrap`` is unconditional:
+   * a debit-and-gone location is where material goes to LEAVE inventory, so it
+   * is never a place to put anything — not a transfer destination, not a receipt
+   * destination, not a parent to hang a sub-type on, not a kit's output.
+   *
+   * It was already unpickable (a ``storage_category`` has ``can_store`` false, so
+   * the default ``selectable`` rejects it), but unpickable is not the same as
+   * absent: it still drew a row under "Storage" in every destination picker,
+   * reading as an option that silently refused to be chosen. Since such a
+   * location now has no sub-types either, that row expands to nothing.
+   *
+   * Hiding the node hides its whole subtree — children are filtered through this
+   * same predicate, and an unrendered parent never renders any.
+   *
+   * No caller needs the opposite. The one flow that DOES target these locations
+   * is Issue, and it uses a flat list from ``issuesApi.destinations`` rather than
+   * this tree; the consumable-issue dialog uses this picker but scoped to
+   * ``areas={['production']}``, which the Storage room is not in.
+   */
+  const isHidden = React.useCallback(
+    (n: PNode) => excluded.has(n.nodeType) || n.isScrap,
+    [excluded],
+  );
+
   const canPick = React.useCallback(
     (n: PNode) =>
-      !n.isGroup && selectable(n) && (!allowedNodeIds || allowedNodeIds.has(n.id)),
-    [selectable, allowedNodeIds],
+      !n.isGroup &&
+      !isHidden(n) &&
+      selectable(n) &&
+      (!allowedNodeIds || allowedNodeIds.has(n.id)),
+    [selectable, allowedNodeIds, isHidden],
   );
 
   // When restricted to specific nodes, prune the tree to just the branches
@@ -326,10 +401,14 @@ export function LocationTreePicker({
     () =>
       forest
         ? forest.roots.filter(
-            (r) => r.area && areas.includes(r.area) && (!visibleIds || visibleIds.has(r.id)),
+            (r) =>
+              r.area &&
+              areas.includes(r.area) &&
+              !isHidden(r) &&
+              (!visibleIds || visibleIds.has(r.id)),
           )
         : [],
-    [forest, areas, visibleIds],
+    [forest, areas, visibleIds, isHidden],
   );
 
   const selected = forest?.byId.get(value) ?? null;
@@ -453,6 +532,7 @@ export function LocationTreePicker({
                 value={value}
                 expanded={expanded}
                 canPick={canPick}
+                isHidden={isHidden}
                 visibleIds={visibleIds}
                 nodeQty={nodeQty}
                 onToggle={toggle}
@@ -472,6 +552,7 @@ function TreeRow({
   value,
   expanded,
   canPick,
+  isHidden,
   visibleIds,
   nodeQty,
   onToggle,
@@ -482,14 +563,15 @@ function TreeRow({
   value: string;
   expanded: Set<string>;
   canPick: (n: PNode) => boolean;
+  isHidden: (n: PNode) => boolean;
   visibleIds: Set<string> | null;
   nodeQty?: Record<string, number>;
   onToggle: (id: string) => void;
   onPick: (id: string) => void;
 }) {
-  const children = visibleIds
-    ? node.children.filter((c) => visibleIds.has(c.id))
-    : node.children;
+  const children = node.children.filter(
+    (c) => !isHidden(c) && (!visibleIds || visibleIds.has(c.id)),
+  );
   const hasChildren = children.length > 0;
   const isOpen = expanded.has(node.id);
   const pickable = canPick(node);
@@ -537,10 +619,15 @@ function TreeRow({
           <button
             type="button"
             onClick={() => hasChildren && onToggle(node.id)}
-            className={cn(
-              'flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-sm',
-              node.isGroup ? 'font-medium text-text-2' : 'text-text-3',
-            )}
+            // One style for everything you cannot pick. This used to give a
+            // SYNTHETIC group (`grp:ln2`, `grp:production`) heavier, darker text
+            // than a real room — but both kinds sit at the top level as
+            // siblings, and both behave identically: expand to reveal children,
+            // never selectable. The weight tracked whether the app stores a row
+            // or synthesises it, which is invisible to whoever is reading the
+            // list; all it did was make LN2 and Production look pickable when
+            // they are not. Black is reserved for rows you can actually choose.
+            className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left text-sm text-text-3"
           >
             <span className="truncate">{node.name}</span>
           </button>
@@ -555,6 +642,7 @@ function TreeRow({
             value={value}
             expanded={expanded}
             canPick={canPick}
+            isHidden={isHidden}
             visibleIds={visibleIds}
             nodeQty={nodeQty}
             onToggle={onToggle}

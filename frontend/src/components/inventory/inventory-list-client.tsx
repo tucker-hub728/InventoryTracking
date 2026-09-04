@@ -14,6 +14,9 @@ import { NewItemDialog } from './new-item-dialog';
 import { useInventoryStore } from '@/stores/inventory.store';
 import { usePermission } from '@/hooks/use-permission';
 import { toast } from '@/components/ui/sonner';
+import { ApiError } from '@/lib/api/client';
+import { exportsApi } from '@/lib/api/exports';
+import { saveBlob, timestampedFilename } from '@/lib/download';
 
 /**
  * Inventory list page client.
@@ -89,10 +92,26 @@ export function InventoryListClient() {
       <div className="px-6 py-5 sm:px-8">
         {/* <InventoryKPIs items={items} total={total} /> */}
 
+        {/* RPT-001 — the same real export the per-tier pages offer. There is
+            no queue and no notification: the file is built and returned on
+            the request. */}
         <InventoryFilters
-          onExport={() =>
-            toast.info('Export queued', { description: 'You will be notified when ready.' })
-          }
+          onExport={() => {
+            void (async () => {
+              try {
+                const { blob, filename } = await exportsApi.inventoryXlsx();
+                const name = filename ?? timestampedFilename('cellready-inventory', 'xlsx');
+                saveBlob(blob, name);
+                toast.success('Export downloaded', { description: name });
+              } catch (err) {
+                toast.error(
+                  err instanceof ApiError
+                    ? err.message
+                    : 'Failed to export. Please try again.',
+                );
+              }
+            })();
+          }}
         />
 
         <Card className="overflow-hidden">

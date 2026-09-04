@@ -11,6 +11,7 @@ nothing imports.
 from __future__ import annotations
 
 from app.models.audit import AuditEvent, ReauthConsumption, ReauthEvent
+from app.models.consumables import ConsumableIssue
 from app.models.forecast import ForecastEntry
 from app.models.identity import Role, User
 from app.models.inventory import (
@@ -28,16 +29,18 @@ from app.models.inventory import (
     Supplier,
 )
 from app.models.invitations import Invitation
-from app.models.kitting import Kit, KitLine
+from app.models.kitting import Kit, KitBatchConsumption, KitLine, KitProductionBatch
 from app.models.locations import (
     LocationNode,
     LotAllocation,
 )
+from app.models.notifications import NotificationAlertState, NotificationDelivery
 from app.models.products import Customer
 
 __all__ = [
     "AuditEvent",
     "BomLine",
+    "ConsumableIssue",
     "Customer",
     "ForecastEntry",
     "Invitation",
@@ -46,10 +49,14 @@ __all__ = [
     "ItemSupplier",
     "ItemTier",
     "Kit",
+    "KitBatchConsumption",
     "KitLine",
+    "KitProductionBatch",
     "LocationNode",
     "Lot",
     "LotAllocation",
+    "NotificationAlertState",
+    "NotificationDelivery",
     "ReauthConsumption",
     "ReauthEvent",
     "ReceiptEvent",

@@ -1,3 +1,5 @@
+import type { LotReleaseState } from '@/lib/api/lots';
+
 export type InventoryStatus =
   | 'Available'
   | 'Low stock'
@@ -20,6 +22,10 @@ export interface InventoryItem {
   uom: string;
   /** Blind-consumed with no per-lot traceability when true. */
   isConsumable: boolean;
+  /** Consumed to the kit, never back-flushed (KIT-003) when true. */
+  consumedInKit: boolean;
+  /** Grown/expressed: a kit for this item is not held to the recipe yield. */
+  variableYield: boolean;
   /** Tier (requirements v2 §6). ``tierType`` drives the Type column. */
   tierId: string;
   tierName: string;
@@ -40,6 +46,8 @@ export interface InventoryItem {
   qtyAvailable: number;
   months: number | null;
   onOrder: number;
+  /** Arrived, not yet received to inventory. Drives the "Awaiting release" badge. */
+  qtyAwaitingRelease: number;
   mustOrder: number;
   /** Per-item near-expiry window (days) driving the ledger expiry colours. */
   nearExpiryThresholdDays: number;
@@ -70,6 +78,19 @@ export interface LedgerEntry {
   /** Lot UUID behind the cell — drives the link to the originating order. */
   lotId?: string | null;
   exp: string;
+  /** The LOT's release state as it is now — carried on the row only so the
+   *  per-lot subtotal can show it. Never rendered against an individual
+   *  movement: a movement is a past event and this is the present state. */
+  lotReleaseState?: LotReleaseState | null;
+  /** Decimal (string). The LOT's per-unit price as it is NOW (RPT-003).
+   *
+   *  Carried on the row for the same reason as `lotReleaseState`, and with the
+   *  same rule: it is present state, not history — prices stay editable after
+   *  receive and nothing records what one was on the day of a movement. So it
+   *  is rendered on the per-lot subtotal only, never against a movement.
+   *
+   *  `null` means no price recorded, which is NOT `0`. */
+  lotUnitPrice?: string | null;
   initials: string;
   /** Full ``app.users.full_name`` of the operator who recorded the row.
    *  Rendered in the ledger "By" column and the audit-timeline movement
@@ -88,8 +109,13 @@ export interface LedgerEntry {
   kitId?: string | null;
   /** Customer shipment (CUST-001 / TRX-005): the named customer the finished
    *  good left inventory to (null = catalog / unassigned), and the reference /
-   *  tracking number. Set only on ``customer_shipment`` rows. */
+   *  tracking number. Set only on ``customer_shipment`` rows.
+   *
+   *  The id is carried alongside the name so the column can link to that
+   *  customer's shipping history. It can be null while the name is not —
+   *  the ledger is append-only and outlives the master data it names. */
   customerName?: string | null;
+  customerId?: string | null;
   referenceNumber?: string | null;
   /** True if this row is itself a reversal of an earlier row. */
   isReversal?: boolean;

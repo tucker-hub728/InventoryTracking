@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   ArrowRight,
   Check,
@@ -15,6 +16,7 @@ import {
   ScrollText,
   Send,
   Undo2,
+  Ban,
   X,
   XCircle,
   type LucideIcon,
@@ -53,6 +55,7 @@ import {
   type ApiKit,
   type ApiKitActivityRow,
   type ApiKitAuditEvent,
+  type ApiKitBatch,
   type ApiKitLine,
   type CancelLineInput,
   type KitStatus,
@@ -61,10 +64,13 @@ import {
 } from '@/lib/api/kits';
 import { locationNodesApi, type LocationNode } from '@/lib/api/location-nodes';
 import { lotsApi } from '@/lib/api/lots';
-import { cn } from '@/lib/utils';
+import { cn, formatMoney } from '@/lib/utils';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import { BoxCellPicker } from './cell-grid-picker';
 import { LocationTreePicker } from './location-tree-picker';
+import { LocationPath } from '@/components/locations/location-path';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   LotSourcePicker,
   autoFillFifo,
@@ -81,8 +87,9 @@ import {
   RuleNote,
   Stat,
   formatDateTime,
-  type SelectOption,
 } from './recon-bits';
+import { BatchDetailSheet } from './batch-detail-sheet';
+import { KitCostExportButton } from './kit-cost-export-button';
 
 const STEPS = [
   { key: 'issue', label: 'Issue', hint: 'Pull material to production' },
@@ -90,6 +97,18 @@ const STEPS = [
   { key: 'closeout', label: 'Close-Out', hint: 'Record output & reconcile' },
   { key: 'review', label: 'Review', hint: 'Confirm the batch, then produce or close' },
 ] as const;
+
+/** URL segment per step — what the operator sees in the address bar and copies
+ *  into a message. Kept apart from ``STEPS[].key`` so a label can be reworded
+ *  without breaking a link somebody saved. */
+const STEP_SLUGS = ['issue', 'production', 'close-out', 'review'] as const;
+
+/** ``/reconciliation/<id>/close-out`` → 2. Anything unrecognised → ``null``, so
+ *  the caller can fall back to the kit's own default rather than step 0. */
+function stepFromSlug(slug: string | undefined): number | null {
+  const i = STEP_SLUGS.indexOf(slug as (typeof STEP_SLUGS)[number]);
+  return i === -1 ? null : i;
+}
 
 // Four steps (client 2026-07-22): Issue → Production (adjust only) → Close-Out
 // (record output + reconcile) → Review & Close (summary + e-signed close). The
@@ -152,14 +171,6 @@ const emptyDest = (): OutputDest => ({
 const destPlaced = (d: OutputDest): number =>
   d.location_node_id ? (d.isBox ? d.cells.length : d.qty ?? 0) : 0;
 
-/** The batch size to offer for the NEXT produce: what is still owed against the
- *  kit's target (client 2026-07-28). Target 5 with nothing made yet → 5; after a
- *  batch of 3 → 2. Once the target is met or overshot it floors at **1**, so the
- *  operator can keep producing extras until they close the kit — production is
- *  incremental and the target is a plan, not a cap (KIT-007). */
-const remainingToTarget = (k: ApiKit): number =>
-  Math.max(1, (k.target_qty ?? 0) - (k.good_qty ?? 0));
-
 /** The BOM need for a line, rounded up to whole units (matches the backend). */
 const lineNeededQty = (l: ApiKitLine) => Math.ceil(Number(l.needed_qty));
 
@@ -175,15 +186,72 @@ const todayStr = (): string => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-export function KitDetailClient({ kitId }: { kitId: string }) {
+export function KitDetailClient({
+  kitId,
+  // The step segments render nothing — they exist so each step has a URL, and
+  // the shell reads the segment to know which one to show (see the layout).
+  // Accepted and ignored so Next's layout contract is honoured.
+  children: _children,
+}: {
+  kitId: string;
+  children?: React.ReactNode;
+}) {
   const canSign = usePermission('inventory', 'sign');
   const canWrite = usePermission('inventory', 'create');
+  // CTL-001 — every action that puts material BACK into inventory is
+  // Super-Admin-only. `usePermission` can't answer this: `operator` holds both
+  // `inventory:create` and `inventory:sign`, and the frontend collapses
+  // `super_admin` into the same `admin` bucket, so the raw role is the only
+  // thing that tells them apart (`selectIsSuperAdmin`). The API enforces it
+  // too — this only hides controls that would come back a 403.
+  const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  /** The cost export is Super-Admin-only too (client, 2026-09-03; it was Admin
+   *  and above until then) — it carries what each customer is charged. Mirrors
+   *  the endpoint's own RequireRole(SUPER_ADMIN_ROLE), and matches the RPT-001
+   *  finance export. Same raw-role reasoning as `isSuperAdmin` above, so it is
+   *  now the same value; kept as its own name because it answers a different
+   *  question and the two could diverge again. */
+  const canExportCosts = isSuperAdmin;
+  /** The manual return (TRX-008) and the cancel that returns the whole floor. */
+  const canReturn = canWrite && isSuperAdmin;
+  /** The signed close, whose back-flush credits the leftover back to stock. */
+  const canClose = canSign && isSuperAdmin;
+  // Producing is deliberately NOT gated: it consumes floor material and mints
+  // the output lot, so an operator keeps building without an admin present.
 
   const [kit, setKit] = React.useState<ApiKit | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [nodes, setNodes] = React.useState<LocationNode[]>([]);
-  const [activeStep, setActiveStep] = React.useState(0);
+  // ── The step is the URL ─────────────────────────────────────────────────
+  // ``/reconciliation/<id>/close-out`` IS step 2 — there is no step state to
+  // drift out of sync with the address bar, so a link, a refresh and the back
+  // button all land exactly where they say they will.
+  const router = useRouter();
+  const pathname = usePathname();
+  // Everything after the kit id: [] on the bare route, ['review','PL-123'] on a
+  // lot deep link.
+  const tail = React.useMemo(() => {
+    const parts = pathname.split('/').filter(Boolean);
+    const at = parts.indexOf(kitId);
+    return at === -1 ? [] : parts.slice(at + 1);
+  }, [pathname, kitId]);
+  const urlStep = stepFromSlug(tail[0]);
+  const stepHref = React.useCallback(
+    (n: number) => `/reconciliation/${kitId}/${STEP_SLUGS[n] ?? STEP_SLUGS[0]}`,
+    [kitId],
+  );
+  const activeStep = urlStep ?? 0;
+  /** Navigate to a step. Deliberately keeps the ``useState`` setter signature —
+   *  updater callbacks included — so every existing call site reads unchanged
+   *  and none of them has to know the step now lives in the URL. */
+  const setActiveStep = React.useCallback(
+    (next: number | ((prev: number) => number)) => {
+      const target = typeof next === 'function' ? next(urlStep ?? 0) : next;
+      router.push(stepHref(target));
+    },
+    [router, stepHref, urlStep],
+  );
   const [busy, setBusy] = React.useState(false);
 
   const [activityOpen, setActivityOpen] = React.useState(false);
@@ -231,14 +299,20 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       try {
         const k = await kitsApi.get(kitId, { signal });
         setKit(k);
-        setActiveStep(stepModel(k.status).def);
         setOutput((prev) => ({
           // "This batch" holds only the NEXT batch's amount — never the kit's
-          // cumulative good (that's priorGood). Default to what's still owed
-          // against the target (client 2026-07-28, replacing the flat 1 of
-          // 2026-07-24); keep a value the operator already typed this session.
-          good_qty: prev.good_qty ?? remainingToTarget(k),
-          scrap_qty: k.scrap_qty ?? prev.scrap_qty ?? 0,
+          // cumulative totals. Both default to ZERO, not to what is owed
+          // against the target: the operator is attesting to what they actually
+          // made, and a pre-filled quantity is a number the form invented and
+          // they then signed for. A blank form also means a freshly produced kit
+          // comes back with nothing outstanding, instead of red text listing
+          // what a batch nobody has started is missing.
+          good_qty: prev.good_qty ?? 0,
+          // ``k.scrap_qty`` is the kit's CUMULATIVE scrap across every batch;
+          // reading it here put that running total into a per-batch field, so a
+          // kit that had scrapped 4 units over its life opened its next batch
+          // pre-scrapped by 4.
+          scrap_qty: prev.scrap_qty ?? 0,
           output_location_node_id:
             k.output_location_node_id ?? prev.output_location_node_id ?? '',
           output_expiration_date: prev.output_expiration_date ?? '',
@@ -264,6 +338,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     [kitId],
   );
 
+  // Land the bare ``/reconciliation/<id>`` on the step the kit's status makes
+  // sensible, and bounce a step the kit cannot reach yet — a draft kit has no
+  // Close-Out to show, and a URL can be typed where a disabled tab could not be
+  // clicked. ``replace``, so Back leaves the kit rather than bouncing again.
+  React.useEffect(() => {
+    if (!kit) return;
+    const { def, reachable } = stepModel(kit.status);
+    if (urlStep === null || urlStep > reachable) {
+      router.replace(stepHref(urlStep === null ? def : Math.min(urlStep, reachable)));
+    }
+  }, [kit, urlStep, router, stepHref]);
+
   React.useEffect(() => {
     const ctrl = new AbortController();
     void load(ctrl.signal);
@@ -274,10 +360,12 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
     return () => ctrl.abort();
   }, [load]);
 
-  const nodeOptions: SelectOption[] = React.useMemo(
-    () => nodes.map((n) => ({ value: n.id, label: n.path ?? n.name })),
-    [nodes],
-  );
+  // ``nodeOptions`` — ``{value: n.id, label: n.path ?? n.name}`` — used to be
+  // built here and threaded into the steps so a chosen node could be shown as
+  // text. That made a DROPDOWN's option label do double duty as display, which
+  // is why those cells printed a full path. ``LocationPath`` resolves a node id
+  // against the shared location forest instead, so nothing needs the list and
+  // the pickers below build their own from ``nodes``.
   // Output + back-flush may land on a shelf, freezer sub-location, or an LN2 box
   // (KIT-005) — a box only alongside an explicit free-cell selection.
   const returnableIds = React.useMemo(
@@ -435,9 +523,20 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // can't make N units with less than N units' worth — and no more than what's
   // on the floor. Leftover (= floor − used) back-flushes at close.
   const batchAttempt = (output.good_qty ?? 0) + (output.scrap_qty ?? 0);
-  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * batchAttempt);
+  // Mirrors the server: an ordinary kit scales the recipe by the batch, a
+  // variable-yield kit takes one unit's worth however much it yields. A batch
+  // producing nothing needs nothing, so a good=0 close still passes.
+  const recipeUnits = batchAttempt === 0 ? 0 : kit.variable_yield ? 1 : batchAttempt;
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * recipeUnits);
   const lineLeft = (l: ApiKitLine) => l.on_floor_qty - (used[l.id] ?? 0);
+  // A media line's leftover is CONSUMED at sign-out, never handed back
+  // (REQ-2026-07-31-KIT-003), so it needs no return destination — everywhere
+  // else it is an ordinary line: same recipe need, same operator entry, same
+  // gates. This is the only thing that differs.
+  const backFlushes = (l: ApiKitLine) => !l.consumed_in_kit && lineLeft(l) > 0;
   const usedComplete = kit.lines.every((l) => used[l.id] !== null && used[l.id] !== undefined);
+  // `lineNeed` already carries the variable-yield rule, so this gate stays on
+  // for every kit — it is what stops a batch being produced from no material.
   const usedBelowNeed = kit.lines.some(
     (l) => used[l.id] != null && (used[l.id] as number) < lineNeed(l),
   );
@@ -469,9 +568,8 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // Every leftover unit must have somewhere to go — across ALL of a line's
   // destinations, since the leftover may be split between boxes.
   const cellsIncomplete = kit.lines.some((l) => {
-    const left = lineLeft(l);
-    if (left <= 0) return false;
-    return returnPlaced(l) !== left;
+    if (!backFlushes(l)) return false;
+    return returnPlaced(l) !== lineLeft(l);
   });
   const usedValid = usedComplete && !usedBelowNeed && !usedOverFloor;
   // The operator types the produced batch's lot number (client 2026-07-24 —
@@ -510,6 +608,18 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // ``produceReady`` / ``closeReady``, so the list is empty exactly when the
   // button is live.
   const finalizeOnly = !producingNow;
+  // Has the operator begun entering THIS batch at all? Straight after a produce
+  // the form is deliberately blank, and a blank form is not a wrong one — the
+  // count of what it is "missing" then reads as an accusation about work nobody
+  // has started. The reasons still reach anyone who wants them: each field
+  // prints its own message once touched, and the disabled button keeps the full
+  // list as its tooltip.
+  const batchStarted =
+    (output.good_qty ?? 0) > 0 ||
+    (output.scrap_qty ?? 0) > 0 ||
+    lotEntered.length > 0 ||
+    outputDests.some((d) => Boolean(d.location_node_id)) ||
+    Object.values(used).some((v) => v != null);
   const blockers: string[] = [];
   if (finalizeOnly && priorGood + (output.good_qty ?? 0) < 1) {
     blockers.push('Nothing produced yet — make at least one unit before closing.');
@@ -568,11 +678,15 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   // one button, so its own gate governs. Step 3 shows Produce AND Sign & close
   // together, so either being blocked is worth explaining; the close-only
   // reasons say "before closing" so they never read as blocking Produce.
+  //
+  // CTL-001: when the viewer cannot close, the close-only gates are not
+  // blocking anything they could do — counting them would print "3 things to
+  // fix above" next to a screen with no close button on it.
   const kitOpen = kit.status === 'issued' || kit.status === 'in_production';
   const stepBlocked = finalizeOnly
-    ? !closeReady
+    ? canClose && !closeReady
     : activeStep === 3
-      ? !produceReady || !closeReady
+      ? !produceReady || (canClose && !closeReady)
       : !produceReady;
   const primaryBlocked = kitOpen && (activeStep === 2 || activeStep === 3) && stepBlocked;
 
@@ -601,11 +715,16 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
   const enterCloseOut = () => {
     if (kit.status === 'issued' || kit.status === 'in_production') {
       const attempted = (output.good_qty ?? kit.target_qty) + (output.scrap_qty ?? 0);
+      // Nothing being made consumes nothing. A variable-yield kit otherwise
+      // pre-fills one run's worth, not the target's: seeding it off a planned
+      // quantity would put a number on the form that the recipe never claimed
+      // and the reactor never took.
+      const units = attempted === 0 ? 0 : kit.variable_yield ? 1 : attempted;
       setUsed((prev) => {
         const next = { ...prev };
         for (const l of kit.lines) {
           if (next[l.id] == null) {
-            next[l.id] = Math.ceil(Number(l.qty_per_unit) * attempted);
+            next[l.id] = Math.ceil(Number(l.qty_per_unit) * units);
           }
         }
         return next;
@@ -637,12 +756,13 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         output_lot_number: output.output_lot_number?.trim() || undefined,
         lines: kit.lines.map((l) => ({
           line_id: l.id,
+          // For a media line the close-out overrides this with the whole floor
+          // (KIT-003); for every other line it is what the operator entered.
           used_qty: used[l.id] ?? 0,
           // Only lines with something left carry destinations; the rest have
           // nothing to place, and an empty list means "use the default".
-          destinations:
-            lineLeft(l) > 0
-              ? returnRowsFor(l)
+          destinations: backFlushes(l)
+            ? returnRowsFor(l)
                   .filter((d) => d.location_node_id && destPlaced(d) > 0)
                   .map((d) => ({
                     location_node_id: d.location_node_id,
@@ -685,20 +805,19 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       setKit(k);
       // Reset the batch form for the next batch.
       setOutput((p) => ({
-        // Default the next batch to what's still owed against the target — the
-        // just-produced batch is already folded into ``k.good_qty`` (client
-        // 2026-07-28). Floors at 1 once the target is met, so extras stay easy.
-        good_qty: remainingToTarget(k),
+        // Back to zero, not to what is still owed against the target. The batch
+        // just made is folded into ``k.good_qty``; leaving a quantity in the
+        // form implies another batch is already under way, and every field it
+        // depends on — lot number, output location — is now blank, so the
+        // screen filled with red text for a batch the operator had not begun.
+        // Zero means "no batch in progress", which is the truth after a produce.
+        good_qty: 0,
         scrap_qty: 0,
         output_location_node_id: p.output_location_node_id,
         output_expiration_date: '',
         output_lot_number: '',
       }));
-      // Seed the fresh destination with the next batch size directly. The sync
-      // effect keys off ``good_qty`` alone, so it would NOT fire when the new
-      // default equals the old one (e.g. producing while already at 1-per-batch)
-      // and the row would come back blank.
-      setOutputDests([{ ...emptyDest(), qty: remainingToTarget(k) }]);
+      setOutputDests([emptyDest()]);
       setUsed(Object.fromEntries(k.lines.map((l) => [l.id, null])));
       setActiveStep(3);
       toast.success(`Produced ${made} × ${k.item_number}`, {
@@ -772,7 +891,22 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             <Button variant="secondary" onClick={() => setActivityOpen(true)}>
               <ScrollText size={14} /> Activity log
             </Button>
-            {(editableDraft || inProd) && canWrite && (
+            {/* Scoped to THIS kit, the way the inventory Export button exports
+                the tier you are looking at (RPT-003). Only once the kit has
+                produced something — an export of a kit with no finished lot is
+                a header row. Admin+, matching the endpoint's own gate. */}
+            {canExportCosts && kit.batches.length > 0 && (
+              <KitCostExportButton
+                kitId={kit.id}
+                kitNumber={kit.kit_number}
+                label="Export cost"
+              />
+            )}
+            {/* CTL-001: cancelling an issued kit hands the whole floor back to
+                inventory, so it is Super-Admin-only. A draft cancel moves
+                nothing, but it is hidden on the same rule — one visible
+                "Cancel kit" that sometimes works would read as a bug. */}
+            {(editableDraft || inProd) && canReturn && (
               <Button variant="danger" onClick={() => void onCancel()} disabled={busy}>
                 Cancel kit
               </Button>
@@ -861,7 +995,6 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         {activeStep === 0 && (
           <IssueStep
             kit={kit}
-            nodeOptions={nodeOptions}
             editableDraft={editableDraft}
             busy={busy}
             picks={linePicks}
@@ -874,6 +1007,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
           <ProductionStep
             kit={kit}
             canWrite={canWrite}
+            canReturn={canReturn}
             busy={busy}
             onIssueMore={(l) => setAddingTo(l)}
             onReturn={(l) => setReturningFrom(l)}
@@ -900,7 +1034,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             returnRowsFor={returnRowsFor}
             onReturnDests={(id, next) => setReturnDests((p) => ({ ...p, [id]: next }))}
             returnPlaced={returnPlaced}
-            allowedIds={returnableIds}
+            returnAllowedIds={returnableIds}
           />
         )}
         {activeStep === 3 && (
@@ -910,8 +1044,8 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
             outputDests={outputDests}
             used={used}
             returnLoc={returnLoc}
-            nodeOptions={nodeOptions}
             prodName={prodName}
+            canClose={canClose}
           />
         )}
 
@@ -933,7 +1067,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
                 too was pure duplication; this just points at them. The full list
                 is the button's tooltip. Rendered only when the button really is
                 disabled, so it can never contradict a live button. */}
-            {primaryBlocked && blockers.length > 0 && (
+            {primaryBlocked && blockers.length > 0 && batchStarted && (
               <span className="text-xs text-danger">
                 {blockers.length} thing{blockers.length === 1 ? '' : 's'} to fix above
               </span>
@@ -942,6 +1076,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
               blockers: primaryBlocked ? blockers : [],
               canWrite,
               canSign,
+              canClose,
               busy,
               closeReady,
               produceReady,
@@ -972,7 +1107,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       <CancelKitDialog
         kit={kit}
         open={cancelOpen}
-        allowedIds={returnableIds}
+        returnAllowedIds={returnableIds}
         onOpenChange={setCancelOpen}
         onSubmit={(cancelLines) => {
           setCancelOpen(false);
@@ -984,7 +1119,7 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
       <ReturnExcessDialog
         kit={kit}
         line={returningFrom}
-        allowedIds={returnableIds}
+        returnAllowedIds={returnableIds}
         onOpenChange={(o) => !o && setReturningFrom(null)}
         onDone={(k) => {
           setKit(k);
@@ -1027,7 +1162,12 @@ export function KitDetailClient({ kitId }: { kitId: string }) {
         meaning={
           editableDraft
             ? `I am cancelling draft kit ${kit.kit_number}. No material has moved.`
-            : `I am cancelling kit ${kit.kit_number} and returning all material still on the floor to inventory.`
+            : // What the signature actually attests to. Media is NOT returned on
+              // a cancel — it is discarded (KIT-003) — so a blanket "returning
+              // all material" would be a false statement under e-signature.
+              kit.lines.some((l) => l.consumed_in_kit && l.on_floor_qty > 0)
+              ? `I am cancelling kit ${kit.kit_number}, returning the material still on the floor to inventory and discarding the media, which is never returned.`
+              : `I am cancelling kit ${kit.kit_number} and returning all material still on the floor to inventory.`
         }
         title="Sign this cancellation"
         submitLabel="Cancel kit"
@@ -1146,6 +1286,9 @@ function footerPrimary(
   ctx: {
     canWrite: boolean;
     canSign: boolean;
+    /** CTL-001 — ``canSign`` AND a real Super Admin. Gates the terminal close
+     *  only; ``canSign`` alone still governs Produce. */
+    canClose: boolean;
     busy: boolean;
     closeReady: boolean;
     produceReady: boolean;
@@ -1196,7 +1339,10 @@ function footerPrimary(
   // Review-and-produce screen), or "Review & close" for a pure finalize.
   if (activeStep === 2 && open) {
     const finalize = !ctx.producingNow;
-    const canAdvance = finalize ? ctx.closeReady : ctx.produceReady;
+    // CTL-001: for a viewer who cannot close, this button is pure navigation to
+    // a read-only Review — gating it on ``closeReady`` would strand them on
+    // Close-Out behind conditions only a Super Admin can act on.
+    const canAdvance = finalize ? !ctx.canClose || ctx.closeReady : ctx.produceReady;
     return (
       <Button
         variant="primary"
@@ -1206,7 +1352,10 @@ function footerPrimary(
       >
         {finalize ? (
           <>
-            Review &amp; close <ArrowRight size={14} />
+            {/* CTL-001: a non-Super-Admin can still read the Review step, so
+                the step stays reachable — the button just stops promising a
+                close it cannot perform. */}
+            {ctx.canClose ? 'Review & close' : 'Review'} <ArrowRight size={14} />
           </>
         ) : (
           <>
@@ -1238,7 +1387,12 @@ function footerPrimary(
             Produce another batch
           </Button>
         )}
-        {ctx.canSign && (
+        {/* CTL-001 — the close back-flushes every leftover unit to inventory,
+            so it needs a Super Admin. Hidden, not disabled: the two live
+            buttons beside it (Produce / Produce another batch) are the whole
+            job an operator still has here, and a permanently dead primary
+            would out-rank them. */}
+        {ctx.canClose ? (
           <Button
             variant={ctx.producingNow ? 'secondary' : 'primary'}
             onClick={ctx.onClose}
@@ -1247,6 +1401,10 @@ function footerPrimary(
           >
             Sign &amp; close kit <ArrowRight size={14} />
           </Button>
+        ) : (
+          <span className="text-xs text-text-3">
+            A Super Admin signs the close-out.
+          </span>
         )}
       </div>
     );
@@ -1257,14 +1415,12 @@ function footerPrimary(
 
 function IssueStep({
   kit,
-  nodeOptions,
   editableDraft,
   busy,
   picks,
   onPicksChange,
 }: {
   kit: ApiKit;
-  nodeOptions: SelectOption[];
   editableDraft: boolean;
   busy: boolean;
   picks: Record<string, LotPick[]>;
@@ -1364,19 +1520,23 @@ function IssueStep({
                             <span
                               key={idx}
                               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface/60 px-2 py-0.5 text-[11px]"
-                              title={f.location}
                             >
                               <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
                               <span className="text-text-3">·</span>
-                              <span className="max-w-[160px] truncate text-text-3">{f.location}</span>
+                              {/* The shelf, with its ancestry on hover. A chip
+                                  this narrow truncated the path at 160px, which
+                                  ate the leaf and left the room prefix — the
+                                  one part every chip in the row shares. */}
+                              <span className="max-w-[160px] text-text-3">
+                                <LocationPath path={f.location} />
+                              </span>
                               <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
                             </span>
                           ))}
                         </div>
                       ) : (
-                        <span className="text-xs text-text-3">
-                          {nodeOptions.find((o) => o.value === line.source_location_node_id)?.label ??
-                            '—'}
+                        <span className="min-w-0 text-xs text-text-3">
+                          <LocationPath nodeId={line.source_location_node_id} />
                         </span>
                       )}
                     </td>
@@ -1401,12 +1561,16 @@ function IssueStep({
 function ProductionStep({
   kit,
   canWrite,
+  canReturn,
   busy,
   onIssueMore,
   onReturn,
 }: {
   kit: ApiKit;
   canWrite: boolean;
+  /** CTL-001 — Super Admin only. Issuing more is still ``canWrite``: material
+   *  going OUT to the floor is not a return. */
+  canReturn: boolean;
   busy: boolean;
   onIssueMore: (line: ApiKitLine) => void;
   onReturn: (line: ApiKitLine) => void;
@@ -1503,19 +1667,64 @@ function ProductionStep({
                         >
                           <Plus size={12} /> Issue more
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={!canWrite || busy || floor <= 0}
-                          title={
-                            floor > 0
-                              ? 'Return material to inventory'
-                              : 'Nothing on the floor to return'
+                        {/* Disabled rather than hidden: the row's Returned
+                            column already tells an operator the action exists,
+                            so removing the button would look broken.
+
+                            A greyed-out button with the reason hidden in a
+                            hover title is not an explanation — it reads as the
+                            app being broken (client 2026-09-01). So the reason
+                            is VISIBLE beside the button, and the tooltip carries
+                            the longer form for whoever wants it. Same principle
+                            as the disabled Produce button on Close-Out. */}
+                        {(() => {
+                          // One place decides both whether the action is
+                          // available and what to say when it is not, so the
+                          // button and the sentence can never disagree.
+                          const blocked = line.consumed_in_kit
+                            ? {
+                                short: 'Consumed to the kit',
+                                long: 'Media is never returned — the leftover is discarded at close.',
+                              }
+                            : floor <= 0
+                              ? {
+                                  short: 'Nothing on the floor',
+                                  long: 'Nothing is staged in production for this line.',
+                                }
+                              : !canReturn
+                                ? {
+                                    short: 'Super Admin only',
+                                    long: 'Credits stock back, so it is Super Admin only and e-signed.',
+                                  }
+                                : null;
+
+                          if (blocked) {
+                            return (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="inline-flex cursor-default items-center gap-1 px-2 text-xs text-text-3">
+                                    <Ban size={11} aria-hidden />
+                                    {blocked.short}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs">
+                                  Can’t return: {blocked.long}
+                                </TooltipContent>
+                              </Tooltip>
+                            );
                           }
-                          onClick={() => onReturn(line)}
-                        >
-                          <Undo2 size={12} /> Return
-                        </Button>
+                          return (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={busy}
+                              title="Return material to inventory"
+                              onClick={() => onReturn(line)}
+                            >
+                              <Undo2 size={12} /> Return
+                            </Button>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );
@@ -1530,6 +1739,15 @@ function ProductionStep({
         Nothing here is final — adjust freely. The produced output is recorded and the leftover
         back-flushed at close-out, in one signed step.
       </RuleNote>
+      {/* CTL-001 — say it once here rather than only in a tooltip, so an
+          operator planning the day knows to line up a Super Admin. */}
+      {!canReturn && editable && (
+        <RuleNote>
+          Returning material to inventory is restricted to a{' '}
+          <span className="text-text-2">Super Admin</span>, and every return is recorded. You can
+          still issue more.
+        </RuleNote>
+      )}
     </div>
   );
 }
@@ -1680,6 +1898,7 @@ function OutputPlacement({
         );
       })}
 
+
       {required && good > 0 && placed !== good && (
         <p className="text-xs text-danger">
           {placed < good
@@ -1716,7 +1935,7 @@ function CloseOutStep({
   returnRowsFor,
   onReturnDests,
   returnPlaced,
-  allowedIds,
+  returnAllowedIds,
   lotStatus,
 }: {
   kit: ApiKit;
@@ -1732,7 +1951,7 @@ function CloseOutStep({
   onReturnDests: (lineId: string, next: OutputDest[]) => void;
   /** Units of a line's leftover already placed across its destinations. */
   returnPlaced: (line: ApiKitLine) => number;
-  allowedIds: Set<string>;
+  returnAllowedIds: Set<string>;
   /** Live availability of the typed produced lot number (checked upstream). */
   lotStatus: 'unknown' | 'checking' | 'free' | 'taken';
 }) {
@@ -1771,15 +1990,32 @@ function CloseOutStep({
   // recipe minimum ceil(qty_per_unit × (good+scrap)). Used must be ≥ Needed and
   // ≤ on-floor; the leftover (floor − used) back-flushes at close.
   const attempted = (goodQty ?? 0) + (scrapQty ?? 0);
-  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * attempted);
+  // See the parent: an ordinary kit scales the recipe by the batch; a
+  // variable-yield kit takes one unit's worth however much it yields, because
+  // the output must not drive the input but nothing is made from nothing.
+  const recipeUnits = attempted === 0 ? 0 : kit.variable_yield ? 1 : attempted;
+  const lineNeed = (l: ApiKitLine) => Math.ceil(Number(l.qty_per_unit) * recipeUnits);
   // Changing good/scrap re-syncs each line's Used to the recipe need, so the
   // Used column tracks the target (client 2026-07-23). The operator can still
   // override a line afterwards.
   const setBatch = (next: OutputDraft) => {
     onOutputChange(next);
     const att = (next.good_qty ?? 0) + (next.scrap_qty ?? 0);
+    // The same `recipeUnits` rule the gate and the Min / run column use, so the
+    // number that lands in Used is exactly the minimum shown beside it:
+    //
+    //   nothing made        → 0. A batch making nothing consumes nothing, and
+    //                         this clears even a typed figure — closing with
+    //                         good 0 means "back-flush the rest", so material
+    //                         left here would be destroyed rather than returned.
+    //   variable-yield kit  → one run's worth. It does NOT scale with the
+    //                         quantity made (that coupling is what YLD-001
+    //                         removed), so it stays a small, stable seed the
+    //                         operator adjusts to what the run actually took.
+    //   ordinary kit        → the recipe scaled by the batch, unchanged.
+    const units = att === 0 ? 0 : kit.variable_yield ? 1 : att;
     for (const l of kit.lines) {
-      onUsed(l.id, Math.ceil(Number(l.qty_per_unit) * att));
+      onUsed(l.id, Math.ceil(Number(l.qty_per_unit) * units));
     }
   };
   const usedOf = (l: ApiKitLine) => (editable ? used[l.id] : l.used_qty);
@@ -1787,7 +2023,7 @@ function CloseOutStep({
     editable &&
     kit.lines.some((l) => {
       const u = used[l.id];
-      return u == null || u < lineNeed(l) || u > l.on_floor_qty;
+      return u == null || u > l.on_floor_qty || u < lineNeed(l);
     });
   const consumeTotal = kit.lines.reduce((a, l) => a + (usedOf(l) ?? 0), 0);
   const leftTotal = kit.lines.reduce(
@@ -1996,10 +2232,32 @@ function CloseOutStep({
           <div className="mb-3">
             <h2 className="text-sm font-medium text-text">Material this batch consumes</h2>
             <p className="mt-0.5 text-xs text-text-3">
-              Enter how much of each component you used. It must be at least the recipe{' '}
-              <span className="text-text-2">Needs</span> — making {attempted} unit
-              {attempted === 1 ? '' : 's'} takes at least that much — and no more than what&apos;s on
-              the floor. The leftover back-flushes when you <span className="text-text-2">close</span>.
+              {kit.variable_yield ? (
+                <>
+                  Enter how much of each component you used. This item is{' '}
+                  <span className="text-text-2">grown</span>, so how much comes out
+                  doesn&apos;t change what goes in —{' '}
+                  <span className="text-text-2">Min / run</span> is what a single run
+                  takes whether it yields a little or a lot, and it stays the minimum. No
+                  more than what&apos;s on the floor. The leftover back-flushes when you{' '}
+                  <span className="text-text-2">close</span>.
+                </>
+              ) : (
+                <>
+                  Enter how much of each component you used. It must be at least the recipe{' '}
+                  <span className="text-text-2">Needs</span> — making {attempted} unit
+                  {attempted === 1 ? '' : 's'} takes at least that much — and no more than
+                  what&apos;s on the floor. The leftover back-flushes when you{' '}
+                  <span className="text-text-2">close</span>.
+                </>
+              )}
+              {kit.lines.some((l) => l.consumed_in_kit) && (
+                <>
+                  {' '}
+                  Media is the exception: whatever is still on the floor at close is
+                  <span className="text-text-2"> consumed</span>, never returned.
+                </>
+              )}
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -2008,7 +2266,12 @@ function CloseOutStep({
                 <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-text-3">
                   <th className="px-3 py-2 font-medium">Component</th>
                   <th className="px-3 py-2 text-right font-medium">Per unit</th>
-                  <th className="px-3 py-2 text-right font-medium">Needs</th>
+                  {/* On a variable-yield kit this column is one run's worth, not
+                      a figure scaled to the batch — "Needs" would read as though
+                      it still tracked the quantity made. */}
+                  <th className="px-3 py-2 text-right font-medium">
+                    {kit.variable_yield ? 'Min / run' : 'Needs'}
+                  </th>
                   <th className="px-3 py-2 text-right font-medium">On floor</th>
                   <th className="px-3 py-2 text-right font-medium">Used</th>
                   <th className="px-3 py-2 text-right font-medium">Left</th>
@@ -2017,14 +2280,28 @@ function CloseOutStep({
               </thead>
               <tbody>
                 {kit.lines.map((line) => {
+                  // A media line's leftover is poured at sign-out rather than
+                  // returned (KIT-003), so it asks for no destination. In every
+                  // other respect it is an ordinary component.
+                  const media = line.consumed_in_kit;
                   const need = lineNeed(line);
                   const floor = line.on_floor_qty;
                   const u = used[line.id];
                   const left = floor - (u ?? 0);
+                  // `need` already carries the variable-yield rule, so both
+                  // checks stay live: on such a kit they simply measure against
+                  // one run's worth instead of the batch's, which is what keeps
+                  // the client's 350-off-200 example green while still refusing
+                  // a batch recorded as consuming nothing.
                   const cantMake = need > floor; // even the minimum doesn't fit
                   const belowNeed = u != null && u < need;
                   const overFloor = u != null && u > floor;
                   const rowBad = cantMake || belowNeed || overFloor;
+                  // Nothing is being made, yet material is recorded as used —
+                  // legitimate for a run that died consuming its charge, but the
+                  // consequence is easy to miss: it is CONSUMED, not returned.
+                  // Advisory, so `rowBad` deliberately excludes it.
+                  const consumedForNothing = attempted === 0 && (u ?? 0) > 0;
                   return (
                     <React.Fragment key={line.id}>
                       <tr className={cn('border-b border-border/60', rowBad && 'bg-danger-soft/30')}>
@@ -2058,7 +2335,20 @@ function CloseOutStep({
                           )}
                         </td>
                         <td className="px-3 py-2">
-                          {left > 0 ? (
+                          {media ? (
+                            // KIT-003: whatever is still on the floor at sign-out
+                            // is poured, so there is no destination to pick.
+                            <span className="text-xs text-text-3">
+                              {left > 0
+                                ? // Drained off the floor and gone, but NOT
+                                  // charged to this batch's lot — the lot pays
+                                  // for what you recorded in Used. Named
+                                  // "discarded" rather than "consumed" so the
+                                  // two are not read as the same event.
+                                  `Discarded at close (${left})`
+                                : 'Consumed'}
+                            </span>
+                          ) : left > 0 ? (
                             // The destinations themselves live in the full-width
                             // row below — a split needs more room than a table
                             // cell. This says how much of the leftover is placed.
@@ -2079,17 +2369,32 @@ function CloseOutStep({
                         <tr className="bg-danger-soft/30">
                           <td colSpan={7} className="px-3 pb-2 text-xs text-danger">
                             {cantMake
-                              ? `Not enough on the floor — ${need} needed to make ${attempted}, only ${floor} here. Issue more first.`
+                              ? kit.variable_yield
+                                ? `Not enough on the floor — one run takes ${need}, only ${floor} here. Issue more first.`
+                                : `Not enough on the floor — ${need} needed to make ${attempted}, only ${floor} here. Issue more first.`
                               : belowNeed
-                                ? `Use at least ${need} to make ${attempted} unit${attempted === 1 ? '' : 's'}.`
+                                ? kit.variable_yield
+                                  ? `Use at least ${need} — one run takes that much whatever it yields.`
+                                  : `Use at least ${need} to make ${attempted} unit${attempted === 1 ? '' : 's'}.`
                                 : `Only ${floor} on the floor.`}
+                          </td>
+                        </tr>
+                      )}
+                      {/* Not an error — a failed run writing off its charge is a
+                          real thing to record. It just must not happen by
+                          accident, because the material does not come back. */}
+                      {!rowBad && consumedForNothing && (
+                        <tr className="bg-warning-soft/30">
+                          <td colSpan={7} className="px-3 pb-2 text-xs text-warning">
+                            Nothing is being made, so this {u} will be consumed, not
+                            returned. Leave it at 0 to back-flush it instead.
                           </td>
                         </tr>
                       )}
                       {/* Where the leftover goes — one row, or several when no
                           single box has enough free cells. Full width because a
                           split carries a cryobox grid per destination. */}
-                      {left > 0 && (
+                      {left > 0 && !media && (
                         <tr className="border-b border-border/60 bg-surface/40">
                           <td colSpan={7} className="px-3 pb-3 pt-2">
                             <div className="max-w-xl">
@@ -2097,7 +2402,7 @@ function CloseOutStep({
                                 good={left}
                                 dests={returnRowsFor(line)}
                                 onChange={(next) => onReturnDests(line.id, next)}
-                                allowedIds={allowedIds}
+                                allowedIds={returnAllowedIds}
                                 required
                                 reservedFor={reservedFor}
                                 label={`Back-flush ${line.item_number} to`}
@@ -2145,8 +2450,8 @@ function ReviewStep({
   outputDests,
   used,
   returnLoc,
-  nodeOptions,
   prodName,
+  canClose,
 }: {
   kit: ApiKit;
   output: OutputDraft;
@@ -2156,11 +2461,18 @@ function ReviewStep({
   outputDests: OutputDest[];
   used: Record<string, number | null>;
   returnLoc: Record<string, string>;
-  nodeOptions: SelectOption[];
   /** Resolved production-floor name (production nodes aren't in nodeOptions). */
   prodName: string;
+  /** CTL-001 — false for everyone but a Super Admin. The step stays readable
+   *  either way; only the wording of what happens next changes. */
+  canClose: boolean;
 }) {
   const closed = kit.status === 'closed';
+  // Cancelled counts as FINISHED for anything phrased in tense: the floor is
+  // empty either way and the media is already gone. `closed` alone would tell a
+  // cancelled kit's reader that material is "still on the floor" and that media
+  // will be "discarded at close" — both future tense, on a kit that has ended.
+  const finished = closed || kit.status === 'cancelled';
   // Good/scrap accumulate on the kit across produce batches (KIT-007).
   const producedSoFar = kit.good_qty ?? 0;
   const scrapSoFar = kit.scrap_qty ?? 0;
@@ -2169,12 +2481,84 @@ function ReviewStep({
   const producingNow = pendingGood >= 1;
   const totalMade = producedSoFar + scrapSoFar;
   const yieldPct = totalMade > 0 ? producedSoFar / totalMade : null;
-  const label = (id: string | null | undefined) =>
-    id ? (nodeOptions.find((o) => o.value === id)?.label ?? '—') : '—';
+  // A ``label(nodeId)`` helper used to turn a node id into the picker's own
+  // option text, which was the full path. ``LocationPath`` resolves the id
+  // against the shared location forest instead, so it renders the leaf, hovers
+  // the hierarchy and links — and the display no longer borrows a string that
+  // exists to disambiguate a dropdown.
   // ``on_floor_qty`` already nets out cumulative used, so it is the material
   // still physically on the floor — which is exactly what back-flushes at close.
   const floorTotal = kit.lines.reduce((a, l) => a + l.on_floor_qty, 0);
   const usedTotal = kit.lines.reduce((a, l) => a + (l.used_qty ?? 0), 0);
+  // KIT-003 splits the floor in two at close: media is poured, everything else
+  // is handed back. The copy below has to say which, because "N units still on
+  // the floor back-flush to inventory" is a promise the close-out will not keep
+  // for the media half of that number.
+  const floorPoured = kit.lines.reduce(
+    (a, l) => a + (l.consumed_in_kit ? l.on_floor_qty : 0),
+    0,
+  );
+  const floorReturned = floorTotal - floorPoured;
+  const router = useRouter();
+  const pathname = usePathname();
+  /** The lot segment of ``/review/<lot>``, if the panel is open. */
+  const openBatchKey = React.useMemo(() => {
+    const parts = pathname.split('/').filter(Boolean);
+    const at = parts.indexOf('review');
+    const lot = at === -1 ? undefined : parts[at + 1];
+    return lot ? decodeURIComponent(lot) : null;
+  }, [pathname]);
+  // The open batch breakdown is a route of its own —
+  // ``/reconciliation/<kit>/review/<lot>`` — so it is linkable, survives a
+  // refresh, and a lot number clicked anywhere else in the app lands straight
+  // on it. Keyed by lot number because that is what the rest of the system
+  // quotes; a batch that scrapped everything has no lot, so it falls back to id.
+  const batchDetail =
+    openBatchKey === null
+      ? null
+      : (kit.batches.find(
+          (b) => b.output_lot_number === openBatchKey || b.id === openBatchKey,
+        ) ?? null);
+  const reviewHref = `/reconciliation/${kit.id}/review`;
+  const showBatch = (b: ApiKitBatch) =>
+    router.push(`${reviewHref}/${encodeURIComponent(b.output_lot_number ?? b.id)}`, {
+      scroll: false,
+    });
+  const hideBatch = () => router.push(reviewHref, { scroll: false });
+  // RPT-003. What the kit has been CHARGED but never handed to a finished lot.
+  // The same subtraction means two different things depending on where the kit
+  // is: while it is OPEN that value is still staged on the production floor;
+  // once it is CLOSED the floor is empty, so what is left over is media that was
+  // discarded at sign-out (KIT-003) — drained, never returned, and charged to no
+  // lot. Labelling a closed kit's figure "still on the floor" claimed material
+  // was somewhere it no longer is (user, 2026-09-01).
+  //
+  // `null` when either side is unknown — subtracting from an unknown total is
+  // not a number anyone should read.
+  const costUnattributed =
+    kit.material_cost_amount === null || kit.consumed_value_amount === null
+      ? null
+      : Number(kit.material_cost_amount) - Number(kit.consumed_value_amount);
+  // A kit closed BEFORE per-batch costing existed carries no batch rows at all,
+  // so nothing was ever attributed to a lot and the ENTIRE charge falls into the
+  // leftover above. It was not discarded — the units were made and stocked — it
+  // was never costed, and there is no record left from which to cost it. Saying
+  // "discarded" there reports real product cost as waste: KIT-0004 read
+  // "$687.50 discarded" three lines above "50 × AY-002 stocked" (client,
+  // 2026-09-01). Distinct from a kit that produced nothing and was cancelled,
+  // which never charged anything to fall through in the first place.
+  const neverCosted = kit.batches.length === 0;
+  // RPT-003. Summed from the batches, not recomputed from the kit total: each
+  // batch's scrap was valued at ITS unit cost, which differs between batches
+  // when the material mix changed. `null` if any batch is unpriced — a partial
+  // scrap figure would understate the loss while looking authoritative.
+  const scrapValueTotal = kit.batches.some((b) => !b.cost_is_complete)
+    ? null
+    : kit.batches.length > 0
+      ? String(
+          kit.batches.reduce((a, b) => a + Number(b.scrap_value_amount ?? 0), 0),
+        )
+      : null;
   // Both come from the close-out draft. The batch card below only renders while
   // a batch is pending (never once closed), so there is no closed-kit branch to
   // take here — ApiKit doesn't carry the produced expiry anyway.
@@ -2227,7 +2611,9 @@ function ReviewStep({
                 dests.map((d) => (
                   <li key={d.key} className="flex items-baseline gap-2 text-sm">
                     <ArrowRight size={12} className="shrink-0 text-text-3" aria-hidden />
-                    <span className="text-text">{label(d.location_node_id)}</span>
+                    <span className="min-w-0 text-text">
+                      <LocationPath nodeId={d.location_node_id} />
+                    </span>
                     <span className="font-mono tabular-nums text-text-2">×{destPlaced(d)}</span>
                     {d.isBox && (
                       <span className="text-[11px] text-text-3">
@@ -2248,7 +2634,6 @@ function ReviewStep({
             mode="batch"
             used={used}
             returnLoc={returnLoc}
-            label={label}
             closed={closed}
           />
         </Card>
@@ -2297,6 +2682,61 @@ function ReviewStep({
               <span className="font-mono tabular-nums">{floorTotal}</span>{' '}
               {closed ? 'returned' : 'on floor'}
             </ReviewStat>
+            {/* RPT-003. Net of returns, so handing material back lowers it.
+                "—  unpriced material" rather than $0.00 when an input lot has
+                no price: blank means unknown, zero means free, and the $0
+                customer-owned cells make that a distinction with real money
+                behind it.
+
+                Labelled CHARGED, not "Material cost", and split below. This is
+                everything pulled onto the floor; the per-lot figures in the
+                table beneath are what batches have actually CONSUMED, and until
+                the kit closes those are different numbers. Two stats inches
+                apart both reading "Material cost" and disagreeing is a bug
+                report waiting to happen — it was one (user, 2026-08-31). */}
+            <ReviewStat label="Material charged">
+              {kit.cost_is_complete ? (
+                <>
+                  <span className="font-mono tabular-nums font-semibold text-text">
+                    {formatMoney(kit.material_cost_amount)}
+                  </span>
+                  {costUnattributed !== null && costUnattributed > 0 && (
+                    <div className="text-[11px] text-text-3">
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(kit.consumed_value_amount)}
+                      </span>{' '}
+                      to lots ·{' '}
+                      <span className="font-mono tabular-nums">
+                        {formatMoney(String(costUnattributed))}
+                      </span>{' '}
+                      {finished
+                        ? neverCosted
+                          ? 'never costed to a lot'
+                          : 'discarded'
+                        : 'still on the floor'}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-text-3">
+                  — <span className="text-[11px]">unpriced material</span>
+                </span>
+              )}
+            </ReviewStat>
+            {/* "Of which" is deliberate wording: the scrap value is a PORTION
+                of the material cost above, not an extra charge on top. The
+                scrapped units' material was charged at issue; what bills it to
+                the customer is dividing by good units alone. */}
+            {scrapValueTotal !== null && scrapSoFar > 0 && (
+              <ReviewStat label="Of which scrap">
+                <span className="font-mono tabular-nums text-warning">
+                  {formatMoney(scrapValueTotal)}
+                </span>
+                <span className="ml-1.5 text-[11px] text-text-3">
+                  {scrapSoFar} unit{scrapSoFar === 1 ? '' : 's'}
+                </span>
+              </ReviewStat>
+            )}
           </div>
         </div>
 
@@ -2306,6 +2746,94 @@ function ReviewStep({
           </p>
         )}
       </Card>
+
+      {/* Per-batch cost (RPT-003). Shown as soon as a kit has produced ANYTHING:
+          the client bills per finished lot — "the Kit is closed out to the FG Lot
+          specifically so the Customer can be charged the actual cost for that
+          particular FG Lot" — and nothing else on this step names the lot that
+          was minted. It was briefly gated on two-or-more batches, on the theory
+          that one lot is already covered by the kit-level "Material cost" above;
+          that was wrong (user, 2026-08-31). The header figure is a kit total, not
+          a lot, so a kit with exactly one batch showed its output lot NOWHERE
+          once the pending-batch card had gone.
+
+          These figures are FROZEN at produce time, unlike the kit total above,
+          which re-reads lot prices every time this page loads. If a price was
+          corrected after a batch was made the two will differ, and they should:
+          a shipped lot's cost must not move retroactively. */}
+      {kit.batches.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="text-sm font-medium text-text">Lots produced by this kit</h2>
+            <p className="mt-0.5 text-xs text-text-3">
+              Each batch carries its own material cost. Scrap is included — the
+              per-unit figure divides by good units only.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-[11px] uppercase tracking-wider text-text-3">
+                  <th className="px-4 py-2 text-left font-medium">Batch</th>
+                  <th className="px-4 py-2 text-left font-medium">Lot</th>
+                  <th className="px-4 py-2 text-right font-medium">Good</th>
+                  <th className="px-4 py-2 text-right font-medium">Scrap</th>
+                  <th className="px-4 py-2 text-right font-medium">Material cost</th>
+                  <th className="px-4 py-2 text-right font-medium">Per unit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kit.batches.map((b) => (
+                  <tr
+                    key={b.id}
+                    onClick={() => showBatch(b)}
+                    className="cursor-pointer border-b border-border transition-colors last:border-0 hover:bg-surface/60"
+                    title="See how this lot was made"
+                  >
+                    <td className="px-4 py-2 tabular-nums text-text-2">{b.batch_no}</td>
+                    <td className="px-4 py-2 font-mono text-accent underline-offset-2 hover:underline">
+                      {b.output_lot_number ??
+                        (b.scrap_qty > 0 ? (
+                          <span className="text-text-3">no lot · all scrapped</span>
+                        ) : (
+                          // good 0 AND scrap 0: the close-out's own finalising
+                          // batch, which makes nothing and mints no lot. Calling
+                          // that "all scrapped" claimed a loss that never
+                          // happened (user, 2026-09-01).
+                          <span className="text-text-3">no lot · nothing made</span>
+                        ))}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">
+                      {b.good_qty}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums text-text-3">
+                      {b.scrap_qty || '—'}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">
+                      {b.cost_is_complete ? (
+                        formatMoney(b.material_cost_amount)
+                      ) : (
+                        <span className="text-text-3" title="An input lot had no price">
+                          —
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums font-semibold">
+                      {b.cost_is_complete ? (
+                        formatMoney(b.unit_cost_amount)
+                      ) : (
+                        <span className="font-normal text-text-3">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <BatchDetailSheet batch={batchDetail} kit={kit} onClose={hideBatch} />
 
       {/* The kit-level component picture. Shown on its own only when there is no
           batch above — otherwise the batch table already covers the components
@@ -2317,7 +2845,9 @@ function ReviewStep({
             <p className="mt-0.5 text-xs text-text-3">
               {closed
                 ? 'What the kit consumed and what returned to inventory.'
-                : 'Consumed so far and what is still staged on the floor — the remainder back-flushes at close.'}
+                : floorPoured > 0
+                  ? 'Consumed so far and what is still staged on the floor — at close the leftover back-flushes, except media, which is consumed.'
+                  : 'Consumed so far and what is still staged on the floor — the remainder back-flushes at close.'}
             </p>
           </div>
           <ComponentReviewTable
@@ -2325,7 +2855,6 @@ function ReviewStep({
             mode="kit"
             used={used}
             returnLoc={returnLoc}
-            label={label}
             closed={closed}
           />
         </Card>
@@ -2343,15 +2872,60 @@ function ReviewStep({
             </p>
           </div>
         </Card>
-      ) : (
+      ) : canClose ? (
         <RuleNote>
           <span className="text-text-2">Produce another batch</span> to make more (the kit stays
-          open), or <span className="text-text-2">Sign &amp; close</span> to finish — the{' '}
-          {floorTotal} unit{floorTotal === 1 ? '' : 's'} still on the floor back-flush to inventory.
+          open), or <span className="text-text-2">Sign &amp; close</span> to finish.{' '}
+          {/* What the close actually does with the floor. KIT-003 splits it:
+              media is poured, everything else is handed back — so the two halves
+              are named separately rather than promising a back-flush of units
+              that will never see one. */}
+          {floorReturned > 0 && (
+            <>
+              The {floorReturned} unit{floorReturned === 1 ? '' : 's'} still on the floor
+              back-flush{floorReturned === 1 ? 'es' : ''} to inventory
+              {floorPoured > 0 ? ', ' : '.'}
+            </>
+          )}
+          {floorPoured > 0 && (
+            <>
+              {floorReturned > 0 ? 'and the' : 'The'} {floorPoured} unit
+              {floorPoured === 1 ? '' : 's'} of media{' '}
+              {floorReturned > 0 ? 'are consumed, never returned.' : 'on the floor are consumed, never returned.'}
+            </>
+          )}
+        </RuleNote>
+      ) : (
+        /* CTL-001 — the close back-flushes the leftover to inventory, so only a
+           Super Admin signs it. Producing stays available here. */
+        <RuleNote>
+          <span className="text-text-2">Produce another batch</span> to make more (the kit stays
+          open). Closing the kit back-flushes the {floorTotal} unit
+          {floorTotal === 1 ? '' : 's'} still on the floor to inventory, so it is signed by a{' '}
+          <span className="text-text-2">Super Admin</span> and recorded.
         </RuleNote>
       )}
     </div>
   );
+}
+
+/**
+ * A component line's contribution in money (RPT-003).
+ *
+ * With ``batchQty``, prices the units this pending batch will consume at the
+ * line's current unit cost. Without it, reports what the line has already
+ * handed to finished lots across every batch.
+ *
+ * Returns an em dash rather than `$0.00` when the cost is unknown — an input
+ * lot with no price. That is not the same as free, and the $0 customer-owned
+ * cells are the reason the difference has money behind it.
+ */
+function lineCost(line: ApiKitLine, batchQty: number | null): string {
+  if (batchQty !== null) {
+    if (line.unit_cost_amount === null || batchQty <= 0) return '—';
+    return formatMoney(String(Number(line.unit_cost_amount) * batchQty));
+  }
+  return formatMoney(line.consumed_value_amount);
 }
 
 /** One labelled figure in the kit strip. */
@@ -2376,19 +2950,38 @@ function ReviewStat({ label, children }: { label: string; children: React.ReactN
  * component appeared twice under different headings, in different frames of
  * reference, which is what made the page unreadable (client 2026-07-28).
  */
+/**
+ * How much of a line's ``used_qty`` was actually charged to a finished lot.
+ *
+ * For an ordinary component the two are the same number. For media they part
+ * company at close-out: the batches take what the operator recorded, and the
+ * remainder is DISCARDED — drained off the floor and charged to no lot
+ * (REQ-2026-07-31-KIT-003). Summing the batch consumption rows is what tells
+ * them apart after the fact, and the difference is the waste. Derived rather
+ * than stored: both numbers are already on the kit and cannot drift apart.
+ */
+function consumedByLots(kit: ApiKit, lineId: string): number {
+  return kit.batches.reduce(
+    (a, b) =>
+      a +
+      b.consumptions
+        .filter((c) => c.kit_line_id === lineId)
+        .reduce((x, c) => x + c.qty, 0),
+    0,
+  );
+}
+
 function ComponentReviewTable({
   kit,
   mode,
   used,
   returnLoc,
-  label,
   closed,
 }: {
   kit: ApiKit;
   mode: 'batch' | 'kit';
   used: Record<string, number | null>;
   returnLoc: Record<string, string>;
-  label: (id: string | null | undefined) => string;
   closed: boolean;
 }) {
   const isBatch = mode === 'batch';
@@ -2403,6 +2996,10 @@ function ComponentReviewTable({
             <th className="px-4 py-2 text-right font-medium">
               {isBatch ? 'Left after' : closed ? 'Back-flushed' : 'On floor'}
             </th>
+            {/* RPT-003. The value of what this component contributes — for a
+                batch, what it puts into THIS lot; for the kit, what it has
+                handed to finished lots in total. */}
+            <th className="px-4 py-2 text-right font-medium">Cost</th>
             <th className="px-4 py-2 font-medium">
               {closed ? 'Returned to' : 'Back-flushes to'}
             </th>
@@ -2413,6 +3010,24 @@ function ComponentReviewTable({
             const thisBatch = used[line.id] ?? 0;
             const leftAfter = line.on_floor_qty - thisBatch;
             const remaining = isBatch ? leftAfter : line.on_floor_qty;
+            // KIT-003: closing the kit DISCARDS a media line's leftover — it is
+            // drained off the floor and never returned to stock, but it is not
+            // charged to this batch's lot either (client, 2026-09-01). The lot
+            // pays for what the batch recorded; the rest is waste against the
+            // kit. So this annotates the quantity only — deliberately not the
+            // cost, because the cost does not move.
+            const discardedAtClose = isBatch && line.consumed_in_kit ? leftAfter : 0;
+            // After the fact: what this line was recorded as using, minus what
+            // the batches actually charged to lots. Non-zero only for media —
+            // EXCEPT on a kit with no batch rows at all (produced before cost
+            // tracking), where it is the whole line and nothing was discarded.
+            // See ``neverCosted`` above: the difference is waste versus a
+            // missing record, and only one of them is the operator's problem.
+            const discardedTotal = Math.max(
+              0,
+              (line.used_qty ?? 0) - consumedByLots(kit, line.id),
+            );
+            const leftoverWord = kit.batches.length === 0 ? 'never costed' : 'discarded';
             return (
               <tr key={line.id} className="border-b border-border/60 align-top last:border-0">
                 <td className="max-w-[240px] px-4 py-2.5">
@@ -2433,6 +3048,20 @@ function ComponentReviewTable({
                         >
                           <span className="font-mono text-text">{f.lot_number ?? 'No lot'}</span>
                           <span className="font-mono tabular-nums text-text-2">×{f.qty}</span>
+                          {/* The per-lot price (RPT-003). A line drawing from
+                              two lots reports a blended unit cost, and these
+                              are what it blends — without them the average is
+                              a number nobody can check. */}
+                          <span
+                            className="font-mono tabular-nums text-text-3"
+                            title={
+                              f.unit_price_amount === null
+                                ? 'This lot has no price, so the line has no cost'
+                                : 'Price per unit'
+                            }
+                          >
+                            @ {formatMoney(f.unit_price_amount)}
+                          </span>
                         </span>
                       ))}
                     </div>
@@ -2442,15 +3071,47 @@ function ComponentReviewTable({
                 </td>
                 <td className="px-4 py-2.5 text-right">
                   <QtyCell value={isBatch ? thisBatch || null : (line.used_qty ?? null)} />
+                  {!isBatch && discardedTotal > 0 && (
+                    <div className="text-[11px] text-text-3">
+                      {(line.used_qty ?? 0) - discardedTotal} to lots · {discardedTotal}{' '}
+                      {leftoverWord}
+                    </div>
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-right">
                   <QtyCell value={remaining || null} tone={remaining ? 'success' : 'muted'} />
+                  {discardedAtClose > 0 && (
+                    <div className="text-[11px] text-text-3">discarded at close</div>
+                  )}
+                </td>
+                <td className="px-4 py-2.5 text-right">
+                  <span className="font-mono text-xs tabular-nums text-text-2">
+                    {lineCost(line, isBatch ? thisBatch : null)}
+                  </span>
                 </td>
                 <td className="px-4 py-2.5">
                   <span className="text-xs text-text-2">
-                    {remaining > 0
-                      ? label(closed ? line.return_location_node_id : returnLoc[line.id])
-                      : '—'}
+                    {line.consumed_in_kit ? (
+                      // KIT-003: media is poured at sign-out, never returned, so
+                      // it has no destination HOWEVER much is still on the floor.
+                      // This test has to come before the `remaining > 0` one —
+                      // behind it, a media line with a leftover fell through to
+                      // the LocationPath and advertised a back-flush that is
+                      // never going to happen (user, 2026-09-01).
+                      closed
+                        ? discardedTotal > 0
+                          ? `Consumed · ${discardedTotal} discarded`
+                          : 'Consumed'
+                        : discardedAtClose > 0
+                          ? `Discarded at close (${discardedAtClose})`
+                          : 'Consumed at close'
+                    ) : remaining > 0 ? (
+                      <LocationPath
+                        nodeId={closed ? line.return_location_node_id : returnLoc[line.id]}
+                      />
+                    ) : (
+                      '—'
+                    )}
                   </span>
                 </td>
               </tr>
@@ -2571,13 +3232,13 @@ function AdditionalIssueDialog({
 function ReturnExcessDialog({
   kit,
   line,
-  allowedIds,
+  returnAllowedIds,
   onOpenChange,
   onDone,
 }: {
   kit: ApiKit;
   line: ApiKitLine | null;
-  allowedIds: Set<string>;
+  returnAllowedIds: Set<string>;
   onOpenChange: (open: boolean) => void;
   onDone: (kit: ApiKit) => void;
 }) {
@@ -2603,16 +3264,35 @@ function ReturnExcessDialog({
   const onFloor = line.on_floor_qty;
   const lotAvail = (lotId: string) => floorLots.find((l) => l.lot_id === lotId)?.qty ?? 0;
   const rowEff = (r: ReturnRow) => (r.isBox ? r.cells.length : r.qty ?? 0);
-  // This row's cap = its lot's on-floor qty minus what other rows already take
-  // from the SAME lot (a lot can be split to more than one destination).
+  // This row's cap is the LOWER of two limits, and both are needed:
+  //
+  //   * its lot's on-floor qty, minus what other rows already take from the
+  //     SAME lot — a lot can be split across more than one destination;
+  //   * what THIS KIT still holds, minus what every other row takes — because
+  //     the kit's on-floor total is the real ceiling, and with two lots each
+  //     capped at that total the rows could otherwise sum past it and the
+  //     return would be refused (``return_exceeds_on_floor``) only on submit.
   const rowCap = (r: ReturnRow) => {
-    const usedElsewhere = rows
+    const sameLot = rows
       .filter((x) => x.key !== r.key && x.lot_id === r.lot_id)
       .reduce((s, x) => s + rowEff(x), 0);
-    return Math.max(0, lotAvail(r.lot_id) - usedElsewhere);
+    const anyRow = rows.filter((x) => x.key !== r.key).reduce((s, x) => s + rowEff(x), 0);
+    return Math.max(0, Math.min(lotAvail(r.lot_id) - sameLot, onFloor - anyRow));
   };
   const setRow = (key: string, patch: Partial<ReturnRow>) =>
     setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  /** Cells the OTHER rows already claim in the box ``r`` is returning to. Two
+   *  rows may return to one box (two lots, or one lot split) but never to the
+   *  same physical position; nothing on the server knows about a claim until
+   *  this is submitted. The same guard close-out (``reservedFor``) and the
+   *  transfer dialog already apply. */
+  const reservedFor = (r: ReturnRow) =>
+    new Set(
+      rows
+        .filter((x) => x.key !== r.key && x.isBox && x.node === r.node)
+        .flatMap((x) => x.cells),
+    );
 
   const totalReturn = rows.reduce((s, r) => s + rowEff(r), 0);
   const ready =
@@ -2716,7 +3396,7 @@ function ReturnExcessDialog({
                           value={r.node}
                           onChange={(v) => setRow(r.key, { node: v, isBox: false, cells: [] })}
                           areas={['storage']}
-                          allowedNodeIds={allowedIds}
+                          allowedNodeIds={returnAllowedIds}
                           modal
                           showPath
                         />
@@ -2731,6 +3411,7 @@ function ReturnExcessDialog({
                               onResolved={(isBox) => {
                                 if (isBox !== r.isBox) setRow(r.key, { isBox, cells: [], qty: isBox ? null : cap });
                               }}
+                              reserved={reservedFor(r)}
                               derive
                             />
                             {!r.isBox && (
@@ -2829,19 +3510,26 @@ interface ReturnRow {
 function CancelKitDialog({
   kit,
   open,
-  allowedIds,
+  returnAllowedIds,
   onOpenChange,
   onSubmit,
 }: {
   kit: ApiKit;
   open: boolean;
-  allowedIds: Set<string>;
+  returnAllowedIds: Set<string>;
   onOpenChange: (open: boolean) => void;
   /** Hand the chosen return locations back — the parent then collects the
    *  signature and posts the cancel. */
   onSubmit: (lines: CancelLineInput[]) => void;
 }) {
   const lines = React.useMemo(() => kit.lines.filter((l) => l.on_floor_qty > 0), [kit.lines]);
+  // KIT-003 splits what a cancel does with the floor, so this dialog has to
+  // split too: ordinary components go back to inventory and need a destination,
+  // media is DISCARDED and has none. Offering it a location picker asked the
+  // operator to decide something the server ignores, then counted those units in
+  // "return 20 & sign" — a promise the cancel does not keep (user, 2026-09-01).
+  const returning = React.useMemo(() => lines.filter((l) => !l.consumed_in_kit), [lines]);
+  const discarding = React.useMemo(() => lines.filter((l) => l.consumed_in_kit), [lines]);
 
   // Default each line to where it was pulled from (D1).
   React.useEffect(() => {
@@ -2873,15 +3561,18 @@ function CancelKitDialog({
   const [dests, setDests] = React.useState<Record<string, OutputDest[]>>({});
   const destsFor = (lineId: string): OutputDest[] => dests[lineId] ?? [];
 
-  const ready = lines.every(
+  const ready = returning.every(
     (l) => destsFor(l.id).reduce((s, d) => s + destPlaced(d), 0) === l.on_floor_qty,
   );
-  const totalUnits = lines.reduce((a, l) => a + l.on_floor_qty, 0);
+  const returnUnits = returning.reduce((a, l) => a + l.on_floor_qty, 0);
+  const discardUnits = discarding.reduce((a, l) => a + l.on_floor_qty, 0);
 
   const submit = () => {
     if (!ready) return;
     onSubmit(
-      lines.map((l) => ({
+      // Media carries no destinations — the server exempts it from the
+      // every-line-needs-one check and would ignore them anyway.
+      returning.map((l) => ({
         line_id: l.id,
         destinations: destsFor(l.id).map((d) => ({
           location_node_id: d.location_node_id,
@@ -2921,13 +3612,25 @@ function CancelKitDialog({
         <DialogHeader>
           <DialogTitle>Cancel {kit.kit_number}?</DialogTitle>
           <DialogDescription>
-            {totalUnits} unit{totalUnits === 1 ? '' : 's'} still on the production floor will be
-            returned to inventory as a back-flush. Choose where each component goes — each is
-            pre-set to where it was pulled from. You’ll sign to confirm on the next step.
+            {returnUnits > 0 && (
+              <>
+                {returnUnits} unit{returnUnits === 1 ? '' : 's'} still on the production floor
+                will be returned to inventory as a back-flush. Choose where each component goes —
+                each is pre-set to where it was pulled from.{' '}
+              </>
+            )}
+            {discardUnits > 0 && (
+              <>
+                {discardUnits} unit{discardUnits === 1 ? '' : 's'} of media {discardUnits === 1 ? 'is' : 'are'}{' '}
+                <span className="text-text-2">discarded</span> — media is never returned to
+                inventory.{' '}
+              </>
+            )}
+            You’ll sign to confirm on the next step.
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="max-h-[55vh] space-y-3 overflow-y-auto">
-          {lines.map((line) => {
+          {returning.map((line) => {
             const rows = destsFor(line.id);
             const placed = rows.reduce((s, d) => s + destPlaced(d), 0);
             return (
@@ -2947,7 +3650,7 @@ function CancelKitDialog({
                   good={line.on_floor_qty}
                   dests={rows}
                   onChange={(next) => setDests((p) => ({ ...p, [line.id]: next }))}
-                  allowedIds={allowedIds}
+                  allowedIds={returnAllowedIds}
                   required
                   reservedFor={reservedFor}
                   label={`Return ${line.item_number} to`}
@@ -2957,13 +3660,36 @@ function CancelKitDialog({
               </div>
             );
           })}
+          {discarding.map((line) => (
+            <div
+              key={line.id}
+              className="rounded-md border border-dashed border-border bg-surface/40 p-3"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <ItemCell
+                  itemNumber={line.item_number}
+                  description={line.description}
+                  itemId={line.item_id}
+                />
+                <span className="shrink-0 font-mono text-sm tabular-nums text-text-3">
+                  {line.on_floor_qty} discarded
+                </span>
+              </div>
+              <p className="mt-2 text-xs text-text-3">
+                Consumed to the kit, so there is nowhere to return it — these units are written
+                off when the kit is cancelled.
+              </p>
+            </div>
+          ))}
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Keep kit
           </Button>
           <Button variant="danger" onClick={submit} disabled={!ready}>
-            Continue — return {totalUnits} &amp; sign
+            {returnUnits > 0
+              ? `Continue — return ${returnUnits} & sign`
+              : 'Continue — discard & sign'}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -3014,6 +3740,72 @@ interface TimelineNode {
   /** Material this batch consumed (produce / close) — no stock movement backs it. */
   consumed: ApiKitAuditEvent['consumed'];
   moves: ApiKitActivityRow[];
+}
+
+/** REQ-2026-07-31-KIT-002 — the campaign day an event happened on.
+ *
+ *  The client's own picture of a multi-day kit is a tree of ISSUE EVENTS by day
+ *  (day 0, 5, 12, 18 …), not a partition of the recipe: the same material comes
+ *  out again whenever the campaign calls for it, so "media" legitimately appears
+ *  under day 0, day 12 AND day 18. That shape can only be read off the ledger —
+ *  a label stored per material could never express it, since a material has no
+ *  single day.
+ *
+ *  So nothing here is stored. The rows are the ``kit_issue`` /
+ *  ``kit_additional_issue`` movements the system already writes, grouped by the
+ *  day they were performed. That is what the requirement means by "a
+ *  naming/organization layer over the existing issue logic, not new consumption
+ *  logic" — this file computes headings and nothing else.
+ */
+
+/** Local calendar day of a timestamp, as a stable YYYY-MM-DD key.
+ *
+ *  Deliberately LOCAL rather than the ISO string's UTC date: the day an operator
+ *  means is the day they were standing in the suite, and a late-evening pull
+ *  would otherwise be filed under tomorrow. */
+function dayKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
+}
+
+/** Midnight-to-midnight days between two timestamps, so "day 5" means the fifth
+ *  calendar day of the campaign rather than 120-odd hours. */
+function daysBetween(fromIso: string, toIso: string): number {
+  const a = new Date(fromIso);
+  const b = new Date(toIso);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.max(0, Math.round((midnight(b) - midnight(a)) / 86_400_000));
+}
+
+function formatDayDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: '2-digit',
+  });
+}
+
+/** A date rule between one campaign day and the next.
+ *
+ *  Day 0 is the day material was FIRST ISSUED, not the day the kit record was
+ *  created — a kit may be drafted a week before anyone reaches the bench, and
+ *  numbering from the draft would put the campaign's first day at "day 7". */
+function TimelineDayHeading({ dayIndex, time }: { dayIndex: number; time: string }) {
+  return (
+    <li className="flex items-center gap-3 pb-3 pt-1 first:pt-0">
+      <span className="text-[11px] font-medium uppercase tracking-wider text-text-2">
+        Day {dayIndex}
+      </span>
+      <span className="text-[11px] text-text-3">{formatDayDate(time)}</span>
+      <span className="h-px flex-1 bg-border" />
+    </li>
+  );
 }
 
 /** Fold the audit events + stock movements into one chronological timeline.
@@ -3102,6 +3894,25 @@ function ActivitySheet({
     [events, rows],
   );
 
+  /** Day 0 of the campaign — the first node that actually MOVED material.
+   *  Falls back to the first node at all, so a kit that has only been created
+   *  still numbers from something rather than crashing. */
+  const day0 = React.useMemo(() => {
+    const firstIssue = timeline.find((n) =>
+      n.moves.some(
+        (m) => m.movement_type === 'kit_issue' || m.movement_type === 'kit_additional_issue',
+      ),
+    );
+    return (firstIssue ?? timeline[0])?.time ?? null;
+  }, [timeline]);
+
+  // Headings show from the first day, not only once a kit turns out to span
+  // several. A campaign is only "multi-day" in hindsight: suppressing the
+  // heading until day 2 means the structure appears days after the operator
+  // started working to it, and on day 0 the feature looks absent. One line
+  // reading "Day 0" is orientation, not noise — the client's own picture of a
+  // campaign starts at Day 0 with a single day on it.
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="right" className="sm:w-[640px]">
@@ -3109,7 +3920,8 @@ function ActivitySheet({
           <SheetTitle>Activity — {kitNumber}</SheetTitle>
           <p className="text-xs text-text-3">
             The kit’s full story, oldest first. Each step shows what happened and the exact stock it
-            moved.
+            moved. Steps are grouped by intervention day, counted from the day material was first
+            issued — so a campaign that runs over several days reads day by day.
           </p>
         </SheetHeader>
         <SheetBody className="px-0 py-0">
@@ -3121,9 +3933,24 @@ function ActivitySheet({
             </div>
           ) : (
             <ol className="px-5 py-4">
-              {timeline.map((node, i) => (
-                <TimelineItem key={node.key} node={node} last={i === timeline.length - 1} />
-              ))}
+              {timeline.map((node, i) => {
+                // A heading whenever the calendar day changes — including on the
+                // first node, so the campaign opens with "Day 0" rather than
+                // starting mid-air.
+                const prev = i > 0 ? timeline[i - 1] : undefined;
+                const newDay = !prev || dayKey(prev.time) !== dayKey(node.time);
+                return (
+                  <React.Fragment key={node.key}>
+                    {newDay && day0 && (
+                      <TimelineDayHeading
+                        dayIndex={daysBetween(day0, node.time)}
+                        time={node.time}
+                      />
+                    )}
+                    <TimelineItem node={node} last={i === timeline.length - 1} />
+                  </React.Fragment>
+                );
+              })}
             </ol>
           )}
         </SheetBody>
@@ -3181,7 +4008,9 @@ function TimelineItem({ node, last }: { node: TimelineNode; last: boolean }) {
             {node.outputLocation && (
               <div className="flex gap-1.5">
                 <dt className="text-text-3">Stocked to</dt>
-                <dd className="font-medium text-text-2">{node.outputLocation}</dd>
+                <dd className="min-w-0 font-medium text-text-2">
+                  <LocationPath path={node.outputLocation} />
+                </dd>
               </div>
             )}
             {node.outputExpiry && (

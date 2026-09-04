@@ -193,6 +193,13 @@ class BomLineRead(BaseModel):
     # The child item's real stock status (same value the inventory list shows),
     # so the tree badge matches the list.
     child_status_code: Literal["available", "low_stock", "out_of_stock"]
+    # The two numbers the badge needs to say "Awaiting release" instead of "Low
+    # stock" — i.e. to keep the promise the line above makes. Without them the
+    # tree would go on showing "Low stock" for a component whose delivery is
+    # sitting in the receiving bay, while every item list said otherwise, and a
+    # planner would have no way to tell which screen was lying.
+    child_reorder_threshold: Decimal = Decimal("0")
+    child_qty_awaiting_release: Decimal = Decimal("0")
     # True when the child itself is a built item with its own BOM (so the UI
     # can offer to expand it).
     child_has_bom: bool

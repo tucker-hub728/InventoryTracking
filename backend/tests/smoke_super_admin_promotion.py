@@ -101,9 +101,12 @@ def check(label: str, ok: bool, ctx: object = "") -> None:
 
 
 def _users(token: str) -> list[dict]:
-    s, b = _req("GET", "/users", token=token)
+    # ``GET /users`` is paginated and returns an ``{"items": [...]}`` envelope.
+    # The limit is the endpoint's ceiling: this probe scans the directory for
+    # specific members, so it needs the whole thing, not the default page.
+    s, b = _req("GET", "/users?limit=200", token=token)
     assert s == 200, b
-    return b
+    return b["items"]
 
 
 def _patch(token: str, user_id: str, **changes) -> tuple[int, dict]:

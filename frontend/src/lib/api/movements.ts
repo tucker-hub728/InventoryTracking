@@ -11,6 +11,7 @@
  */
 
 import { api } from './client';
+import type { LotReleaseState } from './lots';
 
 export type MovementType =
   | 'receipt'
@@ -32,7 +33,15 @@ export type MovementType =
   | 'kit_cancel_return'
   // Terminal customer shipment (CUST-001 / TRX-005) — the finished good leaves
   // inventory to a customer. Unit-out.
-  | 'customer_shipment';
+  | 'customer_shipment'
+  // Consumable issued to a Kanban (TRX-003, consum01). Unit-out of the shelf,
+  // into the room; terminal for quantity and never back-flushed.
+  | 'consumable_issue'
+  // Debit-and-gone issue to a scrap location (TRX-001/002, issue01) — PD, R&D,
+  // a QC lab. Unit-out of the shelf INTO that location; the material leaves
+  // controlled inventory and nothing is stored at the destination. The `to`
+  // node on these rows is the disposition, not a balance.
+  | 'material_issue';
 
 /** Display labels — keep aligned with the backend ``MovementType`` enum. */
 export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
@@ -50,6 +59,10 @@ export const MOVEMENT_TYPE_LABEL: Record<MovementType, string> = {
   kit_return: 'Returned',
   kit_cancel_return: 'Cancel return',
   customer_shipment: 'Shipped to customer',
+  consumable_issue: 'Issued to Kanban',
+  // Named for where it went, like the two above it — "Issued" alone would read
+  // as the Kanban issue, and the two are different transactions.
+  material_issue: 'Issued to location',
 };
 
 /** Sign of the qty_delta enforced by each type — useful for colouring the row. */
@@ -69,6 +82,11 @@ export const MOVEMENT_TYPE_SIGN: Record<MovementType, 'in' | 'out' | 'signed'> =
   kit_return: 'in',
   kit_cancel_return: 'in',
   customer_shipment: 'out',
+  // Leaves the shelf for good — terminal for quantity (07-09 TRX-001).
+  consumable_issue: 'out',
+  // Leaves controlled inventory entirely (TRX-001/002), despite carrying a
+  // destination node — that node records where it went, not where it now is.
+  material_issue: 'out',
 };
 
 export interface ApiMovement {
@@ -81,6 +99,14 @@ export interface ApiMovement {
   lot_number: string | null;
   /** Lot expiry (ISO date) — surfaced in the ledger's Expiry column. */
   lot_expiration_date: string | null;
+  /** The lot's release state AS IT IS NOW — not the state when this movement
+   *  happened, which nothing records. Rendered on the ledger's per-lot subtotal
+   *  row only, never on a movement row, or it would misread history. */
+  lot_release_state: LotReleaseState | null;
+  /** Decimal (string). The lot's per-unit price as it is NOW (RPT-003) — the
+   *  same present-state caveat as `lot_release_state`. `null` is "no price
+   *  recorded", never zero. */
+  lot_unit_price_amount: string | null;
 
   /** Location System node references + resolved name / breadcrumb path. */
   from_location_node_id: string | null;
@@ -157,6 +183,12 @@ export const movementsApi = {
       },
       signal: opts?.signal,
     }),
+
+  /** One ledger entry by id — backs the audit viewer's movement detail sheet,
+   *  which now opens from a paged timeline row rather than from a cached copy
+   *  of the whole ledger. */
+  get: (movementId: string, opts?: { signal?: AbortSignal }) =>
+    api.get<ApiMovement>(`/movements/${movementId}`, { signal: opts?.signal }),
 
   /**
    * Per-item ledger. The backend 404s when the item doesn't exist

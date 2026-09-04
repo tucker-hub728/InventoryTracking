@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui/sonner';
 import { ApiError } from '@/lib/api/client';
 import { itemsApi, type ApiItem, type ItemUpdateInput } from '@/lib/api/items';
@@ -31,6 +32,8 @@ const schema = z.object({
   // named by the dialog title, so it is never a field and never part of the
   // patch.
   uom: z.string().trim().max(32, 'Unit is too long').optional(),
+  // No ORDER unit here (REQ-001) — the pack belongs to the PO line, and is
+  // edited there or corrected at receive.
   supplier_ids: z.array(z.string()).default([]),
   avg_lead_days: z
     .string()
@@ -54,7 +57,18 @@ const schema = z.object({
       'Near-expiry threshold must be a whole number of days (0–3650)',
     ),
   must_order_flag: z.boolean(),
-});
+  // REQ-2026-07-31-KIT-003. Editable after creation (client 2026-09-01): the
+  // twin item exists precisely so media can enter a BOM, and whether a given
+  // item plays that role is a decision people revise. Create-only would have
+  // meant deleting and re-creating an item — and its part number — to change it.
+  consumed_in_kit: z.boolean(),
+  // Variable yield (client 2026-09-01). Editable after creation for the same
+  // reason as the flag above: whether a process is grown or assembled is
+  // something people learn, and create-only would mean re-numbering the item to
+  // record it. Changing it does NOT disturb kits already running — each kit
+  // snapshots the flag at creation.
+  variable_yield: z.boolean(),
+  });
 
 type FormValues = z.infer<typeof schema>;
 
@@ -119,11 +133,15 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
       reorder_threshold: '',
       near_expiry_threshold_days: '',
       must_order_flag: false,
+      consumed_in_kit: false,
+      variable_yield: false,
     },
   });
 
   const supplierIds = watch('supplier_ids');
   const mustOrder = watch('must_order_flag');
+  const consumedInKit = watch('consumed_in_kit');
+  const variableYield = watch('variable_yield');
 
   // Supplier-side fields apply only to the raw-material tier (a built AY/FG is
   // manufactured, not bought) — suppliers, lead time, must-order. Near-expiry
@@ -131,6 +149,12 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
   // outside it: planning needs it on every tier. See ``new-item-dialog.tsx``
   // for the citations. Read off the item itself, since the tier is fixed.
   const showPurchasing = item?.tier_type === 'raw_material';
+
+  // Variable yield is the mirror image of the block above: it describes how a
+  // thing is MADE, so it only means anything on a tier that is built. A raw
+  // material is bought, and no kit ever produces one.
+  const showBuilt =
+    item?.tier_type === 'sub_assembly' || item?.tier_type === 'finished_good';
 
   // Load suppliers + the fresh item state every time the dialog opens.
   // ``activeOnly: false`` so a supplier that's since been deactivated still
@@ -144,7 +168,10 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
     const ctrl = new AbortController();
     setSuppliersError(null);
     Promise.all([
-      suppliersApi.list({ activeOnly: false, signal: ctrl.signal }),
+      // ``listAll``, not ``list``: this is a searchable multi-select over the
+      // whole supplier master, and a paged response would quietly drop the
+      // suppliers an item is already assigned to off the end of page one.
+      suppliersApi.listAll({ activeOnly: false, signal: ctrl.signal }),
       itemsApi.get(itemId, { signal: ctrl.signal }),
     ])
       .then(([supplierList, freshItem]) => {
@@ -169,6 +196,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
               ? String(freshItem.near_expiry_threshold_days)
               : '',
           must_order_flag: freshItem.must_order_flag,
+          consumed_in_kit: freshItem.consumed_in_kit,
+          variable_yield: freshItem.variable_yield,
         });
         setSubmitError(null);
       })
@@ -203,6 +232,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
         : 0;
     }
     if (dirtyFields.must_order_flag) patch.must_order_flag = values.must_order_flag;
+    if (dirtyFields.consumed_in_kit) patch.consumed_in_kit = values.consumed_in_kit;
+    if (dirtyFields.variable_yield) patch.variable_yield = values.variable_yield;
 
     if (Object.keys(patch).length === 0) {
       setSubmitError('No changes to save.');
@@ -282,10 +313,10 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                 time, near-expiry, must-order) live in the block below. */}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <Label htmlFor="it-uom">Unit</Label>
+                <Label htmlFor="it-uom">Consume unit</Label>
                 <Input
                   id="it-uom"
-                  placeholder="each, mL, box…"
+                  placeholder="each, mL, vial…"
                   aria-invalid={Boolean(errors.uom)}
                   {...register('uom')}
                 />
@@ -371,6 +402,30 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   </div>
                 </div>
 
+                {/* Offered only on a NON-consumable: the two flags are mutually
+                    exclusive (ck_items_consumable_xor_consumed_in_kit), and a
+                    consumable is barred from bills of material anyway, so on one
+                    the switch would be a control that can only produce a 422.
+                    `is_consumable` itself stays create-only — changing it would
+                    silently change whether existing BOM lines are legal. */}
+                {!item?.is_consumable && (
+                  <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="it-consumed-in-kit">Consumed to the kit</Label>
+                      <p className="text-xs text-text-3">
+                        Media and the like: consumed when replaced, never back-flushed
+                      </p>
+                    </div>
+                    <Switch
+                      id="it-consumed-in-kit"
+                      checked={consumedInKit}
+                      onCheckedChange={(v) =>
+                        setValue('consumed_in_kit', v, { shouldDirty: true })
+                      }
+                    />
+                  </div>
+                )}
+
                 <label className="flex cursor-pointer items-center gap-2 text-sm">
                   <input
                     type="checkbox"
@@ -385,6 +440,27 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   <span>Flag as must-order for next PO</span>
                 </label>
               </>
+            )}
+
+            {/* Built tiers only — see `showBuilt`. Editing this does not touch
+                kits already open: each snapshots the flag when it is created,
+                so a kit's rules cannot change underneath it mid-build. */}
+            {showBuilt && (
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-surface px-3 py-2">
+                <div className="space-y-0.5">
+                  <Label htmlFor="it-variable-yield">Variable yield</Label>
+                  <p className="text-xs text-text-3">
+                    Grown or expressed: the amount made isn&apos;t set by the recipe
+                  </p>
+                </div>
+                <Switch
+                  id="it-variable-yield"
+                  checked={variableYield}
+                  onCheckedChange={(v) =>
+                    setValue('variable_yield', v, { shouldDirty: true })
+                  }
+                />
+              </div>
             )}
 
             {submitError && (

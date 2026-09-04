@@ -27,6 +27,11 @@ export interface ApiBomLine {
   child_qty_available: string;
   /** The child's real stock status (matches the inventory list badge). */
   child_status_code: 'available' | 'low_stock' | 'out_of_stock';
+  /** Threshold + arrived-but-unshelved units, so the badge can say "Awaiting
+   *  release" instead of "Low stock" — keeping the promise on the line
+   *  above that this badge matches the inventory list. */
+  child_reorder_threshold: string;
+  child_qty_awaiting_release: string;
   /** True when the child itself has a BOM (so the UI can expand it). */
   child_has_bom: boolean;
   created_at: string;

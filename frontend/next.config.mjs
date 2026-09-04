@@ -60,6 +60,16 @@ const nextConfig = {
   experimental: {
     optimizePackageImports: ['lucide-react'],
   },
+  // Dev only. The source tree reaches the container over a Windows bind mount,
+  // which delivers no inotify events, so Turbopack's native watcher never sees
+  // a file appear or change. It serves whatever it compiled when the dev
+  // server booted and then goes deaf: a route added afterwards falls through
+  // to the `/api/v1/[...path]` catch-all, and a route already in
+  // `app-paths-manifest.json` can 404 outright once its cache entry goes
+  // stale — which is how the notifications SSE route died locally while
+  // working in every deployed build. (WATCHPACK_POLLING / CHOKIDAR_USEPOLLING
+  // in docker-compose only ever covered webpack; Turbopack reads neither.)
+  ...(isDev ? { watchOptions: { pollIntervalMs: 1000 } } : {}),
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];
   },
