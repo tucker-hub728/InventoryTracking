@@ -57,6 +57,7 @@ from app.inventory.schemas import (
     ReceiveEventRequest,
     ReceivePlacement,
     SupplierCreate,
+    SupplierDeleteRequest,
     SupplierListResponse,
     SupplierRead,
     SupplierUpdate,
@@ -74,7 +75,7 @@ from app.models.inventory import (
     Supplier,
 )
 from app.models.locations import can_store, is_grid_node
-from app.security.permissions import RequirePermission
+from app.security.permissions import SUPER_ADMIN_ROLE, RequirePermission, RequireRole
 
 items_router = APIRouter(prefix="/items", tags=["items"])
 suppliers_router = APIRouter(prefix="/suppliers", tags=["suppliers"])
@@ -287,6 +288,7 @@ def _item_to_read(
             ItemSupplierRead(
                 supplier_id=str(iv.supplier_id),
                 supplier_name=iv.supplier.name if iv.supplier else "",
+                is_active=bool(iv.supplier.is_active) if iv.supplier else False,
             )
             for iv in item.suppliers
         ],
@@ -568,6 +570,114 @@ async def delete_supplier(
         subject_label=updated.name,
         before=before,
         after=after,
+    )
+
+    await db.refresh(updated)
+    response = _supplier_to_read(updated)
+    await db.commit()
+    return response
+
+
+@suppliers_router.post(
+    "/{supplier_id}/delete",
+    response_model=SupplierRead,
+    summary="Delete a deactivated supplier (second step — removes it from the UI)",
+    dependencies=[
+        Depends(RequirePermission("inventory", "create")),
+        # A route dependency, NOT an in-body check: an in-body 403 would fire
+        # AFTER the reauth ticket had been spent, burning a single-use signature
+        # on a request that was never going to succeed (CTL-001).
+        Depends(
+            RequireRole(
+                SUPER_ADMIN_ROLE,
+                message="Only a super admin can delete a supplier",
+            )
+        ),
+    ],
+)
+async def delete_supplier_record(
+    db: DBSession,
+    current: CurrentDbUserDep,
+    supplier_id: Annotated[uuid.UUID, Path()],
+    payload: SupplierDeleteRequest,
+) -> SupplierRead:
+    """The SECOND delete step (supdel01) — ``deleted_at``, not a row removal.
+
+    ``DELETE /suppliers/{id}`` deactivates: the supplier leaves every picker but
+    stays on the Deactivated tab and keeps its name reserved. This removes it
+    from the UI entirely and RELEASES the name for re-use.
+
+    Deliberately two steps. Deactivating is reversible and ordinary; this is
+    neither, so it cannot be reached in one click from the Active tab and it
+    costs a signature.
+
+    Refuses when:
+
+    * the supplier is still active — deactivate it first, so nothing can be
+      deleted straight out of the list people are working in;
+    * anything references it — items, lots or order lines. A supplier that is
+      still doing a job stays (client, 2026-09-10). The refusal names what is
+      holding it, because "cannot delete" alone sends someone hunting.
+
+    The row is NEVER removed: three tables FK here with ON DELETE RESTRICT, and
+    the audit trail has to keep resolving the name on historic records. There is
+    no un-delete in the UI by design — the audit row below is the record of what
+    happened, and recovery is a deliberate database act.
+    """
+    evidence_uuid = _parse_uuid_or_422(payload.evidence_id, field="evidence_id")
+
+    supplier = await inv_repo.get_supplier(db, supplier_id)
+    if supplier is None:
+        raise NotFoundError(f"Supplier {supplier_id} not found")
+    if supplier.deleted_at is not None:
+        # Idempotent, like the deactivate route above: a second delete returns
+        # the current state rather than spending another signature.
+        return _supplier_to_read(supplier)
+    if supplier.is_active:
+        raise ConflictError(
+            f"'{supplier.name}' is still active — deactivate it first.",
+            code="supplier_still_active",
+        )
+
+    refs = await inv_repo.supplier_reference_counts(db, supplier.id)
+    if refs:
+        # Labels are stored plural ("items", "order lines"); drop the "s" for a
+        # count of one so the refusal reads as a sentence.
+        detail = ", ".join(
+            f"{n} {label[:-1] if n == 1 else label}" for label, n in refs.items()
+        )
+        raise ConflictError(
+            f"'{supplier.name}' is still attached to {detail}.",
+            code="supplier_in_use",
+            details={"references": refs},
+        )
+
+    before = inv_repo.supplier_to_audit_snapshot(supplier)
+    updated = await inv_repo.soft_delete_supplier(db, supplier=supplier)
+
+    await record_entity_change(
+        db,
+        actor_user_id=current.id,
+        action="deleted",
+        subject_table="meta.suppliers",
+        subject_id=updated.id,
+        subject_label=updated.name,
+        before=before,
+        after=inv_repo.supplier_to_audit_snapshot(updated),
+        signature_id=evidence_uuid,
+    )
+    await consume_reauth_evidence(
+        db,
+        evidence_id=evidence_uuid,
+        user_id=current.id,
+        expected_action="supplier.delete",
+        target_table="meta.suppliers",
+        target_id=updated.id,
+        # Bound to the supplier itself (esignbind01): it is the record on screen
+        # and the record being changed, so there is a real subject to assert
+        # against rather than falling back to an action-only match.
+        record_table="meta.suppliers",
+        record_id=updated.id,
     )
 
     await db.refresh(updated)
@@ -2006,6 +2116,7 @@ async def list_item_suppliers(
         ItemSupplierRead(
             supplier_id=str(iv.supplier_id),
             supplier_name=iv.supplier.name if iv.supplier else "",
+            is_active=bool(iv.supplier.is_active) if iv.supplier else False,
         )
         for iv in rows
     ]

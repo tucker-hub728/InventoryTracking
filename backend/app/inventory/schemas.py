@@ -159,6 +159,20 @@ class SupplierUpdate(BaseModel):
     lead_time_days: int | None = Field(default=None, ge=0, le=3650)
 
 
+class SupplierDeleteRequest(BaseModel):
+    """Payload for ``POST /v1/suppliers/{id}/delete`` — the second delete step.
+
+    E-signed: ``evidence_id`` carries a re-authentication for action
+    ``supplier.delete``, bound to the supplier being removed. Unlike a read,
+    this asserts something — the operator is giving up a name and taking the
+    row off every screen — so a password prompt here means what it says.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+
+
 # ── Items ──────────────────────────────────────────────────────────────
 
 
@@ -169,6 +183,16 @@ class ItemSupplierRead(BaseModel):
 
     supplier_id: str
     supplier_name: str
+    #: Whether the supplier itself is still active. The assignment survives
+    #: deactivation — that is the point of deactivating rather than deleting —
+    #: so a caller offering these for NEW work has to filter, and needs to tell
+    #: "this item has no suppliers" apart from "all of them are deactivated".
+    #: Those are different problems with different fixes.
+    #:
+    #: Required, not defaulted: a default of ``True`` would let a construction
+    #: site that forgets it report a deactivated supplier as live, and the
+    #: warning that depends on this would silently never fire.
+    is_active: bool
 
 
 class ItemCreate(BaseModel):

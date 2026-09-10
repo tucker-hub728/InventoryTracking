@@ -36,6 +36,11 @@ export interface InventoryItem {
   prefixCode: string;
   prefixLabel: string | null;
   supplier: string;
+  /** True when the item HAS assigned suppliers but every one of them is
+   *  deactivated — so it cannot be ordered until one is reactivated or another
+   *  is assigned. Distinct from ``supplier === ''``, which means none were ever
+   *  assigned; the two need different fixes. */
+  suppliersAllInactive: boolean;
   lead: number;
   invValue: number;
   poValue: number;

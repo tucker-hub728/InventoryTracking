@@ -4,6 +4,7 @@ import * as React from 'react';
 import { Plus, Search } from 'lucide-react';
 
 import { EmptyState } from '@/components/shared/empty-state';
+import { PasswordReauthDialog } from '@/components/shared/password-reauth-dialog';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -14,6 +15,7 @@ import { useMinDuration } from '@/hooks/use-min-duration';
 import { clampInt, useUrlSearchBox, useUrlState } from '@/hooks/use-url-state';
 import { ApiError } from '@/lib/api/client';
 import { suppliersApi, type Supplier } from '@/lib/api/suppliers';
+import { selectIsSuperAdmin, useAuthStore } from '@/stores/auth.store';
 
 import { SupplierEditDialog } from './supplier-edit-dialog';
 import { SuppliersTable } from './suppliers-table';
@@ -40,6 +42,15 @@ interface Props {
  */
 export function SuppliersDirectory({ isActive }: Props) {
   const { canManage, createReload, openCreate } = useSuppliersShell();
+  // Deleting is Super-Admin-only (client, 2026-09-10) — narrower than the
+  // ``inventory:create`` that covers deactivate, on the CTL-001 rule that the
+  // route which cannot be undone gets the tighter gate. The server enforces it;
+  // this only decides whether to draw the button.
+  //
+  // ``selectIsSuperAdmin`` reads ``rawRole``, not ``user.role`` — the latter is
+  // the RBAC bucket, where super_admin and admin are both ``admin``.
+  const isSuperAdmin = useAuthStore(selectIsSuperAdmin);
+  const [deleting, setDeleting] = React.useState<Supplier | null>(null);
   const { confirm, confirmDialog } = useConfirm();
   const { value: raw, set } = useUrlState(DEFAULTS);
   // Query params are hand-editable; clamp before they reach the API.
@@ -146,10 +157,46 @@ export function SuppliersDirectory({ isActive }: Props) {
     }
   };
 
+  // Step two. The confirm is deliberately blunt about what is irreversible —
+  // the row survives in the database, but nothing in the app can bring it back.
+  const handleDelete = async (v: Supplier): Promise<void> => {
+    if (!isSuperAdmin) return;
+    const ok = await confirm({
+      title: `Delete ${v.name}?`,
+      description:
+        'It will be removed from every screen, including this tab, and its name ' +
+        'becomes available again. This cannot be undone from the app. Suppliers ' +
+        'attached to items, lots or orders cannot be deleted.',
+      confirmLabel: 'Continue',
+      destructive: true,
+    });
+    if (!ok) return;
+    setDeleting(v);
+  };
+
+  const submitDelete = async (evidenceId: string): Promise<void> => {
+    const target = deleting;
+    if (!target) return;
+    setBusyId(target.id);
+    try {
+      await suppliersApi.remove(target.id, evidenceId);
+      toast.success('Supplier deleted', { description: target.name });
+      setReload((n) => n + 1);
+    } catch (err) {
+      // The server names what is still holding it (items / lots / order lines),
+      // so surface its message rather than a generic failure.
+      toast.error(err instanceof ApiError ? err.message : 'Failed to delete supplier.');
+    } finally {
+      setBusyId(null);
+      setDeleting(null);
+    }
+  };
+
   const emptyTitle = isActive ? 'No active suppliers' : 'No deactivated suppliers';
   const emptyHint = isActive
     ? 'The seed migration usually populates this from the workbook. Add one manually.'
-    : 'Suppliers you deactivate are kept here rather than deleted, and can be reactivated.';
+    : 'Suppliers you deactivate are kept here and can be reactivated. A Super Admin ' +
+      'can delete one that nothing is attached to, which removes it from every screen.';
 
   return (
     <Card className="p-4">
@@ -198,6 +245,7 @@ export function SuppliersDirectory({ isActive }: Props) {
           onEdit={canManage ? (v) => setEditing(v) : undefined}
           onDeactivate={canManage ? handleDeactivate : undefined}
           onReactivate={canManage ? handleReactivate : undefined}
+          onDelete={!isActive && isSuperAdmin ? handleDelete : undefined}
           busyId={busyId}
         />
       )}
@@ -223,6 +271,28 @@ export function SuppliersDirectory({ isActive }: Props) {
         }}
         supplier={editing}
         onUpdated={handleUpdated}
+      />
+
+      <PasswordReauthDialog
+        open={deleting !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleting(null);
+        }}
+        action="supplier.delete"
+        // Bound to the supplier itself (VR-006 / esignbind01): it is both the
+        // record on screen and the record being changed, so the server can
+        // assert the ticket against a real subject instead of the action alone.
+        recordTable="meta.suppliers"
+        recordId={deleting?.id}
+        title="Sign to delete"
+        meaning={
+          deleting
+            ? `I am deleting the supplier ${deleting.name}. It will no longer appear ` +
+              `anywhere in the application and its name becomes available for re-use. ` +
+              `The record is retained for audit.`
+            : ''
+        }
+        onConfirmed={(evidence) => void submitDelete(evidence.evidence_id)}
       />
 
       {confirmDialog}

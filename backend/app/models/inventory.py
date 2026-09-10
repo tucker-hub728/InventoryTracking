@@ -39,11 +39,24 @@ class Supplier(Base):
 
     __tablename__ = "suppliers"
     __table_args__ = (
-        Index("uq_suppliers_name", func.lower(text("name")), unique=True),
+        # Partial since ``supdel01``: deleting a supplier RELEASES its name for
+        # re-use, deactivating one does not. That is what separates the two
+        # steps — see the migration for why a total index was the wrong default
+        # for a client consolidating their supplier list.
+        Index(
+            "uq_suppliers_name",
+            func.lower(text("name")),
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         Index("ix_suppliers_active", "is_active"),
         CheckConstraint(
             "lead_time_days IS NULL OR (lead_time_days >= 0 AND lead_time_days <= 3650)",
             name="ck_suppliers_lead_time_days_range",
+        ),
+        CheckConstraint(
+            "deleted_at IS NULL OR is_active = false",
+            name="ck_suppliers_deleted_implies_inactive",
         ),
         {"schema": "meta"},
     )
@@ -66,6 +79,17 @@ class Supplier(Base):
         Boolean,
         nullable=False,
         server_default=text("TRUE"),
+    )
+    # The SECOND delete step (supdel01). ``is_active=false`` hides a supplier
+    # from the pickers but keeps it on the Deactivated tab and keeps its name
+    # reserved; setting this removes it from the UI entirely and releases the
+    # name. Only a deactivated supplier can be deleted, and only one that
+    # nothing references — see ``POST /suppliers/{id}/delete``.
+    #
+    # The row is never removed: three tables FK here with ON DELETE RESTRICT and
+    # the audit trail must keep resolving the name on historic records.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Days from placing an order with this supplier to the goods arriving

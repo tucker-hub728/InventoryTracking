@@ -234,7 +234,15 @@ export function LotDetailEditDialog({ lotId, onOpenChange, onSaved }: Props) {
       !itemSuppliers.some((v) => v.supplier_id === lot.supplier_id)
     ) {
       return [
-        { supplier_id: lot.supplier_id, supplier_name: lot.supplier_name ?? '(current)' },
+        // ``is_active: true`` because this entry exists to KEEP a choice the lot
+        // already carries — it is a stand-in, not a claim about the supplier's
+        // current state, and marking it inactive would hide the very row this
+        // branch exists to surface.
+        {
+          supplier_id: lot.supplier_id,
+          supplier_name: lot.supplier_name ?? '(current)',
+          is_active: true,
+        },
         ...itemSuppliers,
       ];
     }

@@ -148,6 +148,20 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
   // rides the same gate for now (deferred on AY/FG). Reorder threshold sits
   // outside it: planning needs it on every tier. See ``new-item-dialog.tsx``
   // for the citations. Read off the item itself, since the tier is fixed.
+  // Deactivating a supplier promises it is "hidden from new item / lot pickers",
+  // but the fetch above asks for EVERY supplier — so the multi-select was also
+  // offering deactivated ones for a NEW assignment, which is not what that
+  // promise says. Keep a deactivated supplier visible only when this item is
+  // already assigned to it, which is the case the wide fetch exists for.
+  //
+  // Keyed on ``loadedSupplierIds`` (what was attached when the dialog opened)
+  // rather than the live selection, so unticking one does not make it vanish
+  // mid-edit and strand someone who mis-clicked.
+  const selectableSuppliers = React.useMemo(
+    () => suppliers.filter((s) => s.is_active || loadedSupplierIds.includes(s.id)),
+    [suppliers, loadedSupplierIds],
+  );
+
   const showPurchasing = item?.tier_type === 'raw_material';
 
   // Variable yield is the mirror image of the block above: it describes how a
@@ -158,7 +172,8 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
 
   // Load suppliers + the fresh item state every time the dialog opens.
   // ``activeOnly: false`` so a supplier that's since been deactivated still
-  // appears in the list (and can be unchecked).
+  // appears in the list (and can be unchecked) — narrowed to the ones actually
+  // ATTACHED by ``selectableSuppliers`` below.
   React.useEffect(() => {
     if (!open || !itemId) {
       setItem(null);
@@ -352,7 +367,7 @@ export function ItemEditDialog({ open, onOpenChange, itemId, onUpdated }: Props)
                   <SupplierMultiSelect
                     id="it-suppliers"
                     modal
-                    suppliers={suppliers}
+                    suppliers={selectableSuppliers}
                     value={supplierIds}
                     onChange={(next) => setValue('supplier_ids', next, { shouldDirty: true })}
                     error={suppliersError}

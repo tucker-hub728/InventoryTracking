@@ -476,6 +476,18 @@ export function InventoryDetailShell({
               <>
                 <span aria-hidden>·</span>
                 <SupplierSummary suppliers={item.supplier} />
+                {/* The item still names its suppliers above, so without this it
+                    looks perfectly orderable right up until the order form
+                    offers an empty dropdown. Flagged here so it is fixed before
+                    someone needs to buy. */}
+                {item.suppliersAllInactive && (
+                  <span
+                    className="rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+                    title="Every supplier assigned to this item is deactivated — it cannot be ordered until one is reactivated or another is assigned."
+                  >
+                    all deactivated
+                  </span>
+                )}
                 <span aria-hidden>·</span>
                 {/* Awaiting-release aware: a delivery sitting in quarantine
                     must not read as "go buy more". */}

@@ -74,6 +74,11 @@ export interface ApiAwaitingPutAway {
 export interface ApiItemSupplier {
   supplier_id: string;
   supplier_name: string;
+  /** Whether the supplier itself is still active. The assignment survives
+   *  deactivation, so anything offering these for NEW work must filter — and
+   *  must distinguish "this item has no suppliers" from "all of them are
+   *  deactivated", which are different problems with different fixes. */
+  is_active: boolean;
 }
 
 import type { TierType } from './tiers';

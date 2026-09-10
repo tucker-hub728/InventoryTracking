@@ -62,7 +62,12 @@ async def list_suppliers(
     ``limit=None`` returns every matching row, which is what the item-edit
     supplier picker needs (it renders a searchable select over the full list).
     """
-    conditions = []
+    # Deleted suppliers are excluded from EVERY mode, including the explicit
+    # ``is_active=False`` one that draws the Deactivated tab (supdel01). This is
+    # the single choke point all supplier reads go through — the item picker,
+    # the item-EDIT picker that deliberately asks for inactive rows, both tabs
+    # and the tab counts — so one condition here hides them everywhere at once.
+    conditions = [Supplier.deleted_at.is_(None)]
     if is_active is not None:
         conditions.append(Supplier.is_active.is_(is_active))
     elif active_only:
@@ -97,9 +102,62 @@ async def get_supplier(session: AsyncSession, supplier_id: uuid.UUID) -> Supplie
 
 
 async def get_supplier_by_name(session: AsyncSession, name: str) -> Supplier | None:
-    """Case-insensitive lookup — mirrors the partial-unique index."""
-    stmt = select(Supplier).where(func.lower(Supplier.name) == name.lower())
+    """Case-insensitive lookup — mirrors the partial-unique index.
+
+    Excludes deleted rows, because ``uq_suppliers_name`` does too (supdel01).
+    Without this the create and rename conflict checks would refuse a name a
+    deleted supplier still carries — reporting a clash against a row nobody can
+    see, which is the failure the partial index exists to prevent. It would also
+    return an arbitrary row once a live and a deleted supplier share a name.
+    """
+    stmt = select(Supplier).where(
+        func.lower(Supplier.name) == name.lower(),
+        Supplier.deleted_at.is_(None),
+    )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def supplier_reference_counts(
+    session: AsyncSession, supplier_id: uuid.UUID
+) -> dict[str, int]:
+    """What still points at this supplier, as ``{label: count}``, non-zero only.
+
+    The three tables that FK to ``meta.suppliers``, all ON DELETE RESTRICT. A
+    supplier with ANY of them may not be deleted (client, 2026-09-10): it is
+    still doing a job, and removing it from the UI would strand an item without
+    a source or a lot without a provenance.
+
+    Labels are the words the operator uses, not table names — this text is shown
+    in the refusal, and "attached to 3 items" is actionable where
+    "meta.item_suppliers = 3" is not.
+    """
+    counts: dict[str, int] = {}
+    for label, model, column in (
+        ("items", ItemSupplier, ItemSupplier.supplier_id),
+        ("lots", Lot, Lot.supplier_id),
+        ("order lines", ReceiptTransactionLine, ReceiptTransactionLine.supplier_id),
+    ):
+        n = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(model).where(column == supplier_id)
+                )
+            ).scalar_one()
+        )
+        if n:
+            counts[label] = n
+    return counts
+
+
+async def soft_delete_supplier(session: AsyncSession, *, supplier: Supplier) -> Supplier:
+    """Stamp ``deleted_at`` — the second delete step. Caller commits.
+
+    Caller enforces the rules: super admin, already deactivated, and referenced
+    by nothing. The row itself is never removed.
+    """
+    supplier.deleted_at = datetime.now(UTC)
+    await session.flush()
+    return supplier
 
 
 async def create_supplier(

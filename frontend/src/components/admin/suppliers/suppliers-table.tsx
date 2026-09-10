@@ -18,6 +18,10 @@ interface SuppliersTableProps {
   onEdit?: (v: Supplier) => void;
   onDeactivate?: (v: Supplier) => void;
   onReactivate?: (v: Supplier) => void;
+  /** The SECOND delete step, offered only on the Deactivated tab and only to a
+   *  Super Admin. Takes the supplier off every screen and releases its name;
+   *  there is no un-delete, so it is e-signed. Omitted = not offered. */
+  onDelete?: (v: Supplier) => void;
   /** IDs whose row-level action is in flight; used to disable the button. */
   busyId?: string | null;
 }
@@ -51,9 +55,10 @@ export function SuppliersTable({
   onEdit,
   onDeactivate,
   onReactivate,
+  onDelete,
   busyId,
 }: SuppliersTableProps) {
-  const showActions = Boolean(onEdit || onDeactivate || onReactivate);
+  const showActions = Boolean(onEdit || onDeactivate || onReactivate || onDelete);
 
   return (
     <div className="overflow-x-auto">
@@ -182,6 +187,18 @@ export function SuppliersTable({
                         title="Reactivate supplier"
                       >
                         <RotateCcw size={12} aria-hidden /> Reactivate
+                      </Button>
+                    )}
+                    {!v.is_active && onDelete && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-danger hover:bg-danger/10"
+                        onClick={() => onDelete(v)}
+                        disabled={busyId === v.id}
+                        title="Delete supplier — removes it from every screen"
+                      >
+                        <Trash2 size={12} aria-hidden /> Delete
                       </Button>
                     )}
                   </div>
