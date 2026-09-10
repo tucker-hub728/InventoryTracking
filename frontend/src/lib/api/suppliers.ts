@@ -110,4 +110,21 @@ export const suppliersApi = {
    * ``{ is_active: true }``.
    */
   deactivate: (id: string) => api.delete<Supplier>(`/suppliers/${id}`),
+
+  /**
+   * The SECOND delete step — stamps ``deleted_at`` and takes the supplier off
+   * every screen, including the Deactivated tab, releasing its name for re-use.
+   *
+   * Only reachable for a supplier that is ALREADY deactivated and that nothing
+   * references; the server refuses otherwise and names what is holding it.
+   * Super-admin only, and e-signed (action ``supplier.delete``) because it is
+   * one-way in the UI — there is no un-delete screen by design.
+   *
+   * The row itself is never removed: items, lots and order lines FK to it, and
+   * the audit trail keeps resolving the name on historic records.
+   */
+  remove: (id: string, evidenceId: string) =>
+    api.post<Supplier>(`/suppliers/${id}/delete`, {
+      json: { evidence_id: evidenceId },
+    }),
 };

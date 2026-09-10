@@ -130,6 +130,7 @@ def _to_row(
             ItemSupplierRead(
                 supplier_id=str(link.supplier_id),
                 supplier_name=link.supplier.name if link.supplier else "",
+                is_active=bool(link.supplier.is_active) if link.supplier else False,
             )
             for link in item.suppliers
         ],

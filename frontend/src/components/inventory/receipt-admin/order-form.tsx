@@ -98,7 +98,15 @@ export function formStateFromOrder(order: Order): OrderFormState {
       units_per_pack: l.units_per_pack == null ? '' : String(l.units_per_pack),
       // Seed with the line's own supplier so the Select shows a label before the
       // item's full supplier list resolves; the loader replaces it.
-      suppliers: [{ supplier_id: l.supplier_id, supplier_name: l.supplier_name ?? '' }],
+      //
+      // ``is_active: true`` is a stand-in for an ALREADY-COMMITTED choice, not a
+      // claim about the supplier's current state. The active-only filter on the
+      // Select would otherwise drop it and leave an existing order line looking
+      // supplier-less — a supplier deactivated after the order was placed must
+      // still show on that order.
+      suppliers: [
+        { supplier_id: l.supplier_id, supplier_name: l.supplier_name ?? '', is_active: true },
+      ],
       suppliersLoading: false,
     })),
   };
@@ -509,11 +517,22 @@ export function OrderForm({
                 <SearchableSelect
                   aria-label="Supplier"
                   modal
-                  options={line.suppliers.map((v) => ({
-                    value: v.supplier_id,
-                    label: v.supplier_name,
-                    searchText: v.supplier_name,
-                  }))}
+                  // Active only. Deactivating a supplier promises it is hidden
+                  // from new item / lot pickers, and an order line creates a
+                  // lot at receive — so a deactivated supplier must not be
+                  // orderable even while the item is still assigned to it.
+                  //
+                  // The assignment itself is untouched, and an order ALREADY
+                  // placed against a since-deactivated supplier still receives
+                  // normally: the receive-side check reads the item's whole
+                  // assigned set, not this filtered one.
+                  options={line.suppliers
+                    .filter((v) => v.is_active)
+                    .map((v) => ({
+                      value: v.supplier_id,
+                      label: v.supplier_name,
+                      searchText: v.supplier_name,
+                    }))}
                   value={line.supplierChoice}
                   onChange={(v) => patchLine(line.key, { supplierChoice: v })}
                   disabled={!line.item_id || line.suppliersLoading}
@@ -522,9 +541,11 @@ export function OrderForm({
                       ? 'Pick an item first'
                       : line.suppliersLoading
                         ? 'Loading…'
-                        : line.suppliers.length > 0
+                        : line.suppliers.some((v) => v.is_active)
                           ? 'Select supplier'
-                          : 'Item has no suppliers'
+                          : line.suppliers.length > 0
+                            ? 'All suppliers deactivated'
+                            : 'Item has no suppliers'
                   }
                   searchPlaceholder="Search suppliers…"
                   emptyText="No matching suppliers."
@@ -604,12 +625,20 @@ export function OrderForm({
               <p className="mt-2 text-xs text-text-3">{lineUnitsSummary(line)}</p>
             )}
 
-            {line.item_id && !line.suppliersLoading && line.suppliers.length === 0 && (
-              <p className="mt-2 text-xs text-warning">
-                This item has no assigned suppliers. Add one on the item before
-                ordering against it.
-              </p>
-            )}
+            {/* Two different dead ends, two different fixes — saying "no
+                suppliers" when the item HAS them but they are all deactivated
+                sends someone off to re-add a supplier that is already there. */}
+            {line.item_id &&
+              !line.suppliersLoading &&
+              !line.suppliers.some((v) => v.is_active) && (
+                <p className="mt-2 text-xs text-warning">
+                  {line.suppliers.length > 0
+                    ? `Every supplier assigned to this item is deactivated (${line.suppliers
+                        .map((v) => v.supplier_name)
+                        .join(', ')}). Reactivate one, or assign another on the item.`
+                    : 'This item has no assigned suppliers. Add one on the item before ordering against it.'}
+                </p>
+              )}
           </div>
         ))}
 

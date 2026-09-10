@@ -50,6 +50,8 @@ export function apiItemToInventoryItem(api: ApiItem): InventoryItem {
     // Items can have multiple assigned suppliers — show them joined. Empty
     // when the item has no suppliers yet.
     supplier: api.suppliers.map((v) => v.supplier_name).join(', '),
+    suppliersAllInactive:
+      api.suppliers.length > 0 && !api.suppliers.some((v) => v.is_active),
     lead: api.avg_lead_days ?? 0,
     invValue: num(api.inv_value_amount),
     poValue: num(api.po_value_amount),
