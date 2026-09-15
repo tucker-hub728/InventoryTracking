@@ -14,6 +14,8 @@ import { ConsumedInKitBadge, VariableYieldBadge } from './item-kind-badges';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { NumberedPagination } from '@/components/ui/numbered-pagination';
+import { clampInt, useUrlState } from '@/hooks/use-url-state';
 import {
   Table,
   TableBody,
@@ -53,14 +55,33 @@ import { NewItemDialog } from './new-item-dialog';
  * in labelling and a couple of columns, so they share this client and are
  * configured by the ``TierConfig`` passed from each route.
  */
+/** Query-string defaults for the pager. Stable reference — see ``useUrlState``.
+ *
+ *  ``size`` defaults to the server's maximum (client, 2026-09-15): the tiers
+ *  are a few hundred items, and the complaint that started this was about rows
+ *  being unreachable — so the default shows as many as one request allows and
+ *  the pager exists for the overflow, rather than splitting a 234-item tier
+ *  across five pages nobody asked for. */
+const PAGE_DEFAULTS = { page: 1, size: 200 };
+
+/**
+ * The server's ``limit`` ceiling on ``GET /v1/items`` — anything larger is a 422.
+ *
+ * This page used to request exactly this many rows with no offset and render
+ * whatever came back, which quietly capped the list: a client with 234 raw
+ * materials saw 200 of them and could only reach the rest by searching, because
+ * search re-queries the server (reported 2026-09-15).
+ */
+const MAX_PAGE_SIZE = 200;
+
 /** One filter pill in the row beside the search box. */
 export interface TierFilter {
   /** Stable id — also the control's value. The first entry is the default. */
   id: string;
   label: string;
   /** Extra query params merged into the list request. Omit for "All".
-   *  Filtering is server-side: the list is capped at 200 rows, so filtering
-   *  in memory would quietly search only the first page. */
+   *  Filtering is server-side: the list is paged, so filtering in memory would
+   *  quietly search only the page currently on screen. */
   params?: Pick<
     ListItemsParams,
     'is_consumable' | 'has_bom' | 'below_reorder' | 'awaiting_release'
@@ -135,9 +156,24 @@ export function TierListClient({ config }: { config: TierConfig }) {
   // the column would read "None" on every row.
   const showBom = isBuiltTier(config.type);
 
+  // Page and page size live in the query string, so a link to "page 3 of Raw
+  // Materials" survives a refresh and can be shared. Stable reference — see
+  // ``useUrlState``.
+  const { value: raw, set } = useUrlState(PAGE_DEFAULTS);
+  // Query params are hand-editable; clamp before they reach the API. The
+  // server rejects ``limit`` above MAX_PAGE_SIZE with a 422.
+  const { page, size } = React.useMemo(
+    () => ({
+      page: clampInt(raw.page, 1, 100_000, PAGE_DEFAULTS.page),
+      size: clampInt(raw.size, 1, MAX_PAGE_SIZE, PAGE_DEFAULTS.size),
+    }),
+    [raw],
+  );
+
   const [tier, setTier] = React.useState<ApiTier | null>(null);
   const [rows, setRows] = React.useState<InventoryItem[]>([]);
-  // Unpaged count from the server — the row array stops at the 200 cap.
+  // Unpaged count from the server, across every page — what the subtitle and
+  // the pager both report.
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   // False until the first successful fetch. Drives skeleton-vs-table: once
@@ -201,7 +237,8 @@ export function TierListClient({ config }: { config: TierConfig }) {
             q: query || undefined,
             sort: 'item_number',
             direction: 'asc',
-            limit: 200,
+            limit: size,
+            offset: (page - 1) * size,
             ...activeFilter.params,
           },
           { signal },
@@ -219,7 +256,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
         if (!signal?.aborted) setLoading(false);
       }
     },
-    [tier, query, activeFilter, config.plural],
+    [tier, query, activeFilter, config.plural, page, size],
   );
 
   React.useEffect(() => {
@@ -227,6 +264,27 @@ export function TierListClient({ config }: { config: TierConfig }) {
     void fetchRows(ctrl.signal);
     return () => ctrl.abort();
   }, [fetchRows]);
+
+  const pageCount = Math.max(1, Math.ceil(total / size));
+
+  // Narrowing the result set re-queries from the start, so page 4 of the old
+  // set would land on nothing. Skips its own first run: without that, opening a
+  // shared link like ``?page=3`` would bounce straight back to page 1 on mount.
+  const narrowed = React.useRef(true);
+  React.useEffect(() => {
+    if (narrowed.current) {
+      narrowed.current = false;
+      return;
+    }
+    set({ page: 1 });
+  }, [query, filterId, set]);
+
+  // A hand-edited ``?page=999``, or a page that shrank under a filter, leaves
+  // the pager past the end. Wait for the fetch to settle first — ``total`` is 0
+  // mid-flight and would snap every page back to 1.
+  React.useEffect(() => {
+    if (!loading && page > pageCount) set({ page: pageCount });
+  }, [loading, page, pageCount, set]);
 
   /**
    * RPT-001 — download the finance CSV for this tier.
@@ -493,6 +551,30 @@ export function TierListClient({ config }: { config: TierConfig }) {
                   ))}
                 </TableBody>
               </Table>
+            </div>
+          )}
+
+          {/* The pager carries only ``mt-3`` of its own — on pages that wrap it
+              in a padded Card it inherits the rest, but this Card is
+              ``overflow-hidden`` so the table can run edge to edge. Pad it here,
+              with a rule to separate it from the last row. */}
+          {total > 0 && (
+            <div className="border-t border-border px-4 pb-3 sm:px-6">
+              <NumberedPagination
+                page={Math.min(page, pageCount)}
+                pageCount={pageCount}
+                pageSize={size}
+                total={total}
+                startIdx={(Math.min(page, pageCount) - 1) * size}
+                rowsOnPage={rows.length}
+                onPageChange={(next) => set({ page: next })}
+                onPageSizeChange={(next) => set({ size: next, page: 1 })}
+                // Up to the server's ceiling, which is also the default: the
+                // client asked to keep seeing everything on one page, and the
+                // smaller sizes are there for anyone who wants them.
+                pageSizeOptions={[25, 50, 100, MAX_PAGE_SIZE]}
+                noun={config.singular}
+              />
             </div>
           )}
         </Card>
