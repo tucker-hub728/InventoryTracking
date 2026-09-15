@@ -268,14 +268,22 @@ export function TierListClient({ config }: { config: TierConfig }) {
   const pageCount = Math.max(1, Math.ceil(total / size));
 
   // Narrowing the result set re-queries from the start, so page 4 of the old
-  // set would land on nothing. Skips its own first run: without that, opening a
-  // shared link like ``?page=3`` would bounce straight back to page 1 on mount.
-  const narrowed = React.useRef(true);
+  // set would land on nothing.
+  //
+  // Compares the actual VALUES against the last ones seen, rather than firing
+  // on every run. ``set`` is in the dependency list, and ``useUrlState`` rebuilds
+  // it whenever the query string changes — so a "skip the first run, reset on
+  // every later one" version fired on every page click too: ``?page=2`` changed
+  // the URL, which changed ``set``, which re-ran this and reset to page 1. That
+  // shipped to production on 2026-09-15 and left the pager stuck on page one.
+  //
+  // Seeding the ref with the mount values also keeps a shared ``?page=3`` link
+  // from bouncing back to page 1 on load.
+  const lastNarrowing = React.useRef({ query, filterId });
   React.useEffect(() => {
-    if (narrowed.current) {
-      narrowed.current = false;
-      return;
-    }
+    const prev = lastNarrowing.current;
+    if (prev.query === query && prev.filterId === filterId) return;
+    lastNarrowing.current = { query, filterId };
     set({ page: 1 });
   }, [query, filterId, set]);
 

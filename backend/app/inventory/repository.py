@@ -295,9 +295,31 @@ def _apply_filters(
         )
     if q:
         like = like_contains(q.lower())
+        # The full SKU as the screen shows it — ``<prefix code>-<suffix>``, the
+        # exact format of ``Item.item_number``. The number is not stored, so it
+        # is assembled here per row.
+        #
+        # Without this, searching ``CR-001`` found nothing (client, 2026-09-15):
+        # each branch below tests ONE part, and no single part contains the
+        # hyphenated whole — ``001`` hit the suffix and ``CR`` hit the prefix,
+        # but the string people actually read off the page matched neither.
+        #
+        # Built in SQL rather than by splitting the search term on ``-``,
+        # because a prefix code may itself contain a dash (``AS-TEST-002`` is
+        # ``AS-TEST`` + ``002``) — see ``get_item_by_number``. Matching against
+        # the assembled string needs no split, and still finds partial input
+        # like ``CR-0``.
+        full_sku = func.concat(
+            select(ItemPrefix.code)
+            .where(ItemPrefix.id == Item.prefix_id)
+            .scalar_subquery(),
+            "-",
+            Item.sku_suffix,
+        )
         stmt = stmt.where(
             or_(
-                # The number is derived, so match its parts: the suffix, the
+                func.lower(full_sku).like(like, escape="\\"),
+                # The parts on their own still match too: the suffix, the
                 # description, or the prefix code (so "PRR" finds all PRR items).
                 func.lower(Item.sku_suffix).like(like, escape="\\"),
                 func.lower(Item.description).like(like, escape="\\"),

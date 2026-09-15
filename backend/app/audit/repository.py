@@ -238,10 +238,22 @@ def _movement_keys_stmt(
                     )
                 ),
                 # The item number is derived (``<prefix code>-<suffix>``), so
-                # match its parts the same way the items list does.
+                # match the assembled whole AND its parts, the same way the
+                # items list and the orders search do. Matching only the parts
+                # made "CR-001" — the number printed on every audit row — find
+                # nothing (client, 2026-09-15).
                 StockMovement.item_id.in_(
                     select(Item.id).where(
                         or_(
+                            func.lower(
+                                func.concat(
+                                    select(ItemPrefix.code)
+                                    .where(ItemPrefix.id == Item.prefix_id)
+                                    .scalar_subquery(),
+                                    "-",
+                                    Item.sku_suffix,
+                                )
+                            ).like(like, escape="\\"),
                             func.lower(Item.sku_suffix).like(like, escape="\\"),
                             func.lower(Item.description).like(like, escape="\\"),
                             Item.prefix_id.in_(
