@@ -158,6 +158,10 @@ services:
       # values applied to the Cognito user pool client.
       JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES:-60}
       JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS:-30}
+      # Which environment this is — production | sandbox | local. Read per
+      # request (not inlined at build), so the header marks this as LOCAL.
+      # Changing it needs the container RECREATED, not just restarted.
+      DEPLOYMENT_TIER: ${DEPLOYMENT_TIER:-local}
       # Polling makes the watcher work over Windows bind mounts.
       WATCHPACK_POLLING: "true"
       CHOKIDAR_USEPOLLING: "true"

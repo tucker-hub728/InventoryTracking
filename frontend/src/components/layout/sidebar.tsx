@@ -46,7 +46,8 @@ export function Sidebar() {
       aria-label="Primary"
       className={cn(
         // Hidden below lg — the drawer covers that range.
-        'sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-bg-elev transition-[width] duration-200 lg:flex',
+        // `tier-sidebar` — a light tint outside Production (globals.css).
+        'tier-sidebar sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-bg-elev transition-[width] duration-200 lg:flex',
         collapsed ? 'w-[60px]' : 'w-[220px]',
       )}
     >

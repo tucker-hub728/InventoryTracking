@@ -18,6 +18,8 @@ import { NotificationsPanel } from './notifications-panel';
 import { useAuthStore } from '@/stores/auth.store';
 import { useNotificationsStore, selectUnreadCount } from '@/stores/notifications.store';
 import { useUIStore } from '@/stores/ui.store';
+import { useDeploymentTier } from '@/components/providers/deployment-tier-provider';
+import { tierMarking } from '@/config/deployment-tier';
 import { env } from '@/env';
 
 export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
@@ -26,6 +28,9 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const user = useAuthStore((s) => s.user);
   const clearSession = useAuthStore((s) => s.clear);
+  // Null in Production. Elsewhere the header takes the tier colour (globals.css,
+  // keyed off `.tier-topbar`) and the pill names the environment in words.
+  const tier = tierMarking(useDeploymentTier());
 
   // NOTIF-001 (2026-08-25): the feed is no longer assembled here. Notifications
   // are real per-user rows pushed over SSE by `RealtimeProvider`, which owns the
@@ -49,7 +54,7 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
   }, [clearSession, router]);
 
   return (
-    <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between gap-4 border-b border-border bg-bg-elev px-4 sm:px-6 lg:px-8">
+    <header className="tier-topbar sticky top-0 z-40 flex h-[52px] items-center justify-between gap-4 border-b border-border bg-bg-elev px-4 sm:px-6 lg:px-8">
       <div className="flex min-w-0 items-center gap-2">
         {/* Below lg the nav has no column of its own, so this is the only way
             to reach it. Above lg the nav is always on screen and this button
@@ -87,7 +92,18 @@ export function Topbar({ onOpenNav }: { onOpenNav?: () => void }) {
             {sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           </TooltipContent>
         </Tooltip>
-        <span className="flex min-w-0 items-center gap-1.5 text-xs text-text-3">
+        {tier && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="tier-pill" tabIndex={0}>
+                {tier.label}
+                <span className="sr-only">: {tier.message}</span>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{tier.message}</TooltipContent>
+          </Tooltip>
+        )}
+        <span className="tier-label flex min-w-0 items-center gap-1.5 text-xs text-text-3">
           <Shield size={13} aria-hidden />
           <span className="truncate">{env.ENV_LABEL}</span>
         </span>

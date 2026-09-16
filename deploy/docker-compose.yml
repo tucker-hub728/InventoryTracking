@@ -98,6 +98,11 @@ services:
       # Cookie max-ages (must match Cognito client TTLs).
       JWT_ACCESS_TOKEN_TTL_MINUTES: ${JWT_ACCESS_TOKEN_TTL_MINUTES}
       JWT_REFRESH_TOKEN_TTL_DAYS: ${JWT_REFRESH_TOKEN_TTL_DAYS}
+      # production | sandbox — an SSM parameter, /cellready/<env>/DEPLOYMENT_TIER,
+      # which the prebuild hook writes into .env along with everything else under
+      # that path. NO default here on purpose: if it is ever missing the app shows
+      # "ENVIRONMENT NOT SET" rather than passing as Production.
+      DEPLOYMENT_TIER: ${DEPLOYMENT_TIER}
     ports:
       # EB serves the instance on :80 → CloudFront origin. Backend has no
       # published port (reachable only on the compose network).

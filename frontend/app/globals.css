@@ -280,3 +280,48 @@
     border: 0;
   }
 }
+
+/*
+ * ── Deployment tier marking ──────────────────────────────────────────────
+ * The Sandbox, a local machine, or an unconfigured deployment colours its
+ * header and tints its sidebar, so it can't be mistaken for Production.
+ * Production renders exactly as before — the absence of marking is the signal.
+ *
+ * `data-tier`, `--tier` and `--tier-fg` are set on <html> by app/layout.tsx from
+ * config/deployment-tier.ts, which is the only place a tier colour is defined.
+ * Unlayered and qualified by the attribute, so these outrank the utility
+ * classes on the elements they restyle without needing !important.
+ */
+html[data-tier]:not([data-tier='production']) .tier-topbar {
+  background-color: var(--tier);
+  border-bottom-color: var(--tier);
+}
+html[data-tier]:not([data-tier='production']) .tier-topbar .tier-label {
+  color: var(--tier-fg);
+  opacity: 0.8;
+}
+html[data-tier]:not([data-tier='production']) .tier-sidebar {
+  /* A light wash of the tier colour over the normal surface, so it adapts to
+     light and dark themes instead of hard-coding one of them. */
+  background-color: color-mix(in srgb, var(--tier) 7%, var(--bg-elev));
+  border-right-color: color-mix(in srgb, var(--tier) 22%, var(--border));
+}
+.tier-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  color: var(--tier-fg);
+  background-color: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+.tier-banner {
+  background-color: var(--tier);
+  color: var(--tier-fg);
+}

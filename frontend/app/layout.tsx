@@ -1,21 +1,50 @@
+import type { CSSProperties } from 'react';
 import type { Metadata, Viewport } from 'next';
+import { connection } from 'next/server';
 import { Suspense } from 'react';
 
 import { siteConfig } from '@/config/site';
+import {
+  resolveDeploymentTier,
+  tierFavicon,
+  tierMarking,
+  type DeploymentTier,
+} from '@/config/deployment-tier';
 import { AppProviders } from '@/components/providers/app-providers';
 import { ThemeScript } from '@/components/providers/theme-script';
 
 import './globals.css';
 
-export const metadata: Metadata = {
-  title: {
-    default: `${siteConfig.shortName} — ${siteConfig.name}`,
-    template: `%s · ${siteConfig.shortName}`,
-  },
-  description: siteConfig.description,
-  applicationName: siteConfig.name,
-  formatDetection: { telephone: false },
-};
+/**
+ * The deployment tier, read per request. `connection()` is what makes that true:
+ * without it Next may prerender this layout at BUILD time and freeze whatever
+ * `DEPLOYMENT_TIER` the build machine had into every environment the image is
+ * promoted to. See `config/deployment-tier.ts` for why this can't be build-time.
+ */
+async function currentTier(): Promise<DeploymentTier> {
+  await connection();
+  return resolveDeploymentTier(process.env.DEPLOYMENT_TIER);
+}
+
+export async function generateMetadata(): Promise<Metadata> {
+  const tier = await currentTier();
+  const marking = tierMarking(tier);
+  // Marked tiers prefix every tab title, e.g. "[SANDBOX] Inventory · IMS" —
+  // people switch environments by tab, before they look at the page.
+  const prefix = marking ? `[${marking.label}] ` : '';
+  const favicon = tierFavicon(tier);
+  return {
+    title: {
+      default: `${prefix}${siteConfig.shortName} — ${siteConfig.name}`,
+      template: `${prefix}%s · ${siteConfig.shortName}`,
+    },
+    description: siteConfig.description,
+    applicationName: siteConfig.name,
+    formatDetection: { telephone: false },
+    // Production keeps the browser's default icon, exactly as before.
+    ...(favicon ? { icons: { icon: favicon } } : {}),
+  };
+}
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -27,9 +56,17 @@ export const viewport: Viewport = {
   ],
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const tier = await currentTier();
+  const marking = tierMarking(tier);
+  // `data-tier` is the one hook every tier style keys off (globals.css); the
+  // colour rides along as custom properties so it has a single definition.
+  const tierStyle = marking
+    ? ({ '--tier': marking.color, '--tier-fg': marking.onColor } as CSSProperties)
+    : undefined;
+
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" data-tier={tier} style={tierStyle} suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -46,7 +83,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-screen bg-bg text-text antialiased">
         <Suspense fallback={null}>
-          <AppProviders>{children}</AppProviders>
+          <AppProviders tier={tier}>{children}</AppProviders>
         </Suspense>
       </body>
     </html>
