@@ -100,12 +100,6 @@ SELECT id, depth FROM sub
 """
 
 
-def _db_name(dsn: str) -> str:
-    """Extract the database name from a DSN's path (``.../dbname?params``)."""
-    tail = dsn.rsplit("/", 1)[-1]
-    return tail.split("?", 1)[0]
-
-
 async def _subtree(session, code: str) -> list[tuple[uuid.UUID, int]]:
     rows = await session.execute(text(_SUBTREE_SQL), {"code": code})
     return [(r[0], r[1]) for r in rows]
@@ -155,10 +149,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--confirm-production",
-        metavar="DBNAME",
+        metavar="HOST:PORT/DBNAME",
         default=None,
         help="Required when APP_ENV=production: echo back the exact target "
-        "database name to authorise the change.",
+        "host:port/dbname (as printed on the 'Target DB' line) to authorise "
+        "the change. Host-qualified because dev and prod share the database "
+        "name cellready_ims.",
     )
     return parser.parse_args()
 
@@ -167,7 +163,6 @@ async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
     dsn = str(settings.database_url)
     target = dsn.rsplit("@", 1)[-1] if "@" in dsn else dsn
-    db_name = _db_name(dsn)
     is_prod = settings.app_env == Environment.production
 
     sessionmaker = get_sessionmaker()
@@ -215,14 +210,15 @@ async def _run(args: argparse.Namespace) -> int:
                     print(f"  {count:>6}  {table}.{column}")
             print("\nNo active stock — safe to retire.")
 
-            # Production gate: --yes alone is not enough. NOTE the dev and prod
-            # databases are BOTH named cellready_ims, so this echo proves the
-            # name, not the environment — confirm which host you are on.
-            if is_prod and args.yes and args.confirm_production != db_name:
+            # Production gate: --yes alone is not enough. The echo is
+            # HOST-QUALIFIED: dev and prod are BOTH named cellready_ims and dev
+            # runs APP_ENV=production, so a bare database name would prove the
+            # name rather than the environment and authorise either one.
+            if is_prod and args.yes and args.confirm_production != target:
                 print("\n!! PRODUCTION !!")
                 print(
                     "REFUSING: APP_ENV=production requires "
-                    f"--confirm-production {db_name} to authorise the change."
+                    f"--confirm-production {target} to authorise the change."
                 )
                 return 1
 

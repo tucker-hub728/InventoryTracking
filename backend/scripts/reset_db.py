@@ -23,9 +23,17 @@ Safety model (matches our "never auto-run destructive DB ops" policy):
   * Dry-run by default: prints exactly what it would wipe and exits 0. You
     must pass ``--yes`` to actually mutate data.
   * PRODUCTION requires a second, un-fumbleable confirmation: on top of
-    ``--yes`` you must pass ``--confirm-production <dbname>`` where <dbname>
-    exactly matches the target database. A wrong/absent name refuses. This
-    makes a prod wipe impossible to trigger by a stray flag or wrong shell.
+    ``--yes`` you must pass ``--confirm-production <host:port/dbname>`` where
+    that exactly matches the target. A wrong/absent value refuses. This makes a
+    prod wipe impossible to trigger by a stray flag or wrong shell.
+
+    The token is HOST-qualified on purpose. The dev and prod databases are BOTH
+    named ``cellready_ims`` on BOTH RDS instances, and dev runs
+    ``APP_ENV=production``, so a bare database name authorises a wipe of EITHER
+    environment — it proves the name, not the host. Including the host makes the
+    two tokens read ``cellready-dev…`` and ``cellready-prod…``, which cannot be
+    confused. Note this also means running through an SSM port-forward tunnel
+    masks the host (``host.docker.internal``): run this ON the target instance.
   * Reuses app settings/DSN — there is no second place to misconfigure a URL.
 
 This is irreversible. Dropping/truncating a production database destroys all
@@ -37,8 +45,9 @@ Usage (from the ``backend/`` directory):
     python -m scripts.reset_db --yes --keep-reference    # ...but keep users/suppliers/tiers
     python -m scripts.reset_db --yes --schema            # DROP application schemas
     python -m scripts.reset_db --yes --schema --migrate  # ...then rebuild it in one go
-    # Production also needs the DB name echoed back:
-    python -m scripts.reset_db --yes --schema --migrate --confirm-production cellready_ims
+    # Production also needs the host-qualified target echoed back:
+    python -m scripts.reset_db --yes --schema --migrate \
+        --confirm-production cellready-prod.abc123.us-east-2.rds.amazonaws.com:5432/cellready_ims
 
 Exit codes: 0 = ok / dry-run, 1 = refused or aborted.
 """
@@ -159,12 +168,6 @@ NOT rebuilt by any seed - recreate these yourself
 alembic_version was left alone, so the schema and migration history are intact
 and there is nothing to re-migrate.
 """
-
-
-def _db_name(dsn: str) -> str:
-    """Extract the database name from a DSN's path (``.../dbname?params``)."""
-    tail = dsn.rsplit("/", 1)[-1]  # everything after the last '/'
-    return tail.split("?", 1)[0]  # drop any query string
 
 
 async def _list_user_schemas(conn) -> list[str]:
@@ -349,10 +352,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--confirm-production",
-        metavar="DBNAME",
+        metavar="HOST:PORT/DBNAME",
         default=None,
         help="Required when APP_ENV=production: echo back the exact target "
-        "database name to authorise an irreversible prod wipe.",
+        "host:port/dbname (as printed on the dry run's 'Target DB' line) to "
+        "authorise an irreversible prod wipe. Host-qualified because dev and "
+        "prod share the database name cellready_ims.",
     )
     parser.add_argument(
         "--migrate",
@@ -372,7 +377,6 @@ async def _reset(args: argparse.Namespace) -> int:
     # after the last '@' is host/port/db.
     dsn = str(settings.database_url)
     target = dsn.rsplit("@", 1)[-1] if "@" in dsn else dsn
-    db_name = _db_name(dsn)
     is_prod = settings.app_env == Environment.production
 
     if args.schema and args.keep_reference:
@@ -389,14 +393,18 @@ async def _reset(args: argparse.Namespace) -> int:
     else:
         mode = "TRUNCATE all tables"
 
-    # ── Production gate: --yes is not enough; the DB name must be echoed back ─
+    # ── Production gate: --yes is not enough; the HOST-QUALIFIED target must be
+    # echoed back. Comparing the bare database name would authorise a wipe of
+    # either environment: dev and prod are both `cellready_ims` and dev runs
+    # APP_ENV=production, so the name proves nothing about which host you are
+    # pointed at. `target` is host:port/dbname, so the two tokens differ.
     if is_prod and args.yes:
-        if args.confirm_production != db_name:
+        if args.confirm_production != target:
             print("!! PRODUCTION !!")
             print(f"Target DB   : {target}")
             print(
                 "REFUSING: APP_ENV=production requires "
-                f"--confirm-production {db_name} to authorise an irreversible wipe."
+                f"--confirm-production {target} to authorise an irreversible wipe."
             )
             print(f"(got --confirm-production={args.confirm_production!r})")
             return 1
