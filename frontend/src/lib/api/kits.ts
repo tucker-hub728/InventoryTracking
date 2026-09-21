@@ -8,6 +8,7 @@ import type { BadgeTone } from '@/types/ui';
 
 import { api } from './client';
 import type { LotReleaseState } from './lots';
+import { fetchAllPages } from './paging';
 
 export type KitStatus = 'draft' | 'issued' | 'in_production' | 'closed' | 'cancelled';
 
@@ -679,6 +680,15 @@ export const kitsApi = {
       },
       signal: opts?.signal,
     }),
+
+  /** Every matching kit, unpaged — for pickers. Walks the pages rather than
+   *  asking for ``limit: 200``, which dropped kit 201. 200 is the server's
+   *  ceiling on ``limit`` for this endpoint. */
+  listAll: (
+    params: { status?: KitStatus; q?: string } = {},
+    opts?: { signal?: AbortSignal },
+  ): Promise<ApiKitListItem[]> =>
+    fetchAllPages((page) => kitsApi.list({ ...params, ...page }, opts), 200),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiKit>(`/kits/${id}`, { signal: opts?.signal }),

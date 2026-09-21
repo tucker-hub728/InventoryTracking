@@ -17,6 +17,7 @@
 
 import { api } from './client';
 import type { CellOption } from './kits';
+import { fetchAllPages } from './paging';
 import type { LotReleaseState } from './lots';
 
 // ── Wire shape ─────────────────────────────────────────────────────────
@@ -243,6 +244,9 @@ export interface ItemUpdateInput {
 
 // ── Client ─────────────────────────────────────────────────────────────
 
+/** ``le=`` on ``GET /items`` — a larger ``limit`` 422s. */
+const ITEMS_PAGE_CEILING = 200;
+
 export const itemsApi = {
   list: (params: ListItemsParams = {}, opts?: { signal?: AbortSignal }) =>
     api.get<ApiItemListResponse>('/items', {
@@ -264,6 +268,21 @@ export const itemsApi = {
       },
       signal: opts?.signal,
     }),
+
+  /**
+   * Every matching item, unpaged — for pickers that load the whole catalogue
+   * into a searchable select. ``list({ limit: 200 })`` here is the bug this
+   * replaced: the 201st item never reached the picker. 200 is the server's
+   * ceiling on ``limit`` for this endpoint.
+   */
+  listAll: (
+    params: Omit<ListItemsParams, 'limit' | 'offset'> = {},
+    opts?: { signal?: AbortSignal },
+  ): Promise<ApiItem[]> =>
+    fetchAllPages(
+      (page) => itemsApi.list({ ...params, ...page }, opts),
+      ITEMS_PAGE_CEILING,
+    ),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<ApiItem>(`/items/${id}`, { signal: opts?.signal }),

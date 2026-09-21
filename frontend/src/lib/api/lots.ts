@@ -13,6 +13,7 @@
  */
 
 import { api } from './client';
+import { fetchAllRows } from './paging';
 
 // Two core lot statuses (the client's order model). "Quarantine" was
 // explicitly rejected; expiry is date-driven (expiration_date), not a status.
@@ -155,6 +156,16 @@ export const lotsApi = {
       },
       signal: opts?.signal,
     }),
+
+  /** Every matching lot, unpaged — for pickers. The endpoint returns a bare
+   *  array (no ``total``), so this stops at the first short page. 500 is the
+   *  server's ceiling on ``limit`` for this endpoint. */
+  listAll: (opts?: {
+    itemId?: string;
+    status?: LotStatus;
+    signal?: AbortSignal;
+  }): Promise<Lot[]> =>
+    fetchAllRows((page) => lotsApi.list({ ...opts, ...page }), 500),
 
   get: (lotId: string, opts?: { signal?: AbortSignal }) =>
     api.get<Lot>(`/lots/${lotId}`, { signal: opts?.signal }),

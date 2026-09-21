@@ -109,13 +109,13 @@ export function ForecastClient() {
     setLoadError(null);
     try {
       const [itemsResp, custs] = await Promise.all([
-        itemsApi.list({ limit: 200 }, { signal }),
+        itemsApi.listAll({}, { signal }),
         customersApi.list({}, { signal }),
       ]);
       if (signal?.aborted) return;
       // Forecastable products = built (finished-good) items.
       setProducts(
-        itemsResp.items
+        itemsResp
           .filter((i) => isBuiltTier(i.tier_type))
           .map((i) => ({ id: i.id, sku: i.item_number, name: i.description })),
       );

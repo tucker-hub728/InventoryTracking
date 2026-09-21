@@ -227,14 +227,14 @@ function RequestRestockDialog({
     setBusy(false);
     const ctl = new AbortController();
     Promise.all([
-      itemsApi.list({ is_consumable: true, limit: 200 }, { signal: ctl.signal }),
+      itemsApi.listAll({ is_consumable: true }, { signal: ctl.signal }),
       // Every open ask in this room, so the item list can hide the ones that
       // would be refused as duplicates (one open request per bin per item).
-      kanbanRestockApi.listRequests({ state: 'open' }, { signal: ctl.signal }),
+      kanbanRestockApi.listAllRequests({ state: 'open' }, { signal: ctl.signal }),
     ])
       .then(([itemRes, reqRes]) => {
-        setItems(itemRes.items);
-        setOpenRequests(reqRes.items);
+        setItems(itemRes);
+        setOpenRequests(reqRes);
       })
       .catch(() => {
         if (!ctl.signal.aborted) setItems([]);

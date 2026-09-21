@@ -123,8 +123,8 @@ export function ItemBomTab({ itemId, itemNumber, itemTierType }: Props) {
     if (!isBuilt) return;
     const ctrl = new AbortController();
     itemsApi
-      .list({ limit: 200 }, { signal: ctrl.signal })
-      .then((resp) => setItems(resp.items))
+      .listAll({}, { signal: ctrl.signal })
+      .then(setItems)
       .catch(() => {});
     return () => ctrl.abort();
   }, [isBuilt]);

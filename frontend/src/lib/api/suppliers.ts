@@ -7,6 +7,7 @@
  */
 
 import { api } from './client';
+import { fetchAllPages } from './paging';
 
 export interface Supplier {
   id: string;
@@ -83,15 +84,18 @@ export const suppliersApi = {
   /**
    * Every supplier, unpaged — for pickers that render the whole list in a
    * searchable select and would otherwise silently show only the first page.
+   * Walks every page — a single ``limit: 500`` request dropped supplier 501.
    * 500 is the server's ceiling on ``limit`` for this endpoint.
    */
   listAll: (opts?: { activeOnly?: boolean; signal?: AbortSignal }) =>
-    api
-      .get<SupplierListResponse>('/suppliers', {
-        query: { active_only: opts?.activeOnly ?? true, limit: 500 },
-        signal: opts?.signal,
-      })
-      .then((r) => r.items),
+    fetchAllPages(
+      (page) =>
+        api.get<SupplierListResponse>('/suppliers', {
+          query: { active_only: opts?.activeOnly ?? true, ...page },
+          signal: opts?.signal,
+        }),
+      500,
+    ),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<Supplier>(`/suppliers/${id}`, { signal: opts?.signal }),

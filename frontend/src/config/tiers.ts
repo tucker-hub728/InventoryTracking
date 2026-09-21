@@ -6,8 +6,10 @@
  * these and never constitute a fourth tier, so this list is fixed by
  * design and is not admin-extensible.
  *
- * Each entry is a module-level constant so it is referentially stable across
- * renders (``TierListClient`` takes it as an effect dependency).
+ * These are module constants, but they are NOT referentially stable where they
+ * are used: the routes are server components, so the object is serialized to
+ * ``TierListClient`` and re-delivered as a fresh copy on every router.replace.
+ * Never make one an effect dependency — key on ``type`` instead.
  */
 
 import type { TierConfig, TierFilter } from '@/components/inventory/tier-list-client';

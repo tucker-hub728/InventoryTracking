@@ -122,9 +122,9 @@ export function NodeCreateDialog({ open, onOpenChange, mode, onCreated }: Props)
     Promise.all([
       customersApi.list({}, { signal: ctrl.signal }).catch(() => []),
       itemsApi
-        .list({ limit: 200 }, { signal: ctrl.signal })
-        .then((resp) =>
-          resp.items
+        .listAll({}, { signal: ctrl.signal })
+        .then((items) =>
+          items
             .filter((i) => isBuiltTier(i.tier_type))
             .map((i) => ({ id: i.id, name: `${i.item_number} · ${i.description}` })),
         )

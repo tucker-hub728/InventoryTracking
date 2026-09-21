@@ -61,8 +61,8 @@ export function KitCostExportButton({
     if (kitId || !open || kits.length > 0) return;
     const ctrl = new AbortController();
     void kitsApi
-      .list({ limit: 200 }, { signal: ctrl.signal })
-      .then((r) => setKits(r.items))
+      .listAll({}, { signal: ctrl.signal })
+      .then(setKits)
       .catch(() => setKits([]));
     return () => ctrl.abort();
   }, [kitId, open, kits.length]);

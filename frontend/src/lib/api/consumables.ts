@@ -21,6 +21,7 @@
  */
 import { api } from './client';
 import type { CellOption } from './kits';
+import { fetchAllPages } from './paging';
 
 /** How close to its expiry a row is. `null` = comfortably in date, or no date
  *  at all (07-09: "expiration flags apply only where a date exists"). */
@@ -311,6 +312,16 @@ export const kanbanRestockApi = {
       })}`,
       { signal: opts?.signal },
     ),
+
+  /** Every matching request, unpaged — for screens that filter against the
+   *  whole set (e.g. hiding items that already have an open ask). The default
+   *  page of 50 would let request 51 slip through. 200 is the server's ceiling
+   *  on ``limit`` for this endpoint. */
+  listAllRequests: (
+    params: { kanbanNodeId?: string; itemId?: string; state?: RestockState } = {},
+    opts?: { signal?: AbortSignal },
+  ): Promise<RestockRequest[]> =>
+    fetchAllPages((page) => kanbanRestockApi.listRequests({ ...params, ...page }, opts), 200),
 
   /** Not e-signed: asking for more moves no stock and asserts nothing about
    *  material. Any consumable may be requested — the bin need not already hold

@@ -186,13 +186,23 @@ export function TierListClient({ config }: { config: TierConfig }) {
   // Held briefly — the list returns in ~20ms locally, too fast to see.
   const showSkeleton = useMinDuration(!hasLoaded && !loadError);
 
+  // ``config`` is NOT a stable reference, despite being a module constant: the
+  // route is a server component, so it crosses the RSC boundary serialized and
+  // every ``router.replace`` (each pager / filter URL write) hands this client a
+  // fresh copy. Key effects on ``tierType``, never on ``config`` — keying the
+  // reset below on ``config`` snapped the filter back to "All" on every change,
+  // because changing it writes ``?page`` which re-delivered ``config``.
+  const tierType = config.type;
+
   // Active filter pill. The first entry ("All") is the default; reset when the
   // page switches tier so a stale pill can't carry across.
   const [filterId, setFilterId] = React.useState(config.filters[0].id);
+  const defaultFilterId = config.filters[0].id;
   React.useEffect(() => {
-    setFilterId(config.filters[0].id);
-  }, [config]);
+    setFilterId(defaultFilterId);
+  }, [tierType, defaultFilterId]);
   const activeFilter = config.filters.find((f) => f.id === filterId) ?? config.filters[0];
+  const filterParams = JSON.stringify(activeFilter.params ?? {});
 
   // Search box (debounced into the fetch below).
   const [queryInput, setQueryInput] = React.useState('');
@@ -202,8 +212,11 @@ export function TierListClient({ config }: { config: TierConfig }) {
     return () => clearTimeout(t);
   }, [queryInput]);
 
-  // Resolve the tier's tier once.
+  // Resolve the tier's tier once (per tier type — see ``tierType``).
+  const configRef = React.useRef(config);
+  configRef.current = config;
   React.useEffect(() => {
+    const config = configRef.current;
     const ctrl = new AbortController();
     tiersApi
       .list({ signal: ctrl.signal })
@@ -223,7 +236,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [config]);
+  }, [tierType]);
 
   const fetchRows = React.useCallback(
     async (signal?: AbortSignal) => {
@@ -239,7 +252,7 @@ export function TierListClient({ config }: { config: TierConfig }) {
             direction: 'asc',
             limit: size,
             offset: (page - 1) * size,
-            ...activeFilter.params,
+            ...(JSON.parse(filterParams) as TierFilter['params']),
           },
           { signal },
         );
@@ -256,7 +269,9 @@ export function TierListClient({ config }: { config: TierConfig }) {
         if (!signal?.aborted) setLoading(false);
       }
     },
-    [tier, query, activeFilter, config.plural, page, size],
+    // ``filterParams`` (a string), not ``activeFilter``: the object is new on
+    // every RSC delivery and would refetch the list on each URL write.
+    [tier, query, filterParams, config.plural, page, size],
   );
 
   React.useEffect(() => {

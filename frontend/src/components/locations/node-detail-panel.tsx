@@ -249,7 +249,7 @@ export function NodeDetailPanel({
       const [allocs, lotList, tgts] = await Promise.all([
         locationNodesApi.nodeAllocations(node.id),
         // Only available lots can be placed — on-order lots aren't received yet.
-        lotsApi.list({ limit: 500, status: 'available' }),
+        lotsApi.listAll({ status: 'available' }),
         locationNodesApi.storageTargets(),
       ]);
       setAllocations(allocs);
@@ -1964,9 +1964,9 @@ function EditDialog({
     Promise.all([
       customersApi.list({}, { signal: ctrl.signal }).catch(() => []),
       itemsApi
-        .list({ limit: 200 }, { signal: ctrl.signal })
-        .then((resp) =>
-          resp.items
+        .listAll({}, { signal: ctrl.signal })
+        .then((items) =>
+          items
             .filter((i) => isBuiltTier(i.tier_type))
             .map((i) => ({ id: i.id, name: `${i.item_number} · ${i.description}` })),
         )

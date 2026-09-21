@@ -12,6 +12,7 @@
 
 import { api } from './client';
 import type { LotReleaseState } from './lots';
+import { fetchAllPages } from './paging';
 
 export type MovementType =
   | 'receipt'
@@ -204,4 +205,13 @@ export const movementsApi = {
       query: { limit: params.limit, offset: params.offset },
       signal: opts?.signal,
     }),
+
+  /** The item's WHOLE ledger — for the Unit Ledger tab, which renders every
+   *  entry with no pager. ``limit: 500`` dropped the oldest entries once an
+   *  item passed 500 movements. 500 is the server's ceiling on ``limit``. */
+  listAllForItem: (
+    itemId: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ApiMovement[]> =>
+    fetchAllPages((page) => movementsApi.listForItem(itemId, page, opts), 500),
 };

@@ -294,10 +294,10 @@ export function InventoryDetailShell({
     setLedgerLoading(true);
     setLedgerError(null);
     movementsApi
-      .listForItem(item.uuid, { limit: 500 }, { signal: ctrl.signal })
-      .then((resp) => {
-        setLedgerRows(resp.items);
-        setLedgerTotal(resp.total);
+      .listAllForItem(item.uuid, { signal: ctrl.signal })
+      .then((rows) => {
+        setLedgerRows(rows);
+        setLedgerTotal(rows.length);
       })
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;

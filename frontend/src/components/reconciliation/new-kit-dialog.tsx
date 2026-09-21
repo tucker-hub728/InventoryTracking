@@ -70,11 +70,11 @@ export function NewKitDialog({
         // whose BOM has at least two components. Transaction_Spec §1.1 composes
         // every built item from two inputs, so a one-line BOM is an unfinished
         // recipe. The backend enforces the same rule on create.
-        const itemRes = await itemsApi.list(
-          { has_bom: true, min_bom_lines: 2, limit: 200 },
+        const itemRes = await itemsApi.listAll(
+          { has_bom: true, min_bom_lines: 2 },
           { signal: ctrl.signal },
         );
-        const buildable = itemRes.items.filter((i) => isBuiltTier(i.tier_type));
+        const buildable = itemRes.filter((i) => isBuiltTier(i.tier_type));
         setItems(buildable);
         setItemId(buildable[0]?.id ?? '');
       } catch (err) {

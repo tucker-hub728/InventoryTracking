@@ -6,6 +6,7 @@
  */
 
 import { api } from './client';
+import { fetchAllRows } from './paging';
 
 export interface Customer {
   id: string;
@@ -32,11 +33,22 @@ export interface CustomerUpdateInput {
 }
 
 export const customersApi = {
-  list: (params: { q?: string | null } = {}, opts?: { signal?: AbortSignal }) =>
-    api.get<Customer[]>('/customers', {
-      query: { q: params.q ?? undefined },
-      signal: opts?.signal,
-    }),
+  /** Every matching customer. Every caller holds the whole list (pickers, the
+   *  Customers page), so this walks the pages — the server's default page of
+   *  500 would otherwise drop customer 501 without a word. 1000 is the
+   *  server's ceiling on ``limit`` for this endpoint. */
+  list: (
+    params: { q?: string | null } = {},
+    opts?: { signal?: AbortSignal },
+  ): Promise<Customer[]> =>
+    fetchAllRows(
+      (page) =>
+        api.get<Customer[]>('/customers', {
+          query: { q: params.q ?? undefined, ...page },
+          signal: opts?.signal,
+        }),
+      1000,
+    ),
 
   get: (id: string, opts?: { signal?: AbortSignal }) =>
     api.get<Customer>(`/customers/${id}`, { signal: opts?.signal }),

@@ -719,12 +719,11 @@ export function useItemsList(open: boolean): {
     const ctrl = new AbortController();
     setLoading(true);
     setError(null);
+    // ``listAll``, not ``list({ limit: 200 })``: the picker searches client-side,
+    // so item 201 onwards was unfindable ("No matching items").
     itemsApi
-      .list(
-        { limit: 200, sort: 'item_number', direction: 'asc' },
-        { signal: ctrl.signal },
-      )
-      .then((resp) => setItems(resp.items))
+      .listAll({ sort: 'item_number', direction: 'asc' }, { signal: ctrl.signal })
+      .then(setItems)
       .catch((err) => {
         if ((err as DOMException)?.name === 'AbortError') return;
         setError('Failed to load items.');
