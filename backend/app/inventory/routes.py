@@ -1033,7 +1033,14 @@ async def update_item(
         # Suppliers-only change — still bump the updater for the audit trail.
         item.updated_by_user_id = current.id
         await db.flush()
-        updated = item
+        # The flush fires ``onupdate=func.now()``, which leaves ``updated_at``
+        # stale — reading it later is a hidden lazy load, and that raises
+        # MissingGreenlet (a 500) in an async request. Re-read the item, as
+        # ``apply_item_patch`` does. Only bites when the editor is not already
+        # the item's last updater; otherwise the flush writes nothing.
+        refreshed = await inv_repo.get_item(db, item.id)
+        assert refreshed is not None
+        updated = refreshed
 
     if supplier_uuids is not None:
         # The eager ``suppliers`` collection was materialised for the
