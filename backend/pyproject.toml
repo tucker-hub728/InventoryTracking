@@ -13,7 +13,7 @@ authors = [{ name = "CellReady" }]
 # ─────────────────────────────────────────────────────────────────────────────
 dependencies = [
     # Web framework + ASGI server
-    "fastapi[standard]>=0.115.0,<0.120.0",
+    "fastapi[standard]>=0.115.0,<0.142.0",
     "uvicorn[standard]>=0.32.0,<0.34.0",
     "gunicorn>=23.0.0,<24.0.0",
 
