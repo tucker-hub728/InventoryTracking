@@ -16,7 +16,7 @@ ARG PYTHON_VERSION=3.12
 # ── Stage: uv binary (pinned) ────────────────────────────────────────────────
 # Versions are bumped deliberately. `COPY --from` resolves stage names at
 # parse time and does NOT expand global ARGs, so the tag is inlined.
-FROM ghcr.io/astral-sh/uv:0.5.11 AS uvbin
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uvbin
 
 # ── Stage: base ──────────────────────────────────────────────────────────────
 FROM python:${PYTHON_VERSION}-slim-bookworm AS base
